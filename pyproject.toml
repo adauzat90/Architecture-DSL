@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "barndsl"
+version = "0.1.0"
+description = "An embedded Python DSL and agentic workflow for designing barndominium floor plans."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Architecture-DSL" }]
+keywords = ["dsl", "floor-plan", "barndominium", "architecture", "agent", "llm"]
+
+dependencies = [
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+# The pure engine (DSL + validation + rendering) needs no extras.
+# The agentic workflow needs the Anthropic SDK.
+agent = ["anthropic>=0.49"]
+dev = [
+    "pytest>=8.0",
+    "anthropic>=0.49",
+]
+
+[project.scripts]
+barndsl = "barndsl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
