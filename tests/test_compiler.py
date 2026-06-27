@@ -59,7 +59,7 @@ def test_unknown_statement_is_flagged():
 def test_semantic_overlap_has_line_and_hint():
     src = (
         'plan "Overlap"\n'
-        "envelope 30 x 20\n"
+        "envelope 40 x 30\n"
         "room a: living at 0,0 size 20 x 20\n"
         "room b: bedroom at 10,0 size 15 x 12\n"
         "entry a south width 3 offset 2\n"

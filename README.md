@@ -28,13 +28,13 @@ plan "Cedar Ridge"
 envelope 60 x 40
 ceiling 12
 
-room great_room: living   at 0,0   size 28 x 26
-room kitchen:    kitchen   at 28,14 size 18 x 12
-room master_bed: bedroom   at 0,29  size 16 x 11
+room great_room: living   at 0,0          size 28 x 26
+room kitchen:    kitchen   east-of great_room size 18 x 26   # abut, no hand-math
+room master_bed: bedroom   north-of great_room size 16 x 11
 
 door great_room - kitchen width 8         # interior door (rooms must share a wall)
-entry great_room south width 3 offset 20  # exterior door
-window master_bed north width 5 offset 5  # egress window
+entry great_room south width 3 offset 20  # exterior door, on an exterior wall
+window master_bed north width 5 offset 5  # egress window, on an exterior wall
 porch front_porch at 0,-8 size 28 x 8 covered
 ```
 
@@ -45,15 +45,25 @@ plan "Name"
 envelope <W> x <L>
 ceiling <H>
 note "free text"
-room <id>: <type> at <x>,<y> size <W> x <L>
+room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]
 window <id> <wall> [width <w>] [offset <o>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 ```
 
+`<placement>` is absolute — `at <x>,<y>` — or **relative**: `east-of`,
+`west-of`, `north-of`, `south-of <room>` (aliases `right-of`, `left-of`,
+`above`, `below`) abuts an already-defined room flush to its corner, so the two
+share a wall and a `door` between them resolves — no coordinate bookkeeping.
+`level <n>` (default 0) puts a room on an upper floor; a `loft` on `level 1` may
+sit above a ground room without overlapping it, and a cross-level `door` reads as
+a stair.
+
 `<type>`: living, kitchen, dining, bedroom, bathroom, hallway, closet, pantry,
 mudroom, office, loft, garage, shop, … · `<wall>`: north|south|east|west.
+Windows and entries must be on an **exterior** wall (one on the envelope edge)
+to count for daylight, bedroom egress, or building access.
 
 ## The compiler
 
@@ -187,8 +197,9 @@ tests/             # 17 tests, no API key required
 
 ## Roadmap
 
-- Multi-story / loft levels and stairs
-- Auto-layout: solve room placement from an adjacency brief
+- Stairs and true multi-story (loft `level`s exist; vertical circulation is next)
+- Auto-layout: solve room placement from an adjacency brief (relative placement
+  is the first step)
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

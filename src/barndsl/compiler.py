@@ -13,11 +13,14 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     envelope <W> x <L>
     ceiling <H>
     note "free text"
-    room <id>: <type> at <x>,<y> size <W> x <L>
+    room <id>: <type> <placement> size <W> x <L> [level <n>]
     door <id_a> - <id_b> [width <w>]
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
     window <id> <wall> [width <w>] [offset <o>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
+
+``<placement>`` is ``at <x>,<y>`` (absolute) or ``east-of|west-of|north-of|
+south-of <room>`` (abut an already-defined room).
 
 Coordinates are in feet; origin (0,0) is the south-west corner, x→east, y→north.
 ``<type>`` is a RoomType value (living, kitchen, bedroom, bathroom, hallway,
@@ -26,6 +29,7 @@ shop, …); ``<wall>`` is north|south|east|west.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .elements import Barndominium, Direction, RoomType
@@ -45,30 +49,41 @@ THE barndsl ARCHITECTURE LANGUAGE
 One statement per line. '#' begins a comment. Braces { } are optional.
 Measurements are in FEET. Origin (0,0) is the south-west corner; x increases
 east, y increases north. A room at x,y with size W x L occupies [x, x+W] east-west
-and [y, y+L] south-north (south wall=y, north=y+L, west=x, east=x+L).
+and [y, y+L] south-north (south wall=y, north=y+L, west=x, east=x+W).
 
 Statements:
   plan "Name"
   envelope <W> x <L>              # overall footprint
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   note "free text"                # optional design note
-  room <id>: <type> at <x>,<y> size <W> x <L>
+  room <id>: <type> <placement> size <W> x <L> [level <n>]
   door <id_a> - <id_b> [width <w>]            # interior door (rooms must share a wall)
-  entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door
-  window <id> <wall> [width <w>] [offset <o>]              # exterior window
+  entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
+  window <id> <wall> [width <w>] [offset <o>]              # window, on an exterior wall
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
 
+<placement> is one of:
+  at <x>,<y>                      # absolute, in feet
+  east-of <room> | west-of <room> | north-of <room> | south-of <room>
+        # abut an already-defined room, flush to its corner (shares a wall, so a
+        # `door` between the two resolves). Aliases: right-of, left-of, above, below.
+<level> defaults to 0 (ground). A loft on level 1 may sit above a ground room
+        without overlapping it.
 <type> is one of: %s
 <wall> is one of: %s
-<offset> is feet from the wall's start corner (south or west end) to the opening.
+<offset> is feet from the wall's start corner (south or west end) to the opening;
+        the opening must fit on the wall (offset + width <= wall length).
+
+Windows and entries must be on an EXTERIOR wall (one lying on the envelope edge)
+to count for daylight, bedroom egress, or building access.
 
 Example:
   plan "Cedar Ridge"
   envelope 60 x 40
   ceiling 12
   room great_room: living at 0,0 size 28 x 26
-  room kitchen: kitchen at 28,14 size 18 x 12
-  room master_bed: bedroom at 0,29 size 16 x 11
+  room kitchen: kitchen east-of great_room size 18 x 26
+  room master_bed: bedroom north-of great_room size 16 x 11
   door great_room - kitchen width 8
   entry great_room south width 3 offset 20
   window master_bed north width 5 offset 5
@@ -83,9 +98,18 @@ class _Token:
     text: str
     line: int
     col: int  # 1-based
+    #: Explicit source span end (1-based, exclusive). Set for quoted tokens,
+    #: whose source length differs from len(text) because of the quote chars
+    #: and any escape sequences. None -> derive from len(text).
+    end: int | None = None
+    #: True if this token came from a "..." literal (so an empty one is still
+    #: a real, if invalid, token rather than absent).
+    quoted: bool = False
 
     @property
     def end_col(self) -> int:
+        if self.end is not None:
+            return self.end
         return self.col + max(1, len(self.text))
 
 
@@ -108,11 +132,17 @@ def _tokenize_line(line: str, lineno: int) -> list[_Token]:
             i += 1
             buf = ""
             while i < n and line[i] != '"':
+                if line[i] == "\\" and i + 1 < n and line[i + 1] in '"\\':
+                    buf += line[i + 1]
+                    i += 2
+                    continue
                 buf += line[i]
                 i += 1
             if i < n:
                 i += 1  # consume closing quote
-            tokens.append(_Token(buf, lineno, start + 1))
+            # Span covers the quotes (and any escapes): from the opening quote
+            # through whatever we consumed, so the caret underlines "...".
+            tokens.append(_Token(buf, lineno, start + 1, end=i + 1, quoted=True))
             continue
         start = i
         buf = ""
@@ -167,7 +197,7 @@ class _Cursor:
     def number(self, what: str) -> float:
         t = self.take(what)
         try:
-            return float(t.text)
+            value = float(t.text)
         except ValueError:
             raise _ParseError(
                 "BAD_NUMBER",
@@ -175,6 +205,28 @@ class _Cursor:
                 t.col,
                 end_col=t.end_col,
             )
+        if not math.isfinite(value):
+            raise _ParseError(
+                "BAD_NUMBER",
+                f"Expected a finite number for {what}, got '{t.text}'.",
+                t.col,
+                end_col=t.end_col,
+                hint="Use a plain measurement in feet, e.g. 12 or 10.5.",
+            )
+        return value
+
+    def ident(self, what: str) -> _Token:
+        """Take an identifier/name token, rejecting an empty `\"\"` literal."""
+        t = self.take(what)
+        if t.text == "":
+            raise _ParseError(
+                "EMPTY_ID",
+                f"Expected {what}, got an empty string.",
+                t.col,
+                end_col=t.end_col,
+                hint="Provide a non-empty name.",
+            )
+        return t
 
     def keyword(self, expected: str) -> _Token:
         t = self.take(f"'{expected}'")
@@ -232,6 +284,43 @@ class _SourceMap:
     room_col: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
+#: Relative-placement keywords -> the add_room anchor kwarg they map to.
+_PLACEMENT = {
+    "east-of": "east_of", "east_of": "east_of", "right-of": "east_of",
+    "west-of": "west_of", "west_of": "west_of", "left-of": "west_of",
+    "north-of": "north_of", "north_of": "north_of", "above": "north_of",
+    "south-of": "south_of", "south_of": "south_of", "below": "south_of",
+}
+
+
+def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
+    """Parse a room's position: ``at <x>,<y>`` or ``<dir> <ref_room>``.
+
+    Returns ``(add_room_kwargs, ref_token)`` — kwargs are either ``{x, y}`` or a
+    single anchor like ``{east_of: 'kitchen'}``; ref_token is the reference id
+    token (for error locations) or None for absolute placement.
+    """
+    nxt = c.peek()
+    if nxt is not None and nxt.text.lower() == "at":
+        c.keyword("at")
+        x = c.number("x")
+        y = c.number("y")
+        return {"x": x, "y": y}, None
+    dir_tok = c.take("a placement ('at <x>,<y>' or e.g. 'east-of <room>')")
+    rel = _PLACEMENT.get(dir_tok.text.lower())
+    if rel is None:
+        raise _ParseError(
+            "BAD_PLACEMENT",
+            f"Unknown placement '{dir_tok.text}'.",
+            dir_tok.col,
+            end_col=dir_tok.end_col,
+            hint="Use 'at <x>,<y>' or one of: east-of, west-of, north-of, "
+            "south-of (aliases: right-of, left-of, above, below).",
+        )
+    ref_tok = c.ident("a reference room id")
+    return {rel: ref_tok.text}, ref_tok
+
+
 def _parse_statement(
     tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int
 ) -> None:
@@ -240,7 +329,7 @@ def _parse_statement(
     key = kw.text.lower()
 
     if key == "plan":
-        plan.name = c.take("a plan name").text
+        plan.name = c.ident("a plan name").text
         c.expect_end()
     elif key == "envelope":
         w = c.number("envelope width")
@@ -255,22 +344,36 @@ def _parse_statement(
         plan.note(c.take("a quoted note").text)
         c.expect_end()
     elif key == "room":
-        rid_tok = c.take("a room id")
+        rid_tok = c.ident("a room id")
         rid = rid_tok.text
         rtype = c.room_type()
-        c.keyword("at")
-        x = c.number("x")
-        y = c.number("y")
+        place_kwargs, ref_tok = _parse_placement(c)
         c.keyword("size")
         w = c.number("width")
         c.keyword("x")
         length = c.number("length")
+        level = 0
+        if c.peek() is not None and c.peek().text.lower() == "level":
+            c.keyword("level")
+            level = int(c.number("level"))
         c.expect_end()
-        plan.add_room(rid, rtype, x=x, y=y, width=w, length=length)
+        try:
+            plan.add_room(rid, rtype, width=w, length=length, level=level, **place_kwargs)
+        except ValueError as exc:
+            col = ref_tok.col if ref_tok else rid_tok.col
+            end = ref_tok.end_col if ref_tok else rid_tok.end_col
+            raise _ParseError(
+                "PLACE_REF",
+                str(exc),
+                col,
+                end_col=end,
+                hint="Define the reference room before placing relative to it.",
+            )
         smap.room_line[rid] = lineno
         smap.room_col[rid] = (rid_tok.col, rid_tok.end_col)
     elif key == "door":
-        a = c.take("the first room id").text
+        a_tok = c.ident("the first room id")
+        a = a_tok.text
         sep = c.take("'-' or 'to'")
         if sep.text.lower() not in ("-", "to"):
             raise _ParseError(
@@ -279,16 +382,19 @@ def _parse_statement(
                 sep.col,
                 end_col=sep.end_col,
             )
-        b = c.take("the second room id").text
-        width = 2.67
+        b = c.ident("the second room id").text
+        width = 32 / 12
         nxt = c.peek()
         if nxt is not None:
             c.keyword("width")
             width = c.number("door width")
         c.expect_end()
         plan.connect(a, b, width=width)
+        door = plan.interior_doors[-1]
+        door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "entry":
-        rid = c.take("a room id").text
+        rid_tok = c.ident("a room id")
+        rid = rid_tok.text
         wall = c.wall()
         width, offset, egress = 3.0, 1.0, True
         while c.peek() is not None:
@@ -308,8 +414,11 @@ def _parse_statement(
                     end_col=c.toks[c.i - 1].end_col,
                 )
         plan.entrance(rid, wall, width=width, offset=offset, egress=egress)
+        ed = plan.exterior_doors[-1]
+        ed.line, ed.col, ed.end_col = lineno, rid_tok.col, rid_tok.end_col
     elif key == "window":
-        rid = c.take("a room id").text
+        rid_tok = c.ident("a room id")
+        rid = rid_tok.text
         wall = c.wall()
         width, offset = 4.0, 2.0
         while c.peek() is not None:
@@ -327,8 +436,10 @@ def _parse_statement(
                     end_col=c.toks[c.i - 1].end_col,
                 )
         plan.add_window(rid, wall, width=width, offset=offset)
+        win = plan.windows[-1]
+        win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
     elif key == "porch":
-        pid = c.take("a porch id").text
+        pid = c.ident("a porch id").text
         c.keyword("at")
         x = c.number("x")
         y = c.number("y")
@@ -409,7 +520,7 @@ def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[st
         loc = f"{filename}:{d.line}"
     else:
         loc = filename
-    where = f" ({d.room})" if d.room else ""
+    where = f" ({d.room})" if d.room is not None else ""
     out = [f"{loc}: {d.severity.value}[{d.code}]{where}: {d.message}"]
 
     if d.line and 1 <= d.line <= len(src_lines):
@@ -435,6 +546,24 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
     for lineno, raw in enumerate(source.splitlines(), start=1):
         toks = _tokenize_line(raw, lineno)
         if not toks:
+            # A line of only separators/punctuation (e.g. ":::") tokenizes to
+            # nothing; flag it rather than silently dropping a typo'd statement.
+            stripped = raw.split("#", 1)[0]
+            residue = [ch for ch in stripped if not ch.isspace() and ch not in _DROP]
+            if residue:
+                col = next(i for i, ch in enumerate(stripped) if not ch.isspace()) + 1
+                diagnostics.append(
+                    Issue(
+                        Severity.ERROR,
+                        "SYNTAX",
+                        "Line has no statement keyword.",
+                        line=lineno,
+                        col=col,
+                        end_col=col + 1,
+                        hint=f"Each line is one statement; start with one of: "
+                        f"{', '.join(_KEYWORDS)}.",
+                    )
+                )
             continue
         try:
             _parse_statement(toks, plan, smap, lineno)

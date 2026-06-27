@@ -13,22 +13,31 @@ def _n(value: float) -> str:
     return f"{value:g}"
 
 
+def _q(text: str) -> str:
+    """Quote a string literal, escaping backslashes and quotes for the lexer."""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def emit_dsl(plan: Barndominium) -> str:
     """Return canonical DSL source for ``plan``."""
-    out: list[str] = [f'plan "{plan.name}"']
+    out: list[str] = [f"plan {_q(plan.name)}"]
     out.append(f"envelope {_n(plan.envelope_width)} x {_n(plan.envelope_length)}")
     out.append(f"ceiling {_n(plan.ceiling_height)}")
     for note in (plan.notes or "").splitlines():
         if note.strip():
-            out.append(f'note "{note.strip()}"')
+            out.append(f"note {_q(note.strip())}")
 
     if plan.rooms:
         out.append("")
         for r in plan.rooms:
-            out.append(
+            line = (
                 f"room {r.id}: {r.type.value} at {_n(r.x)},{_n(r.y)} "
                 f"size {_n(r.width)} x {_n(r.length)}"
             )
+            if getattr(r, "level", 0):
+                line += f" level {r.level}"
+            out.append(line)
 
     if plan.interior_doors:
         out.append("")

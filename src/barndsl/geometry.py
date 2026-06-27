@@ -31,8 +31,11 @@ def shared_edge(a: Room, b: Room, tol: float = TOL) -> SharedEdge | None:
     """Return the wall segment ``a`` and ``b`` share, or ``None`` if not adjacent.
 
     Two rooms are adjacent when one's edge is collinear with the other's and the
-    perpendicular extents overlap by more than ``tol``.
+    perpendicular extents overlap by more than ``tol``. Rooms on different floor
+    levels never share a wall (no stairs are modelled yet).
     """
+    if getattr(a, "level", 0) != getattr(b, "level", 0):
+        return None
     # Vertical shared edge (a constant x), overlapping in y.
     for pos in (a.x2, a.x):
         if abs(pos - b.x) <= tol or abs(pos - b.x2) <= tol:

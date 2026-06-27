@@ -1,0 +1,302 @@
+"""Regression tests for the bug-fix + hardening pass.
+
+Each test maps to a finding from the DSL stress-test (numbered in comments).
+They run with no API key and no `anthropic` dependency.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples"))
+
+import pytest
+
+from barndsl import (
+    Direction as D,
+)
+from barndsl import (
+    RoomType as T,
+)
+from barndsl import (
+    barndominium,
+    compile_source,
+    emit_dsl,
+    validate,
+)
+from barndsl.validation import MIN_EGRESS_DOOR_WIDTH
+
+
+# --- Bug 1 & 2: non-finite numbers ------------------------------------------
+
+
+def test_nan_and_inf_numbers_are_rejected():
+    for bad in ("nan", "inf", "-inf"):
+        r = compile_source(f"envelope {bad} x 40\nroom a: living at 0,0 size 10 x 10\n")
+        assert not r.ok
+        assert any(d.code == "BAD_NUMBER" and d.line == 1 for d in r.errors)
+
+
+def test_huge_dimensions_do_not_crash():
+    # 1e200 * 1e200 overflows to inf internally; the validator must not throw.
+    src = 'plan "x"\nenvelope 60 x 40\nceiling 9\nroom a: living at 0,0 size 1e200 x 1e200\nentry a south\n'
+    r = compile_source(src)  # must return, not raise
+    assert r.plan is not None
+    assert any(d.code == "OUT_OF_BOUNDS" for d in r.diagnostics)
+
+
+# --- Bug 3: openings must be on an exterior wall ----------------------------
+
+
+def test_interior_window_does_not_satisfy_egress_or_light():
+    src = (
+        "plan \"x\"\nenvelope 40 x 20\nceiling 9\n"
+        "room living: living at 0,0 size 20 x 20\n"
+        "room bed: bedroom at 20,0 size 20 x 20\n"  # west wall x=20 is interior
+        "entry living south width 3 offset 2\n"
+        "door living - bed width 3\n"
+        "window bed west width 8 offset 4\n"  # interior wall -> no daylight/egress
+    )
+    r = compile_source(src)
+    codes = {d.code for d in r.diagnostics}
+    assert "WINDOW_INTERIOR" in codes
+    assert any(d.code == "BEDROOM_EGRESS" and d.room == "bed" for d in r.errors)
+
+
+def test_interior_exterior_door_is_an_error():
+    src = (
+        "plan \"x\"\nenvelope 20 x 40\nceiling 9\n"
+        "room a: living at 0,0 size 20 x 20\n"
+        "room b: living at 0,20 size 20 x 20\n"
+        "entry a north width 3 offset 2\n"  # a north wall y=20 is interior
+    )
+    r = compile_source(src)
+    assert any(d.code == "ENTRY_INTERIOR" and d.room == "a" for d in r.errors)
+
+
+# --- Bug 4: door diagnostics point at the door statement --------------------
+
+
+def test_door_diagnostic_points_at_the_door_line():
+    src = (
+        "plan \"x\"\nenvelope 40 x 20\nceiling 9\n"
+        "room living: living at 0,0 size 20 x 20\n"
+        "room bath: bathroom at 0,21 size 8 x 8\n"  # not adjacent to living
+        "entry living south width 3 offset 2\n"
+        "door living - bath width 3\n"  # line 7 — the actual fault
+    )
+    r = compile_source(src)
+    noadj = [d for d in r.diagnostics if d.code == "DOOR_NOADJ"][0]
+    assert noadj.line == 7  # the door line, NOT living's declaration (line 4)
+    assert ":7:" in r.report("p.barn")
+
+
+# --- Bug 5: emit_dsl escapes quotes (lossless round-trip) -------------------
+
+
+def test_emit_dsl_escapes_quotes_and_round_trips():
+    p = (
+        barndominium('A "B" C')
+        .envelope(20, 20)
+        .ceiling(9)
+        .note('say "hi"')
+        .add_room("a", T.LIVING, x=0, y=0, width=10, length=10)
+    )
+    src = emit_dsl(p)
+    r = compile_source(src)
+    assert r.plan is not None
+    assert r.plan.name == 'A "B" C'
+    assert r.plan.notes == 'say "hi"'
+
+
+# --- Bug 6: add_room coerces/validates the room type ------------------------
+
+
+def test_add_room_rejects_unknown_string_type():
+    with pytest.raises(ValueError):
+        barndominium("S").envelope(20, 20).add_room(
+            "a", "lounge", x=0, y=0, width=5, length=5
+        )
+
+
+def test_add_room_accepts_valid_string_type():
+    p = barndominium("S").envelope(20, 20).add_room(
+        "a", "living", x=0, y=0, width=5, length=5
+    )
+    assert p.room("a").type is T.LIVING
+    assert "living" in emit_dsl(p)  # no AttributeError on .value
+
+
+# --- Bug 7: the egress door constant equals inches(32) ----------------------
+
+
+def test_inches_32_door_passes_its_own_egress_check():
+    from barndsl import inches
+
+    assert MIN_EGRESS_DOOR_WIDTH == inches(32)
+    p = (
+        barndominium("E")
+        .envelope(20, 20)
+        .ceiling(9)
+        .add_room("a", T.LIVING, x=0, y=0, width=10, length=10)
+        .entrance("a", D.SOUTH, width=inches(32), egress=True)
+    )
+    report = validate(p)
+    assert not any(i.code == "EGRESS_DOOR" for i in report.issues)
+
+
+# --- Bug 8: empty id / name rejected ----------------------------------------
+
+
+def test_empty_quoted_id_is_rejected():
+    r = compile_source('envelope 20 x 20\nroom "": living at 0,0 size 5 x 5\n')
+    assert any(d.code == "EMPTY_ID" and d.line == 2 for d in r.errors)
+
+
+def test_empty_plan_name_is_rejected():
+    r = compile_source('plan ""\nenvelope 20 x 20\n')
+    assert any(d.code == "EMPTY_ID" and d.line == 1 for d in r.errors)
+
+
+# --- Bug 9: an opening must fit on its wall ----------------------------------
+
+
+def test_opening_running_off_the_wall_is_flagged():
+    src = (
+        "plan \"x\"\nenvelope 30 x 20\nceiling 9\n"
+        "room a: living at 0,0 size 30 x 20\n"
+        "entry a south width 5 offset 28\n"  # 28 + 5 = 33 > 30
+    )
+    r = compile_source(src)
+    assert any(d.code == "OPENING_OOB" and d.room == "a" for d in r.errors)
+
+
+# --- Bug 10: a door can't connect a room to itself --------------------------
+
+
+def test_self_door_is_rejected():
+    r = compile_source(
+        "envelope 20 x 20\nroom a: living at 0,0 size 10 x 10\ndoor a - a\nentry a south\n"
+    )
+    assert any(d.code == "SELF_DOOR" for d in r.errors)
+
+
+# --- Bug 11: caret spans the whole quoted token -----------------------------
+
+
+def test_quoted_token_caret_spans_the_quotes():
+    r = compile_source("envelope \"wide\" x 40\nroom a: living at 0,0 size 5 x 5\n")
+    bad = [d for d in r.errors if d.code == "BAD_NUMBER"][0]
+    assert bad.col == 10 and bad.end_col == 16  # underlines "wide" incl. quotes
+    caret = next(
+        ln for ln in r.report("p.barn").splitlines() if set(ln.strip()) <= {"^", "~"}
+    )
+    assert caret == "    " + " " * 9 + "^" + "~" * 5
+
+
+# --- Bug 12: floor levels (lofts) -------------------------------------------
+
+
+def test_loft_on_a_higher_level_does_not_overlap_the_room_below():
+    src = (
+        "plan \"Cabin\"\nenvelope 30 x 30\nceiling 12\n"
+        "room living: living at 0,0 size 30 x 30\n"
+        "room loft: loft at 0,0 size 30 x 12 level 1\n"  # sits above living
+        "door living - loft width 3\n"  # cross-level = stair opening
+        "entry living south width 3 offset 4\n"
+        "window living south width 16 offset 4\n"
+    )
+    r = compile_source(src)
+    codes = {d.code for d in r.diagnostics}
+    assert "OVERLAP" not in codes  # different levels never overlap
+    assert "DOOR_NOADJ" not in codes  # stacked rooms -> valid stair door
+    assert r.plan.room("loft").level == 1
+
+
+def test_cross_level_door_without_overlap_is_flagged():
+    src = (
+        "plan \"x\"\nenvelope 40 x 20\nceiling 12\n"
+        "room living: living at 0,0 size 20 x 20\n"
+        "room loft: loft at 20,0 size 20 x 20 level 1\n"  # NOT above living
+        "door living - loft width 3\n"
+        "entry living south width 3 offset 2\n"
+    )
+    r = compile_source(src)
+    assert any(d.code == "DOOR_NOADJ" for d in r.errors)
+
+
+def test_level_round_trips_through_emit():
+    p = (
+        barndominium("L")
+        .envelope(30, 30)
+        .ceiling(12)
+        .add_room("living", T.LIVING, x=0, y=0, width=30, length=30)
+        .add_room("loft", T.LOFT, x=0, y=0, width=30, length=12, level=1)
+    )
+    src = emit_dsl(p)
+    assert "level 1" in src
+    assert compile_source(src).plan.room("loft").level == 1
+
+
+# --- Bug 14 (doc) + separator-only line -------------------------------------
+
+
+def test_reference_axis_doc_is_correct():
+    from barndsl import DSL_REFERENCE
+
+    assert "east=x+W" in DSL_REFERENCE
+    assert "east=x+L" not in DSL_REFERENCE
+
+
+def test_separator_only_line_is_flagged_not_silently_dropped():
+    r = compile_source("envelope 20 x 20\n:::\nroom a: living at 0,0 size 5 x 5\n")
+    assert any(d.code == "SYNTAX" and d.line == 2 for d in r.errors)
+
+
+# --- Ergonomics: relative / anchored placement ------------------------------
+
+
+def test_relative_placement_in_dsl_abuts_rooms():
+    src = (
+        "plan \"Rel\"\nenvelope 46 x 26\nceiling 10\n"
+        "room great: living at 0,0 size 28 x 26\n"
+        "room kitchen: kitchen east-of great size 18 x 26\n"
+        "door great - kitchen width 8\n"
+        "entry great south width 3 offset 10\n"
+        "window great south width 8 offset 8\n"
+        "window great west width 6 offset 4\n"
+        "window kitchen east width 6 offset 4\n"
+    )
+    r = compile_source(src)
+    k = r.plan.room("kitchen")
+    assert (k.x, k.y) == (28.0, 0.0)  # flush against great's east wall
+    # They share a wall, so the interior door resolves (no DOOR_NOADJ).
+    assert not any(d.code == "DOOR_NOADJ" for d in r.diagnostics)
+
+
+def test_relative_placement_in_builder():
+    p = (
+        barndominium("B")
+        .envelope(40, 20)
+        .ceiling(9)
+        .add_room("living", T.LIVING, x=0, y=0, width=20, length=20)
+        .add_room("kitchen", T.KITCHEN, east_of="living", width=20, length=20)
+        .add_room("loft", T.LOFT, north_of="living", width=20, length=10)
+    )
+    assert (p.room("kitchen").x, p.room("kitchen").y) == (20.0, 0.0)
+    assert (p.room("loft").x, p.room("loft").y) == (0.0, 20.0)
+
+
+def test_relative_placement_unknown_reference_is_flagged():
+    r = compile_source(
+        "envelope 40 x 20\nroom k: kitchen east-of ghost size 10 x 10\n"
+    )
+    assert any(d.code == "PLACE_REF" and d.line == 2 for d in r.errors)
+
+
+def test_builder_relative_unknown_reference_raises():
+    with pytest.raises(ValueError):
+        barndominium("B").envelope(20, 20).add_room(
+            "k", T.KITCHEN, east_of="nope", width=5, length=5
+        )

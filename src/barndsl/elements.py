@@ -106,6 +106,9 @@ class Room:
     width: float
     length: float
     label: str | None = None
+    #: Floor level (0 = ground). A loft sits on level 1 *above* a ground room,
+    #: so rooms on different levels may share a footprint without overlapping.
+    level: int = 0
 
     @property
     def x2(self) -> float:
@@ -147,6 +150,11 @@ class InteriorDoor:
     room_a: str
     room_b: str
     width: float = inches(32)
+    #: Source location of the statement that created this door (textual DSL
+    #: front-end only); lets diagnostics point at the `door` line, not a room.
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
 
 @dataclass
@@ -160,6 +168,10 @@ class ExteriorDoor:
     #: near edge of the opening.
     offset: float = 1.0
     egress: bool = True
+    #: Source location of the `entry` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
 
 @dataclass
@@ -172,6 +184,10 @@ class Window:
     offset: float = 2.0
     sill_height: float = feet(3)
     head_height: float = feet(6.67)
+    #: Source location of the `window` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
     @property
     def glazed_area(self) -> float:
@@ -243,18 +259,85 @@ class Barndominium:
     def add_room(
         self,
         room_id: str,
-        type: RoomType,
+        type: RoomType | str,
         *,
-        x: float,
-        y: float,
+        x: float | None = None,
+        y: float | None = None,
         width: float,
         length: float,
         label: str | None = None,
+        level: int = 0,
+        east_of: str | None = None,
+        west_of: str | None = None,
+        north_of: str | None = None,
+        south_of: str | None = None,
     ) -> "Barndominium":
+        """Add a room.
+
+        Position it either absolutely (``x=``, ``y=``) or **relatively** by
+        abutting an already-defined room: ``east_of="kitchen"`` places this room
+        flush against the kitchen's east wall (and so on). Relative placement
+        shares a wall, so an interior ``connect`` between the two will resolve.
+        """
+        type = RoomType(type)  # coerce/validate strings -> raises on unknown
+        width, length = float(width), float(length)
+        x, y = self._resolve_position(
+            room_id, x, y, width, length, east_of, west_of, north_of, south_of
+        )
         self.rooms.append(
-            Room(room_id, type, float(x), float(y), float(width), float(length), label)
+            Room(room_id, type, x, y, width, length, label, int(level))
         )
         return self
+
+    def _resolve_position(
+        self,
+        rid: str,
+        x: float | None,
+        y: float | None,
+        width: float,
+        length: float,
+        east_of: str | None,
+        west_of: str | None,
+        north_of: str | None,
+        south_of: str | None,
+    ) -> tuple[float, float]:
+        anchors = [
+            ("east_of", east_of),
+            ("west_of", west_of),
+            ("north_of", north_of),
+            ("south_of", south_of),
+        ]
+        given = [(k, v) for k, v in anchors if v is not None]
+        if given:
+            if len(given) > 1:
+                raise ValueError(
+                    f"Room '{rid}': use at most one relative anchor, got {[k for k, _ in given]}."
+                )
+            if x is not None or y is not None:
+                raise ValueError(
+                    f"Room '{rid}': give either an absolute position or a relative "
+                    "anchor, not both."
+                )
+            kind, ref_id = given[0]
+            ref = self.room(ref_id)
+            if ref is None:
+                raise ValueError(
+                    f"Cannot place '{rid}' {kind} unknown room '{ref_id}' — "
+                    "define the reference room first."
+                )
+            if kind == "east_of":
+                return ref.x2, ref.y
+            if kind == "west_of":
+                return ref.x - width, ref.y
+            if kind == "north_of":
+                return ref.x, ref.y2
+            return ref.x, ref.y - length  # south_of
+        if x is None or y is None:
+            raise ValueError(
+                f"Room '{rid}' needs a position: pass x= and y=, or a relative "
+                "anchor like east_of=."
+            )
+        return float(x), float(y)
 
     def add_porch(
         self,
