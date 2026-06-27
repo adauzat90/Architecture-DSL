@@ -365,7 +365,7 @@ class Barndominium:
     def entrance(
         self,
         room: str,
-        wall: Direction,
+        wall: Direction | str,
         *,
         width: float = feet(3),
         offset: float = 1.0,
@@ -373,14 +373,14 @@ class Barndominium:
     ) -> "Barndominium":
         """Add an exterior door on ``wall`` of ``room``."""
         self.exterior_doors.append(
-            ExteriorDoor(room, wall, float(width), float(offset), egress)
+            ExteriorDoor(room, Direction(wall), float(width), float(offset), egress)
         )
         return self
 
     def add_window(
         self,
         room: str,
-        wall: Direction,
+        wall: Direction | str,
         *,
         width: float = feet(4),
         offset: float = 2.0,
@@ -388,7 +388,14 @@ class Barndominium:
         head_height: float = feet(6.67),
     ) -> "Barndominium":
         self.windows.append(
-            Window(room, wall, float(width), float(offset), float(sill_height), float(head_height))
+            Window(
+                room,
+                Direction(wall),
+                float(width),
+                float(offset),
+                float(sill_height),
+                float(head_height),
+            )
         )
         return self
 

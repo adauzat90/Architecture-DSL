@@ -128,6 +128,21 @@ def test_add_room_accepts_valid_string_type():
     assert "living" in emit_dsl(p)  # no AttributeError on .value
 
 
+def test_entrance_and_window_coerce_string_walls():
+    # A string wall must round-trip through emit_dsl (no AttributeError on .value).
+    p = (
+        barndominium("W")
+        .envelope(20, 20)
+        .ceiling(9)
+        .add_room("a", T.LIVING, x=0, y=0, width=20, length=20)
+        .entrance("a", "south", width=3, offset=4)
+        .add_window("a", "west", width=6, offset=4)
+    )
+    assert p.exterior_doors[0].wall is D.SOUTH
+    assert p.windows[0].wall is D.WEST
+    assert "entry a south" in emit_dsl(p)
+
+
 # --- Bug 7: the egress door constant equals inches(32) ----------------------
 
 
