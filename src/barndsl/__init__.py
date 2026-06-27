@@ -41,6 +41,13 @@ from .compiler import (
     compile_source,
 )
 from .emit import emit_dsl
+from .layout import (
+    LayoutBrief,
+    LayoutResult,
+    RoomSpec,
+    parse_brief,
+    solve_layout,
+)
 from .render import RenderConfig, render_svg, save_svg
 from .validation import Issue, Severity, ValidationReport, validate
 
@@ -63,6 +70,12 @@ __all__ = [
     "CompileResult",
     "DSL_REFERENCE",
     "emit_dsl",
+    # auto-layout
+    "solve_layout",
+    "parse_brief",
+    "LayoutBrief",
+    "LayoutResult",
+    "RoomSpec",
     # checks
     "validate",
     "ValidationReport",

@@ -122,6 +122,48 @@ if result.ok:
     save_svg(result.plan, "plan.svg")
 ```
 
+## Auto-layout: a brief, not coordinates
+
+Don't want to place rooms at all? Give the solver an **adjacency brief** — what
+rooms, how big, and which ones should touch — and it computes the coordinates,
+abutting rooms so each requested adjacency shares a wall, then adds a `door` for
+every one, a front `entry`, and egress/daylight `window`s. No API key; it's a
+deterministic greedy placer (same brief in, same plan out).
+
+```text
+$ barndsl layout examples/birch_run.brief --emit
+Laid out 6 room(s); 5/5 adjacencies satisfied
+
+COMPILE OK — 0 error(s), 0 warning(s), 1 info(s)
+...
+room living: living at 38,18 size 20 x 18
+room kitchen: kitchen east-of … (resolved to absolute coordinates)
+door living - kitchen width 6
+entry living north width 3 offset 8.5
+window bed1 south width 4 offset 7
+...
+```
+
+The brief is a tiny line-based format (`room <id>: <type> <W> x <L>`,
+`adjacent <a> <b> …` to hang rooms off a hub like a hall). It produces a
+**valid, connected starting layout** you then refine in the same compile-fix
+loop — relative and pocket placement are the primitives it builds on, so it
+can't bin-pack a perfect floor plan, but it gets you a walkable plan from a
+program in one shot. From Python:
+
+```python
+from barndsl import RoomSpec, LayoutBrief, solve_layout, emit_dsl
+
+out = solve_layout(LayoutBrief(
+    name="Birch Run",
+    rooms=[RoomSpec("living", "living", 20, 18), RoomSpec("hall", "hallway", 40, 4), ...],
+    adjacencies=[("living", "hall"), ("hall", "bed1"), ...],
+))
+print(out.summary())          # "Laid out 6 room(s); 5/5 adjacencies satisfied"
+print(out.unsatisfied)        # adjacencies the packing couldn't honour
+print(emit_dsl(out.plan))     # → DSL source, ready to compile/render
+```
+
 ## The agent: a compile-fix loop
 
 The agent *writes architecture in the DSL*, compiles it, and feeds the compiler's
@@ -168,6 +210,7 @@ print(emit_dsl(plan))   # → DSL source
 ```bash
 barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl build   examples/cedar_ridge.barn --out plan.svg
+barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 ```
@@ -190,19 +233,22 @@ src/barndsl/
   compiler.py    # lexer + parser + compile_source → CompileResult (diagnostics)
   emit.py        # plan → DSL source
   validation.py  # building-code checks → diagnostics with fix hints
+  layout.py      # auto-layout: adjacency brief → placed plan
   render.py      # annotated 2D SVG renderer
   agent.py       # Claude write → compile → critique → revise loop
   cli.py         # `barndsl` command
 examples/
   cedar_ridge.barn   # the worked plan in DSL (used by `barndsl demo`)
   simple_barndo.py   # the same plan via the Python builder
-tests/             # 17 tests, no API key required
+  birch_run.brief    # an adjacency brief for `barndsl layout`
+tests/             # no API key required
 ```
 
 ## Roadmap
 
-- Auto-layout: solve room placement from an adjacency brief (relative and pocket
-  placement are the first steps)
+- Auto-layout **2.0**: the current `barndsl layout` packs greedily; a true
+  slicing/rectangular-dual solver would fill the envelope and keep every room on
+  the perimeter for daylight
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

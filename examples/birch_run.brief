@@ -1,0 +1,22 @@
+# An adjacency brief for `barndsl layout`: rooms + who-touches-who, no coordinates.
+# The solver packs it into a valid, connected starting layout — doors for every
+# adjacency, an entry, and daylight/egress windows — that you then refine.
+#
+#   barndsl layout examples/birch_run.brief --emit --out birch.svg
+
+plan "Birch Run"
+ceiling 9
+note "2 bed / 1 bath, open core, bedrooms off a hall spine."
+
+room living:  living   20 x 18
+room kitchen: kitchen  16 x 18
+room hall:    hallway  40 x 4
+room bed1:    bedroom  18 x 14
+room bed2:    bedroom  14 x 14
+room bath:    bathroom 8 x 14
+
+adjacent living kitchen        # open core
+adjacent living hall           # core opens to the hall spine
+adjacent hall bed1 bed2 bath   # private rooms off the hall
+
+entry living

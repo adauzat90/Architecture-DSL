@@ -279,6 +279,76 @@ window bed2 north width 4 offset 2
 window bath north width 3 offset 1
 ```
 
+## Auto-layout: hand the solver a brief instead of coordinates
+
+If you'd rather describe the *program* than place rooms, write an **adjacency
+brief** and let `barndsl layout` compute the geometry. You list rooms and sizes
+and say which rooms should touch; the solver packs them, abutting each requested
+pair so they share a wall, then adds a `door` per adjacency, a front `entry`,
+and egress/daylight `window`s.
+
+```text
+# birch_run.brief
+plan "Birch Run"
+ceiling 9
+room living:  living   20 x 18
+room kitchen: kitchen  16 x 18
+room hall:    hallway  40 x 4
+room bed1:    bedroom  18 x 14
+room bed2:    bedroom  14 x 14
+room bath:    bathroom 8 x 14
+adjacent living kitchen        # open core
+adjacent living hall           # core opens to the hall spine
+adjacent hall bed1 bed2 bath   # private rooms off the hall
+entry living
+```
+
+```bash
+barndsl layout birch_run.brief --emit --out plan.svg
+```
+
+Brief grammar (one statement per line, `#` comments):
+
+| statement | meaning |
+|-----------|---------|
+| `plan "Name"` | plan name |
+| `envelope <W> x <L>` | optional; omit to size the envelope to the packed bounding box |
+| `ceiling <H>` | ceiling height |
+| `note "…"` | free text |
+| `room <id>: <type> <W> x <L> [level <n>]` | a room to place (no coordinates) |
+| `adjacent <a> <b> [<c> …]` | connect `<a>` to **each** of the rest — a hub. `adjacent hall bed1 bed2 bath` is the "rooms off a spine" idiom |
+| `entry <room>` | which room gets the front door (default: the first public room on an exterior wall) |
+| `no-openings` | don't auto-add the entry/windows (geometry + doors only) |
+
+**What it is and isn't.** The solver is a deterministic greedy placer built on
+the same relative/pocket placement you'd write by hand — so it fixes *adjacency*
+(shared walls, working doors) but it does **not** bin-pack a perfect rectangle.
+Expect an `AREA_UNUSED` info and the odd elongated footprint; treat its output
+as a **valid, connected starting layout** and refine it in the compile-fix loop.
+It reports what it couldn't honour:
+
+- `LayoutResult.unsatisfied` — adjacency pairs that didn't end up sharing a wall.
+- `LayoutResult.notes` — e.g. a bedroom with no exterior wall (it can't get an
+  egress window there) or a room short on daylight. These map straight onto the
+  `error`/`warning`s you'd then fix.
+
+From Python the brief is plain dataclasses:
+
+```python
+from barndsl import RoomSpec, LayoutBrief, solve_layout, emit_dsl
+
+out = solve_layout(LayoutBrief(
+    name="Birch Run",
+    rooms=[RoomSpec("living", "living", 20, 18), RoomSpec("hall", "hallway", 40, 4)],
+    adjacencies=[("living", "hall")],
+))
+print(out.summary())
+print(emit_dsl(out.plan))   # absolute DSL, ready to compile/render/refine
+```
+
+`add_openings=False` (or the `no-openings` directive) gives you the bare placed
+shell with doors but no entry/windows — handy when you want to add those by hand.
+
 ## Reading a diagnostic
 
 ```

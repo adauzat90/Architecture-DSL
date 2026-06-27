@@ -9,6 +9,10 @@
     barndsl demo [--out FILE.svg]
         Compile and render the bundled example (examples/cedar_ridge.barn).
 
+    barndsl layout BRIEF.txt [--out FILE.svg] [--emit] [--no-openings]
+        Auto-layout: solve room placement from an adjacency brief, then compile
+        (and render). Deterministic, no API key.
+
     barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
         Run the Claude agent: brief → DSL → compile → critique → refine.
         Requires `pip install 'barndsl[agent]'` and ANTHROPIC_API_KEY.
@@ -105,6 +109,42 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_layout(args: argparse.Namespace) -> int:
+    from .emit import emit_dsl
+    from .layout import parse_brief, solve_layout
+
+    with open(args.file, encoding="utf-8") as fh:
+        text = fh.read()
+    try:
+        brief = parse_brief(text)
+        if args.no_openings:
+            brief.add_openings = False
+        out = solve_layout(brief)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(out.summary())
+    if out.unsatisfied:
+        pairs = ", ".join(f"{a}-{b}" for a, b in out.unsatisfied)
+        print(f"  could not abut (no shared wall): {pairs}")
+    for note in out.notes:
+        print(f"  note: {note}")
+
+    src = emit_dsl(out.plan)
+    result = compile_source(src, name=out.plan.name)
+    print("\n" + result.report(out.plan.name))
+    print("\n" + _program_summary(out.plan))
+
+    if args.emit:
+        print("\n--- resolved DSL ---")
+        print(src.rstrip())
+    if args.out:
+        save_svg(out.plan, args.out)
+        print(f"\nWrote {args.out}")
+    return 0 if result.ok else 1
+
+
 def _cmd_design(args: argparse.Namespace) -> int:
     try:
         from .agent import BarndoAgent
@@ -189,6 +229,23 @@ def main(argv: list[str] | None = None) -> int:
     p_demo = sub.add_parser("demo", help="compile and render the bundled example")
     p_demo.add_argument("--out", default="barndo.svg", help="output SVG path")
     p_demo.set_defaults(func=_cmd_demo)
+
+    p_layout = sub.add_parser(
+        "layout", help="solve room placement from an adjacency brief (no API key)"
+    )
+    p_layout.add_argument("file", help="path to a textual layout brief")
+    p_layout.add_argument(
+        "--out", default=None, help="also render the laid-out plan to this SVG path"
+    )
+    p_layout.add_argument(
+        "--emit", action="store_true", help="print the resolved .barn DSL"
+    )
+    p_layout.add_argument(
+        "--no-openings",
+        action="store_true",
+        help="don't auto-add the entry and windows",
+    )
+    p_layout.set_defaults(func=_cmd_layout)
 
     p_design = sub.add_parser("design", help="generate a plan from a brief with Claude")
     p_design.add_argument("brief", help="natural-language design brief")
