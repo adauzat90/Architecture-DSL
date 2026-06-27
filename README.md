@@ -73,7 +73,7 @@ column-accurate carets, and actionable fix hints** — like compiler output:
 
 ```text
 $ barndsl compile broken.barn
-COMPILE FAILED — 3 error(s), 1 warning(s)
+COMPILE FAILED — 3 error(s), 1 warning(s), 0 info(s)
 broken.barn:6:14: error[BAD_TYPE]: Unknown room type 'lounge'.
     room office: lounge at 24,0 size 20 x 14
                  ^~~~~~

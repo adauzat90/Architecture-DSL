@@ -315,3 +315,85 @@ def test_builder_relative_unknown_reference_raises():
         barndominium("B").envelope(20, 20).add_room(
             "k", T.KITCHEN, east_of="nope", width=5, length=5
         )
+
+
+# --- Round 2: new-feature hardening -----------------------------------------
+
+
+def _err_codes(src: str) -> set[str]:
+    return {d.code for d in compile_source(src).errors}
+
+
+def test_non_integer_level_is_rejected():
+    src = (
+        'plan "x"\nenvelope 30 x 30\nceiling 10\n'
+        "room a: living at 0,0 size 30 x 30\n"
+        "room b: loft at 0,0 size 30 x 12 level 0.5\n"
+    )
+    assert "BAD_LEVEL" in _err_codes(src)
+
+
+def test_negative_level_is_rejected_in_dsl_and_builder():
+    src = (
+        'plan "x"\nenvelope 30 x 30\nceiling 10\n'
+        "room a: living at 0,0 size 30 x 30 level -1\n"
+    )
+    assert "BAD_LEVEL" in _err_codes(src)
+    with pytest.raises(ValueError):
+        barndominium("B").envelope(20, 20).add_room(
+            "a", T.LOFT, x=0, y=0, width=5, length=5, level=-1
+        )
+
+
+def test_valid_level_still_compiles():
+    src = (
+        'plan "ok"\nenvelope 30 x 30\nceiling 12\n'
+        "room living: living at 0,0 size 30 x 30\n"
+        "room loft: loft at 0,0 size 30 x 12 level 1\n"
+        "door living - loft width 3\n"
+        "entry living south width 3 offset 4\n"
+        "window living south width 16 offset 4\n"
+    )
+    assert "BAD_LEVEL" not in _err_codes(src)
+    assert compile_source(src).plan.room("loft").level == 1
+
+
+def test_unterminated_string_is_flagged():
+    src = 'plan "Home\nenvelope 40 x 30\nceiling 10\nroom a: living at 0,0 size 40 x 30\n'
+    assert any(
+        d.code == "UNTERMINATED_STRING" and d.line == 1 for d in compile_source(src).errors
+    )
+
+
+def test_missing_placement_reference_is_anchored_on_the_direction():
+    src = (
+        "envelope 40 x 30\n"
+        "room living: living at 0,0 size 24 x 30\n"
+        "room kitchen: kitchen east-of size 24 x 18\n"  # ref omitted before `size`
+    )
+    bad = [d for d in compile_source(src).errors if d.code == "BAD_PLACEMENT"]
+    assert bad and bad[0].line == 3
+    assert "east-of" in bad[0].message
+
+
+def test_quoted_value_is_not_accepted_as_a_number():
+    src = 'envelope "30" x 30\nroom a: living at 0,0 size 10 x 10\n'
+    assert "BAD_NUMBER" in _err_codes(src)
+
+
+def test_builder_self_anchor_has_clear_message():
+    with pytest.raises(ValueError, match="itself"):
+        barndominium("B").envelope(20, 20).add_room(
+            "a", T.LIVING, east_of="a", width=5, length=5
+        )
+
+
+def test_summary_reports_an_info_count():
+    # A plan with an interior kitchen yields a NAT_LIGHT warning; the summary
+    # line now carries an info count too.
+    from barndsl import compile_file
+
+    s = compile_file(
+        os.path.join(os.path.dirname(__file__), "..", "examples", "cedar_ridge.barn")
+    ).summary()
+    assert "info(s)" in s

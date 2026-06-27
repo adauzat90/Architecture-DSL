@@ -39,9 +39,39 @@ def _print_metrics(plan) -> None:
     print(f"  Roof area (≈):    {m['roof_area_sqft']:.0f} sq ft")
 
 
+def _program_summary(plan) -> str:
+    """One-line program recap — a clean compile alone doesn't verify this."""
+    m = plan.metrics()
+    return (
+        f"Program: {int(m['bedroom_count'])} bed / {m['bathroom_count']:g} bath · "
+        f"{m['habitable_sqft']:.0f} sq ft habitable · "
+        f"footprint {m['footprint_sqft']:.0f} sq ft"
+    )
+
+
+def _print_coords(plan) -> None:
+    from .validation import exterior_walls
+
+    print("Resolved geometry (ft):")
+    for r in plan.rooms:
+        ext = ", ".join(w.value for w in exterior_walls(plan, r)) or "—"
+        lvl = f" level {r.level}" if getattr(r, "level", 0) else ""
+        print(
+            f"  {r.id}: ({r.x:g},{r.y:g}) → ({r.x2:g},{r.y2:g})  "
+            f"{r.width:g}×{r.length:g}{lvl}  exterior: {ext}"
+        )
+
+
 def _cmd_compile(args: argparse.Namespace) -> int:
     result = compile_file(args.file)
     print(result.report(os.path.basename(args.file)))
+    if result.plan is not None:
+        print("\n" + _program_summary(result.plan))
+        if args.metrics:
+            _print_metrics(result.plan)
+        if args.show_coords:
+            print()
+            _print_coords(result.plan)
     return 0 if result.ok else 1
 
 
@@ -141,6 +171,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p_compile = sub.add_parser("compile", help="compile a .barn file and print diagnostics")
     p_compile.add_argument("file", help="path to a .barn DSL file")
+    p_compile.add_argument(
+        "--metrics", action="store_true", help="also print the full area/material takeoff"
+    )
+    p_compile.add_argument(
+        "--show-coords",
+        action="store_true",
+        help="print each room's resolved rectangle and exterior walls",
+    )
     p_compile.set_defaults(func=_cmd_compile)
 
     p_build = sub.add_parser("build", help="compile and render a .barn file to SVG")

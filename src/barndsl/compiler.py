@@ -105,6 +105,8 @@ class _Token:
     #: True if this token came from a "..." literal (so an empty one is still
     #: a real, if invalid, token rather than absent).
     quoted: bool = False
+    #: True if a quoted token had no closing '"' before end of line.
+    unterminated: bool = False
 
     @property
     def end_col(self) -> int:
@@ -138,11 +140,17 @@ def _tokenize_line(line: str, lineno: int) -> list[_Token]:
                     continue
                 buf += line[i]
                 i += 1
-            if i < n:
+            terminated = i < n
+            if terminated:
                 i += 1  # consume closing quote
             # Span covers the quotes (and any escapes): from the opening quote
             # through whatever we consumed, so the caret underlines "...".
-            tokens.append(_Token(buf, lineno, start + 1, end=i + 1, quoted=True))
+            tokens.append(
+                _Token(
+                    buf, lineno, start + 1, end=i + 1, quoted=True,
+                    unterminated=not terminated,
+                )
+            )
             continue
         start = i
         buf = ""
@@ -196,6 +204,14 @@ class _Cursor:
 
     def number(self, what: str) -> float:
         t = self.take(what)
+        if t.quoted:
+            raise _ParseError(
+                "BAD_NUMBER",
+                f"Expected a number for {what}, not a quoted value.",
+                t.col,
+                end_col=t.end_col,
+                hint="Write the measurement without quotes, e.g. 12.",
+            )
         try:
             value = float(t.text)
         except ValueError:
@@ -214,6 +230,30 @@ class _Cursor:
                 hint="Use a plain measurement in feet, e.g. 12 or 10.5.",
             )
         return value
+
+    def level_value(self) -> int:
+        """Take a floor-level token: a whole number >= 0 (0 = ground)."""
+        t = self.take("a floor level")
+        bad = None
+        if t.quoted:
+            bad = "a quoted value"
+        else:
+            try:
+                v = float(t.text)
+            except ValueError:
+                bad = f"'{t.text}'"
+            else:
+                if not math.isfinite(v) or v != int(v) or v < 0:
+                    bad = f"'{t.text}'"
+        if bad is not None:
+            raise _ParseError(
+                "BAD_LEVEL",
+                f"Floor level must be a whole number >= 0, got {bad}.",
+                t.col,
+                end_col=t.end_col,
+                hint="0 = ground, 1 = the floor above, etc.",
+            )
+        return int(float(t.text))
 
     def ident(self, what: str) -> _Token:
         """Take an identifier/name token, rejecting an empty `\"\"` literal."""
@@ -317,6 +357,15 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
             hint="Use 'at <x>,<y>' or one of: east-of, west-of, north-of, "
             "south-of (aliases: right-of, left-of, above, below).",
         )
+    nxt = c.peek()
+    if nxt is None or nxt.text.lower() == "size":
+        raise _ParseError(
+            "BAD_PLACEMENT",
+            f"Expected a reference room id after '{dir_tok.text}'.",
+            dir_tok.col,
+            end_col=dir_tok.end_col,
+            hint=f"Name the room to abut, e.g. `{dir_tok.text} living`.",
+        )
     ref_tok = c.ident("a reference room id")
     return {rel: ref_tok.text}, ref_tok
 
@@ -355,7 +404,7 @@ def _parse_statement(
         level = 0
         if c.peek() is not None and c.peek().text.lower() == "level":
             c.keyword("level")
-            level = int(c.number("level"))
+            level = c.level_value()
         c.expect_end()
         try:
             plan.add_room(rid, rtype, width=w, length=length, level=level, **place_kwargs)
@@ -492,16 +541,20 @@ class CompileResult:
         return [i for i in self.diagnostics if i.severity is Severity.WARNING]
 
     @property
+    def infos(self) -> list[Issue]:
+        return [i for i in self.diagnostics if i.severity is Severity.INFO]
+
+    @property
     def ok(self) -> bool:
         """True when the source compiled and passed all code checks."""
         return self.plan is not None and not self.errors
 
     def summary(self) -> str:
-        e, w = len(self.errors), len(self.warnings)
+        e, w, n = len(self.errors), len(self.warnings), len(self.infos)
         if self.plan is None:
             return f"COMPILE FAILED — {e} error(s)"
         status = "OK" if self.ok else "FAILED"
-        return f"COMPILE {status} — {e} error(s), {w} warning(s)"
+        return f"COMPILE {status} — {e} error(s), {w} warning(s), {n} info(s)"
 
     def report(self, filename: str = "<plan>") -> str:
         """Compiler-style diagnostic listing with column-accurate carets."""
@@ -545,6 +598,20 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
 
     for lineno, raw in enumerate(source.splitlines(), start=1):
         toks = _tokenize_line(raw, lineno)
+        unterminated = next((t for t in toks if t.unterminated), None)
+        if unterminated is not None:
+            diagnostics.append(
+                Issue(
+                    Severity.ERROR,
+                    "UNTERMINATED_STRING",
+                    "String literal has no closing '\"'.",
+                    line=lineno,
+                    col=unterminated.col,
+                    end_col=unterminated.end_col,
+                    hint='Add the closing quote, e.g. `plan "Name"`.',
+                )
+            )
+            continue
         if not toks:
             # A line of only separators/punctuation (e.g. ":::") tokenizes to
             # nothing; flag it rather than silently dropping a typo'd statement.

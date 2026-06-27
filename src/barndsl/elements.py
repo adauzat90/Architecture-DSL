@@ -281,12 +281,17 @@ class Barndominium:
         """
         type = RoomType(type)  # coerce/validate strings -> raises on unknown
         width, length = float(width), float(length)
+        if isinstance(level, float) and not level.is_integer():
+            raise ValueError(f"Room '{room_id}': level must be a whole number, got {level}.")
+        level = int(level)
+        if level < 0:
+            raise ValueError(
+                f"Room '{room_id}': level must be >= 0 (0 = ground), got {level}."
+            )
         x, y = self._resolve_position(
             room_id, x, y, width, length, east_of, west_of, north_of, south_of
         )
-        self.rooms.append(
-            Room(room_id, type, x, y, width, length, label, int(level))
-        )
+        self.rooms.append(Room(room_id, type, x, y, width, length, label, level))
         return self
 
     def _resolve_position(
@@ -319,6 +324,8 @@ class Barndominium:
                     "anchor, not both."
                 )
             kind, ref_id = given[0]
+            if ref_id == rid:
+                raise ValueError(f"Room '{rid}' can't be placed relative to itself.")
             ref = self.room(ref_id)
             if ref is None:
                 raise ValueError(

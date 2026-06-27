@@ -22,12 +22,20 @@ write .barn  ─▶  barndsl compile FILE  ─▶  read diagnostics ─▶  fix 
 Every diagnostic has a `line:col`, a code, a caret under the exact token, and a
 `hint` with a concrete DSL fix. **Fix every `error`. Address `warning`s where
 reasonable. `info`s are design-quality nudges** — not blockers, but worth
-heeding.
+heeding. The summary line counts all three: `COMPILE OK — 0 error(s), 1
+warning(s), 0 info(s)`.
 
 ```bash
-barndsl compile plan.barn          # diagnostics only
+barndsl compile plan.barn                  # diagnostics + a one-line program recap
+barndsl compile plan.barn --show-coords    # + each room's resolved rectangle
+barndsl compile plan.barn --metrics        # + full area/material takeoff
 barndsl build   plan.barn --out plan.svg   # compile + render if valid
 ```
+
+**A clean compile does not mean you built the right plan.** It checks the code is
+valid, not that you met the brief — you can compile `0/0/0` while having dropped a
+bedroom. `compile` prints a one-line `Program: N bed / M bath · … sq ft` recap so
+you can check the program against the brief; `--metrics` gives the full takeoff.
 
 ## The mental model
 
@@ -90,9 +98,39 @@ adjacency bugs come from — a room one foot off, or two rooms that only touch a
 corner, won't share a wall and the door fails. The reference room must be defined
 *above* the line that points at it.
 
-Relative placement still leaves gaps if your sizes don't tile the footprint —
-it fixes *adjacency*, not *bin-packing*. Watch the `AREA_UNUSED` info and the
-metrics to see how much footprint is unallocated.
+### The anchor rule (read this — it prevents most placement errors)
+
+An anchor sets **both** coordinates of the new room:
+
+- `east-of`/`west-of` butt against the reference's east/west wall **and copy its
+  `y` (south edge)** — they align horizontally.
+- `north-of`/`south-of` stack on the reference's north/south wall **and copy its
+  `x` (west edge)** — they align vertically.
+
+So **chaining in one direction is safe** (a stacked column, or a row):
+
+```barn
+room hall: hallway at 0,26 size 46 x 3
+room bed1: bedroom north-of hall  size 12 x 11   # x = hall.x = 0
+room bed2: bedroom east-of bed1   size 12 x 11   # y = bed1.y; sits beside bed1
+room bed3: bedroom east-of bed2   size 12 x 11
+```
+
+But **branching re-anchors to the deeper room.** If you place `B north-of A`,
+then `C east-of B`, then `D north-of C`, `D` inherits `C`'s (deeper) `x` and may
+collide with rooms to its west. When a wing goes wrong this way, you'll see an
+`OUT_OF_BOUNDS` or `OVERLAP` with a fix hint, or a `DOOR_NOADJ` whose hint lists
+the room's *actual* neighbours. To lay a **hallway spine**, place **every** served
+room directly off the spine (`north-of hall`, `east-of hall`, …), one room deep —
+don't chain a second column off a room that's already off the spine, or it stops
+touching the hall.
+
+Relative placement fixes *adjacency*, not *bin-packing* — it won't tile the
+footprint for you. It also can't offset a room partway along a shared wall (the
+anchor always aligns to the reference's corner); for that, fall back to `at
+<x>,<y>`. Use `barndsl compile FILE --show-coords` to print every room's resolved
+rectangle and which walls ended up exterior — the fastest way to see what a chain
+of anchors actually produced.
 
 ## Levels and lofts
 
@@ -109,6 +147,13 @@ room below) and don't share walls. A `door` between levels is read as a stair an
 is valid when the two rooms **stack** (their footprints overlap). Vertical
 circulation isn't modelled further yet, so an unreachable loft is a `warning`,
 not an error.
+
+`<n>` must be a **whole number ≥ 0** (`0` = ground, `1` = the floor above);
+non-integer or negative levels are rejected (`BAD_LEVEL`). A loft's exterior
+walls are still computed from the envelope edges in plan view, so a loft **inset**
+from the envelope (like the `30 x 12` example above, whose north wall is interior)
+can't take a window that counts for daylight/egress — put the loft against an
+envelope edge if it needs a real window.
 
 ## The rules the compiler enforces
 
@@ -202,7 +247,19 @@ verbatim. Apply the hint, recompile, repeat until `COMPILE OK`.
 ## Two front-ends, one core
 
 You can also build a plan with the embedded **Python builder** — same rules, same
-core object; `emit_dsl(plan)` serialises it back to this language.
+core object; `emit_dsl(plan)` serialises it back to this language (round-trips
+losslessly, including `level`).
+
+The builder mirrors the DSL:
+
+- `add_room(id, type, *, width, length, x=, y=, level=0, label=, east_of=,
+  west_of=, north_of=, south_of=)` — relative anchors use **underscores**
+  (`east_of=`), and the reference must be added *before* this call.
+- `connect(a, b, width=)` is an interior `door`; `entrance(room, wall, …)` is an
+  `entry`; `add_window(room, wall, …)`; `add_porch(id, …)`.
+- `type` and `wall` accept the enum **or** a string (`"living"`, `"south"`) and
+  are validated immediately (a bad value raises `ValueError`, not a late crash).
+- `level=` must be a whole number ≥ 0, same as the DSL.
 
 ```python
 from barndsl import barndominium, RoomType as T, validate, emit_dsl
@@ -211,9 +268,18 @@ plan = (
     barndominium("Maple Two-Bed")
     .envelope(48, 30).ceiling(10)
     .add_room("living", T.LIVING, x=0, y=0, width=24, length=30)
-    .add_room("kitchen", T.KITCHEN, east_of="living", width=24, length=18)
-    .entrance("living", "south", width=3, offset=10)
+    .add_room("kitchen", T.KITCHEN, east_of="living", width=24, length=18)  # abut
+    .add_room("loft", T.LOFT, north_of="kitchen", width=24, length=10, level=1)
+    .connect("living", "kitchen", width=8)
+    .entrance("living", "south", width=3, offset=10)   # string wall is fine
 )
 print(validate(plan))   # same diagnostics
-print(emit_dsl(plan))   # → .barn source
+print(emit_dsl(plan))   # → .barn source (loft emitted as `... level 1`)
 ```
+
+## Porches
+
+`porch <id> at <x>,<y> size <W> x <L> [covered|open]` is an exterior platform. It
+may sit **outside** the envelope (e.g. a front porch at a negative `y`) and is
+exempt from the overlap / out-of-bounds / area checks that apply to rooms — so
+place it wherever it physically goes (typically just outside an `entry`).
