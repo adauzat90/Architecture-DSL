@@ -43,6 +43,7 @@ Full grammar:
 ```
 plan "Name"
 envelope <W> x <L>
+wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>
 note "free text"
 room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -59,6 +60,15 @@ stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 share a wall and a `door` between them resolves — no coordinate bookkeeping. Add
 `align near|far|center` and/or `offset <n>` to slide the room along the shared
 wall.
+The footprint is one rectangle by default. For an **L/T/U-shaped building**, add
+`wing <W> x <L> at <x>,<y>` blocks: the footprint becomes the union of the
+`envelope` (the primary block at the origin) and every wing. Containment,
+exterior walls (a wall on the seam between two blocks is *interior*; one facing a
+notch is *exterior*), daylight/egress, area and the drawn outline all follow the
+rectilinear shape — see [`examples/lshape.barn`](examples/lshape.barn). (The
+auto-layout solver still targets a single rectangle; wings are for authored or
+builder plans.)
+
 `level <n>` (default 0) puts a room on an upper floor; a `loft` on `level 1` sits
 above a ground room without overlapping it. A `stair` connects floors (the upper
 level becomes reachable from a ground `entry`), and `barndsl build` renders each
@@ -261,6 +271,7 @@ examples/
   simple_barndo.py   # the same plan via the Python builder
   birch_run.brief    # an adjacency brief for `barndsl layout`
   pinwheel.brief     # a non-sliceable brief that exercises the rectangular dual
+  lshape.barn        # an L-shaped (rectilinear) footprint via `wing`
 tests/             # no API key required
 ```
 

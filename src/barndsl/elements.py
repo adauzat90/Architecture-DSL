@@ -215,6 +215,32 @@ class Window:
 
 
 @dataclass
+class Section:
+    """One rectangular block of the building footprint.
+
+    A plain barndo is a single section (the whole envelope); an L/T/U footprint
+    is the union of two or more abutting sections. ``(x, y)`` is the south-west
+    corner, like a room.
+    """
+
+    x: float
+    y: float
+    width: float
+    length: float
+
+    @property
+    def x2(self) -> float:
+        return self.x + self.width
+
+    @property
+    def y2(self) -> float:
+        return self.y + self.length
+
+    def as_tuple(self) -> tuple[float, float, float, float]:
+        return (self.x, self.y, self.width, self.length)
+
+
+@dataclass
 class Porch:
     """A covered or open exterior platform attached to the building.
 
@@ -298,16 +324,54 @@ class Barndominium:
     porches: list[Porch] = field(default_factory=list)
     stairs: list[Stair] = field(default_factory=list)
     notes: str = ""
+    #: Extra footprint blocks beyond the primary ``envelope`` rectangle. Empty for
+    #: a plain rectangular building; one entry per ``wing`` for an L/T/U footprint.
+    #: The primary block (the envelope at the origin) is implicit — see
+    #: :meth:`footprint_sections`.
+    wings: list[Section] = field(default_factory=list)
 
     # -- fluent builder API ------------------------------------------------
     # Each method mutates the plan and returns ``self`` so calls chain. This
     # is the embedded DSL surface: type-checked, IDE-completable, no parser.
 
     def envelope(self, width: float, length: float) -> "Barndominium":
-        """Set the outer steel-frame footprint (feet)."""
+        """Set the primary steel-frame footprint block (feet), at the origin."""
         self.envelope_width = float(width)
         self.envelope_length = float(length)
         return self
+
+    def wing(
+        self, width: float, length: float, *, x: float, y: float
+    ) -> "Barndominium":
+        """Add a rectangular footprint block at ``(x, y)`` — an L/T/U extension.
+
+        The building footprint becomes the union of the primary ``envelope`` block
+        (at the origin) and every wing. ``envelope_width``/``envelope_length`` stay
+        the *primary* block as declared; use :meth:`bounds` for the overall extent.
+        """
+        self.wings.append(Section(float(x), float(y), float(width), float(length)))
+        return self
+
+    def footprint_sections(self) -> list[tuple[float, float, float, float]]:
+        """The footprint as ``(x, y, w, l)`` rectangles whose union is the building.
+
+        The primary ``envelope`` block at the origin plus any ``wing`` blocks. For
+        a plain rectangular plan this is a single rectangle, so every footprint
+        query degrades to the ordinary envelope check.
+        """
+        secs = [(0.0, 0.0, self.envelope_width, self.envelope_length)]
+        secs.extend(w.as_tuple() for w in self.wings)
+        return secs
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        """Bounding box ``(min_x, min_y, max_x, max_y)`` of the whole footprint."""
+        secs = self.footprint_sections()
+        return (
+            min(s[0] for s in secs),
+            min(s[1] for s in secs),
+            max(s[0] + s[2] for s in secs),
+            max(s[1] + s[3] for s in secs),
+        )
 
     def ceiling(self, height: float) -> "Barndominium":
         self.ceiling_height = float(height)
@@ -570,7 +634,11 @@ class Barndominium:
 
     @property
     def footprint_area(self) -> float:
-        return self.envelope_width * self.envelope_length
+        if not self.wings:
+            return self.envelope_width * self.envelope_length
+        from .geometry import footprint_area
+
+        return footprint_area(self.footprint_sections())
 
     @property
     def interior_area(self) -> float:

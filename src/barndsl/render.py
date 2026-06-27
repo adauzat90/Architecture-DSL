@@ -72,11 +72,13 @@ class _Renderer:
         self.c = config
         self.parts: list[str] = []
 
-        # World bounding box (envelope plus any out-of-envelope porches).
-        xs = [0.0, plan.envelope_width] + [p.x for p in plan.porches] + [
+        # World bounding box (whole footprint — incl. wings — plus out-of-envelope
+        # porches).
+        fx0, fy0, fx1, fy1 = plan.bounds()
+        xs = [fx0, fx1] + [p.x for p in plan.porches] + [
             p.x + p.width for p in plan.porches
         ]
-        ys = [0.0, plan.envelope_length] + [p.y for p in plan.porches] + [
+        ys = [fy0, fy1] + [p.y for p in plan.porches] + [
             p.y + p.length for p in plan.porches
         ]
         self.min_x, self.max_x = min(xs), max(xs)
@@ -173,7 +175,7 @@ class _Renderer:
 
     def _draw_level_block(self, lvl: int) -> None:
         label = f"LEVEL {lvl}" + (" — GROUND" if lvl == 0 else "")
-        label += f"   ({self.plan.envelope_width:.0f}′ × {self.plan.envelope_length:.0f}′)"
+        label += f"   ({self._extent_label()})"
         self._text(
             self.c.margin_left, self._block_top - 12, label,
             size=13, anchor="start", weight="bold", fill="#333333",
@@ -192,18 +194,32 @@ class _Renderer:
         sub = (
             f"{m['footprint_sqft']:.0f} sq ft footprint   ·   "
             f"{int(m['bedroom_count'])} bed / {m['bathroom_count']:.1f} bath   ·   "
-            f'{self.plan.envelope_width:.0f}′ × {self.plan.envelope_length:.0f}′'
+            f"{self._extent_label()}"
         )
         self._text(self.c.margin_left, 54, sub, size=12, anchor="start", fill="#666666")
 
+    def _extent_label(self) -> str:
+        fx0, fy0, fx1, fy1 = self.plan.bounds()
+        label = f"{fx1 - fx0:.0f}′ × {fy1 - fy0:.0f}′"
+        return label + " (L/T/U)" if self.plan.wings else label
+
     def _draw_envelope(self):
-        x = self.sx(0)
-        y = self.sy(self.plan.envelope_length)
-        self._rect(
-            x, y, self.plan.envelope_width * self.c.scale,
-            self.plan.envelope_length * self.c.scale,
-            fill="none", stroke=WALL, sw=3.0,
-        )
+        if not self.plan.wings:  # plain rectangle — one stroke
+            x = self.sx(0)
+            y = self.sy(self.plan.envelope_length)
+            self._rect(
+                x, y, self.plan.envelope_width * self.c.scale,
+                self.plan.envelope_length * self.c.scale,
+                fill="none", stroke=WALL, sw=3.0,
+            )
+            return
+        # Rectilinear (L/T/U) footprint: stroke the outline of the section union.
+        from .geometry import footprint_boundary
+
+        for (x1, y1), (x2, y2) in footprint_boundary(self.plan.footprint_sections()):
+            self._line(
+                self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2), stroke=WALL, sw=3.0
+            )
 
     def _draw_porches(self):
         for p in self.plan.porches:
@@ -328,16 +344,19 @@ class _Renderer:
 
     def _draw_dimensions(self):
         scale = self.c.scale
+        # Overall dimensions span the whole footprint (incl. wings), not just the
+        # primary envelope block.
+        fx0, fy0, fx1, fy1 = self.plan.bounds()
         # Overall width dimension below the plan.
         y = self.c.margin_top + self.content_h + 28
-        x0 = self.sx(0)
-        x1 = self.sx(self.plan.envelope_width)
-        self._dim_line(x0, y, x1, y, f'{self.plan.envelope_width:.0f}′', horizontal=True)
+        self._dim_line(
+            self.sx(fx0), y, self.sx(fx1), y, f"{fx1 - fx0:.0f}′", horizontal=True
+        )
         # Overall length dimension left of the plan.
         x = self.c.margin_left - 34
-        y0 = self.sy(0)
-        y1 = self.sy(self.plan.envelope_length)
-        self._dim_line(x, y0, x, y1, f'{self.plan.envelope_length:.0f}′', horizontal=False)
+        self._dim_line(
+            x, self.sy(fy0), x, self.sy(fy1), f"{fy1 - fy0:.0f}′", horizontal=False
+        )
 
     def _dim_line(self, x1, y1, x2, y2, label, horizontal):
         self._line(x1, y1, x2, y2, DIM_COLOR, 1.0)

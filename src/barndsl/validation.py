@@ -24,7 +24,7 @@ from .elements import (
     Room,
     RoomType,
 )
-from .geometry import shared_edge
+from .geometry import rect_in_footprint, shared_edge, wall_faces_outside
 
 # Approximate IRC-derived thresholds (feet unless noted).
 MIN_CEILING = 7.0
@@ -94,16 +94,31 @@ class ValidationReport:
 
 
 def exterior_walls(plan: Barndominium, room: Room, tol: float = 1e-6) -> list[Direction]:
-    """Walls of ``room`` that lie on the building envelope (can take windows)."""
-    walls: list[Direction] = []
-    if abs(room.y) <= tol:
-        walls.append(Direction.SOUTH)
-    if abs(room.y2 - plan.envelope_length) <= tol:
-        walls.append(Direction.NORTH)
-    if abs(room.x) <= tol:
-        walls.append(Direction.WEST)
-    if abs(room.x2 - plan.envelope_width) <= tol:
-        walls.append(Direction.EAST)
+    """Walls of ``room`` that lie on the building envelope (can take windows).
+
+    For a plain rectangular footprint this is the four envelope edges; for an
+    L/T/U footprint (``wing`` blocks) a wall counts only when it faces *outside*
+    the footprint union — a wall on the seam between two abutting blocks is
+    interior even if it sits at the primary envelope's edge.
+    """
+    if not plan.wings:
+        walls: list[Direction] = []
+        if abs(room.y) <= tol:
+            walls.append(Direction.SOUTH)
+        if abs(room.y2 - plan.envelope_length) <= tol:
+            walls.append(Direction.NORTH)
+        if abs(room.x) <= tol:
+            walls.append(Direction.WEST)
+        if abs(room.x2 - plan.envelope_width) <= tol:
+            walls.append(Direction.EAST)
+        return walls
+
+    sections = plan.footprint_sections()
+    return [
+        w
+        for w in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST)
+        if wall_faces_outside(sections, room, w)
+    ]
     return walls
 
 
@@ -170,6 +185,59 @@ def _nearest_distance(
 # --- entry point ------------------------------------------------------------
 
 
+def _check_wings(plan: Barndominium, add, tol: float = 1e-6) -> None:
+    """Validate ``wing`` blocks: positive size, and a single connected footprint."""
+    if not plan.wings:
+        return
+    for i, w in enumerate(plan.wings, 1):
+        if w.width <= 0 or w.length <= 0:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "WING_SIZE",
+                    f"Wing #{i} has non-positive size ({_f(w.width)}×{_f(w.length)}).",
+                    hint="Use positive feet, e.g. `wing 20 x 24 at 40,0`.",
+                )
+            )
+    secs = plan.footprint_sections()  # [primary, *wings]
+
+    def abuts(s, t) -> bool:
+        ox = min(s[0] + s[2], t[0] + t[2]) - max(s[0], t[0])
+        oy = min(s[1] + s[3], t[1] + t[3]) - max(s[1], t[1])
+        if ox > tol and oy > tol:
+            return True  # overlap
+        if abs(ox) <= tol and oy > tol:
+            return True  # shared vertical edge
+        if abs(oy) <= tol and ox > tol:
+            return True  # shared horizontal edge
+        return False
+
+    parent = list(range(len(secs)))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for i in range(len(secs)):
+        for j in range(i + 1, len(secs)):
+            if abuts(secs[i], secs[j]):
+                parent[find(i)] = find(j)
+
+    if len({find(i) for i in range(len(secs))}) > 1:
+        add(
+            Issue(
+                Severity.ERROR,
+                "FOOTPRINT_SPLIT",
+                "The footprint is disconnected — a wing doesn't share a wall with "
+                "the rest of the building (a corner touch isn't enough).",
+                hint="Reposition the wing so it abuts the envelope or another wing "
+                "along a shared edge.",
+            )
+        )
+
+
 def validate(plan: Barndominium) -> ValidationReport:
     """Run all checks and return a :class:`ValidationReport`."""
     issues: list[Issue] = []
@@ -184,6 +252,7 @@ def validate(plan: Barndominium) -> ValidationReport:
                 hint="Declare the footprint, e.g. `envelope 60 x 40`.",
             )
         )
+    _check_wings(plan, add)
     if plan.ceiling_height < MIN_CEILING:
         add(
             Issue(
@@ -264,7 +333,34 @@ def _validate_geometry(plan: Barndominium, add) -> None:
             )
         over_x = max(0.0, room.x2 - plan.envelope_width)
         over_y = max(0.0, room.y2 - plan.envelope_length)
-        if room.x < -1e-6 or room.y < -1e-6 or over_x > 1e-6 or over_y > 1e-6:
+        if plan.wings:
+            # Rectilinear footprint: the building may extend past the primary
+            # envelope into wings, and have notches the bbox doesn't, so test the
+            # actual footprint union rather than the primary rectangle.
+            if (
+                room.width > 0
+                and room.length > 0
+                and not rect_in_footprint(
+                    plan.footprint_sections(),
+                    room.x,
+                    room.y,
+                    room.width,
+                    room.length,
+                )
+            ):
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "OUT_OF_BOUNDS",
+                        f"Room falls outside the building footprint "
+                        f"({_f(room.x)},{_f(room.y)} → {_f(room.x2)},{_f(room.y2)}); "
+                        "it isn't covered by the envelope or any wing.",
+                        room=room.id,
+                        hint="Move it inside a footprint block, or add a `wing` "
+                        "to cover that area.",
+                    )
+                )
+        elif room.x < -1e-6 or room.y < -1e-6 or over_x > 1e-6 or over_y > 1e-6:
             # Phrase the fix differently for a relatively-placed room, which has
             # no x,y token to "set" — point at align/offset/size instead.
             relative = room.placement is not None

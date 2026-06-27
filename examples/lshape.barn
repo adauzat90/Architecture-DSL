@@ -1,0 +1,35 @@
+# An L-shaped barndominium: a 44×40 main block with a 24×22 primary-suite wing
+# projecting east. The `wing` statement adds a footprint block; the building
+# outline, containment, exterior walls and area all follow the L, not a rectangle.
+plan "Maple Hollow"
+envelope 44 x 40
+wing 24 x 22 at 44,0
+ceiling 10
+
+# --- main block (0..44 x 0..40) ---
+room living:  living    at 0,0    size 26 x 22
+room kitchen: kitchen   at 26,0   size 18 x 22
+room hall:    hallway   at 0,22   size 44 x 5
+room bed1:    bedroom   at 0,27    size 22 x 13
+room bed2:    bedroom   at 22,27   size 22 x 13
+
+# --- east wing (44..68 x 0..22): primary suite ---
+room master:  bedroom   at 44,0   size 24 x 14
+room mbath:   bathroom  at 44,14  size 12 x 8
+room mcloset: closet    at 56,14  size 12 x 8
+
+door living - kitchen   width 6
+door living - hall      width 3
+door hall - bed1        width 2.67
+door hall - bed2        width 2.67
+door kitchen - master   width 2.67
+door master - mbath     width 2.67
+door master - mcloset   width 2.5
+
+entry living south width 3 offset 10
+window living  south width 14 offset 6
+window kitchen south width 10 offset 4
+window bed1    north width 7  offset 7
+window bed2    north width 7  offset 7
+window master  east  width 6  offset 4
+window master  south width 8  offset 8

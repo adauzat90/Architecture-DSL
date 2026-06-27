@@ -11,6 +11,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
 
     plan "Name"
     envelope <W> x <L>
+    wing <W> x <L> at <x>,<y>          # optional — L/T/U footprint extensions
     ceiling <H>
     note "free text"
     room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -38,7 +39,7 @@ from .validation import Issue, Severity, ValidationReport, validate
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
-    "plan", "envelope", "ceiling", "note", "room", "door", "entry", "window",
+    "plan", "envelope", "wing", "ceiling", "note", "room", "door", "entry", "window",
     "porch", "stair"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
@@ -55,7 +56,8 @@ and [y, y+L] south-north (south wall=y, north=y+L, west=x, east=x+W).
 
 Statements:
   plan "Name"
-  envelope <W> x <L>              # overall footprint
+  envelope <W> x <L>              # primary footprint block (at the origin)
+  wing <W> x <L> at <x>,<y>       # optional; add blocks for an L/T/U footprint
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   note "free text"                # optional design note
   room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -435,6 +437,15 @@ def _parse_statement(
         length = c.number("envelope length")
         plan.envelope(w, length)
         c.expect_end()
+    elif key == "wing":
+        w = c.number("wing width")
+        c.keyword("x")
+        length = c.number("wing length")
+        c.keyword("at")
+        x = c.number("wing x")
+        y = c.number("wing y")
+        c.expect_end()
+        plan.wing(w, length, x=x, y=y)
     elif key == "ceiling":
         plan.ceiling(c.number("ceiling height"))
         c.expect_end()

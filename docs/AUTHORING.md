@@ -54,7 +54,8 @@ you can check the program against the brief; `--metrics` gives the full takeoff.
 
 ```barn
 plan "Name"
-envelope <W> x <L>                 # the steel-frame footprint
+envelope <W> x <L>                 # primary footprint block (at the origin)
+wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>                        # >= 7; 9–12 is typical
 note "free text"                   # optional; repeatable
 
@@ -75,6 +76,34 @@ stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulat
   length` (and `offset >= 0`).
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
+
+## L/T/U footprints with `wing`
+
+The footprint is one rectangle unless you add `wing` blocks. Each `wing <W> x <L>
+at <x>,<y>` adds a rectangle; the building is the **union** of the `envelope`
+(the primary block at the origin) and every wing. An L is one wing, a U is two:
+
+```barn
+envelope 44 x 40            # main block, 0,0 → 44,40
+wing 24 x 22 at 44,0        # a primary-suite wing projecting east
+```
+
+Everything tracks the real shape, not the bounding box:
+
+- **Containment** — a room poking into the notch (covered by neither the envelope
+  nor a wing) is an `OUT_OF_BOUNDS` error; a room sitting wholly in a wing, or
+  straddling the seam between two abutting blocks, is fine.
+- **Exterior walls** — a wall on the **seam** between two blocks is *interior*
+  (no window/egress there); a wall facing a **notch** or the outside is
+  *exterior*. Daylight and egress checks use this.
+- **Area & outline** — `footprint_area`, the drawn building outline, and the
+  dimension labels all follow the union.
+- Wings must form **one connected footprint** (a shared wall, not just a corner
+  touch) — otherwise `FOOTPRINT_SPLIT`.
+
+See [`examples/lshape.barn`](../examples/lshape.barn). Note the **auto-layout
+solver still fills a single rectangle** — `wing` is for plans you place yourself
+(textual DSL or the Python builder's `.wing(w, l, x=…, y=…)`).
 
 ## Placement: prefer relative
 

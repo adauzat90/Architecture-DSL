@@ -23,6 +23,10 @@ def emit_dsl(plan: Barndominium) -> str:
     """Return canonical DSL source for ``plan``."""
     out: list[str] = [f"plan {_q(plan.name)}"]
     out.append(f"envelope {_n(plan.envelope_width)} x {_n(plan.envelope_length)}")
+    for wing in plan.wings:
+        out.append(
+            f"wing {_n(wing.width)} x {_n(wing.length)} at {_n(wing.x)},{_n(wing.y)}"
+        )
     out.append(f"ceiling {_n(plan.ceiling_height)}")
     for note in (plan.notes or "").splitlines():
         if note.strip():
