@@ -125,12 +125,25 @@ room directly off the spine (`north-of hall`, `east-of hall`, …), one room dee
 don't chain a second column off a room that's already off the spine, or it stops
 touching the hall.
 
+**Sliding along the shared wall.** By default a room aligns to the reference's
+*near* corner (south for east/west anchors, west for north/south). Two optional
+clauses move it along that wall without dropping to absolute coordinates:
+
+- `align near|far|center` — `far` makes the two rooms' far edges flush;
+  `center` centres the new room on the reference's wall.
+- `offset <n>` — shift `n` feet further along the wall (positive = north for
+  `east-of`/`west-of`, east for `north-of`/`south-of`; negatives are fine).
+
+```barn
+room living: living  at 0,0                       size 24 x 30
+room bath:   bathroom east-of living align far    size 8 x 10   # flush to the north end
+room office: office   east-of living offset 12    size 8 x 8    # starts 12 ft up the wall
+```
+
 Relative placement fixes *adjacency*, not *bin-packing* — it won't tile the
-footprint for you. It also can't offset a room partway along a shared wall (the
-anchor always aligns to the reference's corner); for that, fall back to `at
-<x>,<y>`. Use `barndsl compile FILE --show-coords` to print every room's resolved
-rectangle and which walls ended up exterior — the fastest way to see what a chain
-of anchors actually produced.
+footprint for you. Use `barndsl compile FILE --show-coords` to print every room's
+resolved rectangle and which walls ended up exterior — the fastest way to see
+what a chain of anchors actually produced.
 
 ## Levels and lofts
 

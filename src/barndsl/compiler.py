@@ -64,9 +64,12 @@ Statements:
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
-  east-of <room> | west-of <room> | north-of <room> | south-of <room>
-        # abut an already-defined room, flush to its corner (shares a wall, so a
-        # `door` between the two resolves). Aliases: right-of, left-of, above, below.
+  <dir>-of <room> [align near|far|center] [offset <n>]
+        # <dir> = east|west|north|south (aliases right|left|above|below). Abut an
+        # already-defined room (shares a wall, so a `door` between them resolves).
+        # By default the new room aligns to the reference's near corner; `align
+        # far|center` slides it along the shared wall, and `offset <n>` shifts it
+        # further (+north for east/west anchors, +east for north/south anchors).
 <level> defaults to 0 (ground). A loft on level 1 may sit above a ground room
         without overlapping it.
 <type> is one of: %s
@@ -367,7 +370,24 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
             hint=f"Name the room to abut, e.g. `{dir_tok.text} living`.",
         )
     ref_tok = c.ident("a reference room id")
-    return {rel: ref_tok.text}, ref_tok
+    kwargs: dict = {rel: ref_tok.text}
+    # Optional slide along the shared wall: `align near|far|center` and `offset <n>`.
+    while c.peek() is not None and c.peek().text.lower() in ("align", "offset"):
+        opt = c.take("an option").text.lower()
+        if opt == "align":
+            a = c.take("near, far, or center")
+            if a.text.lower() not in ("near", "far", "center"):
+                raise _ParseError(
+                    "BAD_PLACEMENT",
+                    f"Unknown alignment '{a.text}'.",
+                    a.col,
+                    end_col=a.end_col,
+                    hint="Use align near, far, or center.",
+                )
+            kwargs["align"] = a.text.lower()
+        else:
+            kwargs["offset"] = c.number("offset")
+    return kwargs, ref_tok
 
 
 def _parse_statement(

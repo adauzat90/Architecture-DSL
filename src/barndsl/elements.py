@@ -271,6 +271,8 @@ class Barndominium:
         west_of: str | None = None,
         north_of: str | None = None,
         south_of: str | None = None,
+        align: str = "near",
+        offset: float = 0.0,
     ) -> "Barndominium":
         """Add a room.
 
@@ -278,6 +280,12 @@ class Barndominium:
         abutting an already-defined room: ``east_of="kitchen"`` places this room
         flush against the kitchen's east wall (and so on). Relative placement
         shares a wall, so an interior ``connect`` between the two will resolve.
+
+        With a relative anchor you can also slide along the shared wall:
+        ``align`` picks where it sits — ``"near"`` (default, the reference's
+        start corner), ``"far"`` (flush to the far corner), or ``"center"`` —
+        and ``offset`` adds a further shift in feet (positive = north for
+        east/west anchors, east for north/south anchors).
         """
         type = RoomType(type)  # coerce/validate strings -> raises on unknown
         width, length = float(width), float(length)
@@ -289,10 +297,20 @@ class Barndominium:
                 f"Room '{room_id}': level must be >= 0 (0 = ground), got {level}."
             )
         x, y = self._resolve_position(
-            room_id, x, y, width, length, east_of, west_of, north_of, south_of
+            room_id, x, y, width, length, east_of, west_of, north_of, south_of,
+            align, float(offset),
         )
         self.rooms.append(Room(room_id, type, x, y, width, length, label, level))
         return self
+
+    @staticmethod
+    def _align_along(ref_lo: float, ref_span: float, new_span: float, align: str) -> float:
+        """Position the new room's near edge along a shared wall."""
+        if align == "far":
+            return ref_lo + ref_span - new_span
+        if align == "center":
+            return ref_lo + (ref_span - new_span) / 2.0
+        return ref_lo  # near
 
     def _resolve_position(
         self,
@@ -305,6 +323,8 @@ class Barndominium:
         west_of: str | None,
         north_of: str | None,
         south_of: str | None,
+        align: str = "near",
+        offset: float = 0.0,
     ) -> tuple[float, float]:
         anchors = [
             ("east_of", east_of),
@@ -313,38 +333,46 @@ class Barndominium:
             ("south_of", south_of),
         ]
         given = [(k, v) for k, v in anchors if v is not None]
-        if given:
-            if len(given) > 1:
+        if not given:
+            if align != "near" or offset:
                 raise ValueError(
-                    f"Room '{rid}': use at most one relative anchor, got {[k for k, _ in given]}."
+                    f"Room '{rid}': align/offset only apply with a relative anchor."
                 )
-            if x is not None or y is not None:
+            if x is None or y is None:
                 raise ValueError(
-                    f"Room '{rid}': give either an absolute position or a relative "
-                    "anchor, not both."
+                    f"Room '{rid}' needs a position: pass x= and y=, or a relative "
+                    "anchor like east_of=."
                 )
-            kind, ref_id = given[0]
-            if ref_id == rid:
-                raise ValueError(f"Room '{rid}' can't be placed relative to itself.")
-            ref = self.room(ref_id)
-            if ref is None:
-                raise ValueError(
-                    f"Cannot place '{rid}' {kind} unknown room '{ref_id}' — "
-                    "define the reference room first."
-                )
-            if kind == "east_of":
-                return ref.x2, ref.y
-            if kind == "west_of":
-                return ref.x - width, ref.y
-            if kind == "north_of":
-                return ref.x, ref.y2
-            return ref.x, ref.y - length  # south_of
-        if x is None or y is None:
+            return float(x), float(y)
+        if len(given) > 1:
             raise ValueError(
-                f"Room '{rid}' needs a position: pass x= and y=, or a relative "
-                "anchor like east_of=."
+                f"Room '{rid}': use at most one relative anchor, got {[k for k, _ in given]}."
             )
-        return float(x), float(y)
+        if x is not None or y is not None:
+            raise ValueError(
+                f"Room '{rid}': give either an absolute position or a relative "
+                "anchor, not both."
+            )
+        if align not in ("near", "far", "center"):
+            raise ValueError(
+                f"Room '{rid}': align must be near, far, or center; got {align!r}."
+            )
+        kind, ref_id = given[0]
+        if ref_id == rid:
+            raise ValueError(f"Room '{rid}' can't be placed relative to itself.")
+        ref = self.room(ref_id)
+        if ref is None:
+            raise ValueError(
+                f"Cannot place '{rid}' {kind} unknown room '{ref_id}' — "
+                "define the reference room first."
+            )
+        if kind in ("east_of", "west_of"):
+            nx = ref.x2 if kind == "east_of" else ref.x - width
+            ny = self._align_along(ref.y, ref.length, length, align) + offset
+            return nx, ny
+        ny = ref.y2 if kind == "north_of" else ref.y - length
+        nx = self._align_along(ref.x, ref.width, width, align) + offset
+        return nx, ny
 
     def add_porch(
         self,

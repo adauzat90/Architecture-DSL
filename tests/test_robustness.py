@@ -388,6 +388,70 @@ def test_builder_self_anchor_has_clear_message():
         )
 
 
+def test_anchor_align_and_offset_slide_along_the_shared_wall():
+    src = (
+        'plan "Align"\nenvelope 40 x 30\nceiling 10\n'
+        "room living: living at 0,0 size 20 x 30\n"
+        "room far: bedroom east-of living align far size 12 x 10\n"
+        "room mid: office east-of living align center size 8 x 6\n"
+        "room shift: office east-of living offset 5 size 8 x 6\n"
+        "room hall: hallway at 0,0 size 30 x 4\n"  # ignore; just need rooms
+    )
+    p = compile_source(src).plan
+    assert (p.room("far").x, p.room("far").y) == (20.0, 20.0)  # 30-10 from south
+    assert (p.room("mid").x, p.room("mid").y) == (20.0, 12.0)  # (30-6)/2
+    assert (p.room("shift").x, p.room("shift").y) == (20.0, 5.0)
+
+
+def test_north_anchor_offset_shifts_east():
+    src = (
+        'plan "N"\nenvelope 40 x 30\nceiling 10\n'
+        "room hall: hallway at 0,0 size 30 x 4\n"
+        "room bed: bedroom north-of hall offset 6 size 10 x 10\n"
+    )
+    p = compile_source(src).plan
+    assert (p.room("bed").x, p.room("bed").y) == (6.0, 4.0)
+
+
+def test_plain_anchor_is_unchanged_by_the_new_options():
+    src = (
+        "envelope 40 x 30\n"
+        "room a: living at 0,0 size 20 x 30\n"
+        "room b: kitchen east-of a size 20 x 30\n"
+    )
+    b = compile_source(src).plan.room("b")
+    assert (b.x, b.y) == (20.0, 0.0)  # near/offset-0 == old behaviour
+
+
+def test_builder_align_and_offset_match_dsl():
+    p = (
+        barndominium("B")
+        .envelope(40, 30)
+        .ceiling(10)
+        .add_room("living", T.LIVING, x=0, y=0, width=20, length=30)
+        .add_room("far", T.BEDROOM, east_of="living", align="far", width=12, length=10)
+        .add_room("shift", T.OFFICE, east_of="living", offset=5, width=8, length=6)
+    )
+    assert (p.room("far").x, p.room("far").y) == (20.0, 20.0)
+    assert (p.room("shift").x, p.room("shift").y) == (20.0, 5.0)
+
+
+def test_bad_alignment_keyword_is_flagged():
+    src = (
+        "envelope 40 x 30\n"
+        "room a: living at 0,0 size 10 x 10\n"
+        "room b: office east-of a align sideways size 5 x 5\n"
+    )
+    assert any(d.code == "BAD_PLACEMENT" and d.line == 3 for d in compile_source(src).errors)
+
+
+def test_align_or_offset_without_anchor_raises_in_builder():
+    with pytest.raises(ValueError, match="anchor"):
+        barndominium("B").envelope(20, 20).add_room(
+            "a", T.LIVING, x=0, y=0, width=5, length=5, offset=3
+        )
+
+
 def test_summary_reports_an_info_count():
     # A plan with an interior kitchen yields a NAT_LIGHT warning; the summary
     # line now carries an info count too.

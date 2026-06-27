@@ -55,7 +55,9 @@ porch <id> at <x>,<y> size <W> x <L> [covered|open]
 `<placement>` is absolute — `at <x>,<y>` — or **relative**: `east-of`,
 `west-of`, `north-of`, `south-of <room>` (aliases `right-of`, `left-of`,
 `above`, `below`) abuts an already-defined room flush to its corner, so the two
-share a wall and a `door` between them resolves — no coordinate bookkeeping.
+share a wall and a `door` between them resolves — no coordinate bookkeeping. Add
+`align near|far|center` and/or `offset <n>` to slide the room along the shared
+wall.
 `level <n>` (default 0) puts a room on an upper floor; a `loft` on `level 1` may
 sit above a ground room without overlapping it, and a cross-level `door` reads as
 a stair.
