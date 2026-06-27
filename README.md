@@ -50,6 +50,7 @@ door <id_a> - <id_b> [width <w>]
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]
 window <id> <wall> [width <w>] [offset <o>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
+stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 ```
 
 `<placement>` is absolute — `at <x>,<y>` — or **relative**: `east-of`,
@@ -58,9 +59,10 @@ porch <id> at <x>,<y> size <W> x <L> [covered|open]
 share a wall and a `door` between them resolves — no coordinate bookkeeping. Add
 `align near|far|center` and/or `offset <n>` to slide the room along the shared
 wall.
-`level <n>` (default 0) puts a room on an upper floor; a `loft` on `level 1` may
-sit above a ground room without overlapping it, and a cross-level `door` reads as
-a stair.
+`level <n>` (default 0) puts a room on an upper floor; a `loft` on `level 1` sits
+above a ground room without overlapping it. A `stair` connects floors (the upper
+level becomes reachable from a ground `entry`), and `barndsl build` renders each
+level as its own labelled floor plan.
 
 `<type>`: living, kitchen, dining, bedroom, bathroom, hallway, closet, pantry,
 mudroom, office, loft, garage, shop, … · `<wall>`: north|south|east|west.
@@ -199,9 +201,8 @@ tests/             # 17 tests, no API key required
 
 ## Roadmap
 
-- Stairs and true multi-story (loft `level`s exist; vertical circulation is next)
-- Auto-layout: solve room placement from an adjacency brief (relative placement
-  is the first step)
+- Auto-layout: solve room placement from an adjacency brief (relative and pocket
+  placement are the first steps)
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

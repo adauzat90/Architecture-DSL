@@ -221,6 +221,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_room_programs(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
+    _validate_stairs(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
@@ -582,6 +583,50 @@ def _validate_openings(plan: Barndominium, add) -> None:
             )
 
 
+def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
+    """Rooms on ``level`` whose footprint the stair lands in."""
+    return [
+        r
+        for r in plan.rooms
+        if r.level == level and stair.overlaps_rect(r.x, r.y, r.x2, r.y2)
+    ]
+
+
+def _validate_stairs(plan: Barndominium, add) -> None:
+    for s in plan.stairs:
+        if not all(math.isfinite(v) for v in (s.x, s.y, s.width, s.length)):
+            add(Issue(Severity.ERROR, "STAIR_GEOMETRY",
+                      f"Stair '{s.id}' has non-finite coordinates or size.", room=s.id))
+            continue
+        if s.width <= 0 or s.length <= 0:
+            add(Issue(Severity.ERROR, "STAIR_SIZE",
+                      f"Stair '{s.id}' has non-positive size.", room=s.id,
+                      hint="Use positive feet, e.g. `size 4 x 10`."))
+        if s.from_level == s.to_level or s.from_level < 0 or s.to_level < 0:
+            add(Issue(Severity.ERROR, "STAIR_LEVELS",
+                      f"Stair '{s.id}' must connect two different levels >= 0.",
+                      room=s.id, hint="e.g. `from 0 to 1`."))
+        over_x = max(0.0, s.x2 - plan.envelope_width)
+        over_y = max(0.0, s.y2 - plan.envelope_length)
+        if s.x < -1e-6 or s.y < -1e-6 or over_x > 1e-6 or over_y > 1e-6:
+            add(Issue(Severity.ERROR, "STAIR_OOB",
+                      f"Stair '{s.id}' extends outside the "
+                      f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
+                      room=s.id, hint="Keep its footprint inside the envelope."))
+        lower = _stair_rooms(plan, s, s.from_level)
+        upper = _stair_rooms(plan, s, s.to_level)
+        if not lower or not upper:
+            missing = []
+            if not lower:
+                missing.append(f"level {s.from_level}")
+            if not upper:
+                missing.append(f"level {s.to_level}")
+            add(Issue(Severity.WARNING, "STAIR_FLOAT",
+                      f"Stair '{s.id}' doesn't land in a room on {', '.join(missing)}.",
+                      room=s.id,
+                      hint="Position it so its footprint overlaps a room on each level."))
+
+
 def _validate_access(plan: Barndominium, add) -> None:
     """Every interior room must be reachable from an exterior door."""
     interior_rooms = {r.id for r in plan.rooms if r.type is not RoomType.PORCH}
@@ -593,6 +638,15 @@ def _validate_access(plan: Barndominium, add) -> None:
         if d.room_a in adjacency and d.room_b in adjacency:
             adjacency[d.room_a].add(d.room_b)
             adjacency[d.room_b].add(d.room_a)
+    # Stairs link the rooms they land in across levels — that's how an upper
+    # floor becomes reachable from the ground.
+    for s in plan.stairs:
+        lower = [r.id for r in _stair_rooms(plan, s, s.from_level) if r.id in adjacency]
+        upper = [r.id for r in _stair_rooms(plan, s, s.to_level) if r.id in adjacency]
+        for a in lower:
+            for b in upper:
+                adjacency[a].add(b)
+                adjacency[b].add(a)
 
     entries = {d.room for d in plan.exterior_doors if d.room in interior_rooms}
     if not entries:

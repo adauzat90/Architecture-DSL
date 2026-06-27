@@ -63,6 +63,7 @@ door <id_a> - <id_b> [width <w>]                  # interior; rooms MUST share a
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door
 window <id> <wall> [width <w>] [offset <o>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
+stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
 ```
 
 - `<type>`: `living, kitchen, dining, bedroom, bathroom, half_bath, laundry,
@@ -177,10 +178,23 @@ door living - loft width 3                          # cross-level door = a stair
 ```
 
 Rooms on **different levels don't overlap** (the loft is above, not beside, the
-room below) and don't share walls. A `door` between levels is read as a stair and
-is valid when the two rooms **stack** (their footprints overlap). Vertical
-circulation isn't modelled further yet, so an unreachable loft is a `warning`,
-not an error.
+room below) and don't share walls.
+
+Connect floors with a **`stair`**:
+
+```barn
+room living: living at 0,0 size 40 x 30
+room loft:   loft   at 0,0 size 28 x 20 level 1     # sits above the living room
+stair s at 24,2 size 4 x 12 from 0 to 1             # run on level 0, landing on level 1
+```
+
+A stair links the rooms its footprint overlaps on each level, so the upper floor
+becomes reachable from an `entry` below. Place it over a room on **both** levels
+(otherwise `STAIR_FLOAT` warns it connects nothing); a stair whose `from`/`to`
+levels are equal or whose footprint leaves the envelope is an error. An upper room
+with no stair (or cross-level `door`) reaching it is flagged `NO_ACCESS` (a
+`warning` for a loft, since it might be an open mezzanine). `barndsl build` draws
+each level as its own labelled floor plan, with the stair marked ↑/↓.
 
 `<n>` must be a **whole number ≥ 0** (`0` = ground, `1` = the floor above);
 non-integer or negative levels are rejected (`BAD_LEVEL`). A loft's exterior

@@ -87,7 +87,24 @@ class _Renderer:
         self.width = (
             config.margin_left + self.content_w + config.gutter + config.panel_width + 20
         )
-        self.height = config.margin_top + self.content_h + config.margin_bottom
+
+        # Multi-story: draw one floor-plan block per level, stacked vertically.
+        self.levels = plan.levels()
+        self.multi = len(self.levels) > 1
+        self.label_gap = 28.0  # space above each level's envelope for its label
+        self.block_stride = self.label_gap + self.content_h + 34.0
+        self._block_top = config.margin_top  # set per level when rendering
+        if self.multi:
+            n = len(self.levels)
+            self.height = (
+                config.margin_top + self.label_gap + self.content_h
+                + (n - 1) * self.block_stride + config.margin_bottom
+            )
+        else:
+            self.height = config.margin_top + self.content_h + config.margin_bottom
+
+    def _env_top(self, i: int) -> float:
+        return self.c.margin_top + self.label_gap + i * self.block_stride
 
     # -- coordinate transform ---------------------------------------------
 
@@ -95,8 +112,8 @@ class _Renderer:
         return self.c.margin_left + (x - self.min_x) * self.c.scale
 
     def sy(self, y: float) -> float:
-        # Flip: world +y (north) maps to screen up.
-        return self.c.margin_top + (self.max_y - y) * self.c.scale
+        # Flip: world +y (north) maps to screen up. _block_top selects the level.
+        return self._block_top + (self.max_y - y) * self.c.scale
 
     # -- primitives --------------------------------------------------------
 
@@ -137,16 +154,37 @@ class _Renderer:
         self.parts.append(f'<rect width="{self.width:.0f}" height="{self.height:.0f}" fill="#ffffff" />')
 
         self._draw_title()
-        self._draw_porches()
-        self._draw_envelope()
-        self._draw_rooms()
-        self._draw_windows()
-        self._draw_doors()
-        self._draw_dimensions()
-        self._draw_panel()
+        if self.multi:
+            for i, lvl in enumerate(self.levels):
+                self._block_top = self._env_top(i)
+                self._draw_level_block(lvl)
+            self._draw_panel(multi=True)
+        else:
+            self._draw_porches()
+            self._draw_envelope()
+            self._draw_rooms()
+            self._draw_windows()
+            self._draw_doors()
+            self._draw_dimensions()
+            self._draw_panel()
 
         self.parts.append("</svg>")
         return "\n".join(self.parts)
+
+    def _draw_level_block(self, lvl: int) -> None:
+        label = f"LEVEL {lvl}" + (" — GROUND" if lvl == 0 else "")
+        label += f"   ({self.plan.envelope_width:.0f}′ × {self.plan.envelope_length:.0f}′)"
+        self._text(
+            self.c.margin_left, self._block_top - 12, label,
+            size=13, anchor="start", weight="bold", fill="#333333",
+        )
+        if lvl == 0:
+            self._draw_porches()
+        self._draw_envelope()
+        self._draw_rooms(level=lvl)
+        self._draw_windows(level=lvl)
+        self._draw_doors(level=lvl)
+        self._draw_stairs(lvl)
 
     def _draw_title(self):
         self._text(self.c.margin_left, 34, self.plan.name, size=22, anchor="start", weight="bold")
@@ -180,8 +218,10 @@ class _Renderer:
             label = p.display_name + (" (covered)" if p.covered else "")
             self._text(cx, cy, label, size=10, fill="#5a7a3c")
 
-    def _draw_rooms(self):
+    def _draw_rooms(self, level: int | None = None):
         for r in self.plan.rooms:
+            if level is not None and r.level != level:
+                continue
             x = self.sx(r.x)
             y = self.sy(r.y2)
             w = r.width * self.c.scale
@@ -192,10 +232,12 @@ class _Renderer:
             self._text(cx, cy - 4, r.display_name, size=12, weight="bold")
             self._text(cx, cy + 11, f"{r.area:.0f} sq ft", size=10, fill="#555555")
 
-    def _draw_windows(self):
+    def _draw_windows(self, level: int | None = None):
         for win in self.plan.windows:
             room = self.plan.room(win.room)
             if not room:
+                continue
+            if level is not None and room.level != level:
                 continue
             x1, y1, x2, y2 = opening_endpoints(room, win.wall, win.offset, win.width)
             sx1, sy1, sx2, sy2 = self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2)
@@ -207,11 +249,13 @@ class _Renderer:
                 self._line(sx1 - 2, sy1, sx2 - 2, sy2, WINDOW_COLOR, 1.4)
                 self._line(sx1 + 2, sy1, sx2 + 2, sy2, WINDOW_COLOR, 1.4)
 
-    def _draw_doors(self):
+    def _draw_doors(self, level: int | None = None):
         for door in self.plan.interior_doors:
             a, b = self.plan.room(door.room_a), self.plan.room(door.room_b)
             if not (a and b):
                 continue
+            if level is not None and not (a.level == b.level == level):
+                continue  # cross-level doors are shown via the stair, not here
             edge = shared_edge(a, b)
             if edge is None:
                 continue
@@ -225,6 +269,8 @@ class _Renderer:
         for door in self.plan.exterior_doors:
             room = self.plan.room(door.room)
             if not room:
+                continue
+            if level is not None and room.level != level:
                 continue
             x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
             if door.wall in (Direction.NORTH, Direction.SOUTH):
@@ -255,6 +301,31 @@ class _Renderer:
         r = w * self.c.scale
         self._path(f"M {tx:.1f} {ty:.1f} A {r:.1f} {r:.1f} 0 0 1 {lx:.1f} {ly:.1f}", "#999999", 0.8)
 
+    def _draw_stairs(self, level: int):
+        for s in self.plan.stairs:
+            if level not in (s.from_level, s.to_level):
+                continue
+            is_run = level == s.from_level
+            x = self.sx(s.x)
+            y = self.sy(s.y2)
+            w = s.width * self.c.scale
+            h = s.length * self.c.scale
+            self._rect(
+                x, y, w, h,
+                fill="#E9E2D0" if is_run else "#F4F0E6", stroke=WALL, sw=1.2,
+                dash=None if is_run else "4 3",
+            )
+            cx = self.sx(s.x + s.width / 2)
+            cy = self.sy(s.y + s.length / 2)
+            if is_run:
+                # Tread lines across the run, plus an "UP" marker.
+                for k in range(1, 6):
+                    ty = y + h * k / 6
+                    self._line(x, ty, x + w, ty, "#b9ab86", 0.8)
+                self._text(cx, cy, f"{s.display_name} ↑{s.to_level}", size=9, fill="#6b5d3a")
+            else:
+                self._text(cx, cy, f"{s.display_name} ↓{s.from_level}", size=9, fill="#8a7f63")
+
     def _draw_dimensions(self):
         scale = self.c.scale
         # Overall width dimension below the plan.
@@ -284,13 +355,18 @@ class _Renderer:
                 f'transform="rotate(-90 {x1 - 6:.1f} {(y1 + y2) / 2:.1f})">{escape(label)}</text>'
             )
 
-    def _draw_panel(self):
+    def _draw_panel(self, multi: bool = False):
         px = self.c.margin_left + self.content_w + self.c.gutter
-        py = self.c.margin_top
+        if multi:
+            py = self.c.margin_top + self.label_gap
+            ph = (len(self.levels) - 1) * self.block_stride + self.content_h
+        else:
+            py = self.c.margin_top
+            ph = self.content_h
         pw = self.c.panel_width
         m = self.plan.metrics()
 
-        self._rect(px, py, pw, self.content_h, fill="#FAFAFA", stroke="#DDDDDD", sw=1.0, rx=6)
+        self._rect(px, py, pw, ph, fill="#FAFAFA", stroke="#DDDDDD", sw=1.0, rx=6)
         cx = px + 14
         y = py + 26
         self._text(cx, y, "PROJECT SUMMARY", size=12, anchor="start", weight="bold")
@@ -300,6 +376,11 @@ class _Renderer:
             ("Footprint", f"{m['footprint_sqft']:.0f} sq ft"),
             ("Interior (cond.)", f"{m['interior_sqft']:.0f} sq ft"),
             ("Habitable", f"{m['habitable_sqft']:.0f} sq ft"),
+        ]
+        if multi:
+            for lvl, area in self.plan.area_by_level().items():
+                rows.append((f"  Level {lvl} area", f"{area:.0f} sq ft"))
+        rows += [
             ("Bedrooms", f"{int(m['bedroom_count'])}"),
             ("Bathrooms", f"{m['bathroom_count']:.1f}"),
             ("Ceiling", f'{self.plan.ceiling_height:.1f}′'),

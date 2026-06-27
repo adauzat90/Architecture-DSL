@@ -68,4 +68,12 @@ def emit_dsl(plan: Barndominium) -> str:
                 f"size {_n(p.width)} x {_n(p.length)} {tag}"
             )
 
+    if plan.stairs:
+        out.append("")
+        for s in plan.stairs:
+            out.append(
+                f"stair {s.id} at {_n(s.x)},{_n(s.y)} "
+                f"size {_n(s.width)} x {_n(s.length)} from {s.from_level} to {s.to_level}"
+            )
+
     return "\n".join(out) + "\n"

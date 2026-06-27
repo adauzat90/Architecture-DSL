@@ -18,9 +18,10 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
     window <id> <wall> [width <w>] [offset <o>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
+    stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 
-``<placement>`` is ``at <x>,<y>`` (absolute) or ``east-of|west-of|north-of|
-south-of <room>`` (abut an already-defined room).
+``<placement>`` is ``at <x>,<y>`` (absolute), ``east-of|west-of|north-of|
+south-of <room>`` (abut an already-defined room), or one of each to pin a corner.
 
 Coordinates are in feet; origin (0,0) is the south-west corner, x→east, y→north.
 ``<type>`` is a RoomType value (living, kitchen, bedroom, bathroom, hallway,
@@ -37,7 +38,8 @@ from .validation import Issue, Severity, ValidationReport, validate
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
-    "plan", "envelope", "ceiling", "note", "room", "door", "entry", "window", "porch"
+    "plan", "envelope", "ceiling", "note", "room", "door", "entry", "window",
+    "porch", "stair"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -61,6 +63,9 @@ Statements:
   entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
   window <id> <wall> [width <w>] [offset <o>]              # window, on an exterior wall
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
+  stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
+        # vertical circulation; defaults from 0 to 1. Place its footprint over a
+        # room on each level so it links them (and makes the upper floor reachable).
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -555,6 +560,33 @@ def _parse_statement(
                 )
         c.expect_end()
         plan.add_porch(pid, x=x, y=y, width=w, length=length, covered=covered)
+    elif key == "stair":
+        sid_tok = c.ident("a stair id")
+        c.keyword("at")
+        x = c.number("x")
+        y = c.number("y")
+        c.keyword("size")
+        w = c.number("width")
+        c.keyword("x")
+        length = c.number("length")
+        lo, hi = 0, 1
+        while c.peek() is not None and c.peek().text.lower() in ("from", "to"):
+            opt = c.take("an option").text.lower()
+            if opt == "from":
+                lo = c.level_value()
+            else:
+                hi = c.level_value()
+        c.expect_end()
+        try:
+            plan.add_stair(
+                sid_tok.text, x=x, y=y, width=w, length=length,
+                from_level=lo, to_level=hi,
+            )
+        except ValueError as exc:
+            raise _ParseError(
+                "BAD_LEVEL", str(exc), sid_tok.col, end_col=sid_tok.end_col,
+                hint="A stair connects two different levels, e.g. `from 0 to 1`.",
+            )
     else:
         raise _ParseError(
             "UNKNOWN_STMT",

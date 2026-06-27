@@ -240,6 +240,46 @@ class Porch:
 
 
 @dataclass
+class Stair:
+    """Vertical circulation connecting two floor levels.
+
+    Occupies a footprint on ``from_level`` (the run) with a matching opening on
+    ``to_level`` (the landing). It links the rooms it overlaps on each level, so
+    upper-level rooms become reachable from the floor below.
+    """
+
+    id: str
+    x: float
+    y: float
+    width: float
+    length: float
+    from_level: int = 0
+    to_level: int = 1
+    label: str | None = None
+
+    @property
+    def x2(self) -> float:
+        return self.x + self.width
+
+    @property
+    def y2(self) -> float:
+        return self.y + self.length
+
+    @property
+    def area(self) -> float:
+        return self.width * self.length
+
+    @property
+    def display_name(self) -> str:
+        return self.label or self.id.replace("_", " ").title()
+
+    def overlaps_rect(self, x: float, y: float, x2: float, y2: float, tol: float = 1e-6) -> bool:
+        dx = min(self.x2, x2) - max(self.x, x)
+        dy = min(self.y2, y2) - max(self.y, y)
+        return dx > tol and dy > tol
+
+
+@dataclass
 class Barndominium:
     """A complete barndominium floor plan.
 
@@ -256,6 +296,7 @@ class Barndominium:
     exterior_doors: list[ExteriorDoor] = field(default_factory=list)
     windows: list[Window] = field(default_factory=list)
     porches: list[Porch] = field(default_factory=list)
+    stairs: list[Stair] = field(default_factory=list)
     notes: str = ""
 
     # -- fluent builder API ------------------------------------------------
@@ -445,6 +486,34 @@ class Barndominium:
         )
         return self
 
+    def add_stair(
+        self,
+        stair_id: str,
+        *,
+        x: float,
+        y: float,
+        width: float,
+        length: float,
+        from_level: int = 0,
+        to_level: int = 1,
+        label: str | None = None,
+    ) -> "Barndominium":
+        """Add a staircase connecting ``from_level`` to ``to_level``."""
+        x = _finite(stair_id, "x", x)
+        y = _finite(stair_id, "y", y)
+        width = _finite(stair_id, "width", width)
+        length = _finite(stair_id, "length", length)
+        lo, hi = int(from_level), int(to_level)
+        if lo < 0 or hi < 0:
+            raise ValueError(f"Stair '{stair_id}': levels must be >= 0.")
+        if lo == hi:
+            raise ValueError(
+                f"Stair '{stair_id}': from_level and to_level must differ "
+                f"(got {lo})."
+            )
+        self.stairs.append(Stair(stair_id, x, y, width, length, lo, hi, label))
+        return self
+
     def connect(
         self, room_a: str, room_b: str, *, width: float = inches(32)
     ) -> "Barndominium":
@@ -514,6 +583,21 @@ class Barndominium:
     @property
     def assigned_area(self) -> float:
         return sum(r.area for r in self.rooms)
+
+    def levels(self) -> list[int]:
+        """All floor levels present, ascending (always includes ground = 0)."""
+        seen = {0}
+        seen.update(r.level for r in self.rooms)
+        for s in self.stairs:
+            seen.update((s.from_level, s.to_level))
+        return sorted(seen)
+
+    def area_by_level(self) -> dict[int, float]:
+        """Assigned room floor area per level."""
+        areas: dict[int, float] = {lvl: 0.0 for lvl in self.levels()}
+        for r in self.rooms:
+            areas[r.level] = areas.get(r.level, 0.0) + r.area
+        return areas
 
     def windows_for(self, room_id: str) -> list[Window]:
         return [w for w in self.windows if w.room == room_id]
