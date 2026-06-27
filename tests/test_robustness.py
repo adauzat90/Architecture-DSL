@@ -515,6 +515,54 @@ def test_out_of_bounds_hint_is_placement_aware():
     assert "align/offset" in oob.hint and "east_of a" in oob.hint
 
 
+def test_pocket_placement_two_cross_axis_anchors():
+    # x from the horizontal anchor, y from the vertical anchor -> corner pocket.
+    src = (
+        'plan "Pocket"\nenvelope 40 x 40\nceiling 10\n'
+        "room living: living at 0,0 size 20 x 20\n"
+        "room hall: hallway at 0,20 size 40 x 4\n"
+        "room closet: closet east-of living north-of hall size 8 x 16\n"
+    )
+    c = compile_source(src).plan.room("closet")
+    assert (c.x, c.y) == (20.0, 24.0)  # living.x2, hall.y2
+    assert c.placement == "east_of living + north_of hall"
+
+
+def test_pocket_placement_in_builder():
+    p = (
+        barndominium("B")
+        .envelope(40, 40)
+        .add_room("living", T.LIVING, x=0, y=0, width=20, length=20)
+        .add_room("hall", T.HALLWAY, x=0, y=20, width=40, length=4)
+        .add_room("closet", T.CLOSET, east_of="living", north_of="hall", width=8, length=16)
+    )
+    assert (p.room("closet").x, p.room("closet").y) == (20.0, 24.0)
+
+
+def test_two_same_axis_anchors_is_an_error():
+    src = (
+        "envelope 40 x 40\n"
+        "room a: living at 0,0 size 10 x 10\n"
+        "room b: office east-of a west-of a size 5 x 5\n"
+    )
+    assert any(d.code == "PLACE_REF" for d in compile_source(src).errors)
+    with pytest.raises(ValueError, match="east-of/west-of"):
+        barndominium("B").envelope(20, 20).add_room(
+            "a", T.LIVING, x=0, y=0, width=5, length=5
+        ).add_room("b", T.OFFICE, east_of="a", west_of="a", width=3, length=3)
+
+
+def test_align_offset_with_two_anchors_is_rejected():
+    with pytest.raises(ValueError, match="single anchor"):
+        (
+            barndominium("B")
+            .envelope(40, 40)
+            .add_room("a", T.LIVING, x=0, y=0, width=10, length=10)
+            .add_room("h", T.HALLWAY, x=0, y=10, width=40, length=4)
+            .add_room("b", T.OFFICE, east_of="a", north_of="h", align="far", width=5, length=5)
+        )
+
+
 def test_emit_dsl_resolves_align_offset_to_absolute():
     # align/offset are build-time sugar; the emitted source must be absolute and
     # carry no relative tokens (guards the round-trip).

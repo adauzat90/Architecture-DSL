@@ -70,6 +70,9 @@ Statements:
         # By default the new room aligns to the reference's near corner; `align
         # far|center` slides it along the shared wall, and `offset <n>` shifts it
         # further (+north for east/west anchors, +east for north/south anchors).
+  <h-dir>-of <room> <v-dir>-of <room>     # pocket placement: one horizontal anchor
+        # (east/west) sets x, one vertical anchor (north/south) sets y, pinning the
+        # room into a corner between two rooms. align/offset don't apply here.
 <level> defaults to 0 (ground). A loft on level 1 may sit above a ground room
         without overlapping it.
 <type> is one of: %s
@@ -349,28 +352,49 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
         x = c.number("x")
         y = c.number("y")
         return {"x": x, "y": y}, None
-    dir_tok = c.take("a placement ('at <x>,<y>' or e.g. 'east-of <room>')")
-    rel = _PLACEMENT.get(dir_tok.text.lower())
-    if rel is None:
+
+    # One or two relative anchors. Two must be on different axes (one of
+    # east/west, one of north/south) — that pins a room into a corner/pocket.
+    kwargs: dict = {}
+    first_ref: _Token | None = None
+    while c.peek() is not None and c.peek().text.lower() in _PLACEMENT:
+        dir_tok = c.take("a placement")
+        rel = _PLACEMENT[dir_tok.text.lower()]
+        nxt = c.peek()
+        reserved = ("size", "align", "offset")
+        if nxt is None or nxt.text.lower() in reserved or nxt.text.lower() in _PLACEMENT:
+            raise _ParseError(
+                "BAD_PLACEMENT",
+                f"Expected a reference room id after '{dir_tok.text}'.",
+                dir_tok.col,
+                end_col=dir_tok.end_col,
+                hint=f"Name the room to abut, e.g. `{dir_tok.text} living`.",
+            )
+        ref_tok = c.ident("a reference room id")
+        if rel in kwargs:
+            raise _ParseError(
+                "BAD_PLACEMENT",
+                f"Repeated '{dir_tok.text}' placement.",
+                dir_tok.col,
+                end_col=dir_tok.end_col,
+                hint="Use at most one east/west and one north/south anchor.",
+            )
+        kwargs[rel] = ref_tok.text
+        if first_ref is None:
+            first_ref = ref_tok
+
+    if not kwargs:
+        t = c.peek()
+        col = t.col if t else c.eol_col
+        end = t.end_col if t else c.eol_col + 1
         raise _ParseError(
             "BAD_PLACEMENT",
-            f"Unknown placement '{dir_tok.text}'.",
-            dir_tok.col,
-            end_col=dir_tok.end_col,
-            hint="Use 'at <x>,<y>' or one of: east-of, west-of, north-of, "
-            "south-of (aliases: right-of, left-of, above, below).",
+            "Expected a placement: 'at <x>,<y>' or a relative anchor.",
+            col,
+            end_col=end,
+            hint="e.g. `at 0,0`, `east-of living`, or `east-of a north-of b`.",
         )
-    nxt = c.peek()
-    if nxt is None or nxt.text.lower() == "size":
-        raise _ParseError(
-            "BAD_PLACEMENT",
-            f"Expected a reference room id after '{dir_tok.text}'.",
-            dir_tok.col,
-            end_col=dir_tok.end_col,
-            hint=f"Name the room to abut, e.g. `{dir_tok.text} living`.",
-        )
-    ref_tok = c.ident("a reference room id")
-    kwargs: dict = {rel: ref_tok.text}
+
     # Optional slide along the shared wall: `align near|far|center` and `offset <n>`.
     while c.peek() is not None and c.peek().text.lower() in ("align", "offset"):
         opt = c.take("an option").text.lower()
@@ -387,7 +411,7 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
             kwargs["align"] = a.text.lower()
         else:
             kwargs["offset"] = c.number("offset")
-    return kwargs, ref_tok
+    return kwargs, first_ref
 
 
 def _parse_statement(

@@ -327,19 +327,17 @@ class Barndominium:
             room_id, x, y, width, length, east_of, west_of, north_of, south_of,
             align, offset,
         )
-        placement = next(
-            (
-                f"{k} {v}"
-                for k, v in (
-                    ("east_of", east_of),
-                    ("west_of", west_of),
-                    ("north_of", north_of),
-                    ("south_of", south_of),
-                )
-                if v is not None
-            ),
-            None,
-        )
+        used = [
+            f"{k} {v}"
+            for k, v in (
+                ("east_of", east_of),
+                ("west_of", west_of),
+                ("north_of", north_of),
+                ("south_of", south_of),
+            )
+            if v is not None
+        ]
+        placement = " + ".join(used) if used else None
         self.rooms.append(
             Room(room_id, type, x, y, width, length, label, level, placement)
         )
@@ -368,14 +366,9 @@ class Barndominium:
         align: str = "near",
         offset: float = 0.0,
     ) -> tuple[float, float]:
-        anchors = [
-            ("east_of", east_of),
-            ("west_of", west_of),
-            ("north_of", north_of),
-            ("south_of", south_of),
-        ]
-        given = [(k, v) for k, v in anchors if v is not None]
-        if not given:
+        h_used = [(k, v) for k, v in (("east_of", east_of), ("west_of", west_of)) if v is not None]
+        v_used = [(k, v) for k, v in (("north_of", north_of), ("south_of", south_of)) if v is not None]
+        if not (h_used or v_used):
             if align != "near" or offset:
                 raise ValueError(
                     f"Room '{rid}': align/offset only apply with a relative anchor."
@@ -386,34 +379,54 @@ class Barndominium:
                     "anchor like east_of=."
                 )
             return float(x), float(y)
-        if len(given) > 1:
-            raise ValueError(
-                f"Room '{rid}': use at most one relative anchor, got {[k for k, _ in given]}."
-            )
+        if len(h_used) > 1:
+            raise ValueError(f"Room '{rid}': use at most one east-of/west-of anchor.")
+        if len(v_used) > 1:
+            raise ValueError(f"Room '{rid}': use at most one north-of/south-of anchor.")
         if x is not None or y is not None:
             raise ValueError(
-                f"Room '{rid}': give either an absolute position or a relative "
-                "anchor, not both."
+                f"Room '{rid}': give either an absolute position or relative "
+                "anchors, not both."
+            )
+        # With one anchor per axis the position is fully pinned, so the
+        # slide-along-the-wall options have nowhere to apply.
+        if h_used and v_used and (align != "near" or offset):
+            raise ValueError(
+                f"Room '{rid}': align/offset apply to a single anchor; with both a "
+                "horizontal and a vertical anchor the position is already fixed."
             )
         if align not in ("near", "far", "center"):
             raise ValueError(
                 f"Room '{rid}': align must be near, far, or center; got {align!r}."
             )
-        kind, ref_id = given[0]
-        if ref_id == rid:
-            raise ValueError(f"Room '{rid}' can't be placed relative to itself.")
-        ref = self.room(ref_id)
-        if ref is None:
-            raise ValueError(
-                f"Cannot place '{rid}' {kind} unknown room '{ref_id}' — "
-                "define the reference room first."
-            )
-        if kind in ("east_of", "west_of"):
-            nx = ref.x2 if kind == "east_of" else ref.x - width
-            ny = self._align_along(ref.y, ref.length, length, align) + offset
-            return nx, ny
-        ny = ref.y2 if kind == "north_of" else ref.y - length
-        nx = self._align_along(ref.x, ref.width, width, align) + offset
+
+        def _ref(kind: str, ref_id: str) -> "Room":
+            if ref_id == rid:
+                raise ValueError(f"Room '{rid}' can't be placed relative to itself.")
+            r = self.room(ref_id)
+            if r is None:
+                raise ValueError(
+                    f"Cannot place '{rid}' {kind} unknown room '{ref_id}' — "
+                    "define the reference room first."
+                )
+            return r
+
+        nx = ny = None
+        href = vref = None
+        if h_used:
+            kind, ref_id = h_used[0]
+            href = _ref(kind, ref_id)
+            nx = href.x2 if kind == "east_of" else href.x - width
+        if v_used:
+            kind, ref_id = v_used[0]
+            vref = _ref(kind, ref_id)
+            ny = vref.y2 if kind == "north_of" else vref.y - length
+        # Fill the unconstrained axis (single-anchor case) via align/offset
+        # along the anchor's shared wall — preserves prior single-anchor behaviour.
+        if nx is None:
+            nx = self._align_along(vref.x, vref.width, width, align) + offset
+        if ny is None:
+            ny = self._align_along(href.y, href.length, length, align) + offset
         return nx, ny
 
     def add_porch(

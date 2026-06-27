@@ -148,12 +148,23 @@ breaking the adjacency a `door` needs) surfaces later as `OUT_OF_BOUNDS` or
 `DOOR_NOADJ`. align/offset are resolved when the room is created, so `emit_dsl`
 writes plain `at x,y` — they don't survive a round-trip as relations.
 
-Relative placement fixes *adjacency*, not *bin-packing* — it won't tile the
-footprint for you, and it can only abut **one** reference (no two-reference
-"pocket" placement yet), so an interior room touching two neighbours may still
-need an `at`. Use `barndsl compile FILE --show-coords` to print every room's
-resolved rectangle and which walls ended up exterior — the fastest way to see
-what a chain of anchors actually produced.
+**Pocket placement (two anchors).** Combine **one** horizontal anchor
+(`east-of`/`west-of`) and **one** vertical anchor (`north-of`/`south-of`) to pin
+a room into a corner between two rooms — the horizontal anchor sets `x`, the
+vertical sets `y`:
+
+```barn
+room living: living  at 0,0          size 20 x 20
+room hall:   hallway at 0,20          size 40 x 4
+room closet: closet  east-of living north-of hall size 8 x 16   # x=20, y=24
+```
+
+With two anchors the position is fully determined, so `align`/`offset` don't
+apply (and two anchors on the *same* axis are an error). Relative placement fixes
+*adjacency*, not *bin-packing* — it still won't tile the footprint for you. Use
+`barndsl compile FILE --show-coords` to print every room's resolved rectangle and
+which walls ended up exterior — the fastest way to see what a chain of anchors
+actually produced.
 
 ## Levels and lofts
 
