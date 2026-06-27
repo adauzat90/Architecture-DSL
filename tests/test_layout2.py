@@ -10,6 +10,7 @@ from barndsl.layout import LayoutBrief, RoomSpec, solve_layout
 from barndsl.layout2 import (
     LayoutBrief2,
     RoomSpec2,
+    _proportion_penalty,
     _score,
     parse_brief2,
     solve_layout2,
@@ -128,6 +129,67 @@ def test_bedrooms_get_egress_windows():
     plan = solve_layout2(_brief()).plan
     for bed in ("bed1", "bed2"):
         assert plan.windows_for(bed)
+
+
+# --- room proportions -------------------------------------------------------
+
+
+def _aspect(r):
+    return max(r.width, r.length) / min(r.width, r.length)
+
+
+def test_bedrooms_are_reasonably_square():
+    # Bedrooms should not come out long and thin (the band depth is sized to keep
+    # them square). 1.8 is generous; in practice they land near 1.1–1.4.
+    plan = solve_layout2(_brief()).plan
+    for r in plan.rooms:
+        if r.type is RoomType.BEDROOM:
+            assert _aspect(r) <= 1.8, f"{r.id} is {_aspect(r):.2f}:1 — too elongated"
+
+
+def test_a_big_shop_does_not_stretch_the_bedrooms():
+    # A large garage/shop must not share the bedroom band (its bulk would force a
+    # deep band and stretch the bedrooms long and thin); it gets its own band, and
+    # no habitable room is buried.
+    brief = LayoutBrief2(
+        name="ShopHouse",
+        rooms=[
+            RoomSpec2("great", "living", area=380),
+            RoomSpec2("kitchen", "kitchen", area=240),
+            RoomSpec2("hall", "hallway", area=130, min_dim=4),
+            RoomSpec2("bed1", "bedroom", area=200),
+            RoomSpec2("bed2", "bedroom", area=160),
+            RoomSpec2("bed3", "bedroom", area=150),
+            RoomSpec2("bath", "bathroom", area=90),
+            RoomSpec2("mud", "mudroom", area=100),
+            RoomSpec2("shop", "shop", width=30, length=40),
+        ],
+        adjacencies=[
+            ("great", "kitchen"), ("great", "hall"),
+            ("hall", "bed1"), ("hall", "bed2"), ("hall", "bed3"), ("hall", "bath"),
+            ("great", "mud"), ("mud", "shop"),
+        ],
+    )
+    out = solve_layout2(brief)
+    result = compile_source(emit_dsl(out.plan), name=out.plan.name)
+    assert not result.errors, result.report()  # no buried bedrooms
+    for r in out.plan.rooms:
+        if r.type is RoomType.BEDROOM:
+            assert _aspect(r) <= 1.8, f"{r.id} is {_aspect(r):.2f}:1"
+
+
+def test_proportion_penalty_prefers_square_rooms():
+    from barndsl.elements import Barndominium, Room, RoomType as T
+
+    def plan_with(w, l):
+        p = Barndominium("p", 40, 40, 9)
+        p.rooms.append(Room("bed", T.BEDROOM, 0, 0, w, l))
+        return p
+
+    square = _proportion_penalty(plan_with(12, 12))
+    thin = _proportion_penalty(plan_with(6, 24))
+    assert square == 0.0  # 1:1 is below the threshold — no penalty
+    assert thin > square  # a 4:1 bedroom is penalised
 
 
 # --- beats v1 ---------------------------------------------------------------

@@ -55,6 +55,9 @@ from .layout import (
 _PUBLIC = (RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING)
 #: Circulation; may be interior (no daylight needed) and sits between the bands.
 _CIRCULATION = (RoomType.HALLWAY,)
+#: Large non-habitable spaces that get their own band, so their bulk doesn't set
+#: the depth of the bedroom row.
+_LARGE_UTILITY = (RoomType.GARAGE, RoomType.SHOP)
 #: A sane default footprint proportion (slightly long, like a barndo) when we
 #: size the envelope ourselves.
 _DEFAULT_ASPECT = 1.5
@@ -237,12 +240,38 @@ def _prepare(brief: LayoutBrief2):
     return specs, adj
 
 
-def _score(result: LayoutResult) -> tuple:
-    """Rank a candidate layout: fewer errors, then unmet adjacencies, then waste.
+#: Habitable rooms more elongated than this (long side / short side) read as
+#: awkward; the scorer penalises the excess so squarer layouts win.
+_GOOD_ASPECT = 1.6
 
-    Lower is better. Errors dominate (a buried bedroom or unreachable room is
-    disqualifying), then how much of the requested program it honored, then how
-    tightly it fills the footprint, then a mild aspect-ratio preference.
+
+def _proportion_penalty(plan: Barndominium) -> float:
+    """How badly habitable rooms are elongated past :data:`_GOOD_ASPECT`.
+
+    Sums the aspect excess over every habitable room (bedrooms weighted double —
+    a long, thin bedroom is the most noticeable). Zero when every such room is
+    reasonably square; grows with each elongated room. Lower is better.
+    """
+    pen = 0.0
+    for r in plan.rooms:
+        if r.type not in HABITABLE_TYPES:
+            continue
+        side = min(r.width, r.length)
+        if side <= 0:
+            pen += 10.0
+            continue
+        excess = max(0.0, max(r.width, r.length) / side - _GOOD_ASPECT)
+        pen += (2.0 if r.type is RoomType.BEDROOM else 1.0) * excess
+    return pen
+
+
+def _score(result: LayoutResult) -> tuple:
+    """Rank a candidate layout. Lower is better.
+
+    In order of priority: fewer compiler **errors** (a buried bedroom or
+    unreachable room is disqualifying), fewer **unmet adjacencies** (how much of
+    the requested program it honored), less **wasted** footprint, squarer **room
+    proportions** (no long, thin bedrooms), then a mild envelope-aspect tiebreak.
     """
     from .compiler import compile_source
     from .emit import emit_dsl
@@ -253,7 +282,13 @@ def _score(result: LayoutResult) -> tuple:
     unused = 1.0 - sum(r.area for r in plan.rooms) / footprint
     w, h = plan.envelope_width, plan.envelope_length
     aspect = max(w, h) / min(w, h) if min(w, h) > 0 else 99.0
-    return (len(report.errors), len(result.unsatisfied), round(unused, 3), round(aspect, 2))
+    return (
+        len(report.errors),
+        len(result.unsatisfied),
+        round(unused, 3),
+        round(_proportion_penalty(plan), 2),
+        round(aspect, 2),
+    )
 
 
 def _solve_bands(
@@ -311,12 +346,14 @@ def _finalize(
 def _build_bands(
     specs: list[RoomSpec2], adj: dict[str, set[str]], notes: list[str]
 ) -> list[_Band]:
-    """Classify rooms and stack them south→north: public, hall, private.
+    """Classify rooms and stack them south→north: public, hall, private, utility.
 
     The hall sits between the public core and the private rooms so it abuts both;
     public and private bands reach the envelope's south/north edges, giving their
-    rooms an exterior wall. Rooms within a band are ordered so requested
-    adjacencies fall between neighbours (and thus share a vertical wall).
+    rooms an exterior wall. Large utility spaces (garage/shop) get their own band
+    so their bulk doesn't dictate the depth of the bedroom row (a 1,200 sq ft shop
+    sharing a band with bedrooms would stretch them long and thin). Rooms within a
+    band are ordered so requested adjacencies fall between neighbours.
     """
     public_ids = {s.id for s in specs if s.type in _PUBLIC}
     hall_ids = {s.id for s in specs if s.type in _CIRCULATION}
@@ -327,19 +364,28 @@ def _build_bands(
         # exterior wall. Bedrooms/baths always go to the private row off the hall.
         if s.type in _PUBLIC:
             return True
-        if s.type in (RoomType.BEDROOM,) + _CIRCULATION:
+        if s.type in (RoomType.BEDROOM,) + _CIRCULATION + _LARGE_UTILITY:
             return False
         return bool(adj[s.id] & public_ids) and not (adj[s.id] & hall_ids)
 
     public = [s for s in specs if is_public_band(s)]
     halls = [s for s in specs if s.type in _CIRCULATION]
+    utility = [s for s in specs if s.type in _LARGE_UTILITY]
     private = [
-        s for s in specs if s not in public and s.type not in _CIRCULATION
+        s
+        for s in specs
+        if s not in public and s.type not in _CIRCULATION and s.type not in _LARGE_UTILITY
     ]
 
+    # Habitable rooms only reach daylight in the two *end* bands, so public and
+    # private take the south/north edges and every interior-only band (hall, and
+    # the non-habitable utility band) stacks between them. Putting utility on an
+    # end instead would push the bedroom row inward and bury it.
     bands: list[_Band] = []
     if public:
         bands.append(_Band(_order_in_band(public, adj)))
+    if utility:  # garage/shop: interior band (no daylight needed), nearest the core
+        bands.append(_Band(_order_in_band(utility, adj), interior_ok=True))
     for h in halls:  # usually one; multiple halls each get a thin strip
         bands.append(_Band([h], interior_ok=True))
     if private:
@@ -400,10 +446,55 @@ def _choose_envelope(
             )
         return env_w, env_l
 
-    # Size to fit: aim for the requested footprint proportion, then satisfy mins.
-    env_w = max(math.sqrt(total_area * brief.aspect), min_w)
+    # Size to fit. The width sets every band's *depth* (area / width), and a
+    # band's rooms are as deep as the band — so choose the width that gives the
+    # bedroom/quality band a depth keeping its rooms reasonably square, rather
+    # than a blind area×aspect guess that can leave bedrooms long and thin. Fall
+    # back to the footprint-proportion heuristic when there's no such band.
+    quality = _quality_band(bands)
+    if quality is not None:
+        env_w = quality.area / _target_depth(quality)
+        # don't stray too far from a sane overall footprint
+        base = math.sqrt(total_area * brief.aspect)
+        env_w = min(max(env_w, 0.7 * base), 1.5 * base)
+    else:
+        env_w = math.sqrt(total_area * brief.aspect)
+    env_w = max(env_w, min_w)
     env_l = sum(_band_height(b, env_w) for b in bands)
     return env_w, env_l
+
+
+def _quality_band(bands: list[_Band]) -> _Band | None:
+    """The exterior band whose room proportions matter most — the bedroom row.
+
+    Picks the non-hall band with the most bedrooms (then the most habitable
+    rooms); its depth drives the envelope width so those rooms come out square.
+    """
+    cands = [
+        b
+        for b in bands
+        if not b.interior_ok and any(r.type in HABITABLE_TYPES for r in b.rooms)
+    ]
+    if not cands:
+        return None
+    return max(
+        cands,
+        key=lambda b: (
+            sum(1 for r in b.rooms if r.type is RoomType.BEDROOM),
+            sum(1 for r in b.rooms if r.type in HABITABLE_TYPES),
+        ),
+    )
+
+
+def _target_depth(band: _Band) -> float:
+    """A band depth that keeps its rooms square: the geometric mean of the extreme
+    room areas (which minimises the worst room's aspect), clamped to a realistic
+    residential range."""
+    areas = [r.area for r in band.rooms if r.type in HABITABLE_TYPES] or [
+        r.area for r in band.rooms
+    ]
+    depth = (min(areas) * max(areas)) ** 0.25
+    return min(max(depth, feet(9.5)), feet(15.0))
 
 
 def _band_height(band: _Band, env_w: float) -> float:
@@ -462,14 +553,38 @@ def _dimension(bands: list[_Band], env_w: float, env_l: float):
 
 
 def _share_widths(band: _Band, env_w: float) -> list[float]:
-    """Split ``env_w`` among a band's rooms: each gets its min + an area-share of slack."""
-    mins = [r.min_dim for r in band.rooms]
-    slack = env_w - sum(mins)
-    if slack <= 0:  # envelope too narrow for the mins — distribute proportionally
+    """Split ``env_w`` among a band's rooms, **proportional to area**, respecting mins.
+
+    A room's width should track its area (so, at the band's depth, it hits its
+    target size and a sensible aspect). We start from the pure area-proportional
+    width, floor each at its minimum dimension, then settle the small surplus or
+    deficit back onto the rooms that have slack — so widths sum to ``env_w`` and
+    no room dips below its minimum. (The old "min + area-share of slack" base made
+    bedrooms narrower than their area warranted, stretching them thin.)
+    """
+    rooms = band.rooms
+    mins = [r.min_dim for r in rooms]
+    if sum(mins) >= env_w:  # envelope too narrow for the mins — scale them down
         scale = env_w / (sum(mins) or 1.0)
         return [m * scale for m in mins]
     area_total = band.area or 1.0
-    return [m + slack * (r.area / area_total) for m, r in zip(mins, band.rooms)]
+    w = [max(env_w * r.area / area_total, m) for r, m in zip(rooms, mins)]
+    for _ in range(12):
+        diff = sum(w) - env_w
+        if abs(diff) < 1e-7:
+            break
+        if diff > 0:  # over budget — shrink rooms that sit above their minimum
+            slack = [wi - m for wi, m in zip(w, mins)]
+            total_slack = sum(slack)
+            if total_slack <= 1e-9:
+                break
+            w = [
+                max(wi - diff * (s / total_slack), m)
+                for wi, s, m in zip(w, slack, mins)
+            ]
+        else:  # under budget — grow rooms proportional to area
+            w = [wi + (-diff) * (r.area / area_total) for wi, r in zip(w, rooms)]
+    return w
 
 
 def _ensure_connected(plan: Barndominium, min_wall: float = inches(32)) -> int:
