@@ -1,0 +1,29 @@
+# A *fill*-engine brief: rooms by TARGET AREA (not fixed size) + adjacencies.
+# The fill engine dissects the envelope so every room tiles it with no wasted
+# space and habitable rooms land on the perimeter.
+#
+#   barndsl layout examples/oakline.brief --emit --out oakline.svg
+#
+# (The default engine is `fill`; `--engine greedy` runs the v1 abutment placer.)
+
+plan "Oakline 3-Bed"
+ceiling 10
+note "3 bed / 2 bath, open core, bedrooms off a hall."
+
+room living:  living   area 380
+room kitchen: kitchen  area 280
+room dining:  dining    area 170
+room hall:    hallway  area 150 min 4
+room master:  bedroom  area 224
+room mbath:   bathroom area 100
+room bed2:    bedroom  area 156
+room bed3:    bedroom  area 156
+room bath2:   bathroom area 90
+
+adjacent living kitchen          # open core
+adjacent kitchen dining
+adjacent living hall             # core opens to the hall spine
+adjacent hall master bed2 bed3 bath2   # bedrooms + shared bath off the hall
+adjacent master mbath            # ensuite
+
+entry living

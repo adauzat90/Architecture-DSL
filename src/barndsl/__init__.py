@@ -48,6 +48,12 @@ from .layout import (
     parse_brief,
     solve_layout,
 )
+from .layout2 import (
+    LayoutBrief2,
+    RoomSpec2,
+    parse_brief2,
+    solve_layout2,
+)
 from .render import RenderConfig, render_svg, save_svg
 from .validation import Issue, Severity, ValidationReport, validate
 
@@ -76,6 +82,11 @@ __all__ = [
     "LayoutBrief",
     "LayoutResult",
     "RoomSpec",
+    # auto-layout 2.0 (space-filling)
+    "solve_layout2",
+    "parse_brief2",
+    "LayoutBrief2",
+    "RoomSpec2",
     # checks
     "validate",
     "ValidationReport",

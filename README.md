@@ -145,11 +145,24 @@ window bed1 south width 4 offset 7
 ```
 
 The brief is a tiny line-based format (`room <id>: <type> <W> x <L>`,
-`adjacent <a> <b> …` to hang rooms off a hub like a hall). It produces a
-**valid, connected starting layout** you then refine in the same compile-fix
-loop — relative and pocket placement are the primitives it builds on, so it
-can't bin-pack a perfect floor plan, but it gets you a walkable plan from a
-program in one shot. From Python:
+`adjacent <a> <b> …` to hang rooms off a hub like a hall).
+
+**Two engines.** The default **`fill`** engine *dissects the envelope*: it bands
+the rooms (public core · hall · private row) and dimensions each to **tile the
+rectangle with no wasted space**, so habitable rooms land on the perimeter for
+daylight/egress by construction. Give it **target areas** (`room living: living
+area 360`) and it sizes everything to fit. `--engine greedy` is the original
+abutment placer, which honors fixed sizes exactly but leaves gaps and the odd
+buried room — kept for when you want exact dimensions. The design and the
+floor-planning research behind `fill` are in
+[`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md).
+
+```bash
+barndsl layout examples/birch_run.brief             # fill (default): 0/0/0, tiled
+barndsl layout examples/birch_run.brief --engine greedy
+```
+
+From Python:
 
 ```python
 from barndsl import RoomSpec, LayoutBrief, solve_layout, emit_dsl
@@ -233,7 +246,8 @@ src/barndsl/
   compiler.py    # lexer + parser + compile_source → CompileResult (diagnostics)
   emit.py        # plan → DSL source
   validation.py  # building-code checks → diagnostics with fix hints
-  layout.py      # auto-layout: adjacency brief → placed plan
+  layout.py      # auto-layout v1: greedy abutment from an adjacency brief
+  layout2.py     # auto-layout 2.0: space-filling band dissection (the `fill` engine)
   render.py      # annotated 2D SVG renderer
   agent.py       # Claude write → compile → critique → revise loop
   cli.py         # `barndsl` command
@@ -246,9 +260,11 @@ tests/             # no API key required
 
 ## Roadmap
 
-- Auto-layout **2.0**: the current `barndsl layout` packs greedily; a true
-  slicing/rectangular-dual solver would fill the envelope and keep every room on
-  the perimeter for daylight
+- Auto-layout **2.0 — Phase 2**: Phase 1 (the `fill` engine) ships a
+  space-filling *band* dissection. Phase 2 would add a true **rectangular-dual**
+  topology so *arbitrary* adjacency graphs (not just core/hall/row programs)
+  become shared-wall layouts — see
+  [`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md)
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

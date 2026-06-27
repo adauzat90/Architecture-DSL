@@ -9,9 +9,11 @@
     barndsl demo [--out FILE.svg]
         Compile and render the bundled example (examples/cedar_ridge.barn).
 
-    barndsl layout BRIEF.txt [--out FILE.svg] [--emit] [--no-openings]
+    barndsl layout BRIEF.txt [--out FILE.svg] [--emit] [--no-openings] [--engine fill|greedy]
         Auto-layout: solve room placement from an adjacency brief, then compile
-        (and render). Deterministic, no API key.
+        (and render). Deterministic, no API key. The default `fill` engine
+        dissects the envelope (no wasted space, rooms on the perimeter); `greedy`
+        is the v1 abutment placer.
 
     barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
         Run the Claude agent: brief → DSL → compile → critique → refine.
@@ -111,15 +113,24 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
 def _cmd_layout(args: argparse.Namespace) -> int:
     from .emit import emit_dsl
-    from .layout import parse_brief, solve_layout
 
     with open(args.file, encoding="utf-8") as fh:
         text = fh.read()
     try:
-        brief = parse_brief(text)
-        if args.no_openings:
-            brief.add_openings = False
-        out = solve_layout(brief)
+        if args.engine == "greedy":
+            from .layout import parse_brief, solve_layout
+
+            brief = parse_brief(text)
+            if args.no_openings:
+                brief.add_openings = False
+            out = solve_layout(brief)
+        else:  # "fill" — the space-filling v2 engine (default)
+            from .layout2 import parse_brief2, solve_layout2
+
+            brief = parse_brief2(text)
+            if args.no_openings:
+                brief.add_openings = False
+            out = solve_layout2(brief)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -244,6 +255,13 @@ def main(argv: list[str] | None = None) -> int:
         "--no-openings",
         action="store_true",
         help="don't auto-add the entry and windows",
+    )
+    p_layout.add_argument(
+        "--engine",
+        choices=("fill", "greedy"),
+        default="fill",
+        help="'fill' (default): space-filling, dimensioned, rooms on the "
+        "perimeter; 'greedy': v1 abutment placer",
     )
     p_layout.set_defaults(func=_cmd_layout)
 

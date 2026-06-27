@@ -1,7 +1,43 @@
 # Design: Auto-layout 2.0 — a space-filling, adjacency-true layout engine
 
-> Status: **proposed** (design + research). No code yet. This document is the
-> plan; implementation is phased and gated on the decisions in §11.
+> Status: **Phase 1 implemented** (`src/barndsl/layout2.py`); Phase 2
+> (rectangular-dual topology) still proposed. This document is the research +
+> plan; see "Implementation status" below for what shipped and how it deviates.
+
+## 0. Implementation status
+
+**Phase 1 — shipped** as `barndsl.layout2` (`solve_layout2`, `LayoutBrief2`,
+`RoomSpec2`, `parse_brief2`), wired into the CLI as `barndsl layout --engine fill`
+(the default; `--engine greedy` selects v1). Measured against v1 on the
+development brief corpus it eliminates the three weaknesses below: ~0 % wasted
+footprint, **0 buried habitable rooms**, tighter aspect, while keeping every plan
+valid and reachable. 17 dedicated tests; full suite green.
+
+Deviations from the architecture as first written, all deliberate:
+
+- **Single module, not a `layout2/` package.** Phase 1 is small enough
+  (~1 file mirroring `layout.py`); it can be split when Phase 2 lands.
+- **Band dimensioner instead of the general st-graph longest-path solver.**
+  Phase 1's topology is a stack of horizontal bands, so dimensioning is the
+  simpler closed-form "min width + area-proportional slack" pass (§7.3), not the
+  full difference-constraint longest-path of §7.2. The st-graph dimensioner is
+  deferred to **Phase 2**, where non-band (rectangular-dual) topologies need it.
+- **Coordinates snap to a 0.01 ft grid** (`_grid_lines`) so the tiling's shared
+  walls survive `emit_dsl`'s `%g` rounding — without this, a round-trip nudged
+  abutting rooms apart and broke adjacency. A real, non-obvious requirement the
+  design hadn't anticipated.
+- **Added a connectivity pass** (`_ensure_connected`): the tiling is one physical
+  mass, but the *door* graph can split when a requested adjacency can't be honored
+  (a room can't be a row-neighbour of three others). It adds the fewest doors on
+  real shared walls to make every room reachable — a hard requirement (`NO_ACCESS`
+  is an error) the design hadn't called out.
+
+The rest of this document is the original research + design.
+
+---
+
+> Status (original): **proposed** (design + research). Implementation is phased
+> and gated on the decisions in §11.
 
 ## 1. Why
 

@@ -320,7 +320,37 @@ Brief grammar (one statement per line, `#` comments):
 | `entry <room>` | which room gets the front door (default: the first public room on an exterior wall) |
 | `no-openings` | don't auto-add the entry/windows (geometry + doors only) |
 
-**What it is and isn't.** The solver is a deterministic greedy placer built on
+### Two engines: `fill` (default) and `greedy`
+
+`barndsl layout` has two solvers, selected with `--engine`:
+
+- **`fill` (default)** — a *space-filling* engine. It dissects the envelope into
+  bands (public core · hall · private row) and **dimensions every room to tile
+  the rectangle with no gaps**, so habitable rooms land on the perimeter (for
+  daylight/egress) by construction. Because it sizes rooms to fit, briefs give a
+  **target area** rather than fixed dimensions — `room living: living area 360`.
+  Fixed `W x L` still works (treated as that area). This is the engine to reach
+  for: near-zero `AREA_UNUSED`, no buried bedrooms, tidy aspect. See
+  `docs/design/AUTO_LAYOUT_2.md` for how and why.
+- **`greedy`** — the original abutment placer (below). Honors fixed sizes exactly
+  but packs a blob with holes; kept for when you want rooms at their exact given
+  dimensions.
+
+```bash
+barndsl layout brief.txt                    # fill (default)
+barndsl layout brief.txt --engine greedy    # v1 abutment
+```
+
+A `fill` brief uses `area` (or fixed `W x L`); everything else — `adjacent`,
+`entry`, `envelope`, `no-openings` — is identical:
+
+```text
+room living: living area 360
+room hall:   hallway area 140 min 4     # `min` sets the smallest side
+room bed1:   bedroom area 168
+```
+
+**What `greedy` is and isn't.** It's a deterministic greedy placer built on
 the same relative/pocket placement you'd write by hand — so it fixes *adjacency*
 (shared walls, working doors) but it does **not** bin-pack a perfect rectangle.
 Expect an `AREA_UNUSED` info and the odd elongated footprint; treat its output
