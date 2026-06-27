@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
+from .validation import Issue, Severity
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -190,6 +191,9 @@ class BarndoAgent:
             source = self.write_source(brief, prior=source, diagnostics=feedback)
             result = compile_source(source, name=None)
             crit = self.critique(result) if (critique and result.plan is not None) else None
+            # Fold the architect's review into the diagnostic stream as INFO, so
+            # design feedback travels the same channel as the compiler's errors.
+            _fold_critique(result, crit)
 
             step = DesignStep(i, source, result, crit)
             history.append(step)
@@ -199,18 +203,25 @@ class BarndoAgent:
             done = result.ok and (crit is None or crit.satisfied)
             if done or i == max_iterations:
                 break
-            feedback = _format_feedback(result, crit)
+            feedback = result.report()
 
         last = history[-1]
         return DesignResult(last.source, last.result, history)
 
 
-def _format_feedback(result: CompileResult, crit: CritiqueSpec | None) -> str:
-    parts = [result.report()]
-    if crit and crit.suggestions:
-        parts.append("\nDESIGN CRITIQUE (improve where you can):")
-        parts += [f"  - {s}" for s in crit.suggestions]
-    return "\n".join(parts)
+def _fold_critique(result: CompileResult, crit: CritiqueSpec | None) -> None:
+    """Append the architect's suggestions to ``result`` as INFO diagnostics.
+
+    This makes design-quality feedback first-class: it shows up in
+    ``result.report()`` (carets and all) alongside code-check errors, so a
+    single diagnostic stream carries both "is it valid" and "is it good".
+    """
+    if crit is None or crit.satisfied:
+        return
+    for s in crit.suggestions:
+        result.diagnostics.append(
+            Issue(Severity.INFO, "DESIGN", s, hint="Architect's review (design quality).")
+        )
 
 
 def design(

@@ -53,6 +53,7 @@ class Issue:
     room: str | None = None
     line: int | None = None
     col: int | None = None
+    end_col: int | None = None  # 1-based, exclusive — for column-accurate carets
     hint: str | None = None
 
     def __str__(self) -> str:
@@ -119,6 +120,41 @@ def _f(value: float) -> str:
     return f"{value:g}"
 
 
+#: Public, shared living spaces — bedrooms ideally don't open straight onto these.
+PUBLIC_TYPES = {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
+BATH_TYPES = {RoomType.BATHROOM, RoomType.HALF_BATH}
+
+
+def _door_graph(plan: Barndominium) -> dict[str, set[str]]:
+    """Adjacency by interior doors (who can walk to whom)."""
+    graph: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
+    for d in plan.interior_doors:
+        if d.room_a in graph and d.room_b in graph:
+            graph[d.room_a].add(d.room_b)
+            graph[d.room_b].add(d.room_a)
+    return graph
+
+
+def _nearest_distance(
+    graph: dict[str, set[str]], start: str, targets: set[str]
+) -> int | None:
+    """Fewest doors from ``start`` to any id in ``targets`` (None if unreachable)."""
+    if start in targets:
+        return 0
+    seen = {start}
+    queue: deque[tuple[str, int]] = deque([(start, 0)])
+    while queue:
+        cur, dist = queue.popleft()
+        for nb in graph.get(cur, ()):  # neighbours
+            if nb in seen:
+                continue
+            if nb in targets:
+                return dist + 1
+            seen.add(nb)
+            queue.append((nb, dist + 1))
+    return None
+
+
 # --- entry point ------------------------------------------------------------
 
 
@@ -174,6 +210,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_doors(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
+    _validate_design_quality(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
         add(
@@ -444,6 +481,75 @@ def _validate_access(plan: Barndominium, add) -> None:
                 hint=hint,
             )
         )
+
+
+def _validate_design_quality(plan: Barndominium, add) -> None:
+    """Soft, advisory checks (INFO) that nudge toward a livable layout.
+
+    These never block compilation — they flow through the *same* diagnostic
+    channel as code errors so the author (or the agent) gets quality guidance,
+    not just code-compliance. They mirror what a reviewing architect notices:
+    open-concept flow, bedroom privacy, and bath proximity.
+    """
+    graph = _door_graph(plan)
+    by_id = {r.id: r for r in plan.rooms}
+
+    # 1. Open-concept flow: a kitchen should connect to dining or living.
+    for room in plan.rooms:
+        if room.type is RoomType.KITCHEN:
+            neigh_types = {by_id[n].type for n in graph.get(room.id, ()) if n in by_id}
+            if not neigh_types & {RoomType.DINING, RoomType.LIVING}:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "KITCHEN_FLOW",
+                        f"Kitchen '{room.id}' isn't connected to a dining or living area.",
+                        room=room.id,
+                        hint="Open it to the main living space for an idiomatic "
+                        f"barndo, e.g. `door {room.id} - <living_or_dining>`.",
+                    )
+                )
+
+    # 2. Bedroom privacy: a bedroom shouldn't open straight onto a public room.
+    for room in plan.rooms:
+        if room.type is RoomType.BEDROOM:
+            public_nb = [
+                n
+                for n in graph.get(room.id, ())
+                if n in by_id and by_id[n].type in PUBLIC_TYPES
+            ]
+            if public_nb:
+                onto = by_id[public_nb[0]].type.value
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BED_PRIVACY",
+                        f"Bedroom '{room.id}' opens directly onto the "
+                        f"{onto} area ('{public_nb[0]}').",
+                        room=room.id,
+                        hint="Buffer bedrooms with a hallway for privacy — route the "
+                        "door off a `hallway` rather than a shared living space.",
+                    )
+                )
+
+    # 3. Bath proximity: each bedroom should be near a bathroom.
+    baths = {r.id for r in plan.rooms if r.type in BATH_TYPES}
+    if baths:
+        for room in plan.rooms:
+            if room.type is RoomType.BEDROOM:
+                dist = _nearest_distance(graph, room.id, baths)
+                if dist is None or dist > 2:
+                    detail = "no connected bathroom" if dist is None else f"{dist} doors away"
+                    add(
+                        Issue(
+                            Severity.INFO,
+                            "BATH_DISTANCE",
+                            f"Bedroom '{room.id}' is far from any bathroom ({detail}).",
+                            room=room.id,
+                            hint="Site a bath adjacent to the bedrooms — ideally off "
+                            "the same hallway — so it's within a door or two.",
+                        )
+                    )
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:

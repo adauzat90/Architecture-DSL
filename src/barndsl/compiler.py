@@ -127,11 +127,19 @@ def _tokenize_line(line: str, lineno: int) -> list[_Token]:
 
 
 class _ParseError(Exception):
-    def __init__(self, code: str, message: str, col: int, hint: str | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        col: int,
+        hint: str | None = None,
+        end_col: int | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.col = col
+        self.end_col = end_col
         self.hint = hint
 
 
@@ -150,7 +158,9 @@ class _Cursor:
     def take(self, what: str) -> _Token:
         t = self.peek()
         if t is None:
-            raise _ParseError("SYNTAX", f"Expected {what}.", self.eol_col)
+            raise _ParseError(
+                "SYNTAX", f"Expected {what}.", self.eol_col, end_col=self.eol_col + 1
+            )
         self.i += 1
         return t
 
@@ -160,7 +170,10 @@ class _Cursor:
             return float(t.text)
         except ValueError:
             raise _ParseError(
-                "BAD_NUMBER", f"Expected a number for {what}, got '{t.text}'.", t.col
+                "BAD_NUMBER",
+                f"Expected a number for {what}, got '{t.text}'.",
+                t.col,
+                end_col=t.end_col,
             )
 
     def keyword(self, expected: str) -> _Token:
@@ -170,6 +183,7 @@ class _Cursor:
                 "SYNTAX",
                 f"Expected '{expected}', got '{t.text}'.",
                 t.col,
+                end_col=t.end_col,
             )
         return t
 
@@ -183,6 +197,7 @@ class _Cursor:
                 f"Unknown room type '{t.text}'.",
                 t.col,
                 hint=f"Use one of: {_TYPES}.",
+                end_col=t.end_col,
             )
 
     def wall(self) -> Direction:
@@ -195,6 +210,7 @@ class _Cursor:
                 f"Unknown wall '{t.text}'.",
                 t.col,
                 hint=f"Use one of: {_WALLS}.",
+                end_col=t.end_col,
             )
 
     def expect_end(self) -> None:
@@ -205,12 +221,15 @@ class _Cursor:
                 f"Unexpected '{t.text}' at end of statement.",
                 t.col,
                 hint="Remove the extra token(s).",
+                end_col=t.end_col,
             )
 
 
 @dataclass
 class _SourceMap:
     room_line: dict[str, int] = field(default_factory=dict)
+    # room id -> (col, end_col) of its id token, for column-accurate carets.
+    room_col: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 def _parse_statement(
@@ -236,7 +255,8 @@ def _parse_statement(
         plan.note(c.take("a quoted note").text)
         c.expect_end()
     elif key == "room":
-        rid = c.take("a room id").text
+        rid_tok = c.take("a room id")
+        rid = rid_tok.text
         rtype = c.room_type()
         c.keyword("at")
         x = c.number("x")
@@ -248,11 +268,17 @@ def _parse_statement(
         c.expect_end()
         plan.add_room(rid, rtype, x=x, y=y, width=w, length=length)
         smap.room_line[rid] = lineno
+        smap.room_col[rid] = (rid_tok.col, rid_tok.end_col)
     elif key == "door":
         a = c.take("the first room id").text
         sep = c.take("'-' or 'to'")
         if sep.text.lower() not in ("-", "to"):
-            raise _ParseError("SYNTAX", f"Expected '-' or 'to', got '{sep.text}'.", sep.col)
+            raise _ParseError(
+                "SYNTAX",
+                f"Expected '-' or 'to', got '{sep.text}'.",
+                sep.col,
+                end_col=sep.end_col,
+            )
         b = c.take("the second room id").text
         width = 2.67
         nxt = c.peek()
@@ -279,6 +305,7 @@ def _parse_statement(
                     f"Unknown entry option '{opt}'.",
                     c.toks[c.i - 1].col,
                     hint="Options: width <n>, offset <n>, no-egress.",
+                    end_col=c.toks[c.i - 1].end_col,
                 )
         plan.entrance(rid, wall, width=width, offset=offset, egress=egress)
     elif key == "window":
@@ -297,6 +324,7 @@ def _parse_statement(
                     f"Unknown window option '{opt}'.",
                     c.toks[c.i - 1].col,
                     hint="Options: width <n>, offset <n>.",
+                    end_col=c.toks[c.i - 1].end_col,
                 )
         plan.add_window(rid, wall, width=width, offset=offset)
     elif key == "porch":
@@ -315,7 +343,12 @@ def _parse_statement(
             if tag == "open":
                 covered = False
             elif tag != "covered":
-                raise _ParseError("SYNTAX", f"Expected 'covered' or 'open', got '{tag}'.", nxt.col)
+                raise _ParseError(
+                    "SYNTAX",
+                    f"Expected 'covered' or 'open', got '{tag}'.",
+                    nxt.col,
+                    end_col=nxt.end_col,
+                )
         c.expect_end()
         plan.add_porch(pid, x=x, y=y, width=w, length=length, covered=covered)
     else:
@@ -324,6 +357,7 @@ def _parse_statement(
             f"Unknown statement '{kw.text}'.",
             kw.col,
             hint=f"Statements start with one of: {', '.join(_KEYWORDS)}.",
+            end_col=kw.end_col,
         )
 
 
@@ -359,15 +393,37 @@ class CompileResult:
         return f"COMPILE {status} — {e} error(s), {w} warning(s)"
 
     def report(self, filename: str = "<plan>") -> str:
-        """Compiler-style diagnostic listing."""
+        """Compiler-style diagnostic listing with column-accurate carets."""
+        src_lines = self.source.splitlines()
         lines = [self.summary()]
-        for d in sorted(self.diagnostics, key=lambda i: (i.line or 0)):
-            loc = f"{filename}:{d.line}" if d.line else filename
-            where = f" ({d.room})" if d.room else ""
-            lines.append(f"{loc}: {d.severity.value}[{d.code}]{where}: {d.message}")
-            if d.hint:
-                lines.append(f"    hint: {d.hint}")
+        for d in sorted(self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)):
+            lines.extend(_format_diagnostic(d, filename, src_lines))
         return "\n".join(lines)
+
+
+def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[str]:
+    """Render one diagnostic: header, source snippet, caret underline, hint."""
+    if d.line and d.col:
+        loc = f"{filename}:{d.line}:{d.col}"
+    elif d.line:
+        loc = f"{filename}:{d.line}"
+    else:
+        loc = filename
+    where = f" ({d.room})" if d.room else ""
+    out = [f"{loc}: {d.severity.value}[{d.code}]{where}: {d.message}"]
+
+    if d.line and 1 <= d.line <= len(src_lines):
+        # Expand tabs to single spaces so the (char-based) caret stays aligned.
+        snippet = src_lines[d.line - 1].replace("\t", " ")
+        out.append(f"    {snippet}")
+        if d.col:
+            width = max(1, (d.end_col or d.col + 1) - d.col)
+            caret = " " * (d.col - 1) + "^" + "~" * (width - 1)
+            out.append(f"    {caret.rstrip()}")
+
+    if d.hint:
+        out.append(f"    hint: {d.hint}")
+    return out
 
 
 def compile_source(source: str, name: str | None = None) -> CompileResult:
@@ -390,6 +446,7 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
                     err.message,
                     line=lineno,
                     col=err.col,
+                    end_col=err.end_col,
                     hint=err.hint,
                 )
             )
@@ -401,8 +458,14 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
 
     report: ValidationReport = validate(plan)
     for iss in report.issues:
-        if iss.line is None and iss.room is not None:
-            iss.line = smap.room_line.get(iss.room)
+        # Anchor semantic diagnostics to the room's `room ...` line, and point
+        # the caret at the room's id token, so quality/code-check issues get the
+        # same column-accurate underline as syntax errors.
+        if iss.room is not None:
+            if iss.line is None:
+                iss.line = smap.room_line.get(iss.room)
+            if iss.col is None and iss.room in smap.room_col:
+                iss.col, iss.end_col = smap.room_col[iss.room]
     diagnostics.extend(report.issues)
     return CompileResult(plan, diagnostics, source)
 

@@ -58,26 +58,42 @@ mudroom, office, loft, garage, shop, … · `<wall>`: north|south|east|west.
 ## The compiler
 
 `compile_source(src)` lexes, parses, lowers to a plan, runs the building-code
-checks, and returns diagnostics with **line numbers, error codes, and actionable
-fix hints** — like compiler output:
+checks, and returns diagnostics with **line:column locations, error codes,
+column-accurate carets, and actionable fix hints** — like compiler output:
 
 ```text
 $ barndsl compile broken.barn
-COMPILE FAILED — 6 error(s), 4 warning(s)
-broken.barn:4: error[OVERLAP] (living): Rooms 'living' and 'bedroom' overlap by 20 sq ft.
-    hint: Reposition so they don't intersect — e.g. move 'bedroom' to x=24 (east of 'living').
-broken.barn:5: error[BEDROOM_EGRESS] (bedroom): Bedroom has no emergency escape opening.
-    hint: Add an egress window on an exterior wall, e.g. `window bedroom south width 4 offset 2`.
-broken.barn:6: error[OUT_OF_BOUNDS] (office): Room extends outside the 40×30 ft envelope.
-    hint: reduce its width by 4 ft or move it west to x=20.
+COMPILE FAILED — 3 error(s), 1 warning(s)
+broken.barn:6:14: error[BAD_TYPE]: Unknown room type 'lounge'.
+    room office: lounge at 24,0 size 20 x 14
+                 ^~~~~~
+    hint: Use one of: living, kitchen, dining, bedroom, bathroom, ...
+broken.barn:5:6: error[NO_ACCESS] (kitchen): Room 'kitchen' cannot be reached from any entrance.
+    room kitchen: kitchen at 24,0 size 16 x 12
+         ^~~~~~~
+    hint: Add `door kitchen - living` (they share a wall).
+broken.barn:6:6: info[BED_PRIVACY] (bed): Bedroom 'bed' opens directly onto the living area.
+    room bed: bedroom at 24,12 size 16 x 12
+         ^~~
+    hint: Buffer bedrooms with a hallway for privacy.
 ...
 ```
+
+The caret underlines the exact token at fault — for syntax errors it points at
+the offending word, and for semantic checks it points at the room's id, so every
+diagnostic ties back to a precise span of source.
 
 What it checks (loosely IRC-based + spatial sanity): rooms stay in the envelope
 and don't overlap; bedrooms meet min area/dimension and have **egress**; every
 interior room is **reachable** from an entrance via interior doors; habitable
 rooms meet the **8% natural-light** ratio; hallway/door widths; ceiling height;
 at least one egress door. Every diagnostic includes a concrete fix in DSL terms.
+
+**Three severities, one channel.** `error`s must be fixed; `warning`s flag likely
+problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
+bedroom privacy, bath proximity — so "is it good?" travels the same diagnostic
+stream as "is it valid?" and never blocks a compile. The agent's architectural
+critique is folded into this same `info` channel.
 
 > These checks are approximate and **not** a substitute for a licensed designer
 > or a review by the authority having jurisdiction.
@@ -171,7 +187,6 @@ tests/             # 17 tests, no API key required
 
 ## Roadmap
 
-- Richer source spans (column-accurate carets) on semantic diagnostics
 - Multi-story / loft levels and stairs
 - Auto-layout: solve room placement from an adjacency brief
 - Cost estimation from the material takeoff
