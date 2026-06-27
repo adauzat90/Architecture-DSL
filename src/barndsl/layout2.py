@@ -2,17 +2,26 @@
 
 Where v1 (:mod:`barndsl.layout`) places rooms by greedy abutment and lets the
 envelope fall out as the bounding box — leaving holes, burying habitable rooms,
-and elongating the footprint — v2 **dissects the envelope**. It arranges rooms
-into horizontal bands (a public core, an optional hall spine, a private row) and
-dimensions every band to tile the rectangle with no gaps and no overlap, so
-habitable rooms land on the perimeter *by construction*.
+and elongating the footprint — v2 **dissects the envelope**: it dimensions rooms
+to tile the rectangle with no gaps and no overlap, so habitable rooms land on the
+perimeter *by construction*.
 
-This is the Phase 1 engine from ``docs/design/AUTO_LAYOUT_2.md``: a deterministic,
-pure-Python dimensioned slicing/band layout. It consumes a *size program* (target
-area + minimum dimension, or a fixed ``w×l``) rather than fixed coordinates, which
-is what lets it fill an arbitrary envelope. Doors, the entry and windows are added
-by the same logic v1 already uses, and the result is the same
-:class:`~barndsl.layout.LayoutResult`.
+It generates three topologies and keeps the best-scoring one (generate-and-select,
+following the floor-planning literature):
+
+* **bands** — horizontal strips (a public core, an optional hall spine, a private
+  row); the residential idiom.
+* **slice** — a recursive adjacency-ordered slicing tree, for clusters or a room
+  needing three neighbours that a flat band can't seat.
+* **dual** — a rectangular dual, which tiles so that *every* requested adjacency
+  is a shared wall, including non-sliceable graphs like a pinwheel (a centre room
+  touching four others).
+
+It is deterministic and pure-Python, and consumes a *size program* (target area +
+minimum dimension, or a fixed ``w×l``) rather than fixed coordinates, which is
+what lets it fill an arbitrary envelope. Doors, the entry and windows are added by
+the same logic v1 already uses, and the result is the same
+:class:`~barndsl.layout.LayoutResult`. See ``docs/design/AUTO_LAYOUT_2.md``.
 
     from barndsl.layout2 import RoomSpec2, LayoutBrief2, solve_layout2
 
@@ -32,7 +41,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .elements import Barndominium, RoomType, feet, inches
+from .elements import HABITABLE_TYPES, Barndominium, RoomType, feet, inches
 from .geometry import shared_edge
 from .layout import (
     LayoutBrief,
@@ -156,9 +165,15 @@ def solve_layout2(brief: LayoutBrief2, engine: str = "auto") -> LayoutResult:
     * ``"slice"`` — a recursive adjacency-ordered slicing tree (nested H/V cuts).
       Handles a room that needs three neighbours, or nested clusters, that a flat
       band can't — but can bury a habitable room, so it isn't always valid.
+    * ``"dual"`` — a rectangular dual: dissect the rectangle so *every* required
+      adjacency is a shared wall, including non-sliceable graphs like the pinwheel
+      (a centre room touching four others). Returns the best tiling it finds; if
+      none exists it falls back (raises for an explicit ``engine="dual"``).
     * ``"auto"`` (default) — run every applicable engine and return the
       best-scoring valid layout (fewest errors, then fewest unmet adjacencies,
-      then least wasted space). Never worse than ``bands``; sometimes better.
+      then least wasted space). Never worse than ``bands``; sometimes better. The
+      (more expensive) dual is tried only when bands and slice still leave an
+      adjacency unmet or a room misplaced — exactly when it can help.
 
     This generate-and-select strategy follows the floor-planning literature
     (GPLAN enumerates topologies precisely because no single one fits every
@@ -168,14 +183,33 @@ def solve_layout2(brief: LayoutBrief2, engine: str = "auto") -> LayoutResult:
     builders = {"bands": _solve_bands, "slice": _solve_slice}
     if engine in builders:
         return builders[engine](brief, specs, adj)
+    if engine == "dual":
+        result = _solve_dual(brief, specs, adj)
+        if result is None:
+            raise ValueError("No rectangular dual realises this adjacency program.")
+        return result
     if engine != "auto":
-        raise ValueError(f"Unknown engine {engine!r}; use auto, bands or slice.")
+        raise ValueError(f"Unknown engine {engine!r}; use auto, bands, slice or dual.")
 
-    # Score every candidate; keep the best. Ties favour the earlier (bands) one
-    # since min() is stable, so "auto" is never worse than bands.
-    scored = [(_score(result), name, result) for name, result in
-              ((n, fn(brief, specs, adj)) for n, fn in builders.items())]
+    # Score the cheap topologies first. Ties favour the earlier (bands) one since
+    # the sort is stable, so "auto" is never worse than bands.
+    scored = [
+        (_score(result), name, result)
+        for name, result in ((n, fn(brief, specs, adj)) for n, fn in builders.items())
+    ]
     scored.sort(key=lambda s: s[0])
+
+    # The dual is the only topology that can realise an arbitrary adjacency graph
+    # (e.g. a pinwheel), but it costs more, so only reach for it when the best
+    # cheap topology still has errors or unmet adjacencies — its whole reason to
+    # exist. Appended last, so it never steals a tie from bands/slice.
+    best_score = scored[0][0]
+    if best_score[0] or best_score[1]:
+        dual = _solve_dual(brief, specs, adj)
+        if dual is not None:
+            scored.append((_score(dual), "dual", dual))
+            scored.sort(key=lambda s: s[0])
+
     _, best_name, best = scored[0]
     if best_name != "bands":
         best.notes.append(f"Chose the '{best_name}' topology (best fit for this program).")
@@ -603,6 +637,293 @@ def _split_at(lo: float, hi: float, frac: float, min_a: float, min_b: float) -> 
     else:  # too short for both minimums — keep a sliver each so nothing degenerates
         cut = min(max(cut, lo + 0.5), hi - 0.5) if span > 1.0 else lo + span / 2.0
     return round(cut, 2)
+
+
+# --- topology 3: rectangular dual (general, non-sliceable adjacency graphs) --
+#
+# The bands and slice topologies cannot realise an arbitrary required-adjacency
+# graph as shared walls — the canonical counter-example is the *pinwheel*: a
+# centre room that must touch four others, which no single band row and no
+# slicing tree can seat. The rectangular-dual topology can: it dissects the
+# rectangle so that every required adjacency is a real shared wall.
+#
+# We build it by directly searching for an integer *rectangulation* — a tiling of
+# a small structural grid by one rectangle per room — with the classic "fill the
+# lowest-leftmost empty cell" exact-tiling backtracker, keeping only tilings where
+# every required adjacency is a shared wall and every daylight/egress room sits on
+# the boundary. This is the floor-plan use of a rectangular dual; because a floor
+# plan tolerates *extra* shared walls (we simply don't cut a door there), we need
+# the required edges to be a **subset** of the realised contacts, which is weaker
+# and easier than a strict dual yet still covers the non-sliceable cases.
+#
+# The search is correct by construction — its acceptance test *is* the spec (tile,
+# no overlap, required ⊆ shared walls, perimeter) — so it needs none of the
+# planar-embedding / regular-edge-labeling machinery a strict dual constructor
+# would, which is far harder to get right in pure Python. The chosen topology is
+# then dimensioned to the size program and, like every topology, only kept by
+# ``auto`` when it scores best; when no tiling is found it returns ``None`` and
+# ``auto`` falls back. See ``docs/design/AUTO_LAYOUT_2.md`` §7.4.
+
+#: Above this room count the rectangulation search is skipped (its grids grow as
+#: n²); bands/slice still handle larger programs. Barndos sit well under this.
+_DUAL_MAX_ROOMS = 9
+#: Backtracking-node budget across all grids before the search gives up (→ None).
+_DUAL_NODE_CAP = 200_000
+#: Stop collecting once this many distinct valid topologies are found.
+_DUAL_WANT = 240
+#: Dimension and fully score only this many best-by-proxy topologies.
+_DUAL_SCORE_TOP = 16
+
+
+def _rectangulations(
+    n: int,
+    grid_w: int,
+    grid_h: int,
+    perimeter: set[int],
+    node_cap: int,
+    want: int,
+) -> tuple[list, int]:
+    """Enumerate integer rectangulations of a ``grid_w × grid_h`` grid into ``n`` rooms.
+
+    Each solution is a list of ``(cxl, cyb, cxr, cyt)`` cell rectangles, one per
+    room index. We repeatedly fill the lowest-leftmost empty cell (which must be
+    some room's bottom-left corner) with an unplaced room of some extent, so the
+    tiling is gap-free by construction; perimeter-needing rooms are pruned the
+    moment they'd land fully interior. Deterministic order.
+    """
+    cover = [[-1] * grid_w for _ in range(grid_h)]
+    rect: list = [None] * n
+    placed = [False] * n
+    nodes = [0]
+    out: list = []
+
+    def lowest_leftmost():
+        for r in range(grid_h):
+            for c in range(grid_w):
+                if cover[r][c] == -1:
+                    return r, c
+        return None
+
+    def max_width(r, c):
+        w = 0
+        while c + w < grid_w and cover[r][c + w] == -1:
+            w += 1
+        return w
+
+    def block_free(r, c, w, h):
+        if r + h > grid_h or c + w > grid_w:
+            return False
+        for rr in range(r, r + h):
+            for cc in range(c, c + w):
+                if cover[rr][cc] != -1:
+                    return False
+        return True
+
+    def recurse():
+        if len(out) >= want or nodes[0] > node_cap:
+            return
+        nodes[0] += 1
+        cell = lowest_leftmost()
+        if cell is None:
+            if all(placed):
+                out.append([rect[i] for i in range(n)])
+            return
+        r, c = cell
+        mw = max_width(r, c)
+        for i in range(n):
+            if placed[i]:
+                continue
+            for w in range(1, mw + 1):
+                for h in range(1, grid_h - r + 1):
+                    if not block_free(r, c, w, h):
+                        break  # taller blocks at this width can only stay blocked
+                    on_perim = c == 0 or r == 0 or c + w == grid_w or r + h == grid_h
+                    if i in perimeter and not on_perim:
+                        continue
+                    for rr in range(r, r + h):
+                        for cc in range(c, c + w):
+                            cover[rr][cc] = i
+                    rect[i] = (c, r, c + w, r + h)
+                    placed[i] = True
+                    recurse()
+                    placed[i] = False
+                    rect[i] = None
+                    for rr in range(r, r + h):
+                        for cc in range(c, c + w):
+                            cover[rr][cc] = -1
+                    if len(out) >= want or nodes[0] > node_cap:
+                        return
+
+    recurse()
+    return out, nodes[0]
+
+
+def _struct_shared(rects: list) -> set:
+    """Pairs ``(i, j)`` (``i < j``) whose structural rectangles share a wall segment."""
+    adj: set = set()
+    n = len(rects)
+    for i in range(n):
+        xl, yb, xr, yt = rects[i]
+        for j in range(i + 1, n):
+            xl2, yb2, xr2, yt2 = rects[j]
+            if (xr == xl2 or xr2 == xl) and min(yt, yt2) > max(yb, yb2):
+                adj.add((i, j))
+            elif (yt == yb2 or yt2 == yb) and min(xr, xr2) > max(xl, xl2):
+                adj.add((i, j))
+    return adj
+
+
+def _dual_topologies(
+    n: int, perimeter: set[int], required: set[tuple[int, int]]
+) -> list:
+    """Valid structural rectangulations: ``required ⊆ shared walls`` and on-perimeter.
+
+    Searches near-square grids first (good aspect, and pinwheels live there),
+    deduplicating across grid sizes, up to the node/solution budget.
+    """
+    cell_cap = 3 * n + 2
+    grids = [
+        (gw, gh)
+        for gw in range(1, n + 1)
+        for gh in range(1, n + 1)
+        if n <= gw * gh <= cell_cap
+    ]
+    grids.sort(key=lambda g: (abs(g[0] - g[1]), g[0] * g[1], g))
+
+    sols: list = []
+    seen: set = set()
+    nodes = 0
+    for gw, gh in grids:
+        raw, used = _rectangulations(
+            n, gw, gh, perimeter, _DUAL_NODE_CAP - nodes, _DUAL_WANT
+        )
+        nodes += used
+        for rects in raw:
+            if not required.issubset(_struct_shared(rects)):
+                continue
+            key = tuple(rects)
+            if key not in seen:
+                seen.add(key)
+                sols.append(rects)
+        if nodes > _DUAL_NODE_CAP or len(sols) >= _DUAL_WANT:
+            break
+    return sols
+
+
+def _dimension_dual(
+    rects: list, specs: list[RoomSpec2], env_w: float, env_l: float, iters: int = 60
+) -> dict:
+    """Size a structural topology to the area program via iterative proportional fitting.
+
+    The structural grid fixes which rooms share each cut line; we assign real
+    positions to those lines so each room's width×height approaches its target
+    area while meeting its minimum dimension. Column widths and row heights are
+    nudged alternately toward the per-room targets, then renormalised to fill the
+    envelope — a few sweeps converge. Cut lines snap to the grid so shared walls
+    survive the DSL round-trip (see ``_grid_lines``).
+    """
+    from .elements import Room
+
+    n = len(rects)
+    xs = sorted({r[0] for r in rects} | {r[2] for r in rects})
+    ys = sorted({r[1] for r in rects} | {r[3] for r in rects})
+    xi = {v: k for k, v in enumerate(xs)}
+    yi = {v: k for k, v in enumerate(ys)}
+    ncol, nrow = len(xs) - 1, len(ys) - 1
+    cols = [list(range(xi[r[0]], xi[r[2]])) for r in rects]
+    rows = [list(range(yi[r[1]], yi[r[3]])) for r in rects]
+    area = [s.area for s in specs]
+    mind = [s.min_dim for s in specs]
+
+    cw = [env_w / ncol] * ncol
+    rh = [env_l / nrow] * nrow
+
+    def renorm(vals, total):
+        s = sum(vals) or 1.0
+        return [v * total / s for v in vals]
+
+    for _ in range(iters):
+        rw = [sum(cw[c] for c in cols[i]) for i in range(n)]
+        rha = [sum(rh[c] for c in rows[i]) for i in range(n)]
+        scale = [1.0] * ncol
+        wsum = [0.0] * ncol
+        for i in range(n):
+            want = max(area[i] / rha[i] if rha[i] else rw[i], mind[i])
+            ratio = want / rw[i] if rw[i] else 1.0
+            for c in cols[i]:
+                scale[c] += ratio
+                wsum[c] += 1
+        cw = renorm([cw[c] * (scale[c] / (wsum[c] + 1)) for c in range(ncol)], env_w)
+        rw = [sum(cw[c] for c in cols[i]) for i in range(n)]
+        scale = [1.0] * nrow
+        hsum = [0.0] * nrow
+        for i in range(n):
+            want = max(area[i] / rw[i] if rw[i] else rha[i], mind[i])
+            ratio = want / rha[i] if rha[i] else 1.0
+            for c in rows[i]:
+                scale[c] += ratio
+                hsum[c] += 1
+        rh = renorm([rh[c] * (scale[c] / (hsum[c] + 1)) for c in range(nrow)], env_l)
+
+    X = _grid_lines(cw, 0.0, env_w)
+    Y = _grid_lines(rh, 0.0, env_l)
+    placed: dict = {}
+    for i, s in enumerate(specs):
+        x0, x1 = X[xi[rects[i][0]]], X[xi[rects[i][2]]]
+        y0, y1 = Y[yi[rects[i][1]]], Y[yi[rects[i][3]]]
+        placed[s.id] = Room(
+            s.id, s.type, x0, y0, round(x1 - x0, 2), round(y1 - y0, 2), s.label, s.level
+        )
+    return placed
+
+
+def _solve_dual(
+    brief: LayoutBrief2, specs: list[RoomSpec2], adj: dict[str, set[str]]
+) -> LayoutResult | None:
+    """Topology 3: rectangular dual. Returns ``None`` when no tiling realises the brief.
+
+    Finds structural rectangulations honouring the required adjacencies and
+    perimeter needs, then dimensions and fully scores the most promising ones
+    (ranked by how well their cell shares match the area program) and keeps the
+    best. The result is verified downstream by ``_score`` like any candidate.
+    """
+    n = len(specs)
+    if n > _DUAL_MAX_ROOMS:
+        return None
+    idx = {s.id: i for i, s in enumerate(specs)}
+    required = {
+        tuple(sorted((idx[a], idx[b]))) for a in adj for b in adj[a]
+    }
+    perimeter = {i for i, s in enumerate(specs) if s.type in HABITABLE_TYPES}
+    sols = _dual_topologies(n, perimeter, required)
+    if not sols:
+        return None
+
+    total_area = sum(s.area for s in specs)
+
+    def proxy(rects: list) -> float:
+        cells = [(r[2] - r[0]) * (r[3] - r[1]) for r in rects]
+        tcells = sum(cells) or 1.0
+        return sum(
+            abs(cells[i] / tcells - specs[i].area / total_area) for i in range(n)
+        )
+
+    sols.sort(key=lambda r: (proxy(r), tuple(r)))
+
+    if brief.envelope is not None:
+        env_w, env_l = round(float(brief.envelope[0]), 2), round(float(brief.envelope[1]), 2)
+    else:
+        env_w = round(math.sqrt(total_area * brief.aspect), 2)
+        env_l = round(total_area / env_w, 2) if env_w else round(total_area, 2)
+
+    best: tuple | None = None
+    for rects in sols[:_DUAL_SCORE_TOP]:
+        placed = _dimension_dual(rects, specs, env_w, env_l)
+        result = _finalize(brief, specs, placed, env_w, env_l, [])
+        sc = _score(result)
+        if best is None or sc < best[0]:
+            best = (sc, result)
+    return best[1] if best else None
 
 
 def _pick_connected_entry(plan: Barndominium) -> str | None:

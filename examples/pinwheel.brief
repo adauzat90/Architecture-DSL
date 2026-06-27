@@ -1,0 +1,17 @@
+# A pinwheel program: a central great room that must touch all four habitable
+# rooms around it at once. With four daylight-needing arms forced to the
+# perimeter, no band row and no slicing tree can also seat the great room against
+# all four — only the rectangular-dual topology can. `barndsl layout
+# examples/pinwheel.brief` (the default `fill` engine) detects that bands/slice
+# leave an adjacency unmet and picks the dual. (The program has no bathroom, so
+# the compiler notes a NO_BATH warning — add one and the four arms still pin it.)
+plan "Pinwheel"
+ceiling 10
+
+room great:   living   area 320
+room north:   bedroom  area 182
+room east:    bedroom  area 168
+room south:   kitchen  area 210
+room west:    bedroom  area 154
+
+adjacent great north east south west

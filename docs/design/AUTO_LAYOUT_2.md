@@ -1,9 +1,10 @@
 # Design: Auto-layout 2.0 — a space-filling, adjacency-true layout engine
 
-> Status: **Phase 1 + a Phase 2 increment implemented** (`src/barndsl/layout2.py`);
-> the *fully general* (non-sliceable) rectangular-dual topology remains future
-> work. This document is the research + plan; see "Implementation status" for what
-> shipped, the Phase-2 evaluation, and how it deviates.
+> Status: **Phase 1 + Phase 2 implemented, including the general rectangular-dual
+> topology** (`src/barndsl/layout2.py`). `auto` now generates three topologies —
+> bands, slice, and a rectangular dual that handles non-sliceable graphs like the
+> pinwheel — and keeps the best-scoring one. This document is the research + plan;
+> see "Implementation status" for what shipped, the evaluation, and deviations.
 
 ## 0. Implementation status
 
@@ -54,15 +55,47 @@ produced a decisive empirical finding:
   time with **zero** overlap/out-of-bounds/structural failures; on the residential
   corpus it keeps bands; on a three-neighbour program it picks slice.
 
-**What's still future work:** the *fully general, non-sliceable* rectangular dual
-(the 5-room pinwheel and friends). It is the only thing that would beat
-generate-and-select, and it needs the from-scratch planar-embedding + REL pipeline
-(§7.4) — high effort and bug-risk in pure Python with no deps, and **low marginal
-value for barndominiums**, which are long rectangles that bands already nail. The
-generate-and-select frame means it can be added later as just *another candidate
-topology* feeding the same `_score`, with no change to the API or the selection
-logic. Recommendation: defer it until a real program demands a non-sliceable
-adjacency graph.
+**Phase 2 — the general rectangular-dual topology, shipped.** The non-sliceable
+case (the 5-room pinwheel: a centre room that must touch four others) is now
+handled by a third topology, `engine="dual"`, slotted into the same
+generate-and-select frame. Two design decisions, both deliberate:
+
+- **Direct structural-grid search instead of the REL / planar-embedding pipeline
+  (§7.4).** A strict rectangular dual built via a Regular Edge Labeling needs a
+  from-scratch planar embedding, outer-face triangulation, CIP analysis and graph
+  augmentation — intricate, high-bug-risk pure-Python. Instead we search directly
+  for an integer *rectangulation* (a tiling of a small structural grid, one
+  rectangle per room) with the classic "fill the lowest-leftmost empty cell"
+  exact-tiling backtracker, keeping tilings where every required adjacency is a
+  shared wall and every daylight/egress room is on the boundary. **Its acceptance
+  test *is* the spec**, so it is correct by construction and needs none of the REL
+  machinery. This exploits that our room counts are small (≤ 9; barndos sit well
+  under) where the search is fast (worst case measured: 0.33 s / ~100 K nodes).
+- **Subset, not strict-dual, adjacency.** A floor plan tolerates *extra* shared
+  walls (we simply don't cut a door there), so we require the requested edges to
+  be a **subset** of the realised contacts — weaker and easier than a true dual,
+  and it still realises every program a strict dual would.
+
+The chosen topology is dimensioned to the size program by iterative proportional
+fitting (column widths / row heights nudged toward each room's target area, then
+renormalised to fill the envelope; cut lines grid-snapped to round-trip). Like
+every candidate it is kept by `auto` only when it scores best, and `auto` reaches
+for it (it is the most expensive topology) **only when bands and slice still leave
+an adjacency unmet** — exactly when it can help. When no tiling realises the
+program it returns `None` and `auto` falls back, so it can never regress.
+
+**Vetting.** The pinwheel (which bands and slice each drop an arm on) is solved
+with all four adjacencies satisfied and a clean compile. A randomized sweep of
+120 briefs produced **zero** structural failures on every plan the engine emitted
+(no overlap, in-bounds, required adjacencies are real shared walls, no buried
+habitable rooms, 0 compiler errors, < 2 % waste); the ~30 % of briefs with no
+realisable dual correctly returned `None` (widening the search caps recovered
+none of them, confirming they are genuinely non-realisable, not a search gap).
+
+**What's still future work:** the strict REL / planar-embedding constructor of
+§7.4 — only worth building if a future program needs more rooms than the direct
+search scales to (its grids grow as n²), or wants the exact dual's
+no-extra-contacts guarantee. For barndominiums neither is pressing.
 
 The rest of this document is the original research + design.
 
@@ -330,6 +363,11 @@ Phase 1 honors adjacencies expressible as slicing siblings (the common case) and
 *guarantees* fill + no-overlap + outer leaves on the perimeter.
 
 ### 7.4 Phase 2 topology: rectangular dual
+
+> **Implemented differently (see §0).** The pipeline below is the textbook REL
+> route; the shipped engine instead searches directly for a structural-grid
+> rectangulation and verifies the dual property on the output. The REL route is
+> kept here as the scaling path for room counts beyond the direct search.
 
 1. **Build & validate the graph**: required adjacencies + 4 exterior vertices
    (perimeter edges for daylight/egress rooms). Check planarity, proper

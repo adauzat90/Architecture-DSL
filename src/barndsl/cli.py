@@ -259,10 +259,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_layout.add_argument(
         "--engine",
-        choices=("fill", "bands", "slice", "greedy"),
+        choices=("fill", "bands", "slice", "dual", "greedy"),
         default="fill",
         help="'fill' (default): space-filling, auto-selects the best topology; "
-        "'bands'/'slice': force a v2 topology; 'greedy': v1 abutment placer",
+        "'bands'/'slice'/'dual': force a v2 topology ('dual' = rectangular dual, "
+        "for non-sliceable adjacency graphs); 'greedy': v1 abutment placer",
     )
     p_layout.set_defaults(func=_cmd_layout)
 

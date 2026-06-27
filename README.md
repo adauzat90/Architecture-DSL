@@ -151,16 +151,19 @@ The brief is a tiny line-based format (`room <id>: <type> <W> x <L>`,
 dimensions each room to **tile the rectangle with no wasted space**, so habitable
 rooms land on the perimeter for daylight/egress by construction. Give it **target
 areas** (`room living: living area 360`) and it sizes everything to fit.
-Internally it generates two topologies — *bands* (public core · hall · private
-row) and a recursive *slice* (which can give a room three neighbours) — and keeps
-whichever scores best, following the floor-planning literature's
-generate-and-select approach. `--engine greedy` is the original abutment placer,
-which honors fixed sizes exactly but leaves gaps and the odd buried room. The
-design and the floor-planning research behind `fill` are in
+Internally it generates three topologies — *bands* (public core · hall · private
+row), a recursive *slice* (which can give a room three neighbours), and a
+rectangular *dual* (which tiles so that *every* requested adjacency is a shared
+wall, even non-sliceable graphs like a **pinwheel** — a centre room touching four
+others) — and keeps whichever scores best, following the floor-planning
+literature's generate-and-select approach. `--engine greedy` is the original
+abutment placer, which honors fixed sizes exactly but leaves gaps and the odd
+buried room. The design and the floor-planning research behind `fill` are in
 [`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md).
 
 ```bash
 barndsl layout examples/birch_run.brief             # fill (default): 0/0/0, tiled
+barndsl layout examples/pinwheel.brief              # fill picks the dual topology
 barndsl layout examples/birch_run.brief --engine greedy
 ```
 
@@ -249,7 +252,7 @@ src/barndsl/
   emit.py        # plan → DSL source
   validation.py  # building-code checks → diagnostics with fix hints
   layout.py      # auto-layout v1: greedy abutment from an adjacency brief
-  layout2.py     # auto-layout 2.0: space-filling band dissection (the `fill` engine)
+  layout2.py     # auto-layout 2.0: space-filling `fill` engine (bands + slice + rectangular dual)
   render.py      # annotated 2D SVG renderer
   agent.py       # Claude write → compile → critique → revise loop
   cli.py         # `barndsl` command
@@ -257,16 +260,18 @@ examples/
   cedar_ridge.barn   # the worked plan in DSL (used by `barndsl demo`)
   simple_barndo.py   # the same plan via the Python builder
   birch_run.brief    # an adjacency brief for `barndsl layout`
+  pinwheel.brief     # a non-sliceable brief that exercises the rectangular dual
 tests/             # no API key required
 ```
 
 ## Roadmap
 
-- Auto-layout: the `fill` engine generates two topologies (bands + recursive
-  slice) and keeps the best-scoring one. The remaining frontier is the *fully
-  general, non-sliceable* **rectangular dual** (e.g. a 5-room pinwheel) — high
-  effort for low marginal value on rectangular barndos, so deferred; it would slot
-  in as just another candidate topology. See
+- Auto-layout: the `fill` engine generates three topologies — bands, recursive
+  slice, and a rectangular **dual** that handles non-sliceable adjacency graphs
+  (e.g. a 5-room pinwheel) — and keeps the best-scoring one. The dual is built by
+  a direct structural-grid rectangulation search (verified against the adjacency
+  spec, with graceful fallback) rather than the heavier REL / planar-embedding
+  pipeline, which remains the scaling path for very large room counts. See
   [`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md)
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
