@@ -33,6 +33,13 @@ from .elements import (
     feet,
     inches,
 )
+from .compiler import (
+    DSL_REFERENCE,
+    CompileResult,
+    compile_file,
+    compile_source,
+)
+from .emit import emit_dsl
 from .render import RenderConfig, render_svg, save_svg
 from .validation import Issue, Severity, ValidationReport, validate
 
@@ -48,10 +55,18 @@ __all__ = [
     "Porch",
     "feet",
     "inches",
+    # compiler front-end
+    "compile_source",
+    "compile_file",
+    "CompileResult",
+    "DSL_REFERENCE",
+    "emit_dsl",
+    # checks
     "validate",
     "ValidationReport",
     "Issue",
     "Severity",
+    # rendering
     "render_svg",
     "save_svg",
     "RenderConfig",

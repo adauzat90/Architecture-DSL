@@ -1,21 +1,33 @@
 """Command-line interface for barndsl.
 
-    barndsl demo [--out FILE]
-        Build the bundled example plan, validate it, and render an SVG.
+    barndsl compile FILE.barn
+        Compile a DSL file and print compiler-style diagnostics.
 
-    barndsl design "BRIEF" [--out FILE] [--iterations N] [--model ID] [--no-critique]
-        Run the Claude agent: natural language → validated, rendered plan.
+    barndsl build FILE.barn [--out FILE.svg]
+        Compile, and if it's valid, render an annotated 2D floor plan.
+
+    barndsl demo [--out FILE.svg]
+        Compile and render the bundled example (examples/cedar_ridge.barn).
+
+    barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
+        Run the Claude agent: brief → DSL → compile → critique → refine.
         Requires `pip install 'barndsl[agent]'` and ANTHROPIC_API_KEY.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from . import __version__
+from .compiler import compile_file, compile_source
 from .render import save_svg
-from .validation import validate
+
+
+def _repo_example() -> str:
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    return os.path.join(repo_root, "examples", "cedar_ridge.barn")
 
 
 def _print_metrics(plan) -> None:
@@ -27,30 +39,40 @@ def _print_metrics(plan) -> None:
     print(f"  Roof area (≈):    {m['roof_area_sqft']:.0f} sq ft")
 
 
-def _cmd_demo(args: argparse.Namespace) -> int:
-    # Import the bundled example without requiring it to be on sys.path.
-    import importlib.util
-    import os
+def _cmd_compile(args: argparse.Namespace) -> int:
+    result = compile_file(args.file)
+    print(result.report(os.path.basename(args.file)))
+    return 0 if result.ok else 1
 
-    # cli.py lives at <repo>/src/barndsl/cli.py → three levels up is <repo>.
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    example_path = os.path.join(repo_root, "examples", "simple_barndo.py")
-    if os.path.exists(example_path):
-        spec = importlib.util.spec_from_file_location("simple_barndo", example_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
-        plan = module.build_example()
-    else:  # Fallback: a minimal inline plan if the example file is absent.
-        plan = _fallback_plan()
 
-    print(f"Plan: {plan.name}\n")
-    report = validate(plan)
-    print(report)
+def _cmd_build(args: argparse.Namespace) -> int:
+    result = compile_file(args.file)
+    print(result.report(os.path.basename(args.file)))
+    if result.plan is None:
+        return 1
     print()
-    _print_metrics(plan)
-    save_svg(plan, args.out)
+    _print_metrics(result.plan)
+    save_svg(result.plan, args.out)
     print(f"\nWrote {args.out}")
-    return 0 if report.is_valid else 1
+    return 0 if result.ok else 1
+
+
+def _cmd_demo(args: argparse.Namespace) -> int:
+    path = _repo_example()
+    if os.path.exists(path):
+        result = compile_file(path)
+        label = os.path.basename(path)
+    else:  # pragma: no cover - example missing
+        result = compile_source(_FALLBACK_DSL, name="Demo Barndo")
+        label = "<demo>"
+    print(result.report(label))
+    if result.plan is None:  # pragma: no cover
+        return 1
+    print()
+    _print_metrics(result.plan)
+    save_svg(result.plan, args.out)
+    print(f"\nWrote {args.out}")
+    return 0 if result.ok else 1
 
 
 def _cmd_design(args: argparse.Namespace) -> int:
@@ -63,8 +85,8 @@ def _cmd_design(args: argparse.Namespace) -> int:
     def on_step(step) -> None:
         crit = ""
         if step.critique is not None:
-            crit = "  satisfied" if step.critique.satisfied else "  needs work"
-        print(f"  iteration {step.iteration}: {step.report.summary()}{crit}")
+            crit = "  (critic: satisfied)" if step.critique.satisfied else "  (critic: needs work)"
+        print(f"  iteration {step.iteration}: {step.result.summary()}{crit}")
 
     print(f"Designing with {args.model} (up to {args.iterations} iteration(s))...\n")
     agent = BarndoAgent(model=args.model)
@@ -79,48 +101,54 @@ def _cmd_design(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    plan = result.plan
-    print(f"\nPlan: {plan.name}  (after {result.iterations} iteration(s))\n")
-    print(result.report)
-    print()
-    _print_metrics(plan)
+    print(f"\n--- final DSL (after {result.iterations} iteration(s)) ---")
+    print(result.source.rstrip())
+    print("\n--- compiler report ---")
+    print(result.result.report())
+    if result.plan is not None:
+        print()
+        _print_metrics(result.plan)
+        save_svg(result.plan, args.out)
+        print(f"\nWrote {args.out}")
     if result.history and result.history[-1].critique is not None:
         print("\nArchitect's assessment:")
         print(f"  {result.history[-1].critique.assessment}")
-    save_svg(plan, args.out)
-    print(f"\nWrote {args.out}")
-    return 0 if result.report.is_valid else 1
+    return 0 if result.result.ok else 1
 
 
-def _fallback_plan():  # pragma: no cover - only if example file missing
-    from .builder import barndominium
-    from .elements import Direction as D
-    from .elements import RoomType as T
-
-    return (
-        barndominium("Demo Barndo")
-        .envelope(width=40, length=30)
-        .ceiling(10)
-        .add_room("living", T.LIVING, x=0, y=0, width=24, length=30)
-        .add_room("bedroom", T.BEDROOM, x=24, y=0, width=16, length=15)
-        .add_room("bath", T.BATHROOM, x=24, y=15, width=16, length=15)
-        .connect("living", "bedroom", width=2.67)
-        .connect("living", "bath", width=2.67)
-        .entrance("living", D.SOUTH, width=3, offset=10)
-        .add_window("bedroom", D.EAST, width=4, offset=4)
-        .add_window("living", D.WEST, width=8, offset=10)
-    )
+_FALLBACK_DSL = """\
+plan "Demo Barndo"
+envelope 40 x 30
+ceiling 10
+room living: living at 0,0 size 24 x 30
+room bedroom: bedroom at 24,0 size 16 x 15
+room bath: bathroom at 24,15 size 16 x 15
+door living - bedroom width 2.67
+door living - bath width 2.67
+entry living south width 3 offset 10
+window bedroom east width 4 offset 4
+window living west width 8 offset 10
+"""
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="barndsl",
-        description="DSL and agentic workflow for barndominium floor plans.",
+        description="DSL compiler and agentic workflow for barndominium floor plans.",
     )
     parser.add_argument("--version", action="version", version=f"barndsl {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_demo = sub.add_parser("demo", help="render and validate the bundled example plan")
+    p_compile = sub.add_parser("compile", help="compile a .barn file and print diagnostics")
+    p_compile.add_argument("file", help="path to a .barn DSL file")
+    p_compile.set_defaults(func=_cmd_compile)
+
+    p_build = sub.add_parser("build", help="compile and render a .barn file to SVG")
+    p_build.add_argument("file", help="path to a .barn DSL file")
+    p_build.add_argument("--out", default="barndo.svg", help="output SVG path")
+    p_build.set_defaults(func=_cmd_build)
+
+    p_demo = sub.add_parser("demo", help="compile and render the bundled example")
     p_demo.add_argument("--out", default="barndo.svg", help="output SVG path")
     p_demo.set_defaults(func=_cmd_demo)
 

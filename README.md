@@ -1,130 +1,181 @@
 # barndsl
 
-An embedded **Python DSL** and **agentic workflow** for designing residential
-floor plans — focused, for the MVP, on **barndominiums** (metal-frame
-post-and-beam homes).
+A small **architecture description language** with a **compiler**, plus an
+**agentic workflow** that designs floor plans by writing that language and
+iterating against the compiler's feedback. The MVP is focused on
+**barndominiums** (metal-frame post-and-beam homes).
 
-It has two layers:
-
-1. **A pure, dependency-light engine** — a fluent, type-hinted DSL to describe a
-   plan, a building-code validator, and a 2D SVG renderer with dimensions and a
-   project summary. No API key required.
-2. **A Claude-powered agent** — turns a natural-language brief into a *validated*
-   plan through a **generate → validate → critique → refine** loop.
+The core idea: give an AI a *language to describe architecture in*, and a
+*compilation step* that tells it — precisely, with line numbers and fix hints —
+what's wrong and how to make it right. The compiler is the teacher; the
+diagnostics steer the design toward something valid and well laid out.
 
 ```
-brief ──▶ ┌─────────┐   ┌──────────┐   ┌──────────┐   refine
-          │generate │──▶│ validate │──▶│ critique │──────┐
-          └─────────┘   └──────────┘   └──────────┘      │
-               ▲                                          │
-               └──────────  feedback (errors + critique) ─┘
+DSL source ─▶ compile ─▶ ┌── ok? ──▶ render SVG
+                          └── diagnostics (line, code, hint) ─┐
+                                                              │
+   author / agent rewrites the DSL  ◀──────── feedback ───────┘
 ```
 
-## Install
+## The language
 
-```bash
-pip install -e .            # engine only
-pip install -e '.[agent]'   # + the Claude agent (needs ANTHROPIC_API_KEY)
+You describe a plan as source code. One statement per line; `#` for comments;
+measurements in feet; origin `(0,0)` at the south-west corner (`x`→east,
+`y`→north).
+
+```barn
+plan "Cedar Ridge"
+envelope 60 x 40
+ceiling 12
+
+room great_room: living   at 0,0   size 28 x 26
+room kitchen:    kitchen   at 28,14 size 18 x 12
+room master_bed: bedroom   at 0,29  size 16 x 11
+
+door great_room - kitchen width 8         # interior door (rooms must share a wall)
+entry great_room south width 3 offset 20  # exterior door
+window master_bed north width 5 offset 5  # egress window
+porch front_porch at 0,-8 size 28 x 8 covered
 ```
 
-## The DSL
+Full grammar:
 
-The DSL is *embedded*: plans are ordinary Python objects built with a fluent,
-chainable API. You get IDE autocomplete and type-checking, and no custom parser
-to maintain.
-
-```python
-from barndsl import barndominium, RoomType as T, Direction as D, validate, save_svg
-
-plan = (
-    barndominium("Cedar Ridge")
-    .envelope(width=60, length=40)      # footprint in feet
-    .ceiling(12)
-    .add_room("great_room", T.LIVING, x=0,  y=0,  width=28, length=26)
-    .add_room("kitchen",    T.KITCHEN, x=28, y=14, width=18, length=12)
-    .add_room("master_bed", T.BEDROOM, x=0,  y=29, width=16, length=11)
-    .connect("great_room", "kitchen", width=8)        # interior door
-    .entrance("great_room", D.SOUTH, width=3, offset=20)  # exterior door
-    .add_window("master_bed", D.NORTH, width=5, offset=5)  # egress window
-)
-
-print(validate(plan))         # building-code report
-save_svg(plan, "plan.svg")    # annotated 2D floor plan
+```
+plan "Name"
+envelope <W> x <L>
+ceiling <H>
+note "free text"
+room <id>: <type> at <x>,<y> size <W> x <L>
+door <id_a> - <id_b> [width <w>]
+entry <id> <wall> [width <w>] [offset <o>] [no-egress]
+window <id> <wall> [width <w>] [offset <o>]
+porch <id> at <x>,<y> size <W> x <L> [covered|open]
 ```
 
-### Coordinate system
+`<type>`: living, kitchen, dining, bedroom, bathroom, hallway, closet, pantry,
+mudroom, office, loft, garage, shop, … · `<wall>`: north|south|east|west.
 
-All measurements are in **feet**. The origin `(0, 0)` is the **south-west
-corner** of the envelope; `x` increases **east**, `y` increases **north**. A room
-at `(x, y)` with `width` (east-west) and `length` (north-south) occupies
-`[x, x+width] × [y, y+length]`.
+## The compiler
 
-## Validation
+`compile_source(src)` lexes, parses, lowers to a plan, runs the building-code
+checks, and returns diagnostics with **line numbers, error codes, and actionable
+fix hints** — like compiler output:
 
-`validate(plan)` returns a report of `ERROR` / `WARNING` / `INFO` issues, modelled
-loosely on the IRC plus spatial sanity. Among the checks:
+```text
+$ barndsl compile broken.barn
+COMPILE FAILED — 6 error(s), 4 warning(s)
+broken.barn:4: error[OVERLAP] (living): Rooms 'living' and 'bedroom' overlap by 20 sq ft.
+    hint: Reposition so they don't intersect — e.g. move 'bedroom' to x=24 (east of 'living').
+broken.barn:5: error[BEDROOM_EGRESS] (bedroom): Bedroom has no emergency escape opening.
+    hint: Add an egress window on an exterior wall, e.g. `window bedroom south width 4 offset 2`.
+broken.barn:6: error[OUT_OF_BOUNDS] (office): Room extends outside the 40×30 ft envelope.
+    hint: reduce its width by 4 ft or move it west to x=20.
+...
+```
 
-- rooms stay inside the envelope and don't overlap;
-- bedrooms meet minimum area/dimension and have an **egress** window or door;
-- every interior room is **reachable** from an entrance via interior doors;
-- habitable rooms meet the **8% natural-light** glazing ratio;
-- hallway widths, door widths, ceiling height, at least one egress door.
+What it checks (loosely IRC-based + spatial sanity): rooms stay in the envelope
+and don't overlap; bedrooms meet min area/dimension and have **egress**; every
+interior room is **reachable** from an entrance via interior doors; habitable
+rooms meet the **8% natural-light** ratio; hallway/door widths; ceiling height;
+at least one egress door. Every diagnostic includes a concrete fix in DSL terms.
 
 > These checks are approximate and **not** a substitute for a licensed designer
-> or a code review by the authority having jurisdiction.
+> or a review by the authority having jurisdiction.
 
-## The agent
+```python
+from barndsl import compile_source, save_svg
+
+src = open("cedar_ridge.barn").read()
+result = compile_source(src)
+print(result.report())          # diagnostics
+if result.ok:
+    save_svg(result.plan, "plan.svg")
+```
+
+## The agent: a compile-fix loop
+
+The agent *writes architecture in the DSL*, compiles it, and feeds the compiler's
+diagnostics straight back into the next prompt — the same loop a developer runs
+against a compiler:
 
 ```python
 from barndsl.agent import design
 
 result = design(
-    "A 3 bed / 2 bath barndominium around 1,800 sq ft, open-concept living, "
+    "3 bed / 2 bath barndominium ~1800 sq ft, open-concept living, "
     "a mudroom off the carport, and a covered back porch.",
     max_iterations=3,
 )
-print(result.report)                 # final validation
-print(result.iterations, "rounds")
+print(result.source)        # the DSL the model wrote
+print(result.result.report())
 ```
 
-The agent uses Claude (`claude-opus-4-8` by default) with **structured outputs**
-to emit a `PlanSpec`, builds it with the same DSL, validates it, asks the model
-to **critique** the design, then feeds the errors and critique back and
-regenerates — until the plan is code-valid and the critic is satisfied (or the
-iteration cap is reached).
+Each round: **write DSL → compile → critique (design quality) → revise**, until
+it compiles clean and the critic is satisfied (or the cap is hit). Uses Claude
+(`claude-opus-4-8`) — the compiler's diagnostics are the steering signal.
+
+## Two front-ends, one core
+
+You can also build a plan with the **embedded Python builder** — handy for tests
+and programmatic generation; it lowers to the same plan object the compiler
+produces, and `emit_dsl(plan)` serialises it back to DSL source.
+
+```python
+from barndsl import barndominium, RoomType as T, Direction as D, validate, emit_dsl
+
+plan = (
+    barndominium("Cedar Ridge")
+    .envelope(width=60, length=40).ceiling(12)
+    .add_room("great_room", T.LIVING, x=0, y=0, width=28, length=26)
+    .entrance("great_room", D.SOUTH, width=3, offset=20)
+)
+print(validate(plan))
+print(emit_dsl(plan))   # → DSL source
+```
 
 ## CLI
 
 ```bash
-barndsl demo --out cedar_ridge.svg
+barndsl compile examples/cedar_ridge.barn          # diagnostics only
+barndsl build   examples/cedar_ridge.barn --out plan.svg
+barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
-barndsl design "..." --iterations 4 --model claude-opus-4-8
 ```
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
+
+## Install
+
+```bash
+pip install -e .            # compiler + renderer (no API key)
+pip install -e '.[agent]'   # + the Claude agent
+```
 
 ## Project layout
 
 ```
 src/barndsl/
-  elements.py    # dataclasses + the fluent builder API
+  elements.py    # plan IR + the fluent Python builder
   geometry.py    # shared-edge / wall / opening helpers
-  validation.py  # building-code checks → ValidationReport
+  compiler.py    # lexer + parser + compile_source → CompileResult (diagnostics)
+  emit.py        # plan → DSL source
+  validation.py  # building-code checks → diagnostics with fix hints
   render.py      # annotated 2D SVG renderer
-  agent.py       # Claude generate → validate → critique → refine loop
+  agent.py       # Claude write → compile → critique → revise loop
   cli.py         # `barndsl` command
 examples/
-  simple_barndo.py   # the worked Cedar Ridge plan (used by `barndsl demo`)
-tests/
-  test_engine.py     # engine tests (no API key needed)
+  cedar_ridge.barn   # the worked plan in DSL (used by `barndsl demo`)
+  simple_barndo.py   # the same plan via the Python builder
+tests/             # 17 tests, no API key required
 ```
 
 ## Roadmap
 
+- Richer source spans (column-accurate carets) on semantic diagnostics
 - Multi-story / loft levels and stairs
-- Auto-layout (constraint-solve room placement from an adjacency brief)
+- Auto-layout: solve room placement from an adjacency brief
 - Cost estimation from the material takeoff
-- Additional residential building types beyond barndominiums
+- More residential building types beyond barndominiums
 
 ## License
 

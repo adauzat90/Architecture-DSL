@@ -1,196 +1,114 @@
-"""Claude-powered agentic workflow: generate → validate → critique → refine.
+"""Claude-powered agentic workflow built around the compiler.
 
-The pure engine (:mod:`barndsl.elements`, :mod:`barndsl.validation`,
-:mod:`barndsl.render`) has no LLM dependency. This module adds an agent that
-turns a natural-language brief into a validated plan by looping:
+The agent *writes architecture in the DSL*. Each round it emits DSL source, the
+compiler returns diagnostics (errors + fix hints), and those diagnostics are fed
+straight back as the next prompt — a compile-fix loop, exactly like a developer
+iterating against compiler output:
 
-    1. **generate** a structured plan from the brief (and any prior feedback);
-    2. **validate** it against the building-code checks;
-    3. **critique** it with the model for design quality;
-    4. **refine** — feed the errors and critique back and regenerate, until the
-       plan is code-valid and the critic is satisfied (or the iteration cap is hit).
+    1. **write**    DSL source from the brief (+ prior source + diagnostics);
+    2. **compile**  → plan + diagnostics (line, code, hint);
+    3. **critique** the design for quality (optional, model-driven);
+    4. **revise**   feed diagnostics + critique back, rewrite the DSL, repeat —
+       until it compiles clean and the critic is satisfied (or the cap is hit).
 
-Requires the ``anthropic`` package and an ``ANTHROPIC_API_KEY``. Install with
-``pip install 'barndsl[agent]'``.
+Requires ``anthropic`` and ``ANTHROPIC_API_KEY``. Install ``pip install 'barndsl[agent]'``.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
-from .elements import Barndominium, Direction, RoomType
-from .validation import ValidationReport, validate
+from .compiler import DSL_REFERENCE, CompileResult, compile_source
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
-
-# --- Structured output schema ----------------------------------------------
-
-
-class RoomSpec(BaseModel):
-    id: str = Field(description="Unique snake_case identifier, e.g. 'master_bedroom'.")
-    type: RoomType
-    x: float = Field(description="West edge, feet from the SW origin.")
-    y: float = Field(description="South edge, feet from the SW origin.")
-    width: float = Field(description="East-west extent in feet.")
-    length: float = Field(description="North-south extent in feet.")
-
-
-class InteriorDoorSpec(BaseModel):
-    room_a: str
-    room_b: str
-    width: float = 2.67
-
-
-class ExteriorDoorSpec(BaseModel):
-    room: str
-    wall: Direction
-    width: float = 3.0
-    offset: float = 1.0
-    egress: bool = True
-
-
-class WindowSpec(BaseModel):
-    room: str
-    wall: Direction
-    width: float = 4.0
-    offset: float = 2.0
-
-
-class PorchSpec(BaseModel):
-    id: str
-    x: float
-    y: float
-    width: float
-    length: float
-    covered: bool = True
-
-
-class PlanSpec(BaseModel):
-    """The structured floor plan the model emits."""
-
-    name: str
-    envelope_width: float = Field(description="Overall footprint width (E-W), feet.")
-    envelope_length: float = Field(description="Overall footprint length (N-S), feet.")
-    ceiling_height: float = 9.0
-    rooms: list[RoomSpec] = Field(default_factory=list)
-    interior_doors: list[InteriorDoorSpec] = Field(default_factory=list)
-    exterior_doors: list[ExteriorDoorSpec] = Field(default_factory=list)
-    windows: list[WindowSpec] = Field(default_factory=list)
-    porches: list[PorchSpec] = Field(default_factory=list)
-    notes: str = ""
-
-
-class CritiqueSpec(BaseModel):
-    """The model's design-quality review of a generated plan."""
-
-    satisfied: bool = Field(
-        description="True only if the plan is a genuinely good, buildable design "
-        "needing no further changes."
-    )
-    assessment: str = Field(description="One-paragraph overall judgement.")
-    suggestions: list[str] = Field(
-        default_factory=list,
-        description="Specific, actionable changes. Empty if satisfied.",
-    )
-
-
-def build_plan(spec: PlanSpec) -> Barndominium:
-    """Materialise a :class:`Barndominium` from a :class:`PlanSpec`."""
-    plan = Barndominium(
-        name=spec.name,
-        envelope_width=spec.envelope_width,
-        envelope_length=spec.envelope_length,
-        ceiling_height=spec.ceiling_height,
-        notes=spec.notes,
-    )
-    for r in spec.rooms:
-        plan.add_room(r.id, r.type, x=r.x, y=r.y, width=r.width, length=r.length)
-    for d in spec.interior_doors:
-        plan.connect(d.room_a, d.room_b, width=d.width)
-    for d in spec.exterior_doors:
-        plan.entrance(d.room, d.wall, width=d.width, offset=d.offset, egress=d.egress)
-    for w in spec.windows:
-        plan.add_window(w.room, w.wall, width=w.width, offset=w.offset)
-    for p in spec.porches:
-        plan.add_porch(p.id, x=p.x, y=p.y, width=p.width, length=p.length, covered=p.covered)
-    return plan
-
-
-# --- Prompts ----------------------------------------------------------------
-
-_GEOMETRY_RULES = """\
-COORDINATE SYSTEM (read carefully):
-- All measurements are in FEET.
-- Origin (0,0) is the bottom-left (south-west) corner of the building envelope.
-- x increases east (right); y increases north (up).
-- A room at x,y with width W and length L occupies [x, x+W] east-west and
-  [y, y+L] south-north. Its walls: south=y, north=y+L, west=x, east=x+L.
-- Rooms MUST stay inside the envelope: 0 <= x, x+W <= envelope_width and
-  0 <= y, y+L <= envelope_length.
-- Rooms MUST NOT overlap. Pack them to tile the footprint with little waste.
-- Two rooms can only have a connecting interior door if they share a wall
-  segment (collinear edges with overlapping extent).
-- Put exterior doors and windows only on walls that lie on the envelope edge.
-
-DESIGN RULES (barndominium, IRC-informed):
-- Bedrooms: >= 70 sq ft, smallest dimension >= 7 ft, and each needs an egress
-  window (or exterior door) on an exterior wall.
-- Provide at least one full bathroom; locate baths near bedrooms.
-- Every interior room must be reachable from an entrance via interior doors
-  (use a hallway/open plan to connect spaces — don't strand rooms).
-- Habitable rooms need windows totalling >= 8% of their floor area.
-- Hallways >= 3 ft wide; at least one exterior egress door >= 32 in (2.67 ft).
-- Barndominiums are typically a single large rectangle; open-concept
-  living/kitchen/dining is idiomatic. A shop/garage bay is common.
+_DESIGN_RULES = """\
+DESIGN RULES the compiler enforces (write DSL that satisfies them):
+- Rooms must stay inside the envelope and must not overlap. Tile the footprint
+  with little waste; barndominiums are a single rectangle.
+- An interior `door` only connects two rooms that SHARE A WALL. Plan adjacencies
+  so every room is reachable from an `entry` through interior doors (use a
+  hallway or open plan to connect spaces — never strand a room).
+- Bedrooms: >= 70 sq ft, smallest side >= 7 ft, each needs an egress `window`
+  (or its own `entry`) on a wall that lies on the envelope edge.
+- Provide at least one bathroom, sited near the bedrooms.
+- Habitable rooms (living/kitchen/dining/bedroom/office/loft) need windows
+  totalling >= 8% of their floor area, so put them on exterior walls.
+- At least one `entry` must be >= 2.67 ft (an egress door). Hallways >= 3 ft.
+- Idiomatic barndo: open-concept living/kitchen/dining, plus a shop/garage bay.
 """
 
 _GENERATE_SYSTEM = (
-    "You are an expert residential designer specialising in barndominiums "
-    "(metal-frame post-and-beam homes). You produce complete, buildable, "
-    "code-conscious floor plans as structured data.\n\n" + _GEOMETRY_RULES
+    "You are an expert residential designer specialising in barndominiums. You "
+    "describe floor plans by writing source code in the barndsl architecture "
+    "language, then refining it against the compiler's diagnostics until it is "
+    "valid and well-designed.\n\n"
+    + DSL_REFERENCE
+    + "\n"
+    + _DESIGN_RULES
+    + "\nAlways reply with ONLY the DSL source (optionally inside a ```barn code "
+    "block). Do not add prose before or after."
 )
 
 _CRITIQUE_SYSTEM = (
-    "You are a senior architect reviewing a barndominium floor plan for design "
-    "quality and livability. Be constructive but exacting. Consider flow and "
-    "adjacencies (e.g. kitchen near dining, baths near beds, mudroom near "
-    "entry), privacy, natural light, wasted space, and whether the layout is "
-    "actually pleasant to live in — not just code-compliant.\n\n" + _GEOMETRY_RULES
+    "You are a senior architect reviewing a barndominium plan (given as barndsl "
+    "source plus the compiler's report) for design quality and livability. Judge "
+    "flow and adjacencies (kitchen by dining, baths by beds, mudroom by entry), "
+    "privacy, light, wasted space, and whether it is pleasant to live in — not "
+    "just code-compliant. Be constructive but exacting.\n\n" + DSL_REFERENCE
 )
 
+_FENCE_RE = re.compile(r"```(?:[a-zA-Z]+)?\s*\n(.*?)```", re.DOTALL)
 
-# --- Result types -----------------------------------------------------------
+
+def _extract_source(text: str) -> str:
+    """Pull the DSL out of a model reply (strip a code fence if present)."""
+    blocks = _FENCE_RE.findall(text)
+    if blocks:
+        return max(blocks, key=len).strip() + "\n"
+    return text.strip() + "\n"
+
+
+class CritiqueSpec(BaseModel):
+    """The model's design-quality review."""
+
+    satisfied: bool = Field(
+        description="True only if the plan is genuinely good and needs no changes."
+    )
+    assessment: str = Field(description="One-paragraph overall judgement.")
+    suggestions: list[str] = Field(
+        default_factory=list, description="Specific, actionable changes. Empty if satisfied."
+    )
 
 
 @dataclass
 class DesignStep:
     iteration: int
-    spec: PlanSpec
-    plan: Barndominium
-    report: ValidationReport
+    source: str
+    result: CompileResult
     critique: CritiqueSpec | None = None
 
 
 @dataclass
 class DesignResult:
-    plan: Barndominium
-    spec: PlanSpec
-    report: ValidationReport
+    source: str
+    result: CompileResult
     history: list[DesignStep] = field(default_factory=list)
+
+    @property
+    def plan(self):
+        return self.result.plan
 
     @property
     def iterations(self) -> int:
         return len(self.history)
 
 
-# --- Agent ------------------------------------------------------------------
-
-
 class BarndoAgent:
-    """Drives the generate → validate → critique → refine loop."""
+    """Drives the write → compile → critique → revise loop."""
 
     def __init__(self, model: str = DEFAULT_MODEL, client=None):
         self.model = model
@@ -211,41 +129,37 @@ class BarndoAgent:
 
     # -- single steps ------------------------------------------------------
 
-    def generate(self, brief: str, feedback: str | None = None, prior: PlanSpec | None = None) -> PlanSpec:
+    def write_source(
+        self, brief: str, prior: str | None = None, diagnostics: str | None = None
+    ) -> str:
         prompt = f"Design brief:\n{brief}\n"
-        if prior is not None:
+        if prior:
+            prompt += f"\nYour previous DSL:\n```barn\n{prior}```\n"
+        if diagnostics:
             prompt += (
-                "\nYour previous attempt (JSON):\n"
-                + prior.model_dump_json(indent=2)
-                + "\n"
+                "\nThe compiler reported the following. Fix EVERY error and "
+                "address warnings where reasonable:\n\n" + diagnostics + "\n"
             )
-        if feedback:
-            prompt += (
-                "\nThe previous attempt had the following problems. Fix ALL of "
-                "them in this revision:\n" + feedback + "\n"
-            )
-        prompt += "\nProduce the full revised plan."
+        prompt += "\nReturn the complete, revised DSL source."
 
-        resp = self.client.messages.parse(
+        with self.client.messages.stream(
             model=self.model,
-            max_tokens=16000,
+            max_tokens=8000,
             system=_GENERATE_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
-            output_format=PlanSpec,
             thinking={"type": "adaptive"},
-        )
-        spec = resp.parsed_output
-        if spec is None:  # pragma: no cover - refusal / parse failure
-            raise RuntimeError("Model did not return a parseable plan.")
-        return spec
+        ) as stream:
+            msg = stream.get_final_message()
+        text = "".join(b.text for b in msg.content if b.type == "text")
+        return _extract_source(text)
 
-    def critique(self, plan: Barndominium, report: ValidationReport, spec: PlanSpec) -> CritiqueSpec:
+    def critique(self, result: CompileResult) -> CritiqueSpec:
         prompt = (
             "Review this barndominium plan.\n\n"
-            f"Plan (JSON):\n{spec.model_dump_json(indent=2)}\n\n"
-            f"Automated code-check report:\n{report}\n\n"
+            f"DSL source:\n```barn\n{result.source}```\n\n"
+            f"Compiler report:\n{result.report()}\n\n"
             "Assess the design and list concrete improvements. Set satisfied=true "
-            "only if it is code-valid AND a genuinely good layout."
+            "only if it compiles clean AND is a genuinely good layout."
         )
         resp = self.client.messages.parse(
             model=self.model,
@@ -256,7 +170,7 @@ class BarndoAgent:
         )
         crit = resp.parsed_output
         if crit is None:  # pragma: no cover
-            return CritiqueSpec(satisfied=report.is_valid, assessment="(no critique returned)")
+            return CritiqueSpec(satisfied=result.ok, assessment="(no critique returned)")
         return crit
 
     # -- full loop ---------------------------------------------------------
@@ -268,45 +182,39 @@ class BarndoAgent:
         critique: bool = True,
         on_step=None,
     ) -> DesignResult:
-        """Run the full workflow and return the best plan produced."""
         history: list[DesignStep] = []
-        spec: PlanSpec | None = None
+        source: str | None = None
         feedback: str | None = None
 
         for i in range(1, max_iterations + 1):
-            spec = self.generate(brief, feedback=feedback, prior=spec)
-            plan = build_plan(spec)
-            report = validate(plan)
-            crit = self.critique(plan, report, spec) if critique else None
+            source = self.write_source(brief, prior=source, diagnostics=feedback)
+            result = compile_source(source, name=None)
+            crit = self.critique(result) if (critique and result.plan is not None) else None
 
-            step = DesignStep(i, spec, plan, report, crit)
+            step = DesignStep(i, source, result, crit)
             history.append(step)
             if on_step:
                 on_step(step)
 
-            done = report.is_valid and (crit is None or crit.satisfied)
+            done = result.ok and (crit is None or crit.satisfied)
             if done or i == max_iterations:
                 break
-            feedback = _format_feedback(report, crit)
+            feedback = _format_feedback(result, crit)
 
         last = history[-1]
-        return DesignResult(last.plan, last.spec, last.report, history)
+        return DesignResult(last.source, last.result, history)
 
 
-def _format_feedback(report: ValidationReport, crit: CritiqueSpec | None) -> str:
-    lines: list[str] = []
-    if report.errors:
-        lines.append("CODE ERRORS (must fix):")
-        lines += [f"  - {i.code}{f' [{i.room}]' if i.room else ''}: {i.message}" for i in report.errors]
-    if report.warnings:
-        lines.append("WARNINGS (address where possible):")
-        lines += [f"  - {i.code}{f' [{i.room}]' if i.room else ''}: {i.message}" for i in report.warnings]
+def _format_feedback(result: CompileResult, crit: CritiqueSpec | None) -> str:
+    parts = [result.report()]
     if crit and crit.suggestions:
-        lines.append("DESIGN CRITIQUE:")
-        lines += [f"  - {s}" for s in crit.suggestions]
-    return "\n".join(lines) if lines else "No specific issues; improve overall quality."
+        parts.append("\nDESIGN CRITIQUE (improve where you can):")
+        parts += [f"  - {s}" for s in crit.suggestions]
+    return "\n".join(parts)
 
 
-def design(brief: str, model: str = DEFAULT_MODEL, max_iterations: int = 3, on_step=None) -> DesignResult:
+def design(
+    brief: str, model: str = DEFAULT_MODEL, max_iterations: int = 3, on_step=None
+) -> DesignResult:
     """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``."""
     return BarndoAgent(model=model).design(brief, max_iterations=max_iterations, on_step=on_step)

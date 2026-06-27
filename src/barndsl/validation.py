@@ -1,14 +1,18 @@
-"""Constraint and building-code validation for barndominium plans.
+"""Semantic / building-code checks — the "type checker" of the compiler.
 
-The checks are loosely modelled on the International Residential Code (IRC) plus
-common-sense spatial constraints. They are intentionally approximate — enough to
-catch the mistakes an LLM (or a human) most often makes when laying out a plan,
-and to give the agent something concrete to iterate against. They are **not** a
-substitute for a licensed designer or an authority-having-jurisdiction review.
+These run after a plan parses. They are loosely modelled on the International
+Residential Code (IRC) plus spatial sanity, and — crucially — every diagnostic
+carries an actionable ``hint`` telling the author *how* to fix it, in DSL terms.
+That is what turns validation from a pass/fail gate into something that guides
+the design.
+
+The checks are approximate and **not** a substitute for a licensed designer or a
+review by the authority having jurisdiction.
 """
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -30,7 +34,7 @@ MIN_HALLWAY_WIDTH = 3.0  # 36 in
 MIN_EGRESS_DOOR_WIDTH = 2.67  # ~32 in clear (3'0" leaf)
 MIN_INTERIOR_DOOR_WIDTH = 2.5  # 30 in
 NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
-VENT_FALLBACK_TYPES = {RoomType.BATHROOM, RoomType.HALF_BATH}
+_WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 
 
 class Severity(str, Enum):
@@ -41,14 +45,23 @@ class Severity(str, Enum):
 
 @dataclass
 class Issue:
+    """A single diagnostic. Used for both syntax (compiler) and semantic checks."""
+
     severity: Severity
     code: str
     message: str
     room: str | None = None
+    line: int | None = None
+    col: int | None = None
+    hint: str | None = None
 
     def __str__(self) -> str:
-        where = f" [{self.room}]" if self.room else ""
-        return f"{self.severity.value.upper():7} {self.code}{where}: {self.message}"
+        loc = f"line {self.line}: " if self.line else ""
+        where = f" ({self.room})" if self.room else ""
+        head = f"{loc}{self.severity.value}[{self.code}]{where}: {self.message}"
+        if self.hint:
+            head += f"\n    hint: {self.hint}"
+        return head
 
 
 @dataclass
@@ -73,28 +86,40 @@ class ValidationReport:
         return f"{status} — {e} error(s), {w} warning(s)"
 
     def __str__(self) -> str:
-        lines = [self.summary()]
-        lines += [str(i) for i in self.issues]
-        return "\n".join(lines)
+        return "\n".join([self.summary(), *(str(i) for i in self.issues)])
 
 
-def _room_within_envelope(plan: Barndominium, room: Room, tol: float = 1e-6) -> bool:
-    return (
-        room.x >= -tol
-        and room.y >= -tol
-        and room.x2 <= plan.envelope_width + tol
-        and room.y2 <= plan.envelope_length + tol
-    )
+# --- helpers ----------------------------------------------------------------
 
 
-def _room_is_on_exterior(plan: Barndominium, room: Room, tol: float = 1e-6) -> bool:
-    """Whether any of the room's walls lies on the building envelope."""
-    return (
-        abs(room.x) <= tol
-        or abs(room.y) <= tol
-        or abs(room.x2 - plan.envelope_width) <= tol
-        or abs(room.y2 - plan.envelope_length) <= tol
-    )
+def exterior_walls(plan: Barndominium, room: Room, tol: float = 1e-6) -> list[Direction]:
+    """Walls of ``room`` that lie on the building envelope (can take windows)."""
+    walls: list[Direction] = []
+    if abs(room.y) <= tol:
+        walls.append(Direction.SOUTH)
+    if abs(room.y2 - plan.envelope_length) <= tol:
+        walls.append(Direction.NORTH)
+    if abs(room.x) <= tol:
+        walls.append(Direction.WEST)
+    if abs(room.x2 - plan.envelope_width) <= tol:
+        walls.append(Direction.EAST)
+    return walls
+
+
+def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
+    """Ids of rooms that share a wall segment with ``room_id``."""
+    r = plan.room(room_id)
+    if r is None:
+        return []
+    return [o.id for o in plan.rooms if o.id != room_id and shared_edge(r, o)]
+
+
+def _f(value: float) -> str:
+    """Format a measurement: drop a trailing .0 (so 28.0 -> '28')."""
+    return f"{value:g}"
+
+
+# --- entry point ------------------------------------------------------------
 
 
 def validate(plan: Barndominium) -> ValidationReport:
@@ -102,40 +127,106 @@ def validate(plan: Barndominium) -> ValidationReport:
     issues: list[Issue] = []
     add = issues.append
 
-    # --- Envelope sanity --------------------------------------------------
     if plan.envelope_width <= 0 or plan.envelope_length <= 0:
-        add(Issue(Severity.ERROR, "ENVELOPE", "Envelope must have positive dimensions."))
+        add(
+            Issue(
+                Severity.ERROR,
+                "ENVELOPE",
+                "Envelope must have positive dimensions.",
+                hint="Declare the footprint, e.g. `envelope 60 x 40`.",
+            )
+        )
     if plan.ceiling_height < MIN_CEILING:
         add(
             Issue(
                 Severity.ERROR,
                 "CEILING",
-                f"Ceiling height {plan.ceiling_height:.1f} ft is below the "
+                f"Ceiling height {_f(plan.ceiling_height)} ft is below the "
                 f"{MIN_CEILING:.0f} ft minimum for habitable space.",
+                hint=f"Set `ceiling {MIN_CEILING:.0f}` or greater (9–12 is typical).",
             )
         )
     if not plan.rooms:
-        add(Issue(Severity.ERROR, "EMPTY", "Plan has no rooms."))
+        add(
+            Issue(
+                Severity.ERROR,
+                "EMPTY",
+                "Plan has no rooms.",
+                hint="Add rooms, e.g. `room living: living at 0,0 size 20 x 16`.",
+            )
+        )
         return ValidationReport(issues)
 
     ids = [r.id for r in plan.rooms]
-    dupes = {i for i in ids if ids.count(i) > 1}
-    for d in sorted(dupes):
-        add(Issue(Severity.ERROR, "DUP_ID", f"Duplicate room id '{d}'.", d))
+    for d in sorted({i for i in ids if ids.count(i) > 1}):
+        add(
+            Issue(
+                Severity.ERROR,
+                "DUP_ID",
+                f"Duplicate room id '{d}'.",
+                room=d,
+                hint="Give each room a unique id.",
+            )
+        )
 
-    # --- Containment & overlap -------------------------------------------
+    _validate_geometry(plan, add)
+    _validate_room_programs(plan, add)
+    _validate_doors(plan, add)
+    _validate_access(plan, add)
+    _validate_egress_and_light(plan, add)
+
+    if not plan.metrics()["bathroom_count"]:
+        add(
+            Issue(
+                Severity.WARNING,
+                "NO_BATH",
+                "Plan has no bathroom.",
+                hint="Add a bathroom, e.g. `room bath: bathroom at ... size 8 x 8`.",
+            )
+        )
+
+    return ValidationReport(issues)
+
+
+def _validate_geometry(plan: Barndominium, add) -> None:
     for room in plan.rooms:
         if room.width <= 0 or room.length <= 0:
-            add(Issue(Severity.ERROR, "ROOM_SIZE", "Room has non-positive size.", room.id))
-        if not _room_within_envelope(plan, room):
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "ROOM_SIZE",
+                    "Room has non-positive size.",
+                    room=room.id,
+                    hint="Use positive feet, e.g. `size 12 x 10`.",
+                )
+            )
+        over_x = max(0.0, room.x2 - plan.envelope_width)
+        over_y = max(0.0, room.y2 - plan.envelope_length)
+        if room.x < -1e-6 or room.y < -1e-6 or over_x > 1e-6 or over_y > 1e-6:
+            fixes = []
+            if room.x < 0:
+                fixes.append(f"set its x to >= 0")
+            if room.y < 0:
+                fixes.append(f"set its y to >= 0")
+            if over_x > 1e-6:
+                fixes.append(
+                    f"reduce its width by {_f(over_x)} ft or move it west to "
+                    f"x={_f(plan.envelope_width - room.width)}"
+                )
+            if over_y > 1e-6:
+                fixes.append(
+                    f"reduce its length by {_f(over_y)} ft or move it south to "
+                    f"y={_f(plan.envelope_length - room.length)}"
+                )
             add(
                 Issue(
                     Severity.ERROR,
                     "OUT_OF_BOUNDS",
-                    f"Room extends outside the {plan.envelope_width:.0f}×"
-                    f"{plan.envelope_length:.0f} ft envelope "
-                    f"(occupies {room.x:.1f},{room.y:.1f} → {room.x2:.1f},{room.y2:.1f}).",
-                    room.id,
+                    f"Room extends outside the {_f(plan.envelope_width)}×"
+                    f"{_f(plan.envelope_length)} ft envelope "
+                    f"({_f(room.x)},{_f(room.y)} → {_f(room.x2)},{_f(room.y2)}).",
+                    room=room.id,
+                    hint="; ".join(fixes) + ".",
                 )
             )
 
@@ -143,12 +234,19 @@ def validate(plan: Barndominium) -> ValidationReport:
         for b in plan.rooms[i + 1 :]:
             ov = a.overlaps(b)
             if ov > 0.5:  # ignore hairline floating-point overlaps
+                ox = min(a.x2, b.x2) - max(a.x, b.x)
+                oy = min(a.y2, b.y2) - max(a.y, b.y)
+                if ox <= oy:
+                    sug = f"move '{b.id}' to x={_f(a.x2)} (east of '{a.id}')"
+                else:
+                    sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
                 add(
                     Issue(
                         Severity.ERROR,
                         "OVERLAP",
-                        f"Rooms '{a.id}' and '{b.id}' overlap by {ov:.1f} sq ft.",
-                        a.id,
+                        f"Rooms '{a.id}' and '{b.id}' overlap by {_f(ov)} sq ft.",
+                        room=a.id,
+                        hint=f"Reposition so they don't intersect — e.g. {sug}.",
                     )
                 )
 
@@ -160,8 +258,9 @@ def validate(plan: Barndominium) -> ValidationReport:
                 Issue(
                     Severity.WARNING,
                     "AREA_OVERFLOW",
-                    f"Assigned room area ({used:.0f} sq ft) exceeds the footprint "
-                    f"({plan.footprint_area:.0f} sq ft).",
+                    f"Assigned room area ({_f(used)} sq ft) exceeds the footprint "
+                    f"({_f(plan.footprint_area)} sq ft).",
+                    hint="Shrink rooms or enlarge the envelope; rooms likely overlap.",
                 )
             )
         elif frac < 0.85:
@@ -170,32 +269,25 @@ def validate(plan: Barndominium) -> ValidationReport:
                     Severity.INFO,
                     "AREA_UNUSED",
                     f"Only {frac * 100:.0f}% of the footprint is assigned to rooms; "
-                    f"{plan.footprint_area - used:.0f} sq ft unallocated.",
+                    f"{_f(plan.footprint_area - used)} sq ft unallocated.",
+                    hint="Enlarge rooms or add spaces to fill the footprint.",
                 )
             )
-
-    _validate_room_programs(plan, add)
-    _validate_doors(plan, add)
-    _validate_access(plan, add)
-    _validate_egress_and_light(plan, add)
-
-    if not plan.metrics()["bathroom_count"]:
-        add(Issue(Severity.WARNING, "NO_BATH", "Plan has no bathroom."))
-
-    return ValidationReport(issues)
 
 
 def _validate_room_programs(plan: Barndominium, add) -> None:
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
             if room.area < MIN_BEDROOM_AREA:
+                need_len = math.ceil(MIN_BEDROOM_AREA / max(room.width, 1e-6))
                 add(
                     Issue(
                         Severity.ERROR,
                         "BEDROOM_AREA",
-                        f"Bedroom is {room.area:.0f} sq ft; IRC minimum is "
+                        f"Bedroom is {_f(room.area)} sq ft; IRC minimum is "
                         f"{MIN_BEDROOM_AREA:.0f} sq ft.",
-                        room.id,
+                        room=room.id,
+                        hint=f"Enlarge it, e.g. `size {_f(room.width)} x {need_len}`.",
                     )
                 )
             if room.min_dimension < MIN_BEDROOM_DIMENSION:
@@ -203,9 +295,10 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
                     Issue(
                         Severity.ERROR,
                         "BEDROOM_DIM",
-                        f"Bedroom's smallest dimension is {room.min_dimension:.1f} ft; "
+                        f"Bedroom's smallest dimension is {_f(room.min_dimension)} ft; "
                         f"minimum is {MIN_BEDROOM_DIMENSION:.0f} ft.",
-                        room.id,
+                        room=room.id,
+                        hint=f"Make both dimensions >= {MIN_BEDROOM_DIMENSION:.0f} ft.",
                     )
                 )
         if room.type is RoomType.HALLWAY and room.min_dimension < MIN_HALLWAY_WIDTH:
@@ -213,9 +306,10 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
                 Issue(
                     Severity.ERROR,
                     "HALL_WIDTH",
-                    f"Hallway is {room.min_dimension:.1f} ft wide; minimum is "
+                    f"Hallway is {_f(room.min_dimension)} ft wide; minimum is "
                     f"{MIN_HALLWAY_WIDTH:.0f} ft.",
-                    room.id,
+                    room=room.id,
+                    hint=f"Widen it to >= {MIN_HALLWAY_WIDTH:.0f} ft.",
                 )
             )
 
@@ -230,7 +324,8 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         Severity.ERROR,
                         "DOOR_REF",
                         f"Interior door references unknown room '{rid}'.",
-                        rid,
+                        room=rid,
+                        hint="Reference an existing room id, or declare the room.",
                     )
                 )
         a, b = plan.room(door.room_a), plan.room(door.room_b)
@@ -242,7 +337,9 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         Severity.ERROR,
                         "DOOR_NOADJ",
                         f"Door between '{a.id}' and '{b.id}' but they don't share a wall.",
-                        a.id,
+                        room=a.id,
+                        hint="Doors only connect rooms with a common wall; reposition "
+                        "them to be adjacent, or route through a room between them.",
                     )
                 )
             elif edge.length + 1e-6 < door.width:
@@ -250,9 +347,10 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     Issue(
                         Severity.WARNING,
                         "DOOR_FIT",
-                        f"Door ({door.width:.1f} ft) is wider than the shared wall "
-                        f"between '{a.id}' and '{b.id}' ({edge.length:.1f} ft).",
-                        a.id,
+                        f"Door ({_f(door.width)} ft) is wider than the shared wall "
+                        f"between '{a.id}' and '{b.id}' ({_f(edge.length)} ft).",
+                        room=a.id,
+                        hint=f"Set the door width to <= {_f(edge.length)}.",
                     )
                 )
         if door.width < MIN_INTERIOR_DOOR_WIDTH:
@@ -261,8 +359,10 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     Severity.WARNING,
                     "DOOR_NARROW",
                     f"Interior door between '{door.room_a}' and '{door.room_b}' is "
-                    f"{door.width * 12:.0f} in wide; {MIN_INTERIOR_DOOR_WIDTH * 12:.0f} in is the practical minimum.",
-                    door.room_a,
+                    f"{door.width * 12:.0f} in wide.",
+                    room=door.room_a,
+                    hint=f"Use width >= {MIN_INTERIOR_DOOR_WIDTH:g} "
+                    f"({MIN_INTERIOR_DOOR_WIDTH * 12:.0f} in).",
                 )
             )
 
@@ -273,14 +373,15 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     Severity.ERROR,
                     "DOOR_REF",
                     f"Exterior door references unknown room '{door.room}'.",
-                    door.room,
+                    room=door.room,
+                    hint="Reference an existing room id.",
                 )
             )
 
 
 def _validate_access(plan: Barndominium, add) -> None:
     """Every interior room must be reachable from an exterior door."""
-    interior_rooms = {r.id for r in plan.rooms if r.type not in (RoomType.PORCH,)}
+    interior_rooms = {r.id for r in plan.rooms if r.type is not RoomType.PORCH}
     if not interior_rooms:
         return
 
@@ -292,11 +393,14 @@ def _validate_access(plan: Barndominium, add) -> None:
 
     entries = {d.room for d in plan.exterior_doors if d.room in interior_rooms}
     if not entries:
+        first = next(iter(plan.rooms)).id
         add(
             Issue(
                 Severity.ERROR,
                 "NO_ENTRY",
                 "Plan has no exterior door — no way to enter the building.",
+                hint=f"Add an entrance on an exterior wall, e.g. "
+                f"`entry {first} south width 3 offset 4`.",
             )
         )
         return
@@ -312,19 +416,32 @@ def _validate_access(plan: Barndominium, add) -> None:
 
     for rid in sorted(interior_rooms - reached):
         room = plan.room(rid)
-        # Closets/pantries with no door are flagged but as warnings, not errors.
         sev = (
             Severity.WARNING
             if room and room.type in (RoomType.CLOSET, RoomType.PANTRY)
             else Severity.ERROR
         )
+        neighbors = geometric_neighbors(plan, rid)
+        reachable_nb = [n for n in neighbors if n in reached]
+        if reachable_nb:
+            hint = f"Add `door {rid} - {reachable_nb[0]}` (they share a wall)."
+        elif neighbors:
+            hint = (
+                f"Connect it into the plan, e.g. `door {rid} - {neighbors[0]}`, "
+                f"or give it its own `entry {rid} <wall>`."
+            )
+        else:
+            hint = (
+                f"'{rid}' touches no other room — reposition it adjacent to one, "
+                f"or add `entry {rid} <wall>`."
+            )
         add(
             Issue(
                 sev,
                 "NO_ACCESS",
-                f"Room '{rid}' cannot be reached from any entrance "
-                "(no connecting interior door path).",
-                rid,
+                f"Room '{rid}' cannot be reached from any entrance.",
+                room=rid,
+                hint=hint,
             )
         )
 
@@ -339,21 +456,33 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                 Severity.WARNING,
                 "EGRESS_DOOR",
                 f"No exterior egress door is at least {MIN_EGRESS_DOOR_WIDTH * 12:.0f} in wide.",
+                hint=f"Make at least one `entry` width >= {MIN_EGRESS_DOOR_WIDTH:g}.",
             )
         )
 
     for room in plan.rooms:
+        walls = exterior_walls(plan, room)
         if room.type is RoomType.BEDROOM:
             has_window = bool(plan.windows_for(room.id))
             has_ext_door = bool(plan.exterior_doors_for(room.id))
             if not (has_window or has_ext_door):
+                if walls:
+                    hint = (
+                        f"Add an egress window on an exterior wall, e.g. "
+                        f"`window {room.id} {walls[0].value} width 4 offset 2`."
+                    )
+                else:
+                    hint = (
+                        f"'{room.id}' has no exterior wall — relocate it to the "
+                        "building perimeter so it can have an egress window."
+                    )
                 add(
                     Issue(
                         Severity.ERROR,
                         "BEDROOM_EGRESS",
-                        "Bedroom has no emergency escape opening "
-                        "(needs an egress window or exterior door).",
-                        room.id,
+                        "Bedroom has no emergency escape opening.",
+                        room=room.id,
+                        hint=hint,
                     )
                 )
 
@@ -361,13 +490,26 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
             glazing = sum(w.glazed_area for w in plan.windows_for(room.id))
             required = room.area * NATURAL_LIGHT_RATIO
             if glazing + 1e-6 < required:
+                add_width = max(0.0, (required - glazing) / _WINDOW_TYP_HEIGHT)
+                if walls:
+                    hint = (
+                        f"Add ~{add_width:.0f} ft of window width on an exterior wall, "
+                        f"e.g. `window {room.id} {walls[0].value} "
+                        f"width {max(3, math.ceil(add_width))} offset 2`."
+                    )
+                else:
+                    hint = (
+                        f"'{room.id}' has no exterior wall — open it to an adjacent "
+                        "room (an open-concept layout) or move it to the perimeter."
+                    )
                 add(
                     Issue(
                         Severity.WARNING,
                         "NAT_LIGHT",
-                        f"Glazing {glazing:.0f} sq ft is below the natural-light "
-                        f"minimum of {required:.0f} sq ft "
+                        f"Glazing {_f(glazing)} sq ft is below the natural-light "
+                        f"minimum of {_f(required)} sq ft "
                         f"({NATURAL_LIGHT_RATIO * 100:.0f}% of floor area).",
-                        room.id,
+                        room=room.id,
+                        hint=hint,
                     )
                 )
