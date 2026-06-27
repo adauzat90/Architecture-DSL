@@ -16,6 +16,7 @@ is used by the renderer (which flips ``y`` for screen space) and the agent.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -33,6 +34,22 @@ def feet(value: float) -> float:
 def inches(value: float) -> float:
     """Convert inches to the internal unit (feet)."""
     return float(value) / 12.0
+
+
+def _finite(room_id: str, field: str, value: float) -> float:
+    """Coerce ``value`` to a finite float, or raise a clear ValueError.
+
+    The textual front-end rejects non-finite numbers at parse time; this gives
+    the Python builder the same guarantee so a NaN/inf can't slip into geometry
+    (where it would defeat every comparison and corrupt the round-trip).
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Room '{room_id}': {field} must be a number, got {value!r}.")
+    if not math.isfinite(v):
+        raise ValueError(f"Room '{room_id}': {field} must be a finite number, got {value!r}.")
+    return v
 
 
 # --- Enums ------------------------------------------------------------------
@@ -109,6 +126,9 @@ class Room:
     #: Floor level (0 = ground). A loft sits on level 1 *above* a ground room,
     #: so rooms on different levels may share a footprint without overlapping.
     level: int = 0
+    #: How the room was placed, for diagnostics — e.g. "east_of kitchen" for a
+    #: relative anchor, or None for an absolute position. Not serialised.
+    placement: str | None = None
 
     @property
     def x2(self) -> float:
@@ -288,7 +308,14 @@ class Barndominium:
         east/west anchors, east for north/south anchors).
         """
         type = RoomType(type)  # coerce/validate strings -> raises on unknown
-        width, length = float(width), float(length)
+        width = _finite(room_id, "width", width)
+        length = _finite(room_id, "length", length)
+        offset = _finite(room_id, "offset", offset)
+        if x is not None:
+            x = _finite(room_id, "x", x)
+        if y is not None:
+            y = _finite(room_id, "y", y)
+        align = align.lower() if isinstance(align, str) else align
         if isinstance(level, float) and not level.is_integer():
             raise ValueError(f"Room '{room_id}': level must be a whole number, got {level}.")
         level = int(level)
@@ -298,9 +325,24 @@ class Barndominium:
             )
         x, y = self._resolve_position(
             room_id, x, y, width, length, east_of, west_of, north_of, south_of,
-            align, float(offset),
+            align, offset,
         )
-        self.rooms.append(Room(room_id, type, x, y, width, length, label, level))
+        placement = next(
+            (
+                f"{k} {v}"
+                for k, v in (
+                    ("east_of", east_of),
+                    ("west_of", west_of),
+                    ("north_of", north_of),
+                    ("south_of", south_of),
+                )
+                if v is not None
+            ),
+            None,
+        )
+        self.rooms.append(
+            Room(room_id, type, x, y, width, length, label, level, placement)
+        )
         return self
 
     @staticmethod

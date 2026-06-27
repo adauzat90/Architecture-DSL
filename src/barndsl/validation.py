@@ -240,6 +240,17 @@ def validate(plan: Barndominium) -> ValidationReport:
 
 def _validate_geometry(plan: Barndominium, add) -> None:
     for room in plan.rooms:
+        if not all(math.isfinite(v) for v in (room.x, room.y, room.width, room.length)):
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "ROOM_GEOMETRY",
+                    "Room has non-finite coordinates or size.",
+                    room=room.id,
+                    hint="Use finite measurements in feet (no nan/inf).",
+                )
+            )
+            continue  # skip further geometry checks — NaN defeats every comparison
         if room.width <= 0 or room.length <= 0:
             add(
                 Issue(
@@ -253,20 +264,30 @@ def _validate_geometry(plan: Barndominium, add) -> None:
         over_x = max(0.0, room.x2 - plan.envelope_width)
         over_y = max(0.0, room.y2 - plan.envelope_length)
         if room.x < -1e-6 or room.y < -1e-6 or over_x > 1e-6 or over_y > 1e-6:
+            # Phrase the fix differently for a relatively-placed room, which has
+            # no x,y token to "set" — point at align/offset/size instead.
+            relative = room.placement is not None
             fixes = []
-            if room.x < 0:
-                fixes.append(f"set its x to >= 0")
-            if room.y < 0:
-                fixes.append(f"set its y to >= 0")
+            if not relative and room.x < 0:
+                fixes.append("set its x to >= 0")
+            if not relative and room.y < 0:
+                fixes.append("set its y to >= 0")
             if over_x > 1e-6:
+                move_x = plan.envelope_width - room.width
                 fixes.append(
-                    f"reduce its width by {_f(over_x)} ft or move it west to "
-                    f"x={_f(plan.envelope_width - room.width)}"
+                    f"reduce its width by {_f(over_x)} ft"
+                    + ("" if relative or move_x < 0 else f" or move it west to x={_f(move_x)}")
                 )
             if over_y > 1e-6:
+                move_y = plan.envelope_length - room.length
                 fixes.append(
-                    f"reduce its length by {_f(over_y)} ft or move it south to "
-                    f"y={_f(plan.envelope_length - room.length)}"
+                    f"reduce its length by {_f(over_y)} ft"
+                    + ("" if relative or move_y < 0 else f" or move it south to y={_f(move_y)}")
+                )
+            if relative:
+                fixes.append(
+                    f"adjust its align/offset or size, or pin it with `at x,y` "
+                    f"(it's placed `{room.placement}`)"
                 )
             add(
                 Issue(

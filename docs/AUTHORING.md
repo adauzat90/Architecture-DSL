@@ -138,10 +138,20 @@ clauses move it along that wall without dropping to absolute coordinates:
 room living: living  at 0,0                       size 24 x 30
 room bath:   bathroom east-of living align far    size 8 x 10   # flush to the north end
 room office: office   east-of living offset 12    size 8 x 8    # starts 12 ft up the wall
+room garage: garage  north-of living align far    size 12 x 22  # far = the east end here
 ```
 
+Note this placement `offset` is **not** range-checked against the wall (unlike an
+opening's `offset`, which must fit): it just shifts the room, and an `align`/
+`offset`/size that pushes the room off the envelope (or past the shared wall,
+breaking the adjacency a `door` needs) surfaces later as `OUT_OF_BOUNDS` or
+`DOOR_NOADJ`. align/offset are resolved when the room is created, so `emit_dsl`
+writes plain `at x,y` — they don't survive a round-trip as relations.
+
 Relative placement fixes *adjacency*, not *bin-packing* — it won't tile the
-footprint for you. Use `barndsl compile FILE --show-coords` to print every room's
+footprint for you, and it can only abut **one** reference (no two-reference
+"pocket" placement yet), so an interior room touching two neighbours may still
+need an `at`. Use `barndsl compile FILE --show-coords` to print every room's
 resolved rectangle and which walls ended up exterior — the fastest way to see
 what a chain of anchors actually produced.
 
@@ -266,8 +276,10 @@ losslessly, including `level`).
 The builder mirrors the DSL:
 
 - `add_room(id, type, *, width, length, x=, y=, level=0, label=, east_of=,
-  west_of=, north_of=, south_of=)` — relative anchors use **underscores**
-  (`east_of=`), and the reference must be added *before* this call.
+  west_of=, north_of=, south_of=, align="near", offset=0)` — relative anchors
+  use **underscores** (`east_of=`), and the reference must be added *before* this
+  call. `align=` (`"near"`/`"far"`/`"center"`, case-insensitive) and `offset=`
+  slide the room along the shared wall, exactly like the DSL clauses.
 - `connect(a, b, width=)` is an interior `door`; `entrance(room, wall, …)` is an
   `entry`; `add_window(room, wall, …)`; `add_porch(id, …)`.
 - `type` and `wall` accept the enum **or** a string (`"living"`, `"south"`) and

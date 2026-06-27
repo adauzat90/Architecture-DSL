@@ -461,3 +461,71 @@ def test_summary_reports_an_info_count():
         os.path.join(os.path.dirname(__file__), "..", "examples", "cedar_ridge.barn")
     ).summary()
     assert "info(s)" in s
+
+
+# --- Round 3: align/offset hardening ----------------------------------------
+
+
+def test_builder_rejects_non_finite_numbers():
+    # The DSL rejects nan/inf at parse; the builder must too (a NaN coord
+    # otherwise defeats every geometry comparison and corrupts the round-trip).
+    for field in ("offset", "x", "width"):
+        kwargs = dict(x=0, y=0, width=5, length=5)
+        if field == "offset":
+            kwargs = dict(east_of="ref", width=5, length=5, offset=float("nan"))
+        else:
+            kwargs[field] = float("nan")
+        b = barndominium("B").envelope(50, 50).add_room(
+            "ref", T.LIVING, x=0, y=0, width=10, length=10
+        )
+        with pytest.raises(ValueError, match="finite"):
+            b.add_room("x", T.OFFICE, **kwargs)
+
+
+def test_validation_catches_non_finite_geometry_defense_in_depth():
+    # Even if a NaN is injected past the builder guard, validation flags it
+    # rather than letting it pass (NaN comparisons are all False).
+    from barndsl import Room, validate
+
+    plan = barndominium("B").envelope(20, 20).ceiling(9)
+    plan.rooms.append(Room("bad", T.LIVING, float("nan"), 0, 10, 10))
+    assert any(i.code == "ROOM_GEOMETRY" for i in validate(plan).errors)
+
+
+def test_builder_align_is_case_insensitive():
+    p = (
+        barndominium("B")
+        .envelope(40, 30)
+        .add_room("a", T.LIVING, x=0, y=0, width=20, length=30)
+        .add_room("b", T.BEDROOM, east_of="a", align="FAR", width=12, length=10)
+    )
+    assert (p.room("b").x, p.room("b").y) == (20.0, 20.0)
+
+
+def test_out_of_bounds_hint_is_placement_aware():
+    # A relatively-placed room has no x,y token; the hint must not say "set its y".
+    src = (
+        "envelope 40 x 40\n"
+        "room a: living at 0,0 size 20 x 20\n"
+        "room b: bedroom east-of a align far size 8 x 30\n"  # far -> y = -10
+        "entry a south width 3 offset 2\n"
+    )
+    oob = [d for d in compile_source(src).errors if d.code == "OUT_OF_BOUNDS"][0]
+    assert "set its y" not in oob.hint
+    assert "align/offset" in oob.hint and "east_of a" in oob.hint
+
+
+def test_emit_dsl_resolves_align_offset_to_absolute():
+    # align/offset are build-time sugar; the emitted source must be absolute and
+    # carry no relative tokens (guards the round-trip).
+    p = (
+        barndominium("E")
+        .envelope(40, 30)
+        .ceiling(10)
+        .add_room("a", T.LIVING, x=0, y=0, width=20, length=30)
+        .add_room("b", T.OFFICE, east_of="a", offset=5, width=8, length=6)
+    )
+    src = emit_dsl(p)
+    assert "at 20,5" in src
+    for tok in ("east-of", "align", "offset"):
+        assert tok not in src
