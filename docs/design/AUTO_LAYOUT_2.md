@@ -1,8 +1,9 @@
 # Design: Auto-layout 2.0 — a space-filling, adjacency-true layout engine
 
-> Status: **Phase 1 implemented** (`src/barndsl/layout2.py`); Phase 2
-> (rectangular-dual topology) still proposed. This document is the research +
-> plan; see "Implementation status" below for what shipped and how it deviates.
+> Status: **Phase 1 + a Phase 2 increment implemented** (`src/barndsl/layout2.py`);
+> the *fully general* (non-sliceable) rectangular-dual topology remains future
+> work. This document is the research + plan; see "Implementation status" for what
+> shipped, the Phase-2 evaluation, and how it deviates.
 
 ## 0. Implementation status
 
@@ -31,6 +32,37 @@ Deviations from the architecture as first written, all deliberate:
   (a room can't be a row-neighbour of three others). It adds the fewest doors on
   real shared walls to make every room reachable — a hard requirement (`NO_ACCESS`
   is an error) the design hadn't called out.
+
+**Phase 2 — a generate-and-select increment, shipped.** The original Phase 2 was
+"build the general rectangular-dual topology." Prototyping first (as Phase 1 did)
+produced a decisive empirical finding:
+
+- A **recursive adjacency-ordered slicing** topology (nested H/V cuts) was built
+  and benchmarked against bands. On the residential corpus it *regressed*: it
+  buried a bedroom (an egress **error**) on a 3-bed program and dropped
+  adjacencies on a 2-bed — because general slicing has **no perimeter guarantee**,
+  the single property that matters most here. But on a program where one room
+  needs **three neighbours** (which a flat band row physically cannot do), slicing
+  won outright (all three satisfied, vs one dropped by bands).
+- Neither topology dominates. So the shipped Phase 2 follows the floor-planning
+  literature's own answer (GPLAN enumerates multiple topologies precisely because
+  no single one fits every program): **generate every applicable topology and
+  select the best-scoring valid one** (`solve_layout2(brief, engine="auto")`, the
+  default; `_score` ranks by errors → unmet adjacencies → wasted space → aspect).
+  Because bands is always a candidate, `auto` is **never worse than bands** and
+  sometimes strictly better. Across 150 random briefs it chose slice 46 % of the
+  time with **zero** overlap/out-of-bounds/structural failures; on the residential
+  corpus it keeps bands; on a three-neighbour program it picks slice.
+
+**What's still future work:** the *fully general, non-sliceable* rectangular dual
+(the 5-room pinwheel and friends). It is the only thing that would beat
+generate-and-select, and it needs the from-scratch planar-embedding + REL pipeline
+(§7.4) — high effort and bug-risk in pure Python with no deps, and **low marginal
+value for barndominiums**, which are long rectangles that bands already nail. The
+generate-and-select frame means it can be added later as just *another candidate
+topology* feeding the same `_score`, with no change to the API or the selection
+logic. Recommendation: defer it until a real program demands a non-sliceable
+adjacency graph.
 
 The rest of this document is the original research + design.
 

@@ -10,6 +10,7 @@ from barndsl.layout import LayoutBrief, RoomSpec, solve_layout
 from barndsl.layout2 import (
     LayoutBrief2,
     RoomSpec2,
+    _score,
     parse_brief2,
     solve_layout2,
 )
@@ -164,6 +165,63 @@ def test_fill_wastes_far_less_than_greedy():
     ).plan
     assert unused(f) < 0.02
     assert unused(f) < unused(g) - 0.2  # dramatically tighter
+
+
+# --- topology selection (auto) ----------------------------------------------
+
+
+def _fan_brief() -> LayoutBrief2:
+    # kitchen wants three neighbours — impossible for a flat band row.
+    return LayoutBrief2(
+        name="Fan",
+        rooms=[
+            RoomSpec2("living", "living", area=400),
+            RoomSpec2("kitchen", "kitchen", area=300),
+            RoomSpec2("dining", "dining", area=200),
+            RoomSpec2("mud", "mudroom", area=120),
+        ],
+        adjacencies=[("kitchen", "living"), ("kitchen", "dining"), ("kitchen", "mud")],
+    )
+
+
+def test_auto_picks_slice_when_it_beats_bands():
+    out = solve_layout2(_fan_brief())  # engine="auto" default
+    assert out.unsatisfied == []  # all three of kitchen's neighbours satisfied
+    assert any("slice" in n for n in out.notes)
+    result = compile_source(emit_dsl(out.plan))
+    assert not result.errors, result.report()
+
+
+def test_auto_is_never_worse_than_bands():
+    # On the residential corpus, auto must score <= bands (bands is a candidate).
+    out_auto = solve_layout2(_brief())
+    out_bands = solve_layout2(_brief(), engine="bands")
+    assert _score(out_auto) <= _score(out_bands)
+    # and for the band-friendly program, auto should match bands (no buried rooms)
+    for r in out_auto.plan.rooms:
+        if r.type in HABITABLE_TYPES:
+            assert exterior_walls(out_auto.plan, r)
+
+
+def test_auto_is_deterministic():
+    assert emit_dsl(solve_layout2(_fan_brief()).plan) == emit_dsl(
+        solve_layout2(_fan_brief()).plan
+    )
+
+
+def test_slice_engine_produces_valid_geometry():
+    plan = solve_layout2(_fan_brief(), engine="slice").plan
+    for i, a in enumerate(plan.rooms):
+        for b in plan.rooms[i + 1 :]:
+            assert a.overlaps(b) == 0
+    for r in plan.rooms:
+        assert r.x2 <= plan.envelope_width + 1e-6
+        assert r.y2 <= plan.envelope_length + 1e-6
+
+
+def test_unknown_engine_rejected():
+    with pytest.raises(ValueError):
+        solve_layout2(_brief(), engine="nonsense")
 
 
 # --- brief parsing ----------------------------------------------------------

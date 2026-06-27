@@ -324,13 +324,15 @@ Brief grammar (one statement per line, `#` comments):
 
 `barndsl layout` has two solvers, selected with `--engine`:
 
-- **`fill` (default)** — a *space-filling* engine. It dissects the envelope into
-  bands (public core · hall · private row) and **dimensions every room to tile
-  the rectangle with no gaps**, so habitable rooms land on the perimeter (for
-  daylight/egress) by construction. Because it sizes rooms to fit, briefs give a
-  **target area** rather than fixed dimensions — `room living: living area 360`.
-  Fixed `W x L` still works (treated as that area). This is the engine to reach
-  for: near-zero `AREA_UNUSED`, no buried bedrooms, tidy aspect. See
+- **`fill` (default)** — a *space-filling* engine. It **dimensions every room to
+  tile the rectangle with no gaps**, so habitable rooms land on the perimeter (for
+  daylight/egress) and `AREA_UNUSED` ≈ 0. Because it sizes rooms to fit, briefs
+  give a **target area** rather than fixed dimensions — `room living: living area
+  360`. Fixed `W x L` still works (treated as that area). Internally it tries two
+  topologies — *bands* (public core · hall · private row) and a recursive *slice*
+  (which can give a room three neighbours) — and **keeps whichever scores best**
+  (fewest errors, then unmet adjacencies, then waste); it tells you in a note when
+  it picks slice. Force one with `--engine bands|slice` for debugging. See
   `docs/design/AUTO_LAYOUT_2.md` for how and why.
 - **`greedy`** — the original abutment placer (below). Honors fixed sizes exactly
   but packs a blob with holes; kept for when you want rooms at their exact given

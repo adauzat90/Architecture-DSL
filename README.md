@@ -147,14 +147,16 @@ window bed1 south width 4 offset 7
 The brief is a tiny line-based format (`room <id>: <type> <W> x <L>`,
 `adjacent <a> <b> …` to hang rooms off a hub like a hall).
 
-**Two engines.** The default **`fill`** engine *dissects the envelope*: it bands
-the rooms (public core · hall · private row) and dimensions each to **tile the
-rectangle with no wasted space**, so habitable rooms land on the perimeter for
-daylight/egress by construction. Give it **target areas** (`room living: living
-area 360`) and it sizes everything to fit. `--engine greedy` is the original
-abutment placer, which honors fixed sizes exactly but leaves gaps and the odd
-buried room — kept for when you want exact dimensions. The design and the
-floor-planning research behind `fill` are in
+**Two engines.** The default **`fill`** engine *dissects the envelope*: it
+dimensions each room to **tile the rectangle with no wasted space**, so habitable
+rooms land on the perimeter for daylight/egress by construction. Give it **target
+areas** (`room living: living area 360`) and it sizes everything to fit.
+Internally it generates two topologies — *bands* (public core · hall · private
+row) and a recursive *slice* (which can give a room three neighbours) — and keeps
+whichever scores best, following the floor-planning literature's
+generate-and-select approach. `--engine greedy` is the original abutment placer,
+which honors fixed sizes exactly but leaves gaps and the odd buried room. The
+design and the floor-planning research behind `fill` are in
 [`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md).
 
 ```bash
@@ -260,10 +262,11 @@ tests/             # no API key required
 
 ## Roadmap
 
-- Auto-layout **2.0 — Phase 2**: Phase 1 (the `fill` engine) ships a
-  space-filling *band* dissection. Phase 2 would add a true **rectangular-dual**
-  topology so *arbitrary* adjacency graphs (not just core/hall/row programs)
-  become shared-wall layouts — see
+- Auto-layout: the `fill` engine generates two topologies (bands + recursive
+  slice) and keeps the best-scoring one. The remaining frontier is the *fully
+  general, non-sliceable* **rectangular dual** (e.g. a 5-room pinwheel) — high
+  effort for low marginal value on rectangular barndos, so deferred; it would slot
+  in as just another candidate topology. See
   [`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md)
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums

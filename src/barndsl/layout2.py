@@ -145,8 +145,45 @@ class _Band:
         return max((r.min_dim for r in self.rooms), default=0.0)
 
 
-def solve_layout2(brief: LayoutBrief2) -> LayoutResult:
-    """Dissect the envelope into bands and dimension every room to tile it."""
+def solve_layout2(brief: LayoutBrief2, engine: str = "auto") -> LayoutResult:
+    """Lay out the brief by dissecting the envelope; return the placed plan.
+
+    ``engine`` selects the topology:
+
+    * ``"bands"`` — stack the rooms in horizontal bands (public core · hall ·
+      private row). Habitable rooms reach an outer wall by construction; ideal
+      for the residential idiom.
+    * ``"slice"`` — a recursive adjacency-ordered slicing tree (nested H/V cuts).
+      Handles a room that needs three neighbours, or nested clusters, that a flat
+      band can't — but can bury a habitable room, so it isn't always valid.
+    * ``"auto"`` (default) — run every applicable engine and return the
+      best-scoring valid layout (fewest errors, then fewest unmet adjacencies,
+      then least wasted space). Never worse than ``bands``; sometimes better.
+
+    This generate-and-select strategy follows the floor-planning literature
+    (GPLAN enumerates topologies precisely because no single one fits every
+    adjacency program); see ``docs/design/AUTO_LAYOUT_2.md``.
+    """
+    specs, adj = _prepare(brief)
+    builders = {"bands": _solve_bands, "slice": _solve_slice}
+    if engine in builders:
+        return builders[engine](brief, specs, adj)
+    if engine != "auto":
+        raise ValueError(f"Unknown engine {engine!r}; use auto, bands or slice.")
+
+    # Score every candidate; keep the best. Ties favour the earlier (bands) one
+    # since min() is stable, so "auto" is never worse than bands.
+    scored = [(_score(result), name, result) for name, result in
+              ((n, fn(brief, specs, adj)) for n, fn in builders.items())]
+    scored.sort(key=lambda s: s[0])
+    _, best_name, best = scored[0]
+    if best_name != "bands":
+        best.notes.append(f"Chose the '{best_name}' topology (best fit for this program).")
+    return best
+
+
+def _prepare(brief: LayoutBrief2):
+    """Validate the brief and return ``(specs, symmetric adjacency map)``."""
     specs = list(brief.rooms)
     if not specs:
         raise ValueError("Layout brief has no rooms.")
@@ -163,13 +200,53 @@ def solve_layout2(brief: LayoutBrief2) -> LayoutResult:
         if a != b:
             adj[a].add(b)
             adj[b].add(a)
+    return specs, adj
 
+
+def _score(result: LayoutResult) -> tuple:
+    """Rank a candidate layout: fewer errors, then unmet adjacencies, then waste.
+
+    Lower is better. Errors dominate (a buried bedroom or unreachable room is
+    disqualifying), then how much of the requested program it honored, then how
+    tightly it fills the footprint, then a mild aspect-ratio preference.
+    """
+    from .compiler import compile_source
+    from .emit import emit_dsl
+
+    plan = result.plan
+    report = compile_source(emit_dsl(plan), name=plan.name)
+    footprint = plan.envelope_width * plan.envelope_length or 1.0
+    unused = 1.0 - sum(r.area for r in plan.rooms) / footprint
+    w, h = plan.envelope_width, plan.envelope_length
+    aspect = max(w, h) / min(w, h) if min(w, h) > 0 else 99.0
+    return (len(report.errors), len(result.unsatisfied), round(unused, 3), round(aspect, 2))
+
+
+def _solve_bands(
+    brief: LayoutBrief2, specs: list[RoomSpec2], adj: dict[str, set[str]]
+) -> LayoutResult:
+    """Topology 1: horizontal bands (public core · hall · private row)."""
     notes: list[str] = []
     bands = _build_bands(specs, adj, notes)
     env_w, env_l = _choose_envelope(bands, brief, notes)
     env_w, env_l = round(env_w, 2), round(env_l, 2)  # match the snapped grid
     placed = _dimension(bands, env_w, env_l)
+    return _finalize(brief, specs, placed, env_w, env_l, notes)
 
+
+def _finalize(
+    brief: LayoutBrief2,
+    specs: list[RoomSpec2],
+    placed: dict,
+    env_w: float,
+    env_l: float,
+    notes: list[str],
+) -> LayoutResult:
+    """Build the plan from placed rooms and add doors, connectivity and openings.
+
+    Shared by every topology: the geometry differs, but turning it into a valid,
+    reachable, glazed plan is identical.
+    """
     plan = Barndominium(brief.name, env_w, env_l, brief.ceiling)
     if brief.notes:
         plan.note(brief.notes)
@@ -190,8 +267,7 @@ def solve_layout2(brief: LayoutBrief2) -> LayoutResult:
             f"Added {added} circulation door(s) on shared walls to connect the plan."
         )
     if brief.add_openings:
-        # Put the entry on a room that is actually connected to the rest.
-        if v1.entry_room is None:
+        if v1.entry_room is None:  # entry on a room connected to the rest
             v1.entry_room = _pick_connected_entry(plan)
         _add_openings(plan, v1, v1_by_id, notes)
 
@@ -403,6 +479,130 @@ def _ensure_connected(plan: Barndominium, min_wall: float = inches(32)) -> int:
         union(best[1], best[2])
         added += 1
     return added
+
+
+# --- topology 2: recursive slicing ------------------------------------------
+
+
+@dataclass
+class _Slice:
+    """A slicing-tree node: a leaf room, or a cut with two children."""
+
+    spec: RoomSpec2 | None = None
+    a: "_Slice | None" = None
+    b: "_Slice | None" = None
+    area: float = 0.0
+    min_dim: float = 0.0
+
+
+def _solve_slice(
+    brief: LayoutBrief2, specs: list[RoomSpec2], adj: dict[str, set[str]]
+) -> LayoutResult:
+    """Topology 2: a recursive adjacency-ordered slicing tree.
+
+    Order the rooms so adjacent ones are close (Cuthill–McKee), recursively split
+    that order into balanced halves to form a slicing tree, then carve the
+    envelope top-down — cutting each rectangle along its longer side so rooms stay
+    reasonably square. Unlike bands this can give a room three neighbours, but it
+    offers no perimeter guarantee, so ``auto`` only keeps it when it scores well.
+    """
+    total = sum(s.area for s in specs)
+    if brief.envelope is not None:
+        env_w, env_l = float(brief.envelope[0]), float(brief.envelope[1])
+    else:
+        env_w = math.sqrt(total * brief.aspect)
+        env_l = total / env_w if env_w else total
+    env_w, env_l = round(env_w, 2), round(env_l, 2)
+
+    tree = _build_slice_tree(_cuthill_mckee(specs, adj))
+    placed: dict = {}
+    _carve(tree, 0.0, 0.0, env_w, env_l, placed)
+    return _finalize(brief, specs, placed, env_w, env_l, [])
+
+
+def _cuthill_mckee(specs: list[RoomSpec2], adj: dict[str, set[str]]) -> list[RoomSpec2]:
+    """Order rooms so adjacent ones get nearby indices (small graph bandwidth).
+
+    A breadth-first sweep from a lowest-degree room, visiting neighbours in
+    increasing degree. Keeps adjacent rooms close, so the contiguous splits below
+    tend to realise their adjacencies as shared walls. Deterministic.
+    """
+    ids = [s.id for s in specs]
+    by_id = {s.id: s for s in specs}
+    pos = {i: k for k, i in enumerate(ids)}
+    nbr = {i: adj[i] & set(ids) for i in ids}
+    deg = {i: len(nbr[i]) for i in ids}
+    order: list[str] = []
+    seen: set[str] = set()
+    while len(order) < len(ids):
+        start = min((i for i in ids if i not in seen), key=lambda i: (deg[i], pos[i]))
+        queue = [start]
+        seen.add(start)
+        while queue:
+            v = queue.pop(0)
+            order.append(v)
+            for n in sorted(nbr[v], key=lambda j: (deg[j], pos[j])):
+                if n not in seen:
+                    seen.add(n)
+                    queue.append(n)
+    return [by_id[i] for i in order]
+
+
+def _build_slice_tree(seq: list[RoomSpec2]) -> _Slice:
+    """Recursively split an ordered room list into a balanced slicing tree."""
+    if len(seq) == 1:
+        s = seq[0]
+        return _Slice(spec=s, area=s.area, min_dim=s.min_dim)
+    total = sum(s.area for s in seq)
+    cum, best = 0.0, (1e18, 1)
+    for k in range(1, len(seq)):
+        cum += seq[k - 1].area
+        gap = abs(cum - total / 2.0)
+        if gap < best[0]:
+            best = (gap, k)
+    k = best[1]
+    a = _build_slice_tree(seq[:k])
+    b = _build_slice_tree(seq[k:])
+    return _Slice(a=a, b=b, area=total, min_dim=max(a.min_dim, b.min_dim))
+
+
+def _carve(node: _Slice, x0: float, y0: float, x1: float, y1: float, placed: dict) -> None:
+    """Carve ``node`` into the rectangle, cutting along the rectangle's long side."""
+    from .elements import Room
+
+    if node.spec is not None:
+        rx0, ry0 = round(x0, 2), round(y0, 2)
+        placed[node.spec.id] = Room(
+            node.spec.id, node.spec.type, rx0, ry0,
+            round(x1, 2) - rx0, round(y1, 2) - ry0, node.spec.label, node.spec.level,
+        )
+        return
+    frac = node.a.area / node.area if node.area else 0.5
+    if (x1 - x0) >= (y1 - y0):  # vertical cut, side by side
+        cut = _split_at(x0, x1, frac, node.a.min_dim, node.b.min_dim)
+        _carve(node.a, x0, y0, cut, y1, placed)
+        _carve(node.b, cut, y0, x1, y1, placed)
+    else:  # horizontal cut, stacked
+        cut = _split_at(y0, y1, frac, node.a.min_dim, node.b.min_dim)
+        _carve(node.a, x0, y0, x1, cut, placed)
+        _carve(node.b, x0, cut, x1, y1, placed)
+
+
+def _split_at(lo: float, hi: float, frac: float, min_a: float, min_b: float) -> float:
+    """A cut between ``lo`` and ``hi`` at ``frac``, keeping both sides non-trivial.
+
+    Honors each side's minimum extent where the span allows; if it's too short for
+    both minimums, falls back to a proportional split (and the thin room shows up
+    as a min-dimension issue, which the scorer penalises).
+    """
+    span = hi - lo
+    cut = lo + span * frac
+    floor, ceil = lo + min_a, hi - min_b
+    if floor <= ceil:
+        cut = min(max(cut, floor), ceil)
+    else:  # too short for both minimums — keep a sliver each so nothing degenerates
+        cut = min(max(cut, lo + 0.5), hi - 0.5) if span > 1.0 else lo + span / 2.0
+    return round(cut, 2)
 
 
 def _pick_connected_entry(plan: Barndominium) -> str | None:
