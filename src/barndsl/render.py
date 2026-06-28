@@ -276,7 +276,11 @@ class _Renderer:
             if edge is None:
                 continue
             w = min(door.width, edge.length)
-            start = edge.mid - w / 2
+            offset = getattr(door, "offset", None)
+            if offset is None:
+                start = edge.mid - w / 2  # centre on the shared wall
+            else:  # measured from the south/west end, clamped onto the wall
+                start = edge.lo + max(0.0, min(offset, edge.length - w))
             draw = self._door_symbol if getattr(door, "leaf", True) else self._opening_symbol
             if edge.orientation == "v":
                 draw(edge.pos, start, "v", w)

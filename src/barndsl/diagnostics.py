@@ -136,6 +136,9 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "at a corner), or a cross-level door whose footprints don't overlap."),
         _c("DOOR_FIT", W, "Door wider than the wall",
            "A door is wider than the shared wall it sits on."),
+        _c("DOOR_OOB", E, "Door runs off the shared wall",
+           "A positioned interior door's offset+width exceeds the shared wall it "
+           "sits on. Keep offset >= 0 and offset + width <= the shared length."),
         _c("DOOR_NARROW", W, "Door too narrow",
            "A swinging interior door is below the 30 in minimum clear width."),
         _c("DOOR_SIZE", I, "Non-standard door width",

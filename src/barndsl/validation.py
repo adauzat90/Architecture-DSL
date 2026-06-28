@@ -666,6 +666,23 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         **loc,
                     )
                 )
+            elif door.offset is not None and (
+                door.offset < -1e-6
+                or door.offset + door.width > edge.length + 1e-6
+            ):
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "DOOR_OOB",
+                        f"Door between '{a.id}' and '{b.id}' runs off their "
+                        f"{_f(edge.length)} ft shared wall (offset {_f(door.offset)} + "
+                        f"width {_f(door.width)}).",
+                        room=a.id,
+                        hint=f"Keep offset >= 0 and offset + width <= {_f(edge.length)}, "
+                        "or drop the offset to centre it.",
+                        **loc,
+                    )
+                )
         if door.leaf and door.width < MIN_INTERIOR_DOOR_WIDTH:
             # An open cased passage (leaf=False) is wide by design — the narrow
             # check only applies to swinging doors.
@@ -712,6 +729,43 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         hint=f"Use `door {door.room_a} - {door.room_b}` instead of "
                         f"`open` so the bathroom has a door.",
                         **loc,
+                    )
+                )
+
+    # Two doors/openings between the same pair share one wall — they can't overlap
+    # on it. (Positioned or centred; centred ones coincide, so a stray duplicate
+    # connection is caught too.)
+    by_pair: dict[frozenset, list] = {}
+    for door in plan.interior_doors:
+        a, b = plan.room(door.room_a), plan.room(door.room_b)
+        if not (a and b) or a.level != b.level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        w = min(door.width, edge.length)
+        if door.offset is None:
+            start = edge.mid - w / 2
+        else:
+            start = edge.lo + max(0.0, min(door.offset, edge.length - w))
+        by_pair.setdefault(frozenset((door.room_a, door.room_b)), []).append(
+            (start, start + w, door)
+        )
+    for spans in by_pair.values():
+        if len(spans) < 2:
+            continue
+        spans.sort(key=lambda s: s[0])
+        for (a_lo, a_hi, _), (b_lo, b_hi, d2) in zip(spans, spans[1:]):
+            if min(a_hi, b_hi) - max(a_lo, b_lo) > 1e-6:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "OPENING_CLASH",
+                        f"Two doors between '{d2.room_a}' and '{d2.room_b}' overlap "
+                        "on their shared wall.",
+                        room=d2.room_a,
+                        hint="Offset them apart, or use a single door.",
+                        **_door_loc(d2),
                     )
                 )
 

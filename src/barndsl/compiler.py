@@ -15,8 +15,8 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     ceiling <H>
     note "free text"
     room <id>: <type> <placement> size <W> x <L> [level <n>]
-    door <id_a> - <id_b> [width <w>]
-    open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no leaf)
+    door <id_a> - <id_b> [width <w>] [offset <o>]
+    open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no leaf)
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
     window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
@@ -87,8 +87,8 @@ Statements:
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
   room <id>: <type> <placement> size <W> x <L> [level <n>]
-  door <id_a> - <id_b> [width <w>]            # interior door (rooms must share a wall)
-  open <id_a> - <id_b> [width <w>]            # cased opening / walk-through, no door leaf
+  door <id_a> - <id_b> [width <w>] [offset <o>]   # interior door; offset = ft from the wall's S/W end
+  open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through, no door leaf
   entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
   window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]  # window; sill/head are ft above the floor
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
@@ -587,13 +587,23 @@ def _parse_statement(
                 end_col=sep.end_col,
             )
         b = c.ident("the second room id").text
-        width = 32 / 12
-        nxt = c.peek()
-        if nxt is not None:
-            c.keyword("width")
-            width = c.number("door width")
+        width, offset = 32 / 12, None
+        while c.peek() is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "width":
+                width = c.number("door width")
+            elif opt == "offset":
+                offset = c.number("door offset")
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown door option '{opt}'.",
+                    c.toks[c.i - 1].col,
+                    hint="Options: width <n>, offset <n>.",
+                    end_col=c.toks[c.i - 1].end_col,
+                )
         c.expect_end()
-        plan.connect(a, b, width=width)
+        plan.connect(a, b, width=width, offset=offset)
         door = plan.interior_doors[-1]
         door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "open":
@@ -608,13 +618,23 @@ def _parse_statement(
                 end_col=sep.end_col,
             )
         b = c.ident("the second room id").text
-        width = 6.0  # wide cased opening by default; matches DEFAULT_OPENING_WIDTH
-        nxt = c.peek()
-        if nxt is not None:
-            c.keyword("width")
-            width = c.number("opening width")
+        width, offset = 6.0, None  # wide cased opening by default (DEFAULT_OPENING_WIDTH)
+        while c.peek() is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "width":
+                width = c.number("opening width")
+            elif opt == "offset":
+                offset = c.number("opening offset")
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown open option '{opt}'.",
+                    c.toks[c.i - 1].col,
+                    hint="Options: width <n>, offset <n>.",
+                    end_col=c.toks[c.i - 1].end_col,
+                )
         c.expect_end()
-        plan.opening(a, b, width=width)
+        plan.opening(a, b, width=width, offset=offset)
         door = plan.interior_doors[-1]
         door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "entry":

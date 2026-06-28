@@ -57,7 +57,10 @@ def emit_dsl(plan: Barndominium) -> str:
         out.append("")
         for d in plan.interior_doors:
             kw = "door" if getattr(d, "leaf", True) else "open"
-            out.append(f"{kw} {d.room_a} - {d.room_b} width {_n(d.width)}")
+            line = f"{kw} {d.room_a} - {d.room_b} width {_n(d.width)}"
+            if getattr(d, "offset", None) is not None:
+                line += f" offset {_n(d.offset)}"
+            out.append(line)
 
     if plan.exterior_doors:
         out.append("")

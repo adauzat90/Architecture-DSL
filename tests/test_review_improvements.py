@@ -565,3 +565,81 @@ window living west width 10 offset 8
 
 def test_door_size_is_registered():
     assert "DOOR_SIZE" in REGISTRY
+
+
+# --- interior door positioning (offset on the shared wall) -------------------
+
+_POS_SRC = """\
+plan "Positioned"
+envelope 40 x 20
+ceiling 9
+room living: living  at 0,0  size 24 x 20
+room bed:    bedroom at 24,0 size 16 x 20
+door living - bed width 2.67 {offset}
+entry living south width 3 offset 10
+window living west width 10 offset 6
+window bed east width 4 offset 6
+"""
+
+
+def test_door_offset_parses_and_round_trips():
+    from barndsl import emit_dsl
+
+    r = compile_source(_POS_SRC.format(offset="offset 2"))
+    assert r.plan.interior_doors[0].offset == 2.0
+    line = next(
+        l for l in emit_dsl(r.plan).splitlines() if l.startswith("door")
+    )
+    assert line.endswith("offset 2")
+
+
+def test_centred_door_omits_offset_on_emit():
+    from barndsl import emit_dsl
+
+    r = compile_source(_POS_SRC.format(offset=""))
+    assert r.plan.interior_doors[0].offset is None
+    line = next(l for l in emit_dsl(r.plan).splitlines() if l.startswith("door"))
+    assert "offset" not in line
+
+
+def test_door_oob_when_offset_runs_off_the_shared_wall():
+    r = compile_source(_POS_SRC.format(offset="offset 19"))  # 19 + 2.67 > 20
+    assert "DOOR_OOB" in _codes(r, "error")
+
+
+def test_positioned_door_within_the_wall_is_clean():
+    r = compile_source(_POS_SRC.format(offset="offset 5"))
+    assert "DOOR_OOB" not in _codes(r, "error")
+
+
+def test_two_connections_between_the_same_pair_clash():
+    src = _POS_SRC.format(offset="").replace(
+        "door living - bed width 2.67",
+        "door living - bed width 4\nopen living - bed width 4",
+    )
+    assert "OPENING_CLASH" in _codes(compile_source(src), "error")
+
+
+def test_offset_doors_apart_do_not_clash():
+    # Two narrow openings on a 20-ft wall, placed well apart.
+    src = _POS_SRC.format(offset="").replace(
+        "door living - bed width 2.67",
+        "door living - bed width 2.67 offset 1\nopen living - bed width 3 offset 14",
+    )
+    assert "OPENING_CLASH" not in _codes(compile_source(src), "error")
+
+
+def test_door_oob_registered():
+    assert "DOOR_OOB" in REGISTRY
+
+
+def test_builder_connect_accepts_offset():
+    plan = (
+        barndominium("B")
+        .envelope(width=30, length=20)
+        .ceiling(9)
+        .add_room("a", "living", x=0, y=0, width=15, length=20)
+        .add_room("b", "bedroom", x=15, y=0, width=15, length=20)
+        .connect("a", "b", width=2.67, offset=3)
+    )
+    assert plan.interior_doors[0].offset == 3.0

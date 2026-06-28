@@ -183,6 +183,9 @@ class InteriorDoor:
     room_b: str
     width: float = inches(32)
     leaf: bool = True
+    #: Distance (ft) from the **south/west end** of the shared wall to the near
+    #: edge of the door. ``None`` centres it on the shared wall (the default).
+    offset: float | None = None
     #: Source location of the statement that created this door (textual DSL
     #: front-end only); lets diagnostics point at the `door` line, not a room.
     line: int | None = None
@@ -662,26 +665,39 @@ class Barndominium:
         *,
         width: float = inches(32),
         leaf: bool = True,
+        offset: float | None = None,
     ) -> "Barndominium":
         """Add an interior doorway between two adjacent rooms.
 
         Set ``leaf=False`` for an open cased passage (walk-through) with no
-        door leaf — see :meth:`opening`.
+        door leaf — see :meth:`opening`. ``offset`` (ft from the south/west end
+        of the shared wall) positions the door along that wall; omit it to centre.
         """
         self.interior_doors.append(
-            InteriorDoor(room_a, room_b, float(width), leaf=bool(leaf))
+            InteriorDoor(
+                room_a,
+                room_b,
+                float(width),
+                leaf=bool(leaf),
+                offset=None if offset is None else float(offset),
+            )
         )
         return self
 
     def opening(
-        self, room_a: str, room_b: str, *, width: float = DEFAULT_OPENING_WIDTH
+        self,
+        room_a: str,
+        room_b: str,
+        *,
+        width: float = DEFAULT_OPENING_WIDTH,
+        offset: float | None = None,
     ) -> "Barndominium":
         """Add an open cased passage (walk-through) between two adjacent rooms.
 
         Like :meth:`connect`, but with no door leaf — the open-concept link
         between e.g. a kitchen and a living area. Defaults to a wide opening.
         """
-        return self.connect(room_a, room_b, width=width, leaf=False)
+        return self.connect(room_a, room_b, width=width, leaf=False, offset=offset)
 
     def entrance(
         self,

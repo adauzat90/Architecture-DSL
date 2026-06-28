@@ -48,8 +48,8 @@ ceiling <H>
 note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
 room <id>: <type> <placement> size <W> x <L> [level <n>]
-door <id_a> - <id_b> [width <w>]
-open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no door leaf)
+door <id_a> - <id_b> [width <w>] [offset <o>]
+open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no door leaf)
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
