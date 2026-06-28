@@ -197,6 +197,101 @@ def test_new_codes_are_registered():
         assert code in REGISTRY
 
 
+# --- ROOM_TIGHT --------------------------------------------------------------
+
+_TIGHT_SRC = """\
+plan "Tight"
+envelope 30 x 20
+ceiling 9
+room living: living    at 0,0   size 16 x 20
+room kitchen: kitchen  at 16,0  size {kw} x 8
+room bath:   bathroom  at 22,0  size 5 x 6
+room powder: half_bath at 22,6  size 4 x 4
+door living - kitchen width 2.67
+door living - bath width 2.67
+door living - powder width 2.67
+entry living south width 3 offset 4
+window living west width 12 offset 4
+"""
+
+
+def test_room_tight_flags_small_kitchen_and_full_bath():
+    r = compile_source(_TIGHT_SRC.format(kw=6))  # 48 sq ft kitchen, 30 sq ft bath
+    tight = {d.room for d in r.infos if d.code == "ROOM_TIGHT"}
+    assert "kitchen" in tight
+    assert "bath" in tight
+
+
+def test_room_tight_exempts_half_bath():
+    r = compile_source(_TIGHT_SRC.format(kw=6))
+    tight = {d.room for d in r.infos if d.code == "ROOM_TIGHT"}
+    assert "powder" not in tight  # a powder room is fine small
+
+
+def test_room_tight_silent_for_a_workable_kitchen():
+    r = compile_source(_TIGHT_SRC.format(kw=10))  # 80 sq ft kitchen
+    tight = {d.room for d in r.infos if d.code == "ROOM_TIGHT"}
+    assert "kitchen" not in tight
+
+
+# --- BATH_VENT ---------------------------------------------------------------
+
+
+def test_bath_vent_flags_a_windowless_bath():
+    r = compile_source(_TIGHT_SRC.format(kw=10))  # bath has no window
+    assert "BATH_VENT" in _codes(r, "info")
+
+
+def test_bath_vent_silent_with_an_exterior_window():
+    # Give the bath a window on its south (exterior) wall.
+    src = _TIGHT_SRC.format(kw=10) + "window bath south width 3 offset 1\n"
+    vented = {d.room for d in compile_source(src).infos if d.code == "BATH_VENT"}
+    assert "bath" not in vented
+
+
+# --- HALL_DEADEND ------------------------------------------------------------
+
+_HALL_SRC = """\
+plan "Hall"
+envelope 30 x 24
+ceiling 9
+room living: living  at 0,0  size 20 x 24
+room hall:   hallway at 20,0 size 4 x 24
+room bed:    bedroom at 24,0 size 6 x 24
+{doors}
+entry {entry}
+window living west width 12 offset 4
+window bed east width 4 offset 4
+"""
+
+
+def _hall(doors: str, entry: str = "living south width 3 offset 4"):
+    return compile_source(_HALL_SRC.format(doors=doors, entry=entry))
+
+
+def test_hall_serving_two_rooms_is_not_a_deadend():
+    r = _hall("door living - hall width 3\ndoor hall - bed width 2.67")
+    assert "HALL_DEADEND" not in _codes(r, "info")
+
+
+def test_hall_serving_one_room_is_a_deadend():
+    # living reaches bed directly; the hall only touches bed → degree 1.
+    r = _hall("door living - bed width 6\ndoor hall - bed width 2.67")
+    assert "HALL_DEADEND" in _codes(r, "info")
+
+
+def test_foyer_hall_with_an_entry_is_exempt():
+    # The hall carries the exterior entry — a vestibule, not dead circulation.
+    r = _hall("door hall - bed width 2.67", entry="hall south width 3 offset 1")
+    deadends = {d.room for d in r.infos if d.code == "HALL_DEADEND"}
+    assert "hall" not in deadends
+
+
+def test_new_advisory_codes_are_registered():
+    for code in ("ROOM_TIGHT", "BATH_VENT", "HALL_DEADEND"):
+        assert code in REGISTRY
+
+
 def test_compile_result_to_dict_is_machine_readable():
     r = compile_source(_CLASH_SRC.format(second="window living south width 10 offset 6"))
     data = r.to_dict()

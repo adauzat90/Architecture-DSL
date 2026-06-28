@@ -47,17 +47,21 @@ Shipped alongside the checks below:
 - ~~`OPENING_CLASH`~~ — two openings overlapping on the same wall span. DONE
   (error). Surfaced and fixed a latent bug in the auto-layout opening placer.
 
+## Candidate checks shipped — DONE
+Shipped as conservative `info` nudges (never block a compile):
+
+- ~~`ROOM_TIGHT`~~ — type-aware usable minimums (kitchen ~70 sq ft, full bath
+  ~35). `half_bath` is exempt; bedrooms stay covered by `BEDROOM_AREA`.
+- ~~`BATH_VENT`~~ — a windowless bathroom needs mechanical ventilation (R303.3).
+  The DSL can't model fans, so it's a reminder, not a hard check.
+- ~~`HALL_DEADEND`~~ — a hallway opening onto ≤ 1 room isn't earning its
+  footprint. Gated: a hall carrying an exterior entry (a foyer/vestibule) is
+  exempt, and a hall connecting two rooms (a pass-through) doesn't fire.
+
 ## Candidate checks held for later
 Lower-confidence than the ones already shipped (fuzzier thresholds / higher
 false-positive risk); revisit if they prove worth it:
 
-- `ROOM_TIGHT` — type-aware usable minimums (e.g. full bath ≥ ~35 sq ft, kitchen
-  ≥ ~70). Needs conservative thresholds; exempt `half_bath`.
-- `BATH_VENT` — a windowless bathroom needs mechanical ventilation (R303.3). Low
-  risk as an `info`; rounds out the egress/light family (which today stops at
-  habitable rooms and skips wet rooms).
-- `HALL_DEADEND` — a hallway serving ≤ 1 room isn't earning its footprint. A short
-  hall to a single suite is legitimate, so this needs a careful gate.
 - `NO_LAUNDRY` / `NO_DINING` — too soft / high false-positive as written; better
   folded into a widened `program` directive (a required-room list) than emitted
   unconditionally.

@@ -122,6 +122,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A bedroom's smallest dimension is below the 7 ft minimum (R304)."),
         _c("HALL_WIDTH", E, "Hallway too narrow",
            "A hallway is below the 3 ft (36 in) minimum width (R311.6)."),
+        _c("ROOM_TIGHT", I, "Room below a workable size",
+           "A room is smaller than the usable floor area its function needs "
+           "(kitchen ~70 sq ft, full bath ~35). Half-baths are exempt; bedrooms "
+           "are covered by BEDROOM_AREA."),
         # --- doors ----------------------------------------------------------
         _c("SELF_DOOR", E, "Door to self",
            "An interior door connects a room to itself."),
@@ -192,6 +196,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "buffer it with a hallway."),
         _c("BATH_DISTANCE", I, "Bedroom far from a bath",
            "A bedroom is more than two doors from any bathroom."),
+        _c("BATH_VENT", I, "Windowless bathroom",
+           "A bathroom has no exterior window, so it needs mechanical ventilation "
+           "(IRC R303.3). The DSL can't model fans — confirm an exhaust fan."),
+        _c("HALL_DEADEND", I, "Hallway serves one room",
+           "A hallway opens onto at most one room, so it isn't earning its "
+           "footprint as circulation. A hall carrying an exterior entry (a foyer) "
+           "is exempt."),
         _c("PRIVATE_PASSTHROUGH", W, "Routed through a private room",
            "A room is reachable only by passing through a bathroom or someone "
            "else's bedroom — a circulation defect."),

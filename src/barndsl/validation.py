@@ -31,6 +31,13 @@ MIN_CEILING = 7.0
 MIN_BEDROOM_AREA = 70.0
 MIN_BEDROOM_DIMENSION = 7.0
 MIN_HALLWAY_WIDTH = 3.0  # 36 in
+#: Type-aware usable-area floors (sq ft). Conservative: only the rooms whose use
+#: needs a clear minimum of fixtures/clearances. half_bath is deliberately exempt
+#: (a powder room is fine at ~18 sq ft); bedrooms are covered by BEDROOM_AREA.
+MIN_USABLE_AREA: dict[RoomType, float] = {
+    RoomType.KITCHEN: 70.0,  # counters + appliances + a working aisle
+    RoomType.BATHROOM: 35.0,  # tub/shower + toilet + vanity
+}
 MIN_EGRESS_DOOR_WIDTH = 32 / 12  # 32 in clear; matches inches(32) exactly
 MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
 NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
@@ -547,6 +554,25 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
                     f"{MIN_HALLWAY_WIDTH:.0f} ft.",
                     room=room.id,
                     hint=f"Widen it to >= {MIN_HALLWAY_WIDTH:.0f} ft.",
+                )
+            )
+        floor = MIN_USABLE_AREA.get(room.type)
+        if floor is not None and 0 < room.area < floor:
+            need_len = _suggest_int(floor / max(room.width, 1e-6))
+            sizing = (
+                f" e.g. `size {_f(room.width)} x {need_len}`"
+                if need_len is not None
+                else ""
+            )
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ROOM_TIGHT",
+                    f"{room.type.value.capitalize()} '{room.id}' is {_f(room.area)} "
+                    f"sq ft; a workable {room.type.value} wants about "
+                    f"{floor:.0f} sq ft.",
+                    room=room.id,
+                    hint=f"Enlarge it to >= {floor:.0f} sq ft{sizing}.",
                 )
             )
 
@@ -1188,6 +1214,27 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+    # 11. A hallway exists to *distribute* circulation. One that opens onto a
+    #     single room (or none) is just overhead. Exempt a hall that carries an
+    #     exterior entry — a foyer/vestibule is legitimately a one-room hall.
+    hall_entries = {d.room for d in plan.exterior_doors}
+    for room in plan.rooms:
+        if room.type is not RoomType.HALLWAY or room.id in hall_entries:
+            continue
+        served = len(graph.get(room.id, ()))
+        if served <= 1:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "HALL_DEADEND",
+                    f"Hallway '{room.id}' opens onto {served} room(s); a hall that "
+                    "serves one room isn't earning its footprint.",
+                    room=room.id,
+                    hint="Open that room off a larger space and drop the hall, or "
+                    "extend the hall so it distributes to more rooms.",
+                )
+            )
+
 
 def _validate_program(plan: Barndominium, add) -> None:
     """Check the rooms placed against a declared ``program`` (if any).
@@ -1309,6 +1356,24 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                             f"width 4 offset 2`.",
                         )
                     )
+
+        if room.type in BATH_TYPES:
+            # A bathroom needs light+ventilation: a window on an exterior wall, or
+            # else mechanical exhaust. The DSL doesn't model fans, so a windowless
+            # bath gets an info nudge to confirm one (IRC R303.3).
+            has_window = any(w.wall in walls for w in plan.windows_for(room.id))
+            if not has_window:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BATH_VENT",
+                        f"Bathroom '{room.id}' has no exterior window; it needs "
+                        "mechanical ventilation (IRC R303.3).",
+                        room=room.id,
+                        hint="Add an exterior window, or confirm an exhaust fan vented "
+                        "outside — the DSL can't see fans, so this is just a reminder.",
+                    )
+                )
 
         if room.type in HABITABLE_TYPES:
             glazing = sum(
