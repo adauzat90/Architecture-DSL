@@ -15,7 +15,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     ceiling <H>
     note "free text"
     room <id>: <type> <placement> size <W> x <L> [level <n>]
-    door <id_a> - <id_b> [width <w>] [offset <o>]
+    door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]
     open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no leaf)
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
     window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
@@ -87,7 +87,7 @@ Statements:
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
   room <id>: <type> <placement> size <W> x <L> [level <n>]
-  door <id_a> - <id_b> [width <w>] [offset <o>]   # interior door; offset = ft from the wall's S/W end
+  door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]   # interior door
   open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through, no door leaf
   entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
   window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]  # window; sill/head are ft above the floor
@@ -587,23 +587,36 @@ def _parse_statement(
                 end_col=sep.end_col,
             )
         b = c.ident("the second room id").text
-        width, offset = 32 / 12, None
+        width, offset, swing_into, hinge = 32 / 12, None, None, None
         while c.peek() is not None:
             opt = c.take("an option").text.lower()
             if opt == "width":
                 width = c.number("door width")
             elif opt == "offset":
                 offset = c.number("door offset")
+            elif opt == "into":
+                swing_into = c.ident("the room the door swings into").text
+            elif opt == "hinge":
+                h = c.take("'near' or 'far'")
+                if h.text.lower() not in ("near", "far"):
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"Hinge must be 'near' or 'far', got '{h.text}'.",
+                        h.col,
+                        hint="Use `hinge near` or `hinge far`.",
+                        end_col=h.end_col,
+                    )
+                hinge = h.text.lower()
             else:
                 raise _ParseError(
                     "BAD_OPTION",
                     f"Unknown door option '{opt}'.",
                     c.toks[c.i - 1].col,
-                    hint="Options: width <n>, offset <n>.",
+                    hint="Options: width <n>, offset <n>, into <room>, hinge near|far.",
                     end_col=c.toks[c.i - 1].end_col,
                 )
         c.expect_end()
-        plan.connect(a, b, width=width, offset=offset)
+        plan.connect(a, b, width=width, offset=offset, swing_into=swing_into, hinge=hinge)
         door = plan.interior_doors[-1]
         door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "open":

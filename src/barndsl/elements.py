@@ -186,6 +186,13 @@ class InteriorDoor:
     #: Distance (ft) from the **south/west end** of the shared wall to the near
     #: edge of the door. ``None`` centres it on the shared wall (the default).
     offset: float | None = None
+    #: The room the leaf swings *into* (must be ``room_a`` or ``room_b``).
+    #: ``None`` lets the renderer pick a side; a value also enables the
+    #: swing-clearance check.
+    swing_into: str | None = None
+    #: Which end of the opening the hinge is on: ``"near"`` (the south/west end,
+    #: default) or ``"far"``. ``None`` means near.
+    hinge: str | None = None
     #: Source location of the statement that created this door (textual DSL
     #: front-end only); lets diagnostics point at the `door` line, not a room.
     line: int | None = None
@@ -666,13 +673,19 @@ class Barndominium:
         width: float = inches(32),
         leaf: bool = True,
         offset: float | None = None,
+        swing_into: str | None = None,
+        hinge: str | None = None,
     ) -> "Barndominium":
         """Add an interior doorway between two adjacent rooms.
 
         Set ``leaf=False`` for an open cased passage (walk-through) with no
         door leaf — see :meth:`opening`. ``offset`` (ft from the south/west end
         of the shared wall) positions the door along that wall; omit it to centre.
+        ``swing_into`` names the room the leaf opens into (``room_a``/``room_b``)
+        and ``hinge`` is ``"near"`` or ``"far"``.
         """
+        if hinge is not None and hinge not in ("near", "far"):
+            raise ValueError(f"hinge must be 'near' or 'far', got {hinge!r}.")
         self.interior_doors.append(
             InteriorDoor(
                 room_a,
@@ -680,6 +693,8 @@ class Barndominium:
                 float(width),
                 leaf=bool(leaf),
                 offset=None if offset is None else float(offset),
+                swing_into=swing_into,
+                hinge=hinge,
             )
         )
         return self

@@ -683,6 +683,36 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         **loc,
                     )
                 )
+            if door.swing_into is not None:
+                if door.swing_into not in (a.id, b.id):
+                    add(
+                        Issue(
+                            Severity.ERROR,
+                            "DOOR_SWING",
+                            f"Door swings into '{door.swing_into}', which it doesn't "
+                            f"connect (it joins '{a.id}' and '{b.id}').",
+                            room=a.id,
+                            hint=f"Set `into {a.id}` or `into {b.id}`.",
+                            **loc,
+                        )
+                    )
+                elif edge is not None:
+                    target = a if door.swing_into == a.id else b
+                    depth = target.width if edge.orientation == "v" else target.length
+                    if depth + 1e-6 < door.width:
+                        add(
+                            Issue(
+                                Severity.WARNING,
+                                "DOOR_SWING",
+                                f"A {door.width * 12:.0f} in door can't fully open into "
+                                f"'{target.id}' — only {_f(depth)} ft deep at the wall.",
+                                room=target.id,
+                                hint="Swing it into the other room (`into "
+                                f"{(b if target is a else a).id}`), narrow the door, or "
+                                "deepen the room.",
+                                **loc,
+                            )
+                        )
         if door.leaf and door.width < MIN_INTERIOR_DOOR_WIDTH:
             # An open cased passage (leaf=False) is wide by design — the narrow
             # check only applies to swinging doors.

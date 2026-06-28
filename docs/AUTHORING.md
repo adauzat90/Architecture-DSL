@@ -65,7 +65,7 @@ note "free text"                   # optional; repeatable
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
-door <id_a> - <id_b> [width <w>] [offset <o>]     # interior; rooms MUST share a wall
+door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]   # interior
 open <id_a> - <id_b> [width <w>] [offset <o>]     # cased opening / walk-through, no leaf
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor

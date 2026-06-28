@@ -60,6 +60,10 @@ def emit_dsl(plan: Barndominium) -> str:
             line = f"{kw} {d.room_a} - {d.room_b} width {_n(d.width)}"
             if getattr(d, "offset", None) is not None:
                 line += f" offset {_n(d.offset)}"
+            if getattr(d, "swing_into", None) is not None:
+                line += f" into {d.swing_into}"
+            if getattr(d, "hinge", None) is not None:
+                line += f" hinge {d.hinge}"
             out.append(line)
 
     if plan.exterior_doors:

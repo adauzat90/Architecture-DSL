@@ -38,7 +38,7 @@ class CodeInfo:
 
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
-_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE"})
+_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING"})
 
 
 def _c(code: str, severity: Severity, title: str, explanation: str) -> tuple[str, CodeInfo]:
@@ -139,6 +139,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("DOOR_OOB", E, "Door runs off the shared wall",
            "A positioned interior door's offset+width exceeds the shared wall it "
            "sits on. Keep offset >= 0 and offset + width <= the shared length."),
+        _c("DOOR_SWING", W, "Door swing problem",
+           "Error: a door's `into` names a room it doesn't connect. Warning: the "
+           "leaf can't fully open because the room it swings into is shallower "
+           "than the door is wide — swing it the other way or narrow it."),
         _c("DOOR_NARROW", W, "Door too narrow",
            "A swinging interior door is below the 30 in minimum clear width."),
         _c("DOOR_SIZE", I, "Non-standard door width",

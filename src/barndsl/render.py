@@ -281,11 +281,30 @@ class _Renderer:
                 start = edge.mid - w / 2  # centre on the shared wall
             else:  # measured from the south/west end, clamped onto the wall
                 start = edge.lo + max(0.0, min(offset, edge.length - w))
-            draw = self._door_symbol if getattr(door, "leaf", True) else self._opening_symbol
-            if edge.orientation == "v":
-                draw(edge.pos, start, "v", w)
+            if getattr(door, "leaf", True):
+                sgn = self._swing_sgn(door, a, b, edge)
+                hinge_far = getattr(door, "hinge", None) == "far"
+                if edge.orientation == "v":
+                    self._door_symbol(edge.pos, start, "v", w, sgn, hinge_far)
+                else:
+                    self._door_symbol(start, edge.pos, "h", w, sgn, hinge_far)
+            elif edge.orientation == "v":
+                self._opening_symbol(edge.pos, start, "v", w)
             else:
-                draw(start, edge.pos, "h", w)
+                self._opening_symbol(start, edge.pos, "h", w)
+
+    @staticmethod
+    def _swing_sgn(door, a, b, edge) -> float | None:
+        """+1/-1 for the side the leaf swings into, or None to let the symbol
+        fall back to its keep-inside-the-envelope heuristic."""
+        into = getattr(door, "swing_into", None)
+        room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
+        if room is None:
+            return None
+        cx, cy = room.center
+        return (1.0 if cx > edge.pos else -1.0) if edge.orientation == "v" else (
+            1.0 if cy > edge.pos else -1.0
+        )
 
         for door in self.plan.exterior_doors:
             room = self.plan.room(door.room)
@@ -299,18 +318,33 @@ class _Renderer:
             else:
                 self._door_symbol(x1, min(y1, y2), "v", door.width)
 
-    def _door_symbol(self, ox: float, oy: float, orientation: str, w: float):
-        """Draw a door at plan-space origin (ox, oy) as gap + leaf + swing arc."""
+    def _door_symbol(
+        self,
+        ox: float,
+        oy: float,
+        orientation: str,
+        w: float,
+        sgn: float | None = None,
+        hinge_far: bool = False,
+    ):
+        """Draw a door at plan-space origin (ox, oy) as gap + leaf + swing arc.
+
+        ``sgn`` picks the swing side (None → keep the leaf inside the envelope);
+        ``hinge_far`` hinges at the far (high-coordinate) end of the opening
+        instead of the near end.
+        """
         if orientation == "v":  # wall runs in +y; swing into +x or -x
-            sgn = 1.0 if (ox + w) <= self.max_x else -1.0
-            hinge = (ox, oy)
-            latch = (ox, oy + w)
-            tip = (ox + sgn * w, oy)
+            if sgn is None:
+                sgn = 1.0 if (ox + w) <= self.max_x else -1.0
+            hinge = (ox, oy + w) if hinge_far else (ox, oy)
+            latch = (ox, oy) if hinge_far else (ox, oy + w)
+            tip = (ox + sgn * w, hinge[1])
         else:  # wall runs in +x; swing into +y or -y
-            sgn = 1.0 if (oy + w) <= self.max_y else -1.0
-            hinge = (ox, oy)
-            latch = (ox + w, oy)
-            tip = (ox, oy + sgn * w)
+            if sgn is None:
+                sgn = 1.0 if (oy + w) <= self.max_y else -1.0
+            hinge = (ox + w, oy) if hinge_far else (ox, oy)
+            latch = (ox, oy) if hinge_far else (ox + w, oy)
+            tip = (hinge[0], oy + sgn * w)
 
         hx, hy = self.sx(hinge[0]), self.sy(hinge[1])
         lx, ly = self.sx(latch[0]), self.sy(latch[1])

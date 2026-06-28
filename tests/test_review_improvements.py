@@ -643,3 +643,81 @@ def test_builder_connect_accepts_offset():
         .connect("a", "b", width=2.67, offset=3)
     )
     assert plan.interior_doors[0].offset == 3.0
+
+
+# --- door swing / hinge ------------------------------------------------------
+
+_SWING_SRC = """\
+plan "Swing"
+envelope 40 x 20
+ceiling 9
+room living: living  at 0,0  size 24 x 20
+room bed:    bedroom at 24,0 size 16 x 20
+door living - bed width 3 {opt}
+entry living south width 3 offset 10
+window living west width 10 offset 6
+window bed east width 4 offset 6
+"""
+
+
+def test_swing_into_and_hinge_parse_and_round_trip():
+    from barndsl import emit_dsl
+
+    r = compile_source(_SWING_SRC.format(opt="into bed hinge far"))
+    d = r.plan.interior_doors[0]
+    assert (d.swing_into, d.hinge) == ("bed", "far")
+    line = next(l for l in emit_dsl(r.plan).splitlines() if l.startswith("door"))
+    assert line.endswith("into bed hinge far")
+
+
+def test_swing_into_a_room_it_does_not_connect_is_an_error():
+    r = compile_source(_SWING_SRC.format(opt="into kitchen"))
+    assert "DOOR_SWING" in _codes(r, "error")
+
+
+def test_swing_clearance_warns_for_a_shallow_room():
+    src = """\
+plan "Clearance"
+envelope 30 x 20
+ceiling 9
+room bed:    bedroom at 0,0  size 24 x 20
+room closet: closet  at 24,0 size 2 x 20
+door bed - closet width 3 into closet
+entry bed south width 3 offset 10
+window bed west width 10 offset 6
+"""
+    assert "DOOR_SWING" in _codes(compile_source(src), "warning")
+
+
+def test_swinging_the_other_way_clears_the_warning():
+    src = """\
+plan "Clearance ok"
+envelope 30 x 20
+ceiling 9
+room bed:    bedroom at 0,0  size 24 x 20
+room closet: closet  at 24,0 size 2 x 20
+door bed - closet width 3 into bed
+entry bed south width 3 offset 10
+window bed west width 10 offset 6
+"""
+    assert "DOOR_SWING" not in _codes(compile_source(src), "warning")
+
+
+def test_door_swing_is_registered_and_varies():
+    from barndsl.diagnostics import REGISTRY as REG
+
+    assert "DOOR_SWING" in REG and REG["DOOR_SWING"].varies
+
+
+def test_builder_rejects_a_bad_hinge():
+    import pytest
+
+    with pytest.raises(ValueError):
+        (
+            barndominium("B")
+            .envelope(width=20, length=20)
+            .ceiling(9)
+            .add_room("a", "living", x=0, y=0, width=10, length=20)
+            .add_room("b", "bedroom", x=10, y=0, width=10, length=20)
+            .connect("a", "b", hinge="sideways")
+        )
