@@ -500,3 +500,68 @@ def test_master_ensuite_does_not_apply_with_a_single_bath():
 def test_closet_and_ensuite_codes_registered():
     assert "MASTER_ENSUITE" in REGISTRY
     assert "NO_CLOSET" in REGISTRY
+
+
+# --- DOOR_SIZE: standard manufactured door widths ---------------------------
+
+_DOORSIZE_SRC = """\
+plan "Door sizes"
+envelope 36 x 24
+ceiling 9
+room living: living  at 0,0  size 20 x 24
+room bed:    bedroom at 20,0 size 16 x 24
+door living - bed width {w}
+entry living south width {ew} offset 4
+window living west width 10 offset 8
+window bed east width 4 offset 6
+"""
+
+
+def _doorsize(w="2.67", ew="3"):
+    return {
+        d.code for d in compile_source(_DOORSIZE_SRC.format(w=w, ew=ew)).infos
+    }
+
+
+def test_door_size_flags_a_non_standard_swing_width():
+    assert "DOOR_SIZE" in _doorsize(w="2.9")  # 34.8 in — between 32 and 36
+
+
+def test_standard_swing_widths_are_silent():
+    for w in ("2.5", "2.67", "3"):  # 30, 32, 36 in
+        assert "DOOR_SIZE" not in _doorsize(w=w), w
+
+
+def test_door_size_tolerates_a_near_standard_width():
+    assert "DOOR_SIZE" not in _doorsize(w="2.7")  # 32.4 in, within 0.5 of 32
+
+
+def test_open_cased_passage_is_not_size_checked():
+    src = _DOORSIZE_SRC.format(w="2.67", ew="3").replace(
+        "door living - bed width 2.67", "open living - bed width 5"
+    )
+    assert "DOOR_SIZE" not in {d.code for d in compile_source(src).infos}
+
+
+def test_door_size_flags_a_non_standard_exterior_width():
+    assert "DOOR_SIZE" in _doorsize(ew="3.2")  # 38.4 in entry
+
+
+def test_garage_overhead_door_is_exempt_from_door_size():
+    src = """\
+plan "Garage"
+envelope 50 x 24
+ceiling 9
+room living: living at 0,0 size 30 x 24
+room garage: garage at 30,0 size 20 x 24
+door living - garage width 2.67
+entry living south width 3 offset 8
+entry garage south width 9 offset 4 no-egress
+window living west width 10 offset 8
+"""
+    sizes = [d for d in compile_source(src).infos if d.code == "DOOR_SIZE"]
+    assert not sizes, [d.message for d in sizes]
+
+
+def test_door_size_is_registered():
+    assert "DOOR_SIZE" in REGISTRY

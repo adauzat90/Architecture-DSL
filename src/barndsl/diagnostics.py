@@ -138,6 +138,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A door is wider than the shared wall it sits on."),
         _c("DOOR_NARROW", W, "Door too narrow",
            "A swinging interior door is below the 30 in minimum clear width."),
+        _c("DOOR_SIZE", I, "Non-standard door width",
+           "A swing door's width isn't a manufactured leaf size (interior "
+           "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72). Snap it to the "
+           "nearest so it's orderable off-the-shelf."),
         _c("OPEN_BATH", W, "Bathroom has no door",
            "A bathroom is joined by an `open` passage; baths need a door for privacy."),
         # --- openings -------------------------------------------------------

@@ -328,9 +328,9 @@ room c2:      closet   east-of bed2      size 5 x 12
 
 door living - kitchen width 8
 door living - hall width 3
-door hall - bath width 2.7
-door hall - bed1 width 2.7
-door hall - bed2 width 2.7
+door hall - bath width 2.67
+door hall - bed1 width 2.67
+door hall - bed2 width 2.67
 door bed1 - c1 width 2.5
 door bed2 - c2 width 2.5
 

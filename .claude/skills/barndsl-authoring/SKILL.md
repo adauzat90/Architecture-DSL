@@ -118,8 +118,10 @@ placed don't match a declared `program` line).
 doesn't count), `MASTER_ENSUITE` (2+ full baths but the largest bedroom has no
 private bath), `ROOM_TIGHT` (kitchen < ~70 or full bath < ~35 sq ft), `BATH_VENT`
 (a windowless bath — confirm a fan), `HALL_DEADEND` (a hall serving ≤ 1 room),
-`ROOM_PROPORTION` (a habitable room more elongated than ~3:1), `GARAGE_NO_ENTRY`,
-`AREA_UNUSED`. Heed when you can; they don't block. `barndsl explain <CODE>`
+`ROOM_PROPORTION` (a habitable room more elongated than ~3:1), `DOOR_SIZE` (a
+swing door that isn't a stock leaf width — interior 30/32/36 in, exterior 36),
+`GARAGE_NO_ENTRY`, `AREA_UNUSED`. Heed when you can; they don't block. Use `open`
+(not a wide `door`) for cased openings. `barndsl explain <CODE>`
 prints the rationale for any code.
 
 > Checks are approximate, loosely IRC-based — not a substitute for a licensed
@@ -158,9 +160,9 @@ room c2:      closet   east-of bed2      size 5 x 12
 
 door living - kitchen width 8
 door living - hall width 3
-door hall - bath width 2.7
-door hall - bed1 width 2.7
-door hall - bed2 width 2.7
+door hall - bath width 2.67
+door hall - bed1 width 2.67
+door hall - bed2 width 2.67
 door bed1 - c1 width 2.5
 door bed2 - c2 width 2.5
 entry living south width 3 offset 8

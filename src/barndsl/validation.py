@@ -40,6 +40,11 @@ MIN_USABLE_AREA: dict[RoomType, float] = {
 }
 MIN_EGRESS_DOOR_WIDTH = 32 / 12  # 32 in clear; matches inches(32) exactly
 MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
+# Manufactured door leaf widths (inches). A door off these isn't orderable
+# off-the-shelf; the check nudges to the nearest. Doubles (60/72) included.
+STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
+STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
+DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
 NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
@@ -186,6 +191,11 @@ def _door_graph(plan: Barndominium) -> dict[str, set[str]]:
 def _wall_length(room: Room, wall: Direction) -> float:
     """Length of ``room``'s named wall (north/south run east-west = width)."""
     return room.width if wall in (Direction.NORTH, Direction.SOUTH) else room.length
+
+
+def _nearest_std(width_in: float, sizes: tuple[int, ...]) -> int:
+    """The manufactured door width (inches) closest to ``width_in``."""
+    return min(sizes, key=lambda s: abs(s - width_in))
 
 
 def _suggest_int(value: float, cap: float = 1e4) -> int | None:
@@ -671,6 +681,22 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     **loc,
                 )
             )
+        elif door.leaf:
+            # A swing door that *is* wide enough should still be an orderable size.
+            nearest = _nearest_std(door.width * 12, STD_INTERIOR_DOOR_WIDTHS_IN)
+            if abs(nearest - door.width * 12) > DOOR_SIZE_TOL_IN:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "DOOR_SIZE",
+                        f"Interior door between '{door.room_a}' and '{door.room_b}' is "
+                        f"{door.width * 12:.0f} in, not a standard leaf size.",
+                        room=door.room_a,
+                        hint=f"Use a stock width, e.g. `width {nearest / 12:g}` "
+                        f"({nearest} in).",
+                        **loc,
+                    )
+                )
         if not door.leaf and a and b:
             # A walk-through (`open`) gives no privacy; a bathroom needs a door.
             bath = next((r for r in (a, b) if r.type in BATH_TYPES), None)
@@ -698,6 +724,24 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     f"Exterior door references unknown room '{door.room}'.",
                     room=door.room,
                     hint="Reference an existing room id.",
+                    **_door_loc(door),
+                )
+            )
+            continue
+        room = plan.room(door.room)
+        if room is not None and room.type in (RoomType.GARAGE, RoomType.SHOP):
+            continue  # a garage/shop opening is an overhead door, not a leaf size
+        nearest = _nearest_std(door.width * 12, STD_EXTERIOR_DOOR_WIDTHS_IN)
+        if abs(nearest - door.width * 12) > DOOR_SIZE_TOL_IN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "DOOR_SIZE",
+                    f"Exterior door on '{door.room}' is {door.width * 12:.0f} in, "
+                    "not a standard size.",
+                    room=door.room,
+                    hint=f"Use a stock width, e.g. `width {nearest / 12:g}` "
+                    f"({nearest} in); 36 in is the usual entry.",
                     **_door_loc(door),
                 )
             )

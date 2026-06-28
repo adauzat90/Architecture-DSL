@@ -22,7 +22,7 @@ room loft: loft at 0,0 size 24 x 18 level 1
 stair flight at 18,3 size 4 x 12 from 0 to 1
 
 open living - kitchen width 10
-door living - hall width 4
+open living - hall width 4
 door hall - bed width 3
 door hall - bath width 2.67
 door hall - laundry width 2.5

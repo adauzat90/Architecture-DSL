@@ -25,7 +25,7 @@ room master:  bedroom at 36,0  size 12 x 17
 room mcloset: closet  at 48,0  size 6 x 17
 
 open living - kitchen width 10
-door living - hall width 4
+open living - hall width 4
 door hall - bed1 width 3
 door hall - bath width 2.67
 door hall - laundry width 2.5
