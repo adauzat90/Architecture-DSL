@@ -51,7 +51,7 @@ room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]
 open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no door leaf)
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]
-window <id> <wall> [width <w>] [offset <o>]
+window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 ```

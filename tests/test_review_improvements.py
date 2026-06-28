@@ -304,3 +304,82 @@ def test_compile_result_to_dict_is_machine_readable():
         assert set(d) == {
             "code", "severity", "line", "col", "end_col", "room", "message", "hint"
         }
+
+
+# --- window sill/head grammar + WINDOW_SILL ---------------------------------
+
+_SILL_SRC = """\
+plan "Sill"
+envelope 30 x 24
+ceiling 9
+room living: living at 0,0 size 30 x 24
+entry living south width 3 offset 4
+window living west width 6 offset 6 {opts}
+"""
+
+
+def test_window_sill_and_head_parse_onto_the_plan():
+    from barndsl import emit_dsl
+
+    r = compile_source(_SILL_SRC.format(opts="sill 4 head 7"))
+    w = r.plan.windows[0]
+    assert (w.sill_height, w.head_height) == (4.0, 7.0)
+    # Non-default sill/head round-trip through emit.
+    line = next(l for l in emit_dsl(r.plan).splitlines() if l.startswith("window"))
+    assert line.endswith("sill 4 head 7")
+    assert compile_source(emit_dsl(r.plan)).plan is not None
+
+
+def test_default_window_omits_sill_and_head_on_emit():
+    from barndsl import emit_dsl
+
+    r = compile_source(_SILL_SRC.format(opts=""))
+    line = next(l for l in emit_dsl(r.plan).splitlines() if l.startswith("window"))
+    assert "sill" not in line and "head" not in line
+
+
+def test_window_sill_warns_when_head_not_above_sill():
+    r = compile_source(_SILL_SRC.format(opts="sill 6 head 4"))
+    assert "WINDOW_SILL" in _codes(r, "warning")
+
+
+def test_window_sill_is_registered():
+    assert "WINDOW_SILL" in REGISTRY
+
+
+def test_a_high_sill_window_fails_bedroom_egress_size_via_dsl():
+    # Now that sill/head are in the grammar, a transom egress can be expressed.
+    src = """\
+plan "Transom"
+envelope 30 x 24
+ceiling 9
+room living: living  at 0,0  size 14 x 24
+room bed:    bedroom at 14,0 size 16 x 24
+door living - bed width 2.67
+entry living south width 3 offset 4
+window living west width 10 offset 8
+window bed east width 4 offset 4 sill 5 head 7
+"""
+    assert "EGRESS_SIZE" in _codes(compile_source(src), "warning")
+
+
+# --- auto-layout windows a perimeter bath (clears BATH_VENT) -----------------
+
+
+def test_auto_layout_windows_a_perimeter_bath():
+    import os
+
+    from barndsl import emit_dsl
+    from barndsl.layout2 import parse_brief2, solve_layout2
+
+    path = os.path.join(os.path.dirname(__file__), "..", "examples", "birch_run.brief")
+    with open(path) as fh:
+        out = solve_layout2(parse_brief2(fh.read()))
+    r = compile_source(emit_dsl(out.plan), name=out.plan.name)
+    assert "BATH_VENT" not in {d.code for d in r.infos}, r.report()
+    baths = [
+        room.id
+        for room in out.plan.rooms
+        if room.type.value in ("bathroom", "half_bath")
+    ]
+    assert baths and any(out.plan.windows_for(b) for b in baths)

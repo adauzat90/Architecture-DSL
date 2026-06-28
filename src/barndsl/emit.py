@@ -70,9 +70,14 @@ def emit_dsl(plan: Barndominium) -> str:
     if plan.windows:
         out.append("")
         for w in plan.windows:
-            out.append(
-                f"window {w.room} {w.wall.value} width {_n(w.width)} offset {_n(w.offset)}"
-            )
+            line = f"window {w.room} {w.wall.value} width {_n(w.width)} offset {_n(w.offset)}"
+            # Only emit sill/head when they differ from the defaults, to keep the
+            # common case terse while round-tripping a custom (e.g. transom) window.
+            if abs(w.sill_height - 3.0) > 1e-6:
+                line += f" sill {_n(w.sill_height)}"
+            if abs(w.head_height - 6.67) > 1e-6:
+                line += f" head {_n(w.head_height)}"
+            out.append(line)
 
     if plan.porches:
         out.append("")

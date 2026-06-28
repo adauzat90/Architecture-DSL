@@ -151,6 +151,9 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("WINDOW_INTERIOR", W, "Window on an interior wall",
            "A window is on a wall that isn't on the building envelope, so it "
            "provides no daylight or egress."),
+        _c("WINDOW_SILL", W, "Window head at or below its sill",
+           "A window's head height is not above its sill height, so it encloses "
+           "no glazed area. Set `head` above `sill` (both are ft above the floor)."),
         _c("ENTRY_INTERIOR", E, "Entry on an interior wall",
            "An exterior door is on a wall that doesn't face outside."),
         # --- stairs ---------------------------------------------------------

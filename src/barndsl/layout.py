@@ -346,6 +346,20 @@ def _add_openings(
         wall = max(walls, key=lambda d: _wall_len(room, d))
         _add_opening(plan, room, wall, min(feet(4), _wall_len(room, wall) * 0.8))
 
+    # 2b. A small window on any bath that sits on an exterior wall — light plus
+    #     ventilation, and it clears BATH_VENT. An interior bath stays windowless
+    #     (the validator's BATH_VENT info then correctly asks for a fan).
+    for room in plan.rooms:
+        if room.type not in (RoomType.BATHROOM, RoomType.HALF_BATH):
+            continue
+        if plan.windows_for(room.id):
+            continue
+        walls = exterior_walls(plan, room)
+        if not walls:
+            continue
+        wall = max(walls, key=lambda d: _wall_len(room, d))
+        _add_opening(plan, room, wall, min(feet(2.5), _wall_len(room, wall) * 0.5))
+
     # 3. Daylight: top up habitable rooms to the 8% glazing ratio.
     for room in plan.rooms:
         if room.type not in HABITABLE_TYPES:

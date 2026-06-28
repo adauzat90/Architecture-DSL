@@ -18,7 +18,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     door <id_a> - <id_b> [width <w>]
     open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no leaf)
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
-    window <id> <wall> [width <w>] [offset <o>]
+    window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 
@@ -90,7 +90,7 @@ Statements:
   door <id_a> - <id_b> [width <w>]            # interior door (rooms must share a wall)
   open <id_a> - <id_b> [width <w>]            # cased opening / walk-through, no door leaf
   entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
-  window <id> <wall> [width <w>] [offset <o>]              # window, on an exterior wall
+  window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]  # window; sill/head are ft above the floor
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
@@ -646,21 +646,26 @@ def _parse_statement(
         rid = rid_tok.text
         wall = c.wall()
         width, offset = 4.0, 2.0
+        sill, head = 3.0, 6.67  # ft above the floor; matches Window's defaults
         while c.peek() is not None:
             opt = c.take("an option").text.lower()
             if opt == "width":
                 width = c.number("window width")
             elif opt == "offset":
                 offset = c.number("offset")
+            elif opt == "sill":
+                sill = c.number("sill height")
+            elif opt == "head":
+                head = c.number("head height")
             else:
                 raise _ParseError(
                     "BAD_OPTION",
                     f"Unknown window option '{opt}'.",
                     c.toks[c.i - 1].col,
-                    hint="Options: width <n>, offset <n>.",
+                    hint="Options: width <n>, offset <n>, sill <n>, head <n>.",
                     end_col=c.toks[c.i - 1].end_col,
                 )
-        plan.add_window(rid, wall, width=width, offset=offset)
+        plan.add_window(rid, wall, width=width, offset=offset, sill_height=sill, head_height=head)
         win = plan.windows[-1]
         win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
     elif key == "porch":

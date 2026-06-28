@@ -721,6 +721,18 @@ def _validate_openings(plan: Barndominium, add) -> None:
             )
             continue
         room = plan.room(w.room)
+        if w.head_height <= w.sill_height + 1e-6:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "WINDOW_SILL",
+                    f"Window on '{w.room}' has its head ({_f(w.head_height)} ft) at "
+                    f"or below its sill ({_f(w.sill_height)} ft) — it has no glass.",
+                    room=w.room,
+                    hint="Set head above sill, e.g. `sill 3 head 6.5`.",
+                    **_door_loc(w),
+                )
+            )
         wlen = _wall_length(room, w.wall)
         if w.offset < -1e-6 or w.offset + w.width > wlen + 1e-6:
             add(

@@ -68,7 +68,7 @@ room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]                  # interior; rooms MUST share a wall
 open <id_a> - <id_b> [width <w>]                  # cased opening / walk-through, no leaf
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door
-window <id> <wall> [width <w>] [offset <o>]
+window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
 ```
