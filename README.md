@@ -125,9 +125,10 @@ fix in DSL terms.
 
 **Three severities, one channel.** `error`s must be fixed; `warning`s flag likely
 problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
-bedroom privacy, bath proximity — so "is it good?" travels the same diagnostic
-stream as "is it valid?" and never blocks a compile. The agent's architectural
-critique is folded into this same `info` channel.
+bedroom privacy, bath proximity, plumbing economy (cluster wet rooms on a shared
+wall), bedroom closets, and room proportion — so "is it good?" travels the same
+diagnostic stream as "is it valid?" and never blocks a compile. The agent's
+architectural critique is folded into this same `info` channel.
 
 > These checks are approximate and **not** a substitute for a licensed designer
 > or a review by the authority having jurisdiction.

@@ -35,6 +35,7 @@ MIN_EGRESS_DOOR_WIDTH = 32 / 12  # 32 in clear; matches inches(32) exactly
 MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
 NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
+MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
 
 
 class Severity(str, Enum):
@@ -138,6 +139,14 @@ def _f(value: float) -> str:
 #: Public, shared living spaces — bedrooms ideally don't open straight onto these.
 PUBLIC_TYPES = {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
 BATH_TYPES = {RoomType.BATHROOM, RoomType.HALF_BATH}
+#: Rooms with plumbing fixtures — cheaper to build when clustered on a wet wall.
+WET_TYPES = {
+    RoomType.BATHROOM,
+    RoomType.HALF_BATH,
+    RoomType.KITCHEN,
+    RoomType.LAUNDRY,
+    RoomType.UTILITY,
+}
 
 
 def _door_graph(plan: Barndominium) -> dict[str, set[str]]:
@@ -987,6 +996,73 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     "through a public space instead.",
                 )
             )
+
+    # 6. Plumbing economy: wet rooms (bath/kitchen/laundry/utility) are cheaper to
+    #    run when they share a wall. If there are 3+ but none abut another wet
+    #    room, the supply/waste runs are needlessly spread out.
+    wet = [r for r in plan.rooms if r.type in WET_TYPES]
+    if len(wet) >= 3:
+        grouped = any(
+            by_id[n].type in WET_TYPES
+            for r in wet
+            for n in geometric_neighbors(plan, r.id)
+            if n in by_id
+        )
+        if not grouped:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "WET_GROUP",
+                    f"The {len(wet)} wet rooms (bath/kitchen/laundry) don't share any "
+                    "walls; scattered plumbing means longer supply and waste runs.",
+                    hint="Group two or more wet rooms back-to-back on a shared wall "
+                    "(a 'wet wall') to cut plumbing cost — e.g. site a bath against "
+                    "the kitchen or laundry.",
+                )
+            )
+
+    # 7. Storage: a bedroom with no closet beside it is a real, noticeable omission
+    #    (not code, so INFO — some plans use wardrobes instead).
+    for room in plan.rooms:
+        if room.type is RoomType.BEDROOM:
+            has_closet = any(
+                by_id[n].type is RoomType.CLOSET
+                for n in geometric_neighbors(plan, room.id)
+                if n in by_id
+            )
+            if not has_closet:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "NO_CLOSET",
+                        f"Bedroom '{room.id}' has no adjacent closet.",
+                        room=room.id,
+                        hint=f"Add a closet against it, e.g. `room {room.id}_closet: "
+                        f"closet east-of {room.id} size 6 x 3` and `door {room.id} - "
+                        f"{room.id}_closet`.",
+                    )
+                )
+
+    # 8. Proportion: a habitable room shaped like a bowling alley is hard to
+    #    furnish. Hallways/closets are *meant* to be skinny — they're not habitable,
+    #    so the HABITABLE_TYPES gate already excludes them.
+    for room in plan.rooms:
+        if room.type in HABITABLE_TYPES:
+            short = room.min_dimension
+            long = max(room.width, room.length)
+            if short > 1e-6 and long / short > MAX_ROOM_ASPECT:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "ROOM_PROPORTION",
+                        f"{room.type.value.capitalize()} '{room.id}' is "
+                        f"{_f(room.width)} x {_f(room.length)} ({long / short:.1f}:1); "
+                        "very elongated rooms are hard to furnish.",
+                        room=room.id,
+                        hint="Aim for a more rectangular footprint (under ~3:1) — "
+                        "widen the short side or split the space.",
+                    )
+                )
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:

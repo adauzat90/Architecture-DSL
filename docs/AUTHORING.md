@@ -270,6 +270,11 @@ envelope edge if it needs a real window.
 - `BED_PRIVACY` — don't open a bedroom straight onto a public room; buffer with a
   hallway.
 - `BATH_DISTANCE` — keep a bath within a door or two of the bedrooms.
+- `WET_GROUP` — cluster wet rooms (bath/kitchen/laundry/utility) onto a shared
+  plumbing wall; 3+ that share no walls means longer, costlier runs.
+- `NO_CLOSET` — a bedroom with no adjacent closet (per bedroom).
+- `ROOM_PROPORTION` — a habitable room more elongated than ~3:1 is hard to
+  furnish.
 - `AREA_UNUSED` — a lot of footprint is unallocated.
 
 > These checks are approximate (loosely IRC-based) and are **not** a substitute
@@ -289,36 +294,40 @@ envelope edge if it needs a real window.
 
 ## A complete, clean plan
 
-This compiles with **0 errors, 0 warnings, 0 info**:
+This compiles with **0 errors, 0 warnings, 0 info** — note every bedroom gets a
+closet and the bath sits on the kitchen's wet wall, which is what clears the
+`NO_CLOSET` and `WET_GROUP` nudges:
 
 ```barn
 plan "Maple Two-Bed"
-envelope 48 x 30
+envelope 50 x 30
 ceiling 10
-note "2 bed / 1 bath, open living-kitchen, bedrooms off a hall."
+note "2 bed / 1 bath, open living-kitchen, bedrooms + closets off a hall."
 
-room living:  living   at 0,0            size 24 x 30
-room kitchen: kitchen  east-of living    size 24 x 18
-room hall:    hallway  north-of kitchen  size 24 x 4
-room bed1:    bedroom  north-of hall     size 10 x 8
-room bed2:    bedroom  east-of bed1      size 9 x 8
-room bath:    bathroom east-of bed2      size 5 x 8
+room living:  living   at 0,0            size 20 x 30
+room kitchen: kitchen  east-of living    size 22 x 14
+room bath:    bathroom east-of kitchen   size 8 x 14
+room hall:    hallway  north-of kitchen  size 30 x 4
+room bed1:    bedroom  north-of hall     size 11 x 12
+room c1:      closet   east-of bed1      size 3 x 12
+room bed2:    bedroom  east-of c1        size 11 x 12
+room c2:      closet   east-of bed2      size 5 x 12
 
 door living - kitchen width 8
 door living - hall width 3
+door hall - bath width 2.7
 door hall - bed1 width 2.7
 door hall - bed2 width 2.7
-door hall - bath width 2.7
+door bed1 - c1 width 2.5
+door bed2 - c2 width 2.5
 
-entry living south width 3 offset 10
+entry living south width 3 offset 8
 
-window living west width 10 offset 8
-window living south width 8 offset 4
-window kitchen south width 10 offset 6
-window kitchen east width 6 offset 4
+window living west width 14 offset 8
+window kitchen south width 8 offset 6
+window bath east width 4 offset 5
 window bed1 north width 4 offset 3
-window bed2 north width 4 offset 2
-window bath north width 3 offset 1
+window bed2 north width 4 offset 3
 ```
 
 ## Auto-layout: hand the solver a brief instead of coordinates

@@ -109,7 +109,9 @@ need a door for privacy); `PRIVATE_PASSTHROUGH` (a room reachable only *through*
 a bath/bedroom); `ENTRY_PRIVATE` (front door opening into a bath).
 
 **Infos — design nudges:** `KITCHEN_FLOW`, `BED_PRIVACY`, `BATH_DISTANCE`,
-`AREA_UNUSED`. Heed when you can; they don't block.
+`WET_GROUP` (cluster bath/kitchen/laundry on a shared plumbing wall), `NO_CLOSET`
+(a bedroom with no adjacent closet), `ROOM_PROPORTION` (a habitable room more
+elongated than ~3:1), `AREA_UNUSED`. Heed when you can; they don't block.
 
 > Checks are approximate, loosely IRC-based — not a substitute for a licensed
 > designer or the AHJ.
@@ -128,30 +130,37 @@ a bath/bedroom); `ENTRY_PRIVATE` (front door opening into a bath).
 
 ## A complete plan that compiles 0 / 0 / 0
 
+Note the closets (clears `NO_CLOSET`) and the bath on the kitchen's wet wall
+(clears `WET_GROUP`):
+
 ```barn
 plan "Maple Two-Bed"
-envelope 48 x 30
+envelope 50 x 30
 ceiling 10
 
-room living:  living   at 0,0            size 24 x 30
-room kitchen: kitchen  east-of living    size 24 x 18
-room hall:    hallway  north-of kitchen  size 24 x 4
-room bed1:    bedroom  north-of hall     size 10 x 8
-room bed2:    bedroom  east-of bed1      size 9 x 8
-room bath:    bathroom east-of bed2      size 5 x 8
+room living:  living   at 0,0            size 20 x 30
+room kitchen: kitchen  east-of living    size 22 x 14
+room bath:    bathroom east-of kitchen   size 8 x 14
+room hall:    hallway  north-of kitchen  size 30 x 4
+room bed1:    bedroom  north-of hall     size 11 x 12
+room c1:      closet   east-of bed1      size 3 x 12
+room bed2:    bedroom  east-of c1        size 11 x 12
+room c2:      closet   east-of bed2      size 5 x 12
 
 door living - kitchen width 8
 door living - hall width 3
+door hall - bath width 2.7
 door hall - bed1 width 2.7
 door hall - bed2 width 2.7
-door hall - bath width 2.7
-entry living south width 3 offset 10
+door bed1 - c1 width 2.5
+door bed2 - c2 width 2.5
+entry living south width 3 offset 8
 
-window living west width 10 offset 8
-window kitchen south width 10 offset 6
+window living west width 14 offset 8
+window kitchen south width 8 offset 6
+window bath east width 4 offset 5
 window bed1 north width 4 offset 3
-window bed2 north width 4 offset 2
-window bath north width 3 offset 1
+window bed2 north width 4 offset 3
 ```
 
 ## Python builder (same core, same rules)
