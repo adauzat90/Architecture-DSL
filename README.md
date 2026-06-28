@@ -46,7 +46,7 @@ envelope <W> x <L>
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>
 note "free text"
-program <n> bed [<m> bath]          # optional; intended counts, checked vs the rooms
+program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]
 open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no door leaf)

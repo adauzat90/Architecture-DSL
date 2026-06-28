@@ -46,6 +46,29 @@ _KEYWORDS = (
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
 
+_BED_WORDS = frozenset({"bed", "beds", "bedroom", "bedrooms"})
+#: 'bath' is an aggregate (bathroom + half_bath), matching the compile recap.
+_BATH_WORDS = frozenset({"bath", "baths", "bathroom", "bathrooms"})
+
+
+def _program_noun(text: str) -> "str | RoomType | None":
+    """Resolve a `program` noun to 'bed', 'bath', a :class:`RoomType`, or None.
+
+    'bed'/'bath' are exact-count categories; any other room type (singular, or
+    with a trailing plural 's') becomes an at-least requirement.
+    """
+    t = text.lower()
+    if t in _BED_WORDS:
+        return "bed"
+    if t in _BATH_WORDS:
+        return "bath"
+    for cand in (t, t[:-1] if t.endswith("s") else t):
+        try:
+            return RoomType(cand)
+        except ValueError:
+            continue
+    return None
+
 #: Human/LLM-facing language reference, reused in the agent's system prompt so
 #: the grammar has a single source of truth.
 DSL_REFERENCE = """\
@@ -61,7 +84,8 @@ Statements:
   wing <W> x <L> at <x>,<y>       # optional; add blocks for an L/T/U footprint
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   note "free text"                # optional design note
-  program <n> bed [<m> bath]      # optional; intended counts, checked vs the rooms
+  program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
+                                  #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
   room <id>: <type> <placement> size <W> x <L> [level <n>]
   door <id_a> - <id_b> [width <w>]            # interior door (rooms must share a wall)
   open <id_a> - <id_b> [width <w>]            # cased opening / walk-through, no door leaf
@@ -480,30 +504,46 @@ def _parse_statement(
         plan.note(c.take("a quoted note").text)
         c.expect_end()
     elif key == "program":
+        # `program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`.
+        # The first clause (bed) is mandatory; the rest are any order. bed/bath
+        # are exact-count categories; other room types are at-least requirements.
         beds = c.count("the bedroom count")
         unit = c.take("'bed'")
-        if unit.text.lower() not in ("bed", "beds", "bedroom", "bedrooms"):
+        if _program_noun(unit.text) != "bed":
             raise _ParseError(
                 "SYNTAX",
                 f"Expected 'bed', got '{unit.text}'.",
                 unit.col,
                 end_col=unit.end_col,
-                hint="Write the program as `program 3 bed 2 bath`.",
+                hint="The program starts with a bedroom count, e.g. `program 3 bed`.",
             )
         baths = None
-        if c.peek() is not None:
-            baths = c.count("the bathroom count")
-            unit2 = c.take("'bath'")
-            if unit2.text.lower() not in ("bath", "baths", "bathroom", "bathrooms"):
+        requires: dict[RoomType, int] = {}
+        min_area = None
+        while c.peek() is not None:
+            if c.peek().text.lower() == "area":
+                c.take("area")
+                min_area = c.number("the minimum area")
+                continue
+            n = c.count("a room count")
+            noun = c.take("a room type")
+            cat = _program_noun(noun.text)
+            if cat is None:
                 raise _ParseError(
-                    "SYNTAX",
-                    f"Expected 'bath', got '{unit2.text}'.",
-                    unit2.col,
-                    end_col=unit2.end_col,
-                    hint="Write the program as `program 3 bed 2 bath`.",
+                    "BAD_TYPE",
+                    f"Unknown program room type '{noun.text}'.",
+                    noun.col,
+                    end_col=noun.end_col,
+                    hint=f"Use 'bed', 'bath', 'area', or a room type: {_TYPES}.",
                 )
+            if cat == "bed":
+                beds = n
+            elif cat == "bath":
+                baths = n
+            else:
+                requires[cat] = requires.get(cat, 0) + n
         c.expect_end()
-        plan.program(beds, baths)
+        plan.program(beds, baths, requires=requires, min_area=min_area)
         plan.program_spec.line = lineno
         plan.program_spec.col = kw.col
         plan.program_spec.end_col = kw.end_col

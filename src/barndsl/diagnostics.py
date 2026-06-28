@@ -221,7 +221,9 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("GARAGE_NO_ENTRY", I, "Garage has no people-door",
            "A garage abuts the house but has no interior door into it."),
         _c("PROGRAM_MISMATCH", W, "Plan doesn't match its program",
-           "The rooms placed don't match the declared `program` bed/bath counts."),
+           "The rooms placed don't match the declared `program`: exact bed/bath "
+           "counts, an at-least requirement for another room type (e.g. "
+           "`1 laundry`), or a minimum conditioned `area`."),
         # --- agent layer ----------------------------------------------------
         _c("DESIGN", I, "Architect's critique",
            "A design-quality suggestion folded in from the agent's architect review."),

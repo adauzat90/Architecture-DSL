@@ -23,8 +23,8 @@ scoped alongside the design-quality `info` checks and deferred deliberately.
 ### ~~`program N bed M bath` directive + `PROGRAM_MATCH` check~~ — DONE
 Shipped: a `program <n> bed [<m> bath]` statement whose declared counts the
 validator checks against the rooms placed (`PROGRAM_MISMATCH` warning). Closes the
-"clean ≠ correct" gap mechanically. A natural extension is to widen the directive
-to more of the brief (e.g. a required room list, or min total area).
+"clean ≠ correct" gap mechanically. Since widened to a required-room list and a
+minimum area — see "Widened `program` directive" below.
 
 ## Diagnostic machinery — DONE
 Shipped alongside the checks below:
@@ -58,10 +58,21 @@ Shipped as conservative `info` nudges (never block a compile):
   footprint. Gated: a hall carrying an exterior entry (a foyer/vestibule) is
   exempt, and a hall connecting two rooms (a pass-through) doesn't fire.
 
-## Candidate checks held for later
-Lower-confidence than the ones already shipped (fuzzier thresholds / higher
-false-positive risk); revisit if they prove worth it:
+## Widened `program` directive — DONE
+`NO_LAUNDRY` / `NO_DINING` were too soft to emit unconditionally (an eat-in
+kitchen has no dining room; a laundry is often a closet), so instead of guessing,
+the `program` directive now lets the author declare the intent and the existing
+`PROGRAM_MISMATCH` warning checks it:
 
-- `NO_LAUNDRY` / `NO_DINING` — too soft / high false-positive as written; better
-  folded into a widened `program` directive (a required-room list) than emitted
-  unconditionally.
+    program 3 bed 2 bath 1 office 1 laundry area 1800
+
+- `bed` / `bath` stay **exact** counts (catch a dropped bedroom).
+- any other room type is an **at-least** requirement (a missing/short one warns;
+  a surplus doesn't).
+- `area <sqft>` is a minimum on the conditioned interior floor area.
+
+The clauses round-trip through `emit_dsl` and the builder takes
+`program(beds, baths, requires={...}, min_area=...)`.
+
+## Candidate checks held for later
+(none currently — the soft room-presence checks are now covered by `program`.)

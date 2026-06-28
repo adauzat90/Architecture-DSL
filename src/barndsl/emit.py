@@ -33,6 +33,10 @@ def emit_dsl(plan: Barndominium) -> str:
         line = f"program {spec.beds} bed"
         if spec.baths is not None:
             line += f" {spec.baths} bath"
+        for rtype, n in spec.required.items():
+            line += f" {n} {rtype.value}"
+        if spec.min_area is not None:
+            line += f" area {_n(spec.min_area)}"
         out.append(line)
     for note in (plan.notes or "").splitlines():
         if note.strip():

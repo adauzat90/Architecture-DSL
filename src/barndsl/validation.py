@@ -1255,6 +1255,26 @@ def _validate_program(plan: Barndominium, add) -> None:
         mismatches.append(f"{spec.beds} bedroom(s) declared but {actual_beds} placed")
     if spec.baths is not None and spec.baths != actual_baths:
         mismatches.append(f"{spec.baths} bath(s) declared but {actual_baths} placed")
+    # Required room types are an *at-least* check: a declared room that's missing
+    # (or short) is flagged, but a surplus never is.
+    type_counts: dict[RoomType, int] = {}
+    for r in plan.rooms:
+        type_counts[r.type] = type_counts.get(r.type, 0) + 1
+    for rtype, need in spec.required.items():
+        have = type_counts.get(rtype, 0)
+        if have < need:
+            if need == 1:
+                mismatches.append(f"no {rtype.value} placed")
+            else:
+                mismatches.append(
+                    f"{need} {rtype.value}(s) declared but {have} placed"
+                )
+    if spec.min_area is not None:
+        interior = m["interior_sqft"]
+        if math.isfinite(interior) and interior + 1e-6 < spec.min_area:
+            mismatches.append(
+                f"{_f(spec.min_area)} sq ft declared but {interior:.0f} placed"
+            )
     if not mismatches:
         return
     loc = {}
@@ -1266,7 +1286,7 @@ def _validate_program(plan: Barndominium, add) -> None:
             "PROGRAM_MISMATCH",
             "Plan doesn't match its declared program: " + "; ".join(mismatches) + ".",
             hint="Add or remove rooms to match, or update the `program` line to the "
-            "counts you intend.",
+            "intent you mean (counts, required rooms, or `area`).",
             **loc,
         )
     )

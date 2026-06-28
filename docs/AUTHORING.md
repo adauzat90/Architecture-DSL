@@ -62,7 +62,7 @@ envelope <W> x <L>                 # primary footprint block (at the origin)
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>                        # >= 7; 9–12 is typical
 note "free text"                   # optional; repeatable
-program <n> bed [<m> bath]         # optional; intended counts, checked vs the rooms
+program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]                  # interior; rooms MUST share a wall

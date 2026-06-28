@@ -327,10 +327,17 @@ class ProgramSpec:
     guard for "the code compiles clean but I dropped a bedroom". ``baths`` counts
     every bathroom *and* half-bath room, matching the compile recap; ``None``
     means that count wasn't declared and isn't checked.
+
+    ``beds``/``baths`` are checked as **exact** counts. ``required`` maps a room
+    type to a minimum count (an **at-least** check — a declared `1 laundry` warns
+    only if none is placed; an extra never warns). ``min_area`` is the minimum
+    conditioned interior floor area in square feet.
     """
 
     beds: int
     baths: int | None = None
+    required: dict[RoomType, int] = field(default_factory=dict)
+    min_area: float | None = None
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
@@ -415,19 +422,40 @@ class Barndominium:
         self.notes = (self.notes + "\n" + text).strip() if self.notes else text
         return self
 
-    def program(self, beds: int, baths: int | None = None) -> "Barndominium":
-        """Declare the intended program (bedroom / bathroom counts).
+    def program(
+        self,
+        beds: int,
+        baths: int | None = None,
+        *,
+        requires: dict[RoomType | str, int] | None = None,
+        min_area: float | None = None,
+    ) -> "Barndominium":
+        """Declare the intended program (bedroom / bathroom counts and more).
 
         Optional. When set, :func:`~barndsl.validation.validate` warns
         (``PROGRAM_MISMATCH``) if the rooms actually placed don't match — a
         mechanical check that you built what you set out to. ``baths`` counts
         every bathroom and half-bath; omit it to check only bedrooms.
+
+        ``requires`` adds an **at-least** check per room type (e.g.
+        ``requires={RoomType.LAUNDRY: 1}`` warns only if no laundry is placed),
+        and ``min_area`` sets a minimum conditioned interior floor area (sq ft).
         """
         b = int(beds)
         ba = None if baths is None else int(baths)
         if b < 0 or (ba is not None and ba < 0):
             raise ValueError("program counts must be non-negative whole numbers.")
-        self.program_spec = ProgramSpec(b, ba)
+        req: dict[RoomType, int] = {}
+        for t, n in (requires or {}).items():
+            n = int(n)
+            if n < 0:
+                raise ValueError("program counts must be non-negative whole numbers.")
+            if n > 0:
+                req[RoomType(t)] = n
+        ma = None if min_area is None else float(min_area)
+        if ma is not None and ma < 0:
+            raise ValueError("program area must be non-negative.")
+        self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma)
         return self
 
     def add_room(
