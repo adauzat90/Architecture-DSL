@@ -821,3 +821,59 @@ def test_builder_kind_and_bad_kind():
     assert plan.interior_doors[0].kind == "pocket"
     with pytest.raises(ValueError):
         plan.connect("a", "b", kind="revolving")
+
+
+# --- eval-driven fixes -------------------------------------------------------
+
+_ENSUITE_TIE = """\
+plan "Tie"
+envelope 50 x 32
+ceiling 10
+room living:  living   at 0,0   size 50 x 15
+room hall:    hallway  at 0,15  size 50 x 3
+room bed1:    bedroom  at 0,18   size 14 x 14
+room closet1: closet   at 14,18  size 4 x 14
+room master:  bedroom  at 18,18  size 14 x 14
+room mcloset: closet   at 32,18  size 4 x 14
+room mbath:   bathroom at 36,18  size 6 x 14
+room bath1:   bathroom at 42,18  size 8 x 14
+door living - hall width 4
+door hall - bed1 width 3
+door hall - master width 3
+door hall - bath1 width 2.67
+door bed1 - closet1 width 2.5
+door master - mcloset width 2.5
+{mbath_door}
+entry living south width 3 offset 4
+window living south width 12 offset 4
+window bed1 north width 5 offset 4
+window master north width 5 offset 4
+window mbath north width 3 offset 1
+window bath1 north width 3 offset 2
+"""
+
+
+def test_master_ensuite_not_fired_when_a_tied_bedroom_has_the_ensuite():
+    # master and bed1 have equal area; master has a private ensuite (mbath).
+    r = compile_source(_ENSUITE_TIE.format(mbath_door="door master - mbath width 2.67"))
+    assert "MASTER_ENSUITE" not in _codes(r, "info")
+
+
+def test_master_ensuite_still_fires_when_no_bedroom_has_one():
+    # Both baths open off the hall — no private ensuite anywhere.
+    r = compile_source(_ENSUITE_TIE.format(mbath_door="door hall - mbath width 2.67"))
+    assert "MASTER_ENSUITE" in _codes(r, "info")
+
+
+def test_misplaced_align_gives_a_targeted_hint():
+    src = """\
+plan "Misplaced"
+envelope 30 x 20
+ceiling 9
+room living: living at 0,0 size 16 x 20
+room bed: bedroom east-of living size 14 x 20 align far
+entry living south width 3 offset 4
+"""
+    r = compile_source(src)
+    extra = next((d for d in r.errors if d.code == "EXTRA_TOKENS"), None)
+    assert extra is not None and "align" in extra.hint and "before `size`" in extra.hint

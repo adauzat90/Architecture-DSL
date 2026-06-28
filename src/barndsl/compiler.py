@@ -377,11 +377,20 @@ class _Cursor:
     def expect_end(self) -> None:
         t = self.peek()
         if t is not None:
+            # A common slip: `align`/`offset` (the slide-along-the-wall modifiers)
+            # belong on the relative anchor, *before* `size` — not at the end.
+            if t.text.lower() in ("align", "offset", "near", "far", "center"):
+                hint = (
+                    "`align`/`offset` go on the relative anchor, before `size` "
+                    "(e.g. `room x: bedroom east-of y align far size 12 x 11`)."
+                )
+            else:
+                hint = "Remove the extra token(s)."
             raise _ParseError(
                 "EXTRA_TOKENS",
                 f"Unexpected '{t.text}' at end of statement.",
                 t.col,
-                hint="Remove the extra token(s).",
+                hint=hint,
                 end_col=t.end_col,
             )
 

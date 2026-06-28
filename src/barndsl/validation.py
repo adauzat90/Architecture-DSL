@@ -1299,9 +1299,9 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
-    # 8. Primary suite: on a floor with two or more full bathrooms, the largest
-    #    bedroom should have a private (ensuite) bath rather than only sharing the
-    #    hall bath — that's the point of a second bath. INFO (a preference).
+    # 8. Primary suite: on a floor with two or more full bathrooms, *some* bedroom
+    #    should have a private (ensuite) bath rather than every bath only being a
+    #    shared hall bath — that's the point of a second bath. INFO (a preference).
     beds_by_level: dict[int, list[Room]] = {}
     full_baths_by_level: dict[int, int] = {}
     for r in plan.rooms:
@@ -1309,35 +1309,41 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
             beds_by_level.setdefault(r.level, []).append(r)
         elif r.type is RoomType.BATHROOM:
             full_baths_by_level[r.level] = full_baths_by_level.get(r.level, 0) + 1
+
+    def _bedroom_ensuite(bed_id: str) -> bool:
+        # A full bath reached only through this bedroom (a closet off it is fine);
+        # a bath also opening to a hall or another room is a shared bath.
+        return any(
+            by_id[n].type is RoomType.BATHROOM
+            and all(
+                m == bed_id or (m in by_id and by_id[m].type is RoomType.CLOSET)
+                for m in graph.get(n, ())
+            )
+            for n in graph.get(bed_id, ())
+            if n in by_id
+        )
+
     for level, beds in beds_by_level.items():
         nbaths = full_baths_by_level.get(level, 0)
         if nbaths < 2 or not beds:
             continue
+        # Satisfied as long as *any* bedroom has a private ensuite — don't depend
+        # on an arbitrary "largest bedroom" tiebreak (two equal-area bedrooms used
+        # to flip a false positive). The largest just names where to add one.
+        if any(_bedroom_ensuite(b.id) for b in beds):
+            continue
         master = max(beds, key=lambda r: r.area)
-        # An ensuite is a full bath reached only through the master (a closet off
-        # it is fine); a bath also opening to a hall or another room is shared.
-        has_ensuite = any(
-            by_id[n].type is RoomType.BATHROOM
-            and all(
-                m == master.id or (m in by_id and by_id[m].type is RoomType.CLOSET)
-                for m in graph.get(n, ())
+        add(
+            Issue(
+                Severity.INFO,
+                "MASTER_ENSUITE",
+                f"This floor has {nbaths} full baths but none is a private ensuite — "
+                f"the primary bedroom (e.g. '{master.id}') should have its own.",
+                room=master.id,
+                hint=f"Make one bath open only off a bedroom, e.g. "
+                f"`door {master.id} - <bath>` with that bath connected to nothing else.",
             )
-            for n in graph.get(master.id, ())
-            if n in by_id
         )
-        if not has_ensuite:
-            add(
-                Issue(
-                    Severity.INFO,
-                    "MASTER_ENSUITE",
-                    f"The primary bedroom '{master.id}' has no private bath, but this "
-                    f"floor has {nbaths} — the largest bedroom should get an ensuite.",
-                    room=master.id,
-                    hint=f"Make one bath open only off '{master.id}', e.g. "
-                    f"`door {master.id} - <bath>` with that bath connected to nothing "
-                    "else.",
-                )
-            )
 
     # 8. Proportion: a habitable room shaped like a bowling alley is hard to
     #    furnish. Hallways/closets are *meant* to be skinny — they're not habitable,

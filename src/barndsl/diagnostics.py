@@ -230,9 +230,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A bedroom has no closet reached by a door from it — either none "
            "abuts it, or one abuts but with no door into it (e.g. a neighbour's "
            "closet)."),
-        _c("MASTER_ENSUITE", I, "Primary bedroom has no ensuite",
-           "On a floor with two or more full bathrooms, the largest bedroom has "
-           "no private (ensuite) bath — it only shares the hall bath."),
+        _c("MASTER_ENSUITE", I, "No private ensuite",
+           "On a floor with two or more full bathrooms, no bedroom has a private "
+           "(ensuite) bath — every bath is shared. The primary bedroom should get "
+           "its own."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
         _c("GARAGE_BEDROOM", W, "Garage opens into a bedroom",

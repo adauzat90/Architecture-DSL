@@ -50,6 +50,7 @@ def _program_summary(plan) -> str:
     m = plan.metrics()
     return (
         f"Program: {int(m['bedroom_count'])} bed / {m['bathroom_count']:g} bath · "
+        f"{m['interior_sqft']:.0f} sq ft interior · "
         f"{m['habitable_sqft']:.0f} sq ft habitable · "
         f"footprint {m['footprint_sqft']:.0f} sq ft"
     )
