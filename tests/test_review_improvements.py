@@ -721,3 +721,103 @@ def test_builder_rejects_a_bad_hinge():
             .add_room("b", "bedroom", x=10, y=0, width=10, length=20)
             .connect("a", "b", hinge="sideways")
         )
+
+
+# --- unified door statement (kinds + exterior form) -------------------------
+
+_UNI_SRC = """\
+plan "Unified"
+envelope 44 x 20
+ceiling 9
+room living:  living   at 0,0  size 20 x 20
+room kitchen: kitchen  at 20,0 size 12 x 20
+room bath:    bathroom at 32,0 size 12 x 20
+{conn}
+window living west width 10 offset 6
+window bath east width 4 offset 6
+"""
+
+_UNI_CONN = """\
+door living - kitchen cased width 8
+door kitchen - bath pocket width 2.67
+door living south exterior width 3 offset 8"""
+
+
+def test_unified_door_kinds_parse():
+    r = compile_source(_UNI_SRC.format(conn=_UNI_CONN))
+    assert r.ok, r.report()
+    kinds = {(d.room_a, d.room_b): d.kind for d in r.plan.interior_doors}
+    assert kinds[("living", "kitchen")] == "cased"
+    assert kinds[("kitchen", "bath")] == "pocket"
+    # cased has no leaf; pocket does
+    leaves = {(d.room_a, d.room_b): d.leaf for d in r.plan.interior_doors}
+    assert leaves[("living", "kitchen")] is False
+    assert leaves[("kitchen", "bath")] is True
+
+
+def test_unified_door_exterior_form_makes_an_entry():
+    r = compile_source(_UNI_SRC.format(conn=_UNI_CONN))
+    assert [(e.room, e.wall.value) for e in r.plan.exterior_doors] == [("living", "south")]
+    assert "NO_ENTRY" not in _codes(r, "error")
+
+
+def test_unified_doors_emit_terse_shorthands_and_round_trip():
+    from barndsl import emit_dsl
+
+    r = compile_source(_UNI_SRC.format(conn=_UNI_CONN))
+    lines = [
+        l for l in emit_dsl(r.plan).splitlines()
+        if l.startswith(("door", "open", "entry"))
+    ]
+    assert "open living - kitchen width 8" in lines           # cased -> open
+    assert "door kitchen - bath pocket width 2.67" in lines    # pocket keeps `door`
+    assert "entry living south width 3 offset 8" in lines      # exterior -> entry
+    assert emit_dsl(compile_source(emit_dsl(r.plan)).plan) == emit_dsl(r.plan)
+
+
+def test_exterior_door_requires_the_exterior_keyword():
+    bad = _UNI_SRC.format(
+        conn=_UNI_CONN.replace(
+            "door living south exterior width 3 offset 8",
+            "door living south width 3 offset 8",
+        )
+    )
+    assert not compile_source(bad).ok
+
+
+def test_legacy_open_and_entry_still_parse():
+    legacy = _UNI_SRC.format(
+        conn="open living - kitchen width 8\n"
+        "door kitchen - bath width 2.67\n"
+        "entry living south width 3 offset 8"
+    )
+    assert compile_source(legacy).ok
+
+
+def test_sliding_door_has_no_swing_clearance_check():
+    # A sliding door into a shallow closet does NOT warn (no swing to clear).
+    src = """\
+plan "Slide"
+envelope 30 x 20
+ceiling 9
+room bed:    bedroom at 0,0  size 24 x 20
+room closet: closet  at 24,0 size 2 x 20
+door bed - closet sliding width 3 into closet
+entry bed south width 3 offset 10
+window bed west width 10 offset 6
+"""
+    assert "DOOR_SWING" not in _codes(compile_source(src), "warning")
+
+
+def test_builder_kind_and_bad_kind():
+    import pytest
+
+    plan = (
+        barndominium("B").envelope(width=24, length=20).ceiling(9)
+        .add_room("a", "living", x=0, y=0, width=12, length=20)
+        .add_room("b", "bedroom", x=12, y=0, width=12, length=20)
+        .connect("a", "b", kind="pocket")
+    )
+    assert plan.interior_doors[0].kind == "pocket"
+    with pytest.raises(ValueError):
+        plan.connect("a", "b", kind="revolving")

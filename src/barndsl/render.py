@@ -281,17 +281,16 @@ class _Renderer:
                 start = edge.mid - w / 2  # centre on the shared wall
             else:  # measured from the south/west end, clamped onto the wall
                 start = edge.lo + max(0.0, min(offset, edge.length - w))
-            if getattr(door, "leaf", True):
+            kind = getattr(door, "kind", "swing" if getattr(door, "leaf", True) else "cased")
+            ox, oy = (edge.pos, start) if edge.orientation == "v" else (start, edge.pos)
+            if kind == "swing":
                 sgn = self._swing_sgn(door, a, b, edge)
                 hinge_far = getattr(door, "hinge", None) == "far"
-                if edge.orientation == "v":
-                    self._door_symbol(edge.pos, start, "v", w, sgn, hinge_far)
-                else:
-                    self._door_symbol(start, edge.pos, "h", w, sgn, hinge_far)
-            elif edge.orientation == "v":
-                self._opening_symbol(edge.pos, start, "v", w)
-            else:
-                self._opening_symbol(start, edge.pos, "h", w)
+                self._door_symbol(ox, oy, edge.orientation, w, sgn, hinge_far)
+            elif kind in ("pocket", "sliding"):
+                self._slide_symbol(ox, oy, edge.orientation, w)
+            else:  # cased opening
+                self._opening_symbol(ox, oy, edge.orientation, w)
 
     @staticmethod
     def _swing_sgn(door, a, b, edge) -> float | None:
@@ -378,6 +377,19 @@ class _Renderer:
                 self._line(sx0 - t, sy0, sx0 + t, sy0, WALL, 1.2)
             else:
                 self._line(sx0, sy0 - t, sx0, sy0 + t, WALL, 1.2)
+
+    def _slide_symbol(self, ox: float, oy: float, orientation: str, w: float):
+        """Draw a pocket/sliding door: the gap plus a slab line parallel to the
+        wall, set just inside one room (no swing arc)."""
+        d = 0.35  # how far the panel sits off the wall, ft
+        if orientation == "v":  # wall runs in +y at x=ox
+            s = d if (ox + d) <= self.max_x else -d
+            self._line(self.sx(ox), self.sy(oy), self.sx(ox), self.sy(oy + w), "#ffffff", 4.0)
+            self._line(self.sx(ox + s), self.sy(oy), self.sx(ox + s), self.sy(oy + w), WALL, 1.6)
+        else:  # wall runs in +x at y=oy
+            s = d if (oy + d) <= self.max_y else -d
+            self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
+            self._line(self.sx(ox), self.sy(oy + s), self.sx(ox + w), self.sy(oy + s), WALL, 1.6)
 
     def _draw_stairs(self, level: int):
         for s in self.plan.stairs:

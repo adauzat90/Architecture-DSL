@@ -168,21 +168,26 @@ class Room:
         return 0.0
 
 
+#: The interior-door kinds. ``swing`` is a hinged leaf (the default); ``cased``
+#: is an open walk-through (no leaf — the old ``open``); ``pocket``/``sliding``
+#: are sliding leaves (no swing arc). All four join the two rooms in the
+#: circulation graph; they differ in how they render and which checks apply.
+DOOR_KINDS = ("swing", "cased", "pocket", "sliding")
+
+
 @dataclass
 class InteriorDoor:
     """A connection between two adjacent rooms.
 
-    ``leaf`` distinguishes a swinging door (``True``, the default) from a
-    *cased opening* / walk-through (``False``) — an open passage with no door
-    leaf, the canonical open-concept link between e.g. a kitchen and a living
-    area. Both kinds join the two rooms in the circulation graph; they differ
-    only in how they render and which width checks apply.
+    ``kind`` is one of :data:`DOOR_KINDS`. ``leaf`` (a derived property) is True
+    for every kind except ``cased`` — a cased opening is the doorless
+    walk-through (open-concept link) between e.g. a kitchen and a living area.
     """
 
     room_a: str
     room_b: str
     width: float = inches(32)
-    leaf: bool = True
+    kind: str = "swing"
     #: Distance (ft) from the **south/west end** of the shared wall to the near
     #: edge of the door. ``None`` centres it on the shared wall (the default).
     offset: float | None = None
@@ -198,6 +203,11 @@ class InteriorDoor:
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
+
+    @property
+    def leaf(self) -> bool:
+        """True for any door with a leaf (everything but a cased opening)."""
+        return self.kind != "cased"
 
 
 @dataclass
@@ -672,18 +682,23 @@ class Barndominium:
         *,
         width: float = inches(32),
         leaf: bool = True,
+        kind: str | None = None,
         offset: float | None = None,
         swing_into: str | None = None,
         hinge: str | None = None,
     ) -> "Barndominium":
         """Add an interior doorway between two adjacent rooms.
 
-        Set ``leaf=False`` for an open cased passage (walk-through) with no
-        door leaf — see :meth:`opening`. ``offset`` (ft from the south/west end
-        of the shared wall) positions the door along that wall; omit it to centre.
+        ``kind`` is one of :data:`DOOR_KINDS` (``swing`` default, ``cased`` =
+        walk-through, ``pocket``/``sliding``); the legacy ``leaf=False`` is a
+        shorthand for ``kind="cased"``. ``offset`` (ft from the south/west end of
+        the shared wall) positions the door along that wall; omit it to centre.
         ``swing_into`` names the room the leaf opens into (``room_a``/``room_b``)
         and ``hinge`` is ``"near"`` or ``"far"``.
         """
+        resolved = kind if kind is not None else ("swing" if leaf else "cased")
+        if resolved not in DOOR_KINDS:
+            raise ValueError(f"door kind must be one of {DOOR_KINDS}, got {resolved!r}.")
         if hinge is not None and hinge not in ("near", "far"):
             raise ValueError(f"hinge must be 'near' or 'far', got {hinge!r}.")
         self.interior_doors.append(
@@ -691,7 +706,7 @@ class Barndominium:
                 room_a,
                 room_b,
                 float(width),
-                leaf=bool(leaf),
+                kind=resolved,
                 offset=None if offset is None else float(offset),
                 swing_into=swing_into,
                 hinge=hinge,

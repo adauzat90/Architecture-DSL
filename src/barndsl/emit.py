@@ -56,8 +56,15 @@ def emit_dsl(plan: Barndominium) -> str:
     if plan.interior_doors:
         out.append("")
         for d in plan.interior_doors:
-            kw = "door" if getattr(d, "leaf", True) else "open"
-            line = f"{kw} {d.room_a} - {d.room_b} width {_n(d.width)}"
+            kind = getattr(d, "kind", "swing" if getattr(d, "leaf", True) else "cased")
+            if kind == "cased":
+                # Emit the terse `open` shorthand for a cased opening.
+                line = f"open {d.room_a} - {d.room_b} width {_n(d.width)}"
+            else:
+                line = f"door {d.room_a} - {d.room_b}"
+                if kind != "swing":  # name pocket/sliding; swing is the default
+                    line += f" {kind}"
+                line += f" width {_n(d.width)}"
             if getattr(d, "offset", None) is not None:
                 line += f" offset {_n(d.offset)}"
             if getattr(d, "swing_into", None) is not None:

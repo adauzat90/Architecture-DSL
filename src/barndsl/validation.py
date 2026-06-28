@@ -696,7 +696,7 @@ def _validate_doors(plan: Barndominium, add) -> None:
                             **loc,
                         )
                     )
-                elif edge is not None:
+                elif edge is not None and door.kind == "swing":
                     target = a if door.swing_into == a.id else b
                     depth = target.width if edge.orientation == "v" else target.length
                     if depth + 1e-6 < door.width:

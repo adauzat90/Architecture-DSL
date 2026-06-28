@@ -46,6 +46,7 @@ _KEYWORDS = (
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
 
+_DOOR_KINDS = frozenset({"swing", "cased", "pocket", "sliding"})
 _BED_WORDS = frozenset({"bed", "beds", "bedroom", "bedrooms"})
 #: 'bath' is an aggregate (bathroom + half_bath), matching the compile recap.
 _BATH_WORDS = frozenset({"bath", "baths", "bathroom", "bathrooms"})
@@ -87,9 +88,13 @@ Statements:
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
   room <id>: <type> <placement> size <W> x <L> [level <n>]
-  door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]   # interior door
-  open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through, no door leaf
-  entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
+  door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+        # interior door between two rooms. swing (default) hinges; cased = an open
+        # walk-through (no leaf); pocket/sliding slide. offset = ft from the wall's
+        # S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
+  door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
+  open <id_a> - <id_b> [width <w>] [offset <o>]            # shorthand for `door <a> - <b> cased ...`
+  entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
   window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]  # window; sill/head are ft above the floor
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
@@ -576,49 +581,80 @@ def _parse_statement(
         smap.room_line[rid] = lineno
         smap.room_col[rid] = (rid_tok.col, rid_tok.end_col)
     elif key == "door":
-        a_tok = c.ident("the first room id")
+        # Unified door statement. Two forms, told apart by what follows the id:
+        #   interior:  door <a> - <b> [swing|cased|pocket|sliding] [opts]
+        #   exterior:  door <id> <wall> exterior [opts]
+        a_tok = c.ident("a room id")
         a = a_tok.text
-        sep = c.take("'-' or 'to'")
-        if sep.text.lower() not in ("-", "to"):
-            raise _ParseError(
-                "SYNTAX",
-                f"Expected '-' or 'to', got '{sep.text}'.",
-                sep.col,
-                end_col=sep.end_col,
-            )
-        b = c.ident("the second room id").text
-        width, offset, swing_into, hinge = 32 / 12, None, None, None
-        while c.peek() is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "width":
-                width = c.number("door width")
-            elif opt == "offset":
-                offset = c.number("door offset")
-            elif opt == "into":
-                swing_into = c.ident("the room the door swings into").text
-            elif opt == "hinge":
-                h = c.take("'near' or 'far'")
-                if h.text.lower() not in ("near", "far"):
+        nxt = c.peek()
+        if nxt is not None and nxt.text.lower() in ("-", "to"):
+            c.take("'-'")  # consume the separator
+            b = c.ident("the second room id").text
+            kind = "swing"
+            if c.peek() is not None and c.peek().text.lower() in _DOOR_KINDS:
+                kind = c.take("a door kind").text.lower()
+            width = 6.0 if kind == "cased" else 32 / 12  # cased opens wide
+            offset, swing_into, hinge = None, None, None
+            while c.peek() is not None:
+                opt = c.take("an option").text.lower()
+                if opt == "width":
+                    width = c.number("door width")
+                elif opt == "offset":
+                    offset = c.number("door offset")
+                elif opt == "into":
+                    swing_into = c.ident("the room the door swings into").text
+                elif opt == "hinge":
+                    h = c.take("'near' or 'far'")
+                    if h.text.lower() not in ("near", "far"):
+                        raise _ParseError(
+                            "BAD_OPTION",
+                            f"Hinge must be 'near' or 'far', got '{h.text}'.",
+                            h.col,
+                            hint="Use `hinge near` or `hinge far`.",
+                            end_col=h.end_col,
+                        )
+                    hinge = h.text.lower()
+                else:
                     raise _ParseError(
                         "BAD_OPTION",
-                        f"Hinge must be 'near' or 'far', got '{h.text}'.",
-                        h.col,
-                        hint="Use `hinge near` or `hinge far`.",
-                        end_col=h.end_col,
+                        f"Unknown door option '{opt}'.",
+                        c.toks[c.i - 1].col,
+                        hint="Options: a kind (swing/cased/pocket/sliding), width <n>, "
+                        "offset <n>, into <room>, hinge near|far.",
+                        end_col=c.toks[c.i - 1].end_col,
                     )
-                hinge = h.text.lower()
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown door option '{opt}'.",
-                    c.toks[c.i - 1].col,
-                    hint="Options: width <n>, offset <n>, into <room>, hinge near|far.",
-                    end_col=c.toks[c.i - 1].end_col,
-                )
-        c.expect_end()
-        plan.connect(a, b, width=width, offset=offset, swing_into=swing_into, hinge=hinge)
-        door = plan.interior_doors[-1]
-        door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
+            c.expect_end()
+            plan.connect(
+                a, b, width=width, kind=kind, offset=offset,
+                swing_into=swing_into, hinge=hinge,
+            )
+            d = plan.interior_doors[-1]
+            d.line, d.col, d.end_col = lineno, a_tok.col, a_tok.end_col
+        else:
+            # Exterior form: door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]
+            wall = c.wall()
+            c.keyword("exterior")
+            width, offset, egress = 3.0, 1.0, True
+            while c.peek() is not None:
+                opt = c.take("an option").text.lower()
+                if opt == "width":
+                    width = c.number("door width")
+                elif opt == "offset":
+                    offset = c.number("offset")
+                elif opt in ("no-egress", "nonegress"):
+                    egress = False
+                else:
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"Unknown exterior-door option '{opt}'.",
+                        c.toks[c.i - 1].col,
+                        hint="Options: width <n>, offset <n>, no-egress.",
+                        end_col=c.toks[c.i - 1].end_col,
+                    )
+            c.expect_end()
+            plan.entrance(a, wall, width=width, offset=offset, egress=egress)
+            ed = plan.exterior_doors[-1]
+            ed.line, ed.col, ed.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "open":
         a_tok = c.ident("the first room id")
         a = a_tok.text
