@@ -5,20 +5,15 @@ Not yet scheduled; capture here so they aren't lost.
 
 ## Agent aids
 
-### Worked-example gallery (highest-leverage non-check aid)
-Agents produce better plans by few-shotting from known-good examples than from
-prose alone. Curate a small, labeled set of **verified 0/0/0** plans the agent
-can copy-and-adapt:
-
-- a 1-bed / 1-bath cottage,
-- a 3-bed / 2-bath with a hallway spine,
-- an L-shaped plan exercising `wing`,
-- a two-story plan with a `stair` and a loft.
-
-Each should be pinned by a test that re-compiles it and asserts it stays clean,
-so the gallery can't silently rot as the rules evolve. Wire it into the
-`barndsl-authoring` skill (link or inline the most representative one). This was
-scoped alongside the design-quality `info` checks and deferred deliberately.
+### ~~Worked-example gallery (highest-leverage non-check aid)~~ — DONE
+Shipped: four **verified 0/0/0** plans in `examples/gallery/` for the agent to
+few-shot from — `cottage.barn` (1 bed/1 bath), `hall_spine.barn` (3 bed/2 bath
+with a primary suite), `lshape.barn` (`wing`/L-footprint), and `two_story.barn`
+(`stair` + `loft`). `tests/test_gallery.py` recompiles each and asserts it stays
+0/0/0 (and round-trips through `emit`), so the gallery can't rot as the rules
+evolve. Linked from the `barndsl-authoring` skill. Building these also surfaced
+two rule gaps, now fixed: `NO_CLOSET` requiring a door-connected closet, and the
+new `MASTER_ENSUITE` check.
 
 ### ~~`program N bed M bath` directive + `PROGRAM_MATCH` check~~ — DONE
 Shipped: a `program <n> bed [<m> bath]` statement whose declared counts the

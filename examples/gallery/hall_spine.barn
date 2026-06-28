@@ -1,0 +1,51 @@
+# 3-bed / 2-bath with a hallway spine — the classic barndo split: open
+# living/kitchen/dining up front, a full-width hall feeding the bedrooms.
+# Two secondary beds share the hall bath; the primary suite gets its own
+# ensuite and walk-in. Each bedroom has its own closet (with a door); the
+# two baths sit back-to-back on a shared wet wall.
+plan "Birch Hollow"
+envelope 68 x 32
+ceiling 10
+program 3 bed 2 bath
+
+# --- public band (south, y 0..15) ---
+room living:  living  at 0,0   size 26 x 15
+room kitchen: kitchen at 26,0  size 20 x 15
+room dining:  dining  at 46,0  size 22 x 15
+
+# --- the spine ---
+room hall: hallway at 0,15 size 68 x 3
+
+# --- secondary bedrooms + shared bath (west) ---
+room bed1:    bedroom  at 0,18   size 13 x 14
+room closet1: closet   at 13,18  size 4 x 14
+room bed2:    bedroom  at 17,18  size 13 x 14
+room closet2: closet   at 30,18  size 4 x 14
+room bath1:   bathroom at 34,18  size 8 x 14
+
+# --- primary suite (east): ensuite backs onto the shared bath (wet wall) ---
+room mbath:   bathroom at 42,18  size 6 x 14
+room master:  bedroom  at 48,18  size 14 x 14
+room mcloset: closet   at 62,18  size 6 x 14
+
+open living - kitchen width 10
+open kitchen - dining width 10
+door living - hall width 4
+door hall - bed1 width 3
+door hall - bed2 width 3
+door hall - bath1 width 2.67
+door hall - master width 3
+door bed1 - closet1 width 2.5
+door bed2 - closet2 width 2.5
+door master - mbath width 2.67
+door master - mcloset width 2.5
+
+entry living south width 3 offset 20
+window living south width 10 offset 2
+window kitchen south width 8 offset 6
+window dining south width 8 offset 6
+window bed1 north width 5 offset 4
+window bed2 north width 5 offset 4
+window master north width 6 offset 6
+window bath1 north width 3 offset 2
+window mbath north width 3 offset 1

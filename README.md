@@ -295,6 +295,7 @@ examples/
   birch_run.brief    # an adjacency brief for `barndsl layout`
   pinwheel.brief     # a non-sliceable brief that exercises the rectangular dual
   lshape.barn        # an L-shaped (rectilinear) footprint via `wing`
+  gallery/           # four verified-clean (0/0/0) worked plans to few-shot from
 tests/             # no API key required
 ```
 

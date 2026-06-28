@@ -114,9 +114,13 @@ placed don't match a declared `program` line).
 
 **Infos — design nudges:** `KITCHEN_FLOW`, `BED_PRIVACY`, `BATH_DISTANCE`,
 `WET_GROUP` (cluster bath/kitchen/laundry on a shared plumbing wall), `NO_CLOSET`
-(a bedroom with no adjacent closet), `ROOM_PROPORTION` (a habitable room more
-elongated than ~3:1), `GARAGE_NO_ENTRY` (a garage with no interior people-door
-into the house), `AREA_UNUSED`. Heed when you can; they don't block.
+(a bedroom with no closet reached *by a door* — an abutting one with no door
+doesn't count), `MASTER_ENSUITE` (2+ full baths but the largest bedroom has no
+private bath), `ROOM_TIGHT` (kitchen < ~70 or full bath < ~35 sq ft), `BATH_VENT`
+(a windowless bath — confirm a fan), `HALL_DEADEND` (a hall serving ≤ 1 room),
+`ROOM_PROPORTION` (a habitable room more elongated than ~3:1), `GARAGE_NO_ENTRY`,
+`AREA_UNUSED`. Heed when you can; they don't block. `barndsl explain <CODE>`
+prints the rationale for any code.
 
 > Checks are approximate, loosely IRC-based — not a substitute for a licensed
 > designer or the AHJ.
@@ -166,6 +170,23 @@ window kitchen south width 8 offset 6
 window bath east width 4 offset 5
 window bed1 north width 4 offset 3
 window bed2 north width 4 offset 3
+```
+
+## Worked-example gallery — copy and adapt
+
+`examples/gallery/` holds four **verified 0 / 0 / 0** plans (pinned by
+`tests/test_gallery.py` so they can't rot). Few-shot from the closest one rather
+than writing from scratch:
+
+| File | Shape | Shows |
+|------|-------|-------|
+| `cottage.barn` | 1 bed / 1 bath | relative anchors, `open` core, hall-buffered bedroom |
+| `hall_spine.barn` | 3 bed / 2 bath | hall spine, primary suite with a private ensuite, wet-wall baths, per-bedroom closets |
+| `lshape.barn` | 2 bed / 1 bath, `wing` | L-footprint, interior seam walls, a suite off the spine |
+| `two_story.barn` | 1 bed + loft | `level`, `loft`, a `stair` whose run fits the storey |
+
+```bash
+barndsl compile examples/gallery/hall_spine.barn   # read it, then adapt
 ```
 
 ## Python builder (same core, same rules)

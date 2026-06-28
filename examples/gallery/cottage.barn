@@ -1,0 +1,25 @@
+# 1-bed / 1-bath cottage — the smallest complete plan.
+# Open living+kitchen up front; a short hall buffers the bedroom and bath.
+plan "Stillwater Cottage"
+envelope 32 x 24
+ceiling 9
+program 1 bed 1 bath
+
+room living:  living   at 0,0    size 18 x 14
+room kitchen: kitchen  north-of living size 18 x 10
+room hall:    hallway  at 18,0   size 4 x 24
+room bed:     bedroom  at 22,0   size 10 x 12
+room closet:  closet   north-of bed size 10 x 3
+room bath:    bathroom at 22,15  size 10 x 9
+
+open living - kitchen width 8
+door living - hall width 3
+door hall - bed width 3
+door hall - bath width 2.67
+door bed - closet width 2.5
+
+entry living south width 3 offset 13
+window living south width 8 offset 2
+window kitchen north width 6 offset 6
+window bed  south width 4 offset 3
+window bath north width 3 offset 4
