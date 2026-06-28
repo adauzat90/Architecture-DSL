@@ -277,10 +277,11 @@ class _Renderer:
                 continue
             w = min(door.width, edge.length)
             start = edge.mid - w / 2
+            draw = self._door_symbol if getattr(door, "leaf", True) else self._opening_symbol
             if edge.orientation == "v":
-                self._door_symbol(edge.pos, start, "v", w)
+                draw(edge.pos, start, "v", w)
             else:
-                self._door_symbol(start, edge.pos, "h", w)
+                draw(start, edge.pos, "h", w)
 
         for door in self.plan.exterior_doors:
             room = self.plan.room(door.room)
@@ -316,6 +317,29 @@ class _Renderer:
         self._line(hx, hy, tx, ty, WALL, 1.2)
         r = w * self.c.scale
         self._path(f"M {tx:.1f} {ty:.1f} A {r:.1f} {r:.1f} 0 0 1 {lx:.1f} {ly:.1f}", "#999999", 0.8)
+
+    def _opening_symbol(self, ox: float, oy: float, orientation: str, w: float):
+        """Draw a cased opening (walk-through) as a plain gap with jamb ticks.
+
+        Unlike :meth:`_door_symbol` there is no leaf or swing arc — just the
+        wall stopping at two jambs, which reads as an open passage.
+        """
+        if orientation == "v":  # wall runs in +y
+            ends = ((ox, oy), (ox, oy + w))
+        else:  # wall runs in +x
+            ends = ((ox, oy), (ox + w, oy))
+
+        (ax, ay), (bx, by) = ends
+        # White out the wall under the opening.
+        self._line(self.sx(ax), self.sy(ay), self.sx(bx), self.sy(by), "#ffffff", 4.0)
+        # A short jamb tick perpendicular to the wall at each end.
+        t = 3.5
+        for px, py in ends:
+            sx0, sy0 = self.sx(px), self.sy(py)
+            if orientation == "v":
+                self._line(sx0 - t, sy0, sx0 + t, sy0, WALL, 1.2)
+            else:
+                self._line(sx0, sy0 - t, sx0, sy0 + t, WALL, 1.2)
 
     def _draw_stairs(self, level: int):
         for s in self.plan.stairs:

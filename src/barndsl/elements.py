@@ -36,6 +36,11 @@ def inches(value: float) -> float:
     return float(value) / 12.0
 
 
+#: Default width for an open cased passage (walk-through) when none is given.
+#: Walk-throughs are wide by design, so this is generous next to a 32-in door.
+DEFAULT_OPENING_WIDTH = feet(6)
+
+
 def _finite(room_id: str, field: str, value: float) -> float:
     """Coerce ``value`` to a finite float, or raise a clear ValueError.
 
@@ -165,11 +170,19 @@ class Room:
 
 @dataclass
 class InteriorDoor:
-    """A doorway between two adjacent rooms."""
+    """A connection between two adjacent rooms.
+
+    ``leaf`` distinguishes a swinging door (``True``, the default) from a
+    *cased opening* / walk-through (``False``) — an open passage with no door
+    leaf, the canonical open-concept link between e.g. a kitchen and a living
+    area. Both kinds join the two rooms in the circulation graph; they differ
+    only in how they render and which width checks apply.
+    """
 
     room_a: str
     room_b: str
     width: float = inches(32)
+    leaf: bool = True
     #: Source location of the statement that created this door (textual DSL
     #: front-end only); lets diagnostics point at the `door` line, not a room.
     line: int | None = None
@@ -579,11 +592,32 @@ class Barndominium:
         return self
 
     def connect(
-        self, room_a: str, room_b: str, *, width: float = inches(32)
+        self,
+        room_a: str,
+        room_b: str,
+        *,
+        width: float = inches(32),
+        leaf: bool = True,
     ) -> "Barndominium":
-        """Add an interior doorway between two adjacent rooms."""
-        self.interior_doors.append(InteriorDoor(room_a, room_b, float(width)))
+        """Add an interior doorway between two adjacent rooms.
+
+        Set ``leaf=False`` for an open cased passage (walk-through) with no
+        door leaf — see :meth:`opening`.
+        """
+        self.interior_doors.append(
+            InteriorDoor(room_a, room_b, float(width), leaf=bool(leaf))
+        )
         return self
+
+    def opening(
+        self, room_a: str, room_b: str, *, width: float = DEFAULT_OPENING_WIDTH
+    ) -> "Barndominium":
+        """Add an open cased passage (walk-through) between two adjacent rooms.
+
+        Like :meth:`connect`, but with no door leaf — the open-concept link
+        between e.g. a kitchen and a living area. Defaults to a wide opening.
+        """
+        return self.connect(room_a, room_b, width=width, leaf=False)
 
     def entrance(
         self,

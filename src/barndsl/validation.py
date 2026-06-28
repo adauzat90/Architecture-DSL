@@ -603,7 +603,9 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         **loc,
                     )
                 )
-        if door.width < MIN_INTERIOR_DOOR_WIDTH:
+        if door.leaf and door.width < MIN_INTERIOR_DOOR_WIDTH:
+            # An open cased passage (leaf=False) is wide by design — the narrow
+            # check only applies to swinging doors.
             add(
                 Issue(
                     Severity.WARNING,

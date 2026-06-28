@@ -16,6 +16,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     note "free text"
     room <id>: <type> <placement> size <W> x <L> [level <n>]
     door <id_a> - <id_b> [width <w>]
+    open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no leaf)
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
     window <id> <wall> [width <w>] [offset <o>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
@@ -39,8 +40,8 @@ from .validation import Issue, Severity, ValidationReport, validate
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
-    "plan", "envelope", "wing", "ceiling", "note", "room", "door", "entry", "window",
-    "porch", "stair"
+    "plan", "envelope", "wing", "ceiling", "note", "room", "door", "open", "entry",
+    "window", "porch", "stair"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -62,6 +63,7 @@ Statements:
   note "free text"                # optional design note
   room <id>: <type> <placement> size <W> x <L> [level <n>]
   door <id_a> - <id_b> [width <w>]            # interior door (rooms must share a wall)
+  open <id_a> - <id_b> [width <w>]            # cased opening / walk-through, no door leaf
   entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
   window <id> <wall> [width <w>] [offset <o>]              # window, on an exterior wall
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
@@ -499,6 +501,27 @@ def _parse_statement(
             width = c.number("door width")
         c.expect_end()
         plan.connect(a, b, width=width)
+        door = plan.interior_doors[-1]
+        door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
+    elif key == "open":
+        a_tok = c.ident("the first room id")
+        a = a_tok.text
+        sep = c.take("'-' or 'to'")
+        if sep.text.lower() not in ("-", "to"):
+            raise _ParseError(
+                "SYNTAX",
+                f"Expected '-' or 'to', got '{sep.text}'.",
+                sep.col,
+                end_col=sep.end_col,
+            )
+        b = c.ident("the second room id").text
+        width = 6.0  # wide cased opening by default; matches DEFAULT_OPENING_WIDTH
+        nxt = c.peek()
+        if nxt is not None:
+            c.keyword("width")
+            width = c.number("opening width")
+        c.expect_end()
+        plan.opening(a, b, width=width)
         door = plan.interior_doors[-1]
         door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "entry":

@@ -61,6 +61,7 @@ note "free text"                   # optional; repeatable
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]                  # interior; rooms MUST share a wall
+open <id_a> - <id_b> [width <w>]                  # cased opening / walk-through, no leaf
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door
 window <id> <wall> [width <w>] [offset <o>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
@@ -237,7 +238,10 @@ envelope edge if it needs a real window.
 **Errors (must fix):**
 - Rooms stay inside the envelope and don't overlap (same level).
 - A `door` connects two *different* rooms that **share a wall** (or, across
-  levels, stack). Corner-only contact is **not** a shared wall.
+  levels, stack). Corner-only contact is **not** a shared wall. `open` is the
+  same connection without a door leaf — a cased opening / walk-through — and is
+  subject to the same shared-wall rule and reachability, but renders as a plain
+  gap, defaults wide, and is exempt from the narrow-door warning.
 - Bedrooms: area ≥ 70 sq ft, smallest side ≥ 7 ft, and an **egress** opening — a
   `window` (or its own `entry`) **on an exterior wall**.
 - Every interior room is **reachable** from an `entry` through interior doors.
@@ -448,8 +452,9 @@ The builder mirrors the DSL:
   use **underscores** (`east_of=`), and the reference must be added *before* this
   call. `align=` (`"near"`/`"far"`/`"center"`, case-insensitive) and `offset=`
   slide the room along the shared wall, exactly like the DSL clauses.
-- `connect(a, b, width=)` is an interior `door`; `entrance(room, wall, …)` is an
-  `entry`; `add_window(room, wall, …)`; `add_porch(id, …)`.
+- `connect(a, b, width=)` is an interior `door` (`leaf=False` for a walk-through);
+  `opening(a, b, width=)` is the shorthand for that cased opening; `entrance(room,
+  wall, …)` is an `entry`; `add_window(room, wall, …)`; `add_porch(id, …)`.
 - `type` and `wall` accept the enum **or** a string (`"living"`, `"south"`) and
   are validated immediately (a bad value raises `ValueError`, not a late crash).
 - `level=` must be a whole number ≥ 0, same as the DSL.

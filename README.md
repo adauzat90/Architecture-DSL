@@ -48,6 +48,7 @@ ceiling <H>
 note "free text"
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]
+open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no door leaf)
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]
 window <id> <wall> [width <w>] [offset <o>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
@@ -60,6 +61,11 @@ stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 share a wall and a `door` between them resolves — no coordinate bookkeeping. Add
 `align near|far|center` and/or `offset <n>` to slide the room along the shared
 wall.
+A `door` is a swinging door; `open <a> - <b> [width <w>]` is a **cased opening /
+walk-through** — an open passage with no door leaf (the open-concept link
+between e.g. a kitchen and a living area). It joins the two rooms in the
+circulation graph exactly like a door, but renders as a plain gap (no swing
+arc), defaults to a wide opening, and is exempt from the narrow-door warning.
 The footprint is one rectangle by default. For an **L/T/U-shaped building**, add
 `wing <W> x <L> at <x>,<y>` blocks: the footprint becomes the union of the
 `envelope` (the primary block at the origin) and every wing. Containment,
