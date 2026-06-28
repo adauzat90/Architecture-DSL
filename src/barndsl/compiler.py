@@ -727,6 +727,37 @@ class CompileResult:
             lines.extend(_format_diagnostic(d, filename, src_lines))
         return "\n".join(lines)
 
+    def to_dict(self) -> dict:
+        """A machine-readable view of the compile, for the agent loop / tooling.
+
+        The same diagnostics as :meth:`report`, but as stable JSON-able data
+        (code/severity/line/col/room/message/hint) rather than formatted text —
+        so a consumer parses fields instead of scraping the human output.
+        """
+        return {
+            "ok": self.ok,
+            "counts": {
+                "error": len(self.errors),
+                "warning": len(self.warnings),
+                "info": len(self.infos),
+            },
+            "diagnostics": [
+                {
+                    "code": d.code,
+                    "severity": d.severity.value,
+                    "line": d.line,
+                    "col": d.col,
+                    "end_col": d.end_col,
+                    "room": d.room,
+                    "message": d.message,
+                    "hint": d.hint,
+                }
+                for d in sorted(
+                    self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)
+                )
+            ],
+        }
+
 
 def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[str]:
     """Render one diagnostic: header, source snippet, caret underline, hint."""

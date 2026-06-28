@@ -70,6 +70,11 @@ def _print_coords(plan) -> None:
 
 def _cmd_compile(args: argparse.Namespace) -> int:
     result = compile_file(args.file)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.ok else 1
     print(result.report(os.path.basename(args.file)))
     if result.plan is not None:
         print("\n" + _program_summary(result.plan))
@@ -198,6 +203,23 @@ def _cmd_design(args: argparse.Namespace) -> int:
     return 0 if result.result.ok else 1
 
 
+def _cmd_explain(args: argparse.Namespace) -> int:
+    from .diagnostics import REGISTRY, explain
+
+    if args.code is None:
+        # No code given: list every code, grouped by severity.
+        from .validation import Severity
+
+        for sev in (Severity.ERROR, Severity.WARNING, Severity.INFO):
+            codes = sorted(c for c, i in REGISTRY.items() if i.severity is sev)
+            print(f"{sev.value}:")
+            for c in codes:
+                print(f"  {c:<20} {REGISTRY[c].title}")
+        return 0
+    print(explain(args.code))
+    return 0 if args.code.strip().upper() in REGISTRY else 1
+
+
 _FALLBACK_DSL = """\
 plan "Demo Barndo"
 envelope 40 x 30
@@ -230,6 +252,11 @@ def main(argv: list[str] | None = None) -> int:
         "--show-coords",
         action="store_true",
         help="print each room's resolved rectangle and exterior walls",
+    )
+    p_compile.add_argument(
+        "--json",
+        action="store_true",
+        help="emit diagnostics as machine-readable JSON instead of text",
     )
     p_compile.set_defaults(func=_cmd_compile)
 
@@ -274,6 +301,14 @@ def main(argv: list[str] | None = None) -> int:
     p_design.add_argument("--model", default="claude-opus-4-8", help="Claude model id")
     p_design.add_argument("--no-critique", action="store_true", help="skip the design critic")
     p_design.set_defaults(func=_cmd_design)
+
+    p_explain = sub.add_parser(
+        "explain", help="explain a diagnostic code (or list them all)"
+    )
+    p_explain.add_argument(
+        "code", nargs="?", default=None, help="a code like BEDROOM_EGRESS (omit to list all)"
+    )
+    p_explain.set_defaults(func=_cmd_explain)
 
     args = parser.parse_args(argv)
     return args.func(args)

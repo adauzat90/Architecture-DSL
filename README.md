@@ -117,12 +117,19 @@ the offending word, and for semantic checks it points at the room's id, so every
 diagnostic ties back to a precise span of source.
 
 What it checks (loosely IRC-based + spatial sanity): rooms stay in the envelope
-and don't overlap; bedrooms meet min area/dimension and have **egress**; every
-interior room is **reachable** from an entrance via interior doors — and that the
-*route* doesn't force you **through a bathroom** (or a stranger's bedroom) to get
-there; habitable rooms meet the **8% natural-light** ratio; hallway/door widths;
-ceiling height; at least one egress door. Every diagnostic includes a concrete
-fix in DSL terms.
+and don't overlap, and no two openings collide on the same wall; bedrooms meet min
+area/dimension and have **egress** — an escape opening that also clears the R310
+size minimums (~5.7 sq ft, 20 in × 24 in, sill ≤ 44 in); every interior room is
+**reachable** from an entrance via interior doors — and that the *route* doesn't
+force you **through a bathroom** (or a stranger's bedroom) to get there; habitable
+rooms meet the **8% natural-light** ratio; hallway/door widths; a stair footprint
+long enough to climb its storey; ceiling height; at least one egress door. Every
+diagnostic includes a concrete fix in DSL terms.
+
+Every diagnostic code is catalogued in `barndsl/diagnostics.py`; run
+`barndsl explain BEDROOM_EGRESS` (or `barndsl explain` to list them all) for the
+rationale and the IRC clause behind a check. `barndsl compile FILE --json` emits
+the diagnostics as machine-readable JSON for the agent loop or other tooling.
 
 **Three severities, one channel.** `error`s must be fixed; `warning`s flag likely
 problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
@@ -249,10 +256,12 @@ print(emit_dsl(plan))   # → DSL source
 
 ```bash
 barndsl compile examples/cedar_ridge.barn          # diagnostics only
+barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
+barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
 ```
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
@@ -273,6 +282,7 @@ src/barndsl/
   compiler.py    # lexer + parser + compile_source → CompileResult (diagnostics)
   emit.py        # plan → DSL source
   validation.py  # building-code checks → diagnostics with fix hints
+  diagnostics.py # registry of every diagnostic code (powers `explain`)
   layout.py      # auto-layout v1: greedy abutment from an adjacency brief
   layout2.py     # auto-layout 2.0: space-filling `fill` engine (bands + slice + rectangular dual)
   render.py      # annotated 2D SVG renderer

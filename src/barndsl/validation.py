@@ -37,6 +37,20 @@ NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
 
+# Emergency-escape opening minimums (IRC R310). The area is the net *clear*
+# opening; we approximate it from the modelled width × (head − sill), which is
+# generous for a single-hung sash but matches the project's "loosely IRC" stance.
+MIN_EGRESS_AREA = 5.7  # sq ft, upper floors
+MIN_EGRESS_AREA_GRADE = 5.0  # sq ft, at-grade floor (level 0)
+MIN_EGRESS_OPENING_WIDTH = 20 / 12  # 20 in clear
+MIN_EGRESS_OPENING_HEIGHT = 24 / 12  # 24 in clear
+MAX_EGRESS_SILL = 44 / 12  # sill <= 44 in above the finished floor
+
+# Stair geometry (IRC R311.7): a flight needs enough run to climb one storey.
+MAX_RISER_HEIGHT = 7.75 / 12  # 7-3/4 in max riser
+MIN_TREAD_DEPTH = 10 / 12  # 10 in min tread
+MIN_STAIR_WIDTH = 3.0  # 36 in; two side-by-side flights (a switchback) need ~6 ft
+
 
 class Severity(str, Enum):
     ERROR = "error"
@@ -79,13 +93,17 @@ class ValidationReport:
         return [i for i in self.issues if i.severity is Severity.WARNING]
 
     @property
+    def infos(self) -> list[Issue]:
+        return [i for i in self.issues if i.severity is Severity.INFO]
+
+    @property
     def is_valid(self) -> bool:
         return not self.errors
 
     def summary(self) -> str:
-        e, w = len(self.errors), len(self.warnings)
+        e, w, n = len(self.errors), len(self.warnings), len(self.infos)
         status = "VALID" if self.is_valid else "INVALID"
-        return f"{status} — {e} error(s), {w} warning(s)"
+        return f"{status} — {e} error(s), {w} warning(s), {n} info(s)"
 
     def __str__(self) -> str:
         return "\n".join([self.summary(), *(str(i) for i in self.issues)])
@@ -120,7 +138,6 @@ def exterior_walls(plan: Barndominium, room: Room, tol: float = 1e-6) -> list[Di
         for w in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST)
         if wall_faces_outside(sections, room, w)
     ]
-    return walls
 
 
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
@@ -735,6 +752,37 @@ def _validate_openings(plan: Barndominium, add) -> None:
                 )
             )
 
+    # Two openings can't occupy the same run of wall. Group every wall-positioned
+    # opening (window or entry) by (room, wall) and flag overlapping spans.
+    spans: dict[tuple[str, Direction], list[tuple]] = {}
+    for o, kind in (
+        *((w, "window") for w in plan.windows),
+        *((d, "entry") for d in plan.exterior_doors),
+    ):
+        if o.room not in room_ids:
+            continue  # *_REF already raised
+        spans.setdefault((o.room, o.wall), []).append(
+            (o.offset, o.offset + o.width, kind, o)
+        )
+    for (rid, wall), items in spans.items():
+        items.sort()  # by start offset
+        for (a_lo, a_hi, a_kind, a_o), (b_lo, b_hi, b_kind, b_o) in zip(items, items[1:]):
+            ov = min(a_hi, b_hi) - max(a_lo, b_lo)
+            if ov > 1e-6:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "OPENING_CLASH",
+                        f"Two openings overlap on the {wall.value} wall of '{rid}': "
+                        f"the {a_kind} at {_f(a_lo)}–{_f(a_hi)} ft and the {b_kind} at "
+                        f"{_f(b_lo)}–{_f(b_hi)} ft share {_f(ov)} ft.",
+                        room=rid,
+                        hint="Move one along the wall or narrow it so their offsets "
+                        "don't overlap.",
+                        **_door_loc(b_o),
+                    )
+                )
+
 
 def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
     """Rooms on ``level`` whose footprint the stair lands in."""
@@ -749,7 +797,8 @@ def _validate_stairs(plan: Barndominium, add) -> None:
     for s in plan.stairs:
         if not all(math.isfinite(v) for v in (s.x, s.y, s.width, s.length)):
             add(Issue(Severity.ERROR, "STAIR_GEOMETRY",
-                      f"Stair '{s.id}' has non-finite coordinates or size.", room=s.id))
+                      f"Stair '{s.id}' has non-finite coordinates or size.", room=s.id,
+                      hint="Use finite measurements in feet (no nan/inf)."))
             continue
         if s.width <= 0 or s.length <= 0:
             add(Issue(Severity.ERROR, "STAIR_SIZE",
@@ -766,6 +815,33 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                       f"Stair '{s.id}' extends outside the "
                       f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
                       room=s.id, hint="Keep its footprint inside the envelope."))
+        # Does the footprint hold the run one storey demands? A straight flight
+        # needs (risers-1)·tread of horizontal run; a switchback halves that but
+        # needs a footprint wide enough for two flights side by side. Only flag
+        # when even a switchback wouldn't fit — keeps this conservative.
+        if (
+            s.width > 0
+            and s.length > 0
+            and s.from_level != s.to_level
+            and s.from_level >= 0
+            and s.to_level >= 0
+            and plan.ceiling_height > 0
+        ):
+            rise = plan.ceiling_height * abs(s.to_level - s.from_level)
+            risers = max(1, math.ceil(rise / MAX_RISER_HEIGHT))
+            run_needed = max(1, risers - 1) * MIN_TREAD_DEPTH
+            long_dim, short_dim = max(s.width, s.length), min(s.width, s.length)
+            could_switchback = short_dim + 1e-6 >= 2 * MIN_STAIR_WIDTH
+            needed = run_needed / 2 if could_switchback else run_needed
+            if long_dim + 1e-6 < needed:
+                add(Issue(
+                    Severity.WARNING, "STAIR_RUN",
+                    f"Stair '{s.id}' is {_f(long_dim)} ft long, too short to climb "
+                    f"{_f(rise)} ft: ~{risers} risers need about {_f(run_needed)} ft "
+                    "of run (a 7.75 in riser / 10 in tread).",
+                    room=s.id,
+                    hint=f"Lengthen its footprint to >= {_f(run_needed)} ft, or make it "
+                    f">= {_f(2 * MIN_STAIR_WIDTH)} ft wide to fit a switchback."))
         lower = _stair_rooms(plan, s, s.from_level)
         upper = _stair_rooms(plan, s, s.to_level)
         if not lower or not upper:
@@ -1167,11 +1243,9 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
         walls = exterior_walls(plan, room)
         if room.type is RoomType.BEDROOM:
             # Only an opening on an exterior wall counts as an escape route.
-            has_window = any(w.wall in walls for w in plan.windows_for(room.id))
-            has_ext_door = any(
-                d.wall in walls for d in plan.exterior_doors_for(room.id)
-            )
-            if not (has_window or has_ext_door):
+            ext_windows = [w for w in plan.windows_for(room.id) if w.wall in walls]
+            ext_doors = [d for d in plan.exterior_doors_for(room.id) if d.wall in walls]
+            if not ext_windows and not ext_doors:
                 if walls:
                     hint = (
                         f"Add an egress window on an exterior wall, e.g. "
@@ -1191,6 +1265,50 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                         hint=hint,
                     )
                 )
+            else:
+                # An escape opening exists — does it meet the R310 clear-opening
+                # minimums? A full-height door qualifies on width alone; a window
+                # must clear the area and both dimensions and sit low enough.
+                min_area = MIN_EGRESS_AREA_GRADE if room.level == 0 else MIN_EGRESS_AREA
+
+                def _win_ok(w) -> bool:
+                    h = max(0.0, w.head_height - w.sill_height)
+                    return (
+                        w.width + 1e-6 >= MIN_EGRESS_OPENING_WIDTH
+                        and h + 1e-6 >= MIN_EGRESS_OPENING_HEIGHT
+                        and w.width * h + 1e-6 >= min_area
+                        and w.sill_height <= MAX_EGRESS_SILL + 1e-6
+                    )
+
+                door_ok = any(
+                    d.width + 1e-6 >= MIN_EGRESS_OPENING_WIDTH for d in ext_doors
+                )
+                if not (door_ok or any(_win_ok(w) for w in ext_windows)):
+                    if ext_windows:
+                        best = max(ext_windows, key=lambda w: w.glazed_area)
+                        h = max(0.0, best.head_height - best.sill_height)
+                        detail = (
+                            f"its largest is {_f(best.width)} ft wide × {_f(h)} ft "
+                            f"({_f(best.width * h)} sq ft, sill {best.sill_height * 12:.0f} in)"
+                        )
+                    else:
+                        detail = "its only exterior opening is a too-narrow door"
+                    add(
+                        Issue(
+                            Severity.WARNING,
+                            "EGRESS_SIZE",
+                            f"Bedroom '{room.id}' has an escape opening but it's below "
+                            f"the IRC R310 minimum ({_f(min_area)} sq ft clear, "
+                            f"{MIN_EGRESS_OPENING_WIDTH * 12:.0f} in wide × "
+                            f"{MIN_EGRESS_OPENING_HEIGHT * 12:.0f} in tall, sill "
+                            f"<= {MAX_EGRESS_SILL * 12:.0f} in); {detail}.",
+                            room=room.id,
+                            hint=f"Widen/enlarge the egress window so its clear opening "
+                            f"is >= {_f(min_area)} sq ft, e.g. "
+                            f"`window {room.id} {(walls[0].value if walls else 'south')} "
+                            f"width 4 offset 2`.",
+                        )
+                    )
 
         if room.type in HABITABLE_TYPES:
             glazing = sum(
