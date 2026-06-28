@@ -331,6 +331,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
+    _validate_program(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
         add(
@@ -1110,6 +1111,42 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     f"living space, e.g. `door {g.id} - <adjacent_room>`.",
                 )
             )
+
+
+def _validate_program(plan: Barndominium, add) -> None:
+    """Check the rooms placed against a declared ``program`` (if any).
+
+    This is the mechanical guard for "compiles clean but isn't what I asked for":
+    a clean compile means the *code* is valid, not that you met the brief. When
+    the author declares the intended counts, a dropped (or surplus) bedroom/bath
+    surfaces as a ``PROGRAM_MISMATCH`` warning instead of slipping through.
+    """
+    spec = plan.program_spec
+    if spec is None:
+        return
+    m = plan.metrics()
+    actual_beds = int(m["bedroom_count"])
+    actual_baths = int(m["bathroom_count"])
+    mismatches = []
+    if spec.beds != actual_beds:
+        mismatches.append(f"{spec.beds} bedroom(s) declared but {actual_beds} placed")
+    if spec.baths is not None and spec.baths != actual_baths:
+        mismatches.append(f"{spec.baths} bath(s) declared but {actual_baths} placed")
+    if not mismatches:
+        return
+    loc = {}
+    if spec.line is not None:
+        loc = {"line": spec.line, "col": spec.col, "end_col": spec.end_col}
+    add(
+        Issue(
+            Severity.WARNING,
+            "PROGRAM_MISMATCH",
+            "Plan doesn't match its declared program: " + "; ".join(mismatches) + ".",
+            hint="Add or remove rooms to match, or update the `program` line to the "
+            "counts you intend.",
+            **loc,
+        )
+    )
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:

@@ -20,11 +20,11 @@ so the gallery can't silently rot as the rules evolve. Wire it into the
 `barndsl-authoring` skill (link or inline the most representative one). This was
 scoped alongside the design-quality `info` checks and deferred deliberately.
 
-### `program N bed M bath` directive + `PROGRAM_MATCH` check
-Mechanically close the "clean ≠ correct" gap: let the author declare the intended
-program in the file and have the validator compare it to the actual room counts
-(`PROGRAM_MISMATCH` if a bedroom was dropped). Larger than a single check — it's a
-grammar addition — so greenlight on its own.
+### ~~`program N bed M bath` directive + `PROGRAM_MATCH` check~~ — DONE
+Shipped: a `program <n> bed [<m> bath]` statement whose declared counts the
+validator checks against the rooms placed (`PROGRAM_MISMATCH` warning). Closes the
+"clean ≠ correct" gap mechanically. A natural extension is to widen the directive
+to more of the brief (e.g. a required room list, or min total area).
 
 ## Candidate checks held for later
 Lower-confidence than the ones already shipped (fuzzier thresholds / higher

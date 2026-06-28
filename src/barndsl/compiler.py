@@ -40,8 +40,8 @@ from .validation import Issue, Severity, ValidationReport, validate
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
-    "plan", "envelope", "wing", "ceiling", "note", "room", "door", "open", "entry",
-    "window", "porch", "stair"
+    "plan", "envelope", "wing", "ceiling", "note", "program", "room", "door",
+    "open", "entry", "window", "porch", "stair"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -61,6 +61,7 @@ Statements:
   wing <W> x <L> at <x>,<y>       # optional; add blocks for an L/T/U footprint
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   note "free text"                # optional design note
+  program <n> bed [<m> bath]      # optional; intended counts, checked vs the rooms
   room <id>: <type> <placement> size <W> x <L> [level <n>]
   door <id_a> - <id_b> [width <w>]            # interior door (rooms must share a wall)
   open <id_a> - <id_b> [width <w>]            # cased opening / walk-through, no door leaf
@@ -270,6 +271,30 @@ class _Cursor:
             )
         return int(float(t.text))
 
+    def count(self, what: str) -> int:
+        """Take a count: a whole number >= 0."""
+        t = self.take(what)
+        bad = None
+        if t.quoted:
+            bad = "a quoted value"
+        else:
+            try:
+                v = float(t.text)
+            except ValueError:
+                bad = f"'{t.text}'"
+            else:
+                if not math.isfinite(v) or v != int(v) or v < 0:
+                    bad = f"'{t.text}'"
+        if bad is not None:
+            raise _ParseError(
+                "BAD_COUNT",
+                f"Expected a whole number >= 0 for {what}, got {bad}.",
+                t.col,
+                end_col=t.end_col,
+                hint="Use a plain count, e.g. 3.",
+            )
+        return int(float(t.text))
+
     def ident(self, what: str) -> _Token:
         """Take an identifier/name token, rejecting an empty `\"\"` literal."""
         t = self.take(what)
@@ -454,6 +479,34 @@ def _parse_statement(
     elif key == "note":
         plan.note(c.take("a quoted note").text)
         c.expect_end()
+    elif key == "program":
+        beds = c.count("the bedroom count")
+        unit = c.take("'bed'")
+        if unit.text.lower() not in ("bed", "beds", "bedroom", "bedrooms"):
+            raise _ParseError(
+                "SYNTAX",
+                f"Expected 'bed', got '{unit.text}'.",
+                unit.col,
+                end_col=unit.end_col,
+                hint="Write the program as `program 3 bed 2 bath`.",
+            )
+        baths = None
+        if c.peek() is not None:
+            baths = c.count("the bathroom count")
+            unit2 = c.take("'bath'")
+            if unit2.text.lower() not in ("bath", "baths", "bathroom", "bathrooms"):
+                raise _ParseError(
+                    "SYNTAX",
+                    f"Expected 'bath', got '{unit2.text}'.",
+                    unit2.col,
+                    end_col=unit2.end_col,
+                    hint="Write the program as `program 3 bed 2 bath`.",
+                )
+        c.expect_end()
+        plan.program(beds, baths)
+        plan.program_spec.line = lineno
+        plan.program_spec.col = kw.col
+        plan.program_spec.end_col = kw.end_col
     elif key == "room":
         rid_tok = c.ident("a room id")
         rid = rid_tok.text

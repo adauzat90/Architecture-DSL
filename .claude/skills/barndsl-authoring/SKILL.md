@@ -48,7 +48,9 @@ recompile, repeat until `COMPILE OK`.
 **Clean ≠ correct.** A clean compile means the *code* is valid, not that you met
 the brief — you can score `0/0/0` having dropped a bedroom. The `compile` recap
 (`Program: N bed / M bath · … sq ft`) and `--metrics` are how you check the
-program against what was asked. Always reconcile the recap with the brief.
+program against what was asked. Always reconcile the recap with the brief — or
+make it mechanical: add a `program <n> bed [<m> bath]` line and the validator
+warns (`PROGRAM_MISMATCH`) when the rooms placed don't match the declared counts.
 
 ## Mental model (the source of most early bugs)
 
@@ -107,7 +109,8 @@ interior wall; hallway ≥ 3 ft; interior door ≥ 30 in; ≥ 1 egress door ≥ 
 bathroom exists; `OPEN_BATH` (a bath joined by `open` instead of a `door` — baths
 need a door for privacy); `PRIVATE_PASSTHROUGH` (a room reachable only *through*
 a bath/bedroom); `ENTRY_PRIVATE` (front door opening into a bath); `GARAGE_BEDROOM`
-(a garage opening into a sleeping room — IRC R302.5.1).
+(a garage opening into a sleeping room — IRC R302.5.1); `PROGRAM_MISMATCH` (rooms
+placed don't match a declared `program` line).
 
 **Infos — design nudges:** `KITCHEN_FLOW`, `BED_PRIVACY`, `BATH_DISTANCE`,
 `WET_GROUP` (cluster bath/kitchen/laundry on a shared plumbing wall), `NO_CLOSET`

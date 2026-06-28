@@ -319,6 +319,24 @@ class Stair:
 
 
 @dataclass
+class ProgramSpec:
+    """A declared program (design *intent*): the expected room counts.
+
+    Optional. When present, validation compares it against the rooms actually
+    placed and warns on any mismatch (``PROGRAM_MISMATCH``) — the mechanical
+    guard for "the code compiles clean but I dropped a bedroom". ``baths`` counts
+    every bathroom *and* half-bath room, matching the compile recap; ``None``
+    means that count wasn't declared and isn't checked.
+    """
+
+    beds: int
+    baths: int | None = None
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
 class Barndominium:
     """A complete barndominium floor plan.
 
@@ -342,6 +360,9 @@ class Barndominium:
     #: The primary block (the envelope at the origin) is implicit — see
     #: :meth:`footprint_sections`.
     wings: list[Section] = field(default_factory=list)
+    #: Optional declared program (intent). When set, validation checks the actual
+    #: room counts against it. See :class:`ProgramSpec`.
+    program_spec: ProgramSpec | None = None
 
     # -- fluent builder API ------------------------------------------------
     # Each method mutates the plan and returns ``self`` so calls chain. This
@@ -392,6 +413,21 @@ class Barndominium:
 
     def note(self, text: str) -> "Barndominium":
         self.notes = (self.notes + "\n" + text).strip() if self.notes else text
+        return self
+
+    def program(self, beds: int, baths: int | None = None) -> "Barndominium":
+        """Declare the intended program (bedroom / bathroom counts).
+
+        Optional. When set, :func:`~barndsl.validation.validate` warns
+        (``PROGRAM_MISMATCH``) if the rooms actually placed don't match — a
+        mechanical check that you built what you set out to. ``baths`` counts
+        every bathroom and half-bath; omit it to check only bedrooms.
+        """
+        b = int(beds)
+        ba = None if baths is None else int(baths)
+        if b < 0 or (ba is not None and ba < 0):
+            raise ValueError("program counts must be non-negative whole numbers.")
+        self.program_spec = ProgramSpec(b, ba)
         return self
 
     def add_room(

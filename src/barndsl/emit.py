@@ -28,6 +28,12 @@ def emit_dsl(plan: Barndominium) -> str:
             f"wing {_n(wing.width)} x {_n(wing.length)} at {_n(wing.x)},{_n(wing.y)}"
         )
     out.append(f"ceiling {_n(plan.ceiling_height)}")
+    if plan.program_spec is not None:
+        spec = plan.program_spec
+        line = f"program {spec.beds} bed"
+        if spec.baths is not None:
+            line += f" {spec.baths} bath"
+        out.append(line)
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")

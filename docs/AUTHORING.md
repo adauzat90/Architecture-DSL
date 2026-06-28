@@ -36,6 +36,10 @@ barndsl build   plan.barn --out plan.svg   # compile + render if valid
 valid, not that you met the brief — you can compile `0/0/0` while having dropped a
 bedroom. `compile` prints a one-line `Program: N bed / M bath · … sq ft` recap so
 you can check the program against the brief; `--metrics` gives the full takeoff.
+To make that check **mechanical**, declare the intended counts with a `program`
+statement (e.g. `program 3 bed 2 bath`): the validator then warns
+(`PROGRAM_MISMATCH`) if the rooms you placed don't match — so a dropped bedroom
+can't slip through a clean compile.
 
 ## The mental model
 
@@ -58,6 +62,7 @@ envelope <W> x <L>                 # primary footprint block (at the origin)
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>                        # >= 7; 9–12 is typical
 note "free text"                   # optional; repeatable
+program <n> bed [<m> bath]         # optional; intended counts, checked vs the rooms
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [width <w>]                  # interior; rooms MUST share a wall
@@ -267,6 +272,9 @@ envelope edge if it needs a real window.
 - `GARAGE_BEDROOM` — a `garage` opening directly into a **bedroom**. A garage
   must not open into a sleeping room (IRC R302.5.1) — buffer it with a mudroom or
   hall.
+- `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
+  `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
+  — it's a contract check, not a code error — so it's a warning.
 
 **Info (design quality — heed when you can):**
 - `KITCHEN_FLOW` — open the kitchen to dining/living.
@@ -471,6 +479,8 @@ The builder mirrors the DSL:
 - `connect(a, b, width=)` is an interior `door` (`leaf=False` for a walk-through);
   `opening(a, b, width=)` is the shorthand for that cased opening; `entrance(room,
   wall, …)` is an `entry`; `add_window(room, wall, …)`; `add_porch(id, …)`.
+- `program(beds, baths=None)` declares the intended counts (the `program`
+  statement); omit `baths` to check only bedrooms.
 - `type` and `wall` accept the enum **or** a string (`"living"`, `"south"`) and
   are validated immediately (a bad value raises `ValueError`, not a late crash).
 - `level=` must be a whole number ≥ 0, same as the DSL.

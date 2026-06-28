@@ -27,6 +27,7 @@ from .elements import (
     ExteriorDoor,
     InteriorDoor,
     Porch,
+    ProgramSpec,
     Room,
     RoomType,
     Stair,
@@ -68,6 +69,7 @@ __all__ = [
     "Window",
     "Porch",
     "Stair",
+    "ProgramSpec",
     "feet",
     "inches",
     # compiler front-end
