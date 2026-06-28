@@ -7,6 +7,8 @@ more livable, more economical plan:
 - WET_GROUP        — cluster wet rooms onto a shared plumbing wall.
 - NO_CLOSET        — a bedroom with no adjacent closet.
 - ROOM_PROPORTION  — a habitable room shaped like a bowling alley.
+- GARAGE_BEDROOM   — a garage opening into a sleeping room (WARNING; IRC R302.5.1).
+- GARAGE_NO_ENTRY  — a garage with no interior people-door into the house.
 """
 
 from __future__ import annotations
@@ -199,3 +201,85 @@ window living west width 8 offset 6
 """
     r = compile_source(src)
     assert "ROOM_PROPORTION" not in _codes(r, "info")
+
+
+# --- GARAGE_BEDROOM (warning) ------------------------------------------------
+
+
+def test_garage_opening_into_a_bedroom_warns():
+    src = """\
+plan "Garage into bed"
+envelope 40 x 24
+ceiling 9
+room living: living  at 0,0   size 16 x 24
+room bed:    bedroom at 16,0  size 12 x 24
+room garage: garage  at 28,0  size 12 x 24
+door living - bed width 2.67
+door bed - garage width 2.67
+entry living south width 3 offset 6
+entry garage south width 9 offset 1
+window bed north width 4 offset 4
+"""
+    r = compile_source(src)
+    assert "GARAGE_BEDROOM" in _codes(r, "warning")
+    msg = next(d for d in r.warnings if d.code == "GARAGE_BEDROOM").message
+    assert "bed" in msg
+
+
+def test_garage_into_a_mudroom_does_not_warn():
+    src = """\
+plan "Garage into mud"
+envelope 44 x 24
+ceiling 9
+room living: living  at 0,0   size 16 x 24
+room bed:    bedroom at 16,0  size 12 x 24
+room mud:    mudroom at 28,0  size 6 x 24
+room garage: garage  at 34,0  size 10 x 24
+door living - bed width 2.67
+door living - mud width 2.67
+door mud - garage width 2.67
+entry living south width 3 offset 6
+entry garage south width 9 offset 1
+window bed north width 4 offset 4
+"""
+    r = compile_source(src)
+    assert "GARAGE_BEDROOM" not in _codes(r, "warning")
+
+
+# --- GARAGE_NO_ENTRY (info) --------------------------------------------------
+
+
+def test_garage_with_no_interior_door_is_flagged():
+    # The garage abuts the living room but only connects via its own vehicle entry,
+    # so reachability (NO_ACCESS) is satisfied yet there's no way in from the house.
+    src = """\
+plan "Disconnected garage"
+envelope 40 x 24
+ceiling 9
+room living: living at 0,0   size 24 x 24
+room garage: garage at 24,0  size 16 x 24
+entry living south width 3 offset 6
+entry garage south width 9 offset 3
+window living north width 12 offset 6
+"""
+    r = compile_source(src)
+    assert "GARAGE_NO_ENTRY" in _codes(r, "info")
+    assert "NO_ACCESS" not in _codes(r, "error")  # the gap this check fills
+    msg = next(d for d in r.infos if d.code == "GARAGE_NO_ENTRY").message
+    assert "garage" in msg
+
+
+def test_garage_with_an_interior_door_is_silent():
+    src = """\
+plan "Connected garage"
+envelope 40 x 24
+ceiling 9
+room living: living at 0,0   size 24 x 24
+room garage: garage at 24,0  size 16 x 24
+door living - garage width 2.67
+entry living south width 3 offset 6
+entry garage south width 9 offset 3
+window living north width 12 offset 6
+"""
+    r = compile_source(src)
+    assert "GARAGE_NO_ENTRY" not in _codes(r, "info")

@@ -264,6 +264,9 @@ envelope edge if it needs a real window.
   hallway or living space instead.
 - `ENTRY_PRIVATE` — an exterior `entry` opening directly into a **bathroom**
   (warning; into a **bedroom** it's an info — it might be a patio door).
+- `GARAGE_BEDROOM` — a `garage` opening directly into a **bedroom**. A garage
+  must not open into a sleeping room (IRC R302.5.1) — buffer it with a mudroom or
+  hall.
 
 **Info (design quality — heed when you can):**
 - `KITCHEN_FLOW` — open the kitchen to dining/living.
@@ -275,6 +278,8 @@ envelope edge if it needs a real window.
 - `NO_CLOSET` — a bedroom with no adjacent closet (per bedroom).
 - `ROOM_PROPORTION` — a habitable room more elongated than ~3:1 is hard to
   furnish.
+- `GARAGE_NO_ENTRY` — a `garage` that abuts the house but has no interior
+  people-door into it (you'd have to go outside to get in).
 - `AREA_UNUSED` — a lot of footprint is unallocated.
 
 > These checks are approximate (loosely IRC-based) and are **not** a substitute

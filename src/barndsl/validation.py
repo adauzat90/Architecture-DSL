@@ -1064,6 +1064,53 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+    # 9. Garage → sleeping room. IRC R302.5.1: a garage opening shall not open
+    #    into a room used for sleeping. This is code-grounded, so it's a WARNING.
+    garages = [r for r in plan.rooms if r.type is RoomType.GARAGE]
+    for g in garages:
+        for n in graph.get(g.id, ()):
+            if n in by_id and by_id[n].type is RoomType.BEDROOM:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "GARAGE_BEDROOM",
+                        f"Garage '{g.id}' opens directly into the bedroom '{n}'; a "
+                        "garage must not open into a sleeping room (IRC R302.5.1).",
+                        room=n,
+                        hint=f"Buffer it with a mudroom or hall — connect the garage "
+                        f"there instead, e.g. `door {g.id} - <mudroom_or_hall>`.",
+                    )
+                )
+
+    # 10. Garage with no interior people-door into the house. A vehicle `entry`
+    #     satisfies reachability (NO_ACCESS), so this gap slips through: you'd have
+    #     to go outside to get in. Only nudge when it actually abuts the house.
+    house_types = {
+        t for t in RoomType if t not in (RoomType.GARAGE, RoomType.PORCH)
+    }
+    for g in garages:
+        connected_inside = any(
+            n in by_id and by_id[n].type in house_types for n in graph.get(g.id, ())
+        )
+        if connected_inside:
+            continue
+        abuts_house = any(
+            n in by_id and by_id[n].type in house_types
+            for n in geometric_neighbors(plan, g.id)
+        )
+        if abuts_house:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "GARAGE_NO_ENTRY",
+                    f"Garage '{g.id}' has no interior door into the house — you'd "
+                    "have to go outside to get in.",
+                    room=g.id,
+                    hint="Add a people-door from the garage into a mudroom, hall or "
+                    f"living space, e.g. `door {g.id} - <adjacent_room>`.",
+                )
+            )
+
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:
     has_egress_door = any(
