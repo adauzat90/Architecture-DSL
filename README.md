@@ -66,6 +66,8 @@ walk-through** — an open passage with no door leaf (the open-concept link
 between e.g. a kitchen and a living area). It joins the two rooms in the
 circulation graph exactly like a door, but renders as a plain gap (no swing
 arc), defaults to a wide opening, and is exempt from the narrow-door warning.
+An `open` into a **bathroom** is a privacy defect (a bath needs a door), so it
+warns (`OPEN_BATH`).
 The footprint is one rectangle by default. For an **L/T/U-shaped building**, add
 `wing <W> x <L> at <x>,<y>` blocks: the footprint becomes the union of the
 `envelope` (the primary block at the origin) and every wing. Containment,

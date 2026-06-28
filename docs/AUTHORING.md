@@ -255,6 +255,8 @@ envelope edge if it needs a real window.
 - A `window` on an interior wall (gives no daylight/egress).
 - Hallway ≥ 3 ft; interior door ≥ 30 in; at least one egress door ≥ 32 in; a
   bathroom exists.
+- `OPEN_BATH` — a bathroom connected by an `open` walk-through instead of a
+  `door`. A bathroom needs a door for privacy; use `door` for it.
 - `PRIVATE_PASSTHROUGH` — a room reachable only by walking **through a bathroom**
   (or, apart from its own ensuite/closet, through a bedroom). Reachability alone
   (`NO_ACCESS`) is satisfied, but the *route* goes through a private room — a real

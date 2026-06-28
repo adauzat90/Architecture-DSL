@@ -618,6 +618,23 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     **loc,
                 )
             )
+        if not door.leaf and a and b:
+            # A walk-through (`open`) gives no privacy; a bathroom needs a door.
+            bath = next((r for r in (a, b) if r.type in BATH_TYPES), None)
+            if bath is not None:
+                other = b if bath.id == a.id else a
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "OPEN_BATH",
+                        f"Bathroom '{bath.id}' opens to '{other.id}' through an open "
+                        f"passage; a bathroom needs a door for privacy.",
+                        room=bath.id,
+                        hint=f"Use `door {door.room_a} - {door.room_b}` instead of "
+                        f"`open` so the bathroom has a door.",
+                        **loc,
+                    )
+                )
 
     for door in plan.exterior_doors:
         if door.room not in room_ids:

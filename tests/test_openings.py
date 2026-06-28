@@ -118,6 +118,61 @@ entry living south width 3 offset 8
     assert "DOOR_NARROW" not in _codes(compile_source(open_src), "warning")
 
 
+# --- bathroom privacy (OPEN_BATH) -------------------------------------------
+
+
+def test_open_into_a_bathroom_warns():
+    src = """\
+plan "Doorless bath"
+envelope 34 x 20
+ceiling 9
+room living: living   at 0,0  size 22 x 20
+room bath:   bathroom at 22,0 size 12 x 20
+open living - bath width 6
+entry living south width 3 offset 8
+window bath east width 4 offset 8
+"""
+    r = compile_source(src)
+    assert "OPEN_BATH" in _codes(r, "warning")
+    msg = next(d for d in r.warnings if d.code == "OPEN_BATH").message
+    assert "bath" in msg
+
+
+def test_open_into_a_half_bath_warns():
+    src = """\
+plan "Doorless powder"
+envelope 34 x 20
+ceiling 9
+room living: living    at 0,0  size 22 x 20
+room powder: half_bath at 22,0 size 12 x 20
+open living - powder width 6
+entry living south width 3 offset 8
+window powder east width 4 offset 8
+"""
+    r = compile_source(src)
+    assert "OPEN_BATH" in _codes(r, "warning")
+
+
+def test_door_into_a_bathroom_does_not_warn():
+    src = """\
+plan "Bath with a door"
+envelope 34 x 20
+ceiling 9
+room living: living   at 0,0  size 22 x 20
+room bath:   bathroom at 22,0 size 12 x 20
+door living - bath width 2.67
+entry living south width 3 offset 8
+window bath east width 4 offset 8
+"""
+    r = compile_source(src)
+    assert "OPEN_BATH" not in _codes(r, "warning")
+
+
+def test_open_between_non_bath_rooms_does_not_warn():
+    r = compile_source(_OPEN_PLAN)
+    assert "OPEN_BATH" not in _codes(r, "warning")
+
+
 # --- emit round-trip ---------------------------------------------------------
 
 
