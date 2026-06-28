@@ -251,6 +251,13 @@ envelope edge if it needs a real window.
 - A `window` on an interior wall (gives no daylight/egress).
 - Hallway ≥ 3 ft; interior door ≥ 30 in; at least one egress door ≥ 32 in; a
   bathroom exists.
+- `PRIVATE_PASSTHROUGH` — a room reachable only by walking **through a bathroom**
+  (or, apart from its own ensuite/closet, through a bedroom). Reachability alone
+  (`NO_ACCESS`) is satisfied, but the *route* goes through a private room — a real
+  circulation defect, so it's a warning, not just a note. Route the room off a
+  hallway or living space instead.
+- `ENTRY_PRIVATE` — an exterior `entry` opening directly into a **bathroom**
+  (warning; into a **bedroom** it's an info — it might be a patio door).
 
 **Info (design quality — heed when you can):**
 - `KITCHEN_FLOW` — open the kitchen to dining/living.

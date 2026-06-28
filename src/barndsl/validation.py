@@ -182,6 +182,34 @@ def _nearest_distance(
     return None
 
 
+def _components_excluding(
+    graph: dict[str, set[str]], excluded: set[str]
+) -> list[set[str]]:
+    """Connected components of the door graph with ``excluded`` rooms removed.
+
+    Used to ask "if you couldn't walk through these rooms, what's still
+    connected?" — the basis of the pass-through-a-private-room checks.
+    """
+    comps: list[set[str]] = []
+    seen: set[str] = set()
+    for start in graph:
+        if start in excluded or start in seen:
+            continue
+        comp: set[str] = set()
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            if node in comp:
+                continue
+            comp.add(node)
+            seen.add(node)
+            for nb in graph[node]:
+                if nb not in excluded and nb not in comp:
+                    stack.append(nb)
+        comps.append(comp)
+    return comps
+
+
 # --- entry point ------------------------------------------------------------
 
 
@@ -871,6 +899,75 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                             "the same hallway — so it's within a door or two.",
                         )
                     )
+
+    # 4. Pass-through privacy: you shouldn't have to walk through a bathroom (or,
+    #    apart from its own ensuite/closet, a bedroom) to get between rooms. This
+    #    is a circulation-*shape* defect — reachability alone (NO_ACCESS) misses
+    #    it — so it warrants a WARNING, not just an INFO. Remove the gateway rooms
+    #    and see what falls off the main body of the house.
+    #    (key set, label, types whose isolated clusters are legitimate suites)
+    gateways = [
+        (BATH_TYPES, "bathroom", frozenset()),
+        ({RoomType.BEDROOM}, "bedroom", {RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.CLOSET}),
+    ]
+    for gate_types, label, suite_exempt in gateways:
+        gate_ids = {r.id for r in plan.rooms if r.type in gate_types}
+        if not gate_ids:
+            continue
+        comps = _components_excluding(graph, gate_ids)
+        if len(comps) <= 1:
+            continue
+        main = max(comps, key=len)
+        for comp in comps:
+            if comp is main:
+                continue
+            # A bedroom's own ensuite/closet is *meant* to sit behind it.
+            if suite_exempt and all(by_id[r].type in suite_exempt for r in comp):
+                continue
+            for rid in sorted(comp):
+                gate = next(
+                    (n for n in graph.get(rid, ()) if n in gate_ids), None
+                )
+                if gate is None:
+                    continue  # separated, but not directly off this gateway kind
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "PRIVATE_PASSTHROUGH",
+                        f"'{rid}' connects to the rest of the home only through the "
+                        f"{label} '{gate}'.",
+                        room=rid,
+                        hint=f"Route '{rid}' off circulation (a hallway) or a living "
+                        f"space instead of through the {label} — e.g. "
+                        f"`door {rid} - hall`.",
+                    )
+                )
+
+    # 5. An exterior entry shouldn't open straight into a bathroom (a real
+    #    defect → WARNING) or a bedroom (sometimes a patio door → INFO).
+    for d in plan.exterior_doors:
+        rt = by_id[d.room].type if d.room in by_id else None
+        if rt in BATH_TYPES:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ENTRY_PRIVATE",
+                    f"An exterior entry opens directly into the bathroom '{d.room}'.",
+                    room=d.room,
+                    hint="Land the entry in a mudroom, hall or living space, not a bath.",
+                )
+            )
+        elif rt is RoomType.BEDROOM:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ENTRY_PRIVATE",
+                    f"An exterior entry opens into the bedroom '{d.room}'.",
+                    room=d.room,
+                    hint="If this isn't a private patio door, route the entrance "
+                    "through a public space instead.",
+                )
+            )
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:

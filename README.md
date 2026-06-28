@@ -109,9 +109,11 @@ diagnostic ties back to a precise span of source.
 
 What it checks (loosely IRC-based + spatial sanity): rooms stay in the envelope
 and don't overlap; bedrooms meet min area/dimension and have **egress**; every
-interior room is **reachable** from an entrance via interior doors; habitable
-rooms meet the **8% natural-light** ratio; hallway/door widths; ceiling height;
-at least one egress door. Every diagnostic includes a concrete fix in DSL terms.
+interior room is **reachable** from an entrance via interior doors — and that the
+*route* doesn't force you **through a bathroom** (or a stranger's bedroom) to get
+there; habitable rooms meet the **8% natural-light** ratio; hallway/door widths;
+ceiling height; at least one egress door. Every diagnostic includes a concrete
+fix in DSL terms.
 
 **Three severities, one channel.** `error`s must be fixed; `warning`s flag likely
 problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
