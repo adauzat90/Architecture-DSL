@@ -383,3 +383,120 @@ def test_auto_layout_windows_a_perimeter_bath():
         if room.type.value in ("bathroom", "half_bath")
     ]
     assert baths and any(out.plan.windows_for(b) for b in baths)
+
+
+# --- NO_CLOSET tightened: requires a door-connected closet -------------------
+
+_CLOSET_SRC = """\
+plan "Closet"
+envelope 40 x 32
+ceiling 10
+room living: living  at 0,0  size 40 x 15
+room hall:   hallway at 0,15 size 40 x 3
+room bed1:   bedroom at 0,18  size 13 x 14
+room closet1: closet at 13,18 size 4 x 14
+room bed2:   bedroom at 17,18 size 13 x 14
+room bath:   bathroom at 30,18 size 10 x 14
+door living - hall width 4
+door hall - bed1 width 3
+door hall - bed2 width 3
+door hall - bath width 2.67
+door bed1 - closet1 width 2.5
+{extra}
+entry living south width 3 offset 4
+window living south width 12 offset 4
+window bed1 north width 5 offset 4
+window bed2 north width 5 offset 4
+window bath north width 3 offset 2
+"""
+
+
+def _no_closet_rooms(src):
+    return {
+        d.room for d in compile_source(src).infos if d.code == "NO_CLOSET"
+    }
+
+
+def test_no_closet_flags_an_abutting_closet_with_no_door():
+    # bed2 abuts closet1 (bed1's) but has no door into any closet.
+    rooms = _no_closet_rooms(_CLOSET_SRC.format(extra=""))
+    assert "bed2" in rooms
+    assert "bed1" not in rooms  # bed1 has its own door-connected closet
+
+
+def test_no_closet_message_distinguishes_no_door_from_no_closet():
+    r = compile_source(_CLOSET_SRC.format(extra=""))
+    msg = next(d.message for d in r.infos if d.code == "NO_CLOSET" and d.room == "bed2")
+    assert "no door into it" in msg
+
+
+def test_no_closet_silent_with_a_door_connected_closet():
+    # Give bed2 its own closet carved from the bath, with a door.
+    src = _CLOSET_SRC.replace(
+        "room bath:   bathroom at 30,18 size 10 x 14",
+        "room closet2: closet at 30,18 size 4 x 14\n"
+        "room bath:   bathroom at 34,18 size 6 x 14",
+    ).format(extra="door bed2 - closet2 width 2.5")
+    assert "bed2" not in {d.room for d in compile_source(src).infos if d.code == "NO_CLOSET"}
+
+
+# --- MASTER_ENSUITE ----------------------------------------------------------
+
+_SUITE_SRC = """\
+plan "Suite"
+envelope 50 x 32
+ceiling 10
+room living:  living   at 0,0   size 50 x 15
+room hall:    hallway  at 0,15  size 50 x 3
+room bed1:    bedroom  at 0,18   size 14 x 14
+room closet1: closet   at 14,18  size 4 x 14
+room master:  bedroom  at 18,18  size 18 x 14
+room mcloset: closet   at 36,18  size 4 x 14
+room bath1:   bathroom at 40,18  size 5 x 14
+room bath2:   bathroom at 45,18  size 5 x 14
+door living - hall width 4
+door hall - bed1 width 3
+door hall - master width 3
+door bed1 - closet1 width 2.5
+door master - mcloset width 2.5
+{baths}
+entry living south width 3 offset 4
+window living south width 12 offset 4
+window bed1 north width 5 offset 4
+window master north width 6 offset 6
+window bath1 north width 3 offset 1
+window bath2 north width 3 offset 1
+"""
+
+# Both baths off the hall — master only shares them.
+_SHARED_BATHS = "door hall - bath1 width 2.67\ndoor hall - bath2 width 2.67"
+# bath2 opens only off the master — a true ensuite.
+_ENSUITE = "door hall - bath1 width 2.67\ndoor master - bath2 width 2.67"
+
+
+def test_master_ensuite_flags_two_baths_with_no_private_bath():
+    r = compile_source(_SUITE_SRC.format(baths=_SHARED_BATHS))
+    ensuite = {d.room for d in r.infos if d.code == "MASTER_ENSUITE"}
+    assert "master" in ensuite
+
+
+def test_master_ensuite_silent_when_master_has_a_private_bath():
+    r = compile_source(_SUITE_SRC.format(baths=_ENSUITE))
+    assert "MASTER_ENSUITE" not in {d.code for d in r.infos}
+
+
+def test_master_ensuite_does_not_apply_with_a_single_bath():
+    # Drop bath2 entirely → only one full bath, rule doesn't trigger.
+    src = (
+        _SUITE_SRC.replace("room bath2:   bathroom at 45,18  size 5 x 14\n", "")
+        .replace("window bath2 north width 3 offset 1\n", "")
+        .replace("room bath1:   bathroom at 40,18  size 5 x 14",
+                 "room bath1:   bathroom at 40,18  size 10 x 14")
+        .format(baths="door hall - bath1 width 2.67")
+    )
+    assert "MASTER_ENSUITE" not in {d.code for d in compile_source(src).infos}
+
+
+def test_closet_and_ensuite_codes_registered():
+    assert "MASTER_ENSUITE" in REGISTRY
+    assert "NO_CLOSET" in REGISTRY

@@ -215,8 +215,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("WET_GROUP", I, "Scattered plumbing",
            "Three or more wet rooms (bath/kitchen/laundry/utility) share no "
            "walls, spreading plumbing runs out."),
-        _c("NO_CLOSET", I, "Bedroom has no closet",
-           "A bedroom has no adjacent closet."),
+        _c("NO_CLOSET", I, "Bedroom has no usable closet",
+           "A bedroom has no closet reached by a door from it — either none "
+           "abuts it, or one abuts but with no door into it (e.g. a neighbour's "
+           "closet)."),
+        _c("MASTER_ENSUITE", I, "Primary bedroom has no ensuite",
+           "On a floor with two or more full bathrooms, the largest bedroom has "
+           "no private (ensuite) bath — it only shares the hall bath."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
         _c("GARAGE_BEDROOM", W, "Garage opens into a bedroom",

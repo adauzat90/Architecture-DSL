@@ -1136,27 +1136,80 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
-    # 7. Storage: a bedroom with no closet beside it is a real, noticeable omission
-    #    (not code, so INFO — some plans use wardrobes instead).
+    # 7. Storage: a bedroom needs a closet it can actually use — one reached by a
+    #    door/opening *from that bedroom*, not merely a closet that happens to abut
+    #    it (which might be a neighbour's, with no way in). Not code, so INFO.
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
-            has_closet = any(
+            own_closet = any(
                 by_id[n].type is RoomType.CLOSET
-                for n in geometric_neighbors(plan, room.id)
+                for n in graph.get(room.id, ())
                 if n in by_id
             )
-            if not has_closet:
+            if not own_closet:
+                # Distinguish "no closet at all" from "a closet abuts but with no
+                # door" — the second is the subtler omission, so name it.
+                abuts_closet = any(
+                    by_id[n].type is RoomType.CLOSET
+                    for n in geometric_neighbors(plan, room.id)
+                    if n in by_id
+                )
+                detail = (
+                    "has a closet beside it but no door into it"
+                    if abuts_closet
+                    else "has no closet"
+                )
                 add(
                     Issue(
                         Severity.INFO,
                         "NO_CLOSET",
-                        f"Bedroom '{room.id}' has no adjacent closet.",
+                        f"Bedroom '{room.id}' {detail}.",
                         room=room.id,
-                        hint=f"Add a closet against it, e.g. `room {room.id}_closet: "
-                        f"closet east-of {room.id} size 6 x 3` and `door {room.id} - "
-                        f"{room.id}_closet`.",
+                        hint=f"Give it its own closet with a door, e.g. "
+                        f"`room {room.id}_closet: closet east-of {room.id} size 6 x 3` "
+                        f"and `door {room.id} - {room.id}_closet`.",
                     )
                 )
+
+    # 8. Primary suite: on a floor with two or more full bathrooms, the largest
+    #    bedroom should have a private (ensuite) bath rather than only sharing the
+    #    hall bath — that's the point of a second bath. INFO (a preference).
+    beds_by_level: dict[int, list[Room]] = {}
+    full_baths_by_level: dict[int, int] = {}
+    for r in plan.rooms:
+        if r.type is RoomType.BEDROOM:
+            beds_by_level.setdefault(r.level, []).append(r)
+        elif r.type is RoomType.BATHROOM:
+            full_baths_by_level[r.level] = full_baths_by_level.get(r.level, 0) + 1
+    for level, beds in beds_by_level.items():
+        nbaths = full_baths_by_level.get(level, 0)
+        if nbaths < 2 or not beds:
+            continue
+        master = max(beds, key=lambda r: r.area)
+        # An ensuite is a full bath reached only through the master (a closet off
+        # it is fine); a bath also opening to a hall or another room is shared.
+        has_ensuite = any(
+            by_id[n].type is RoomType.BATHROOM
+            and all(
+                m == master.id or (m in by_id and by_id[m].type is RoomType.CLOSET)
+                for m in graph.get(n, ())
+            )
+            for n in graph.get(master.id, ())
+            if n in by_id
+        )
+        if not has_ensuite:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "MASTER_ENSUITE",
+                    f"The primary bedroom '{master.id}' has no private bath, but this "
+                    f"floor has {nbaths} — the largest bedroom should get an ensuite.",
+                    room=master.id,
+                    hint=f"Make one bath open only off '{master.id}', e.g. "
+                    f"`door {master.id} - <bath>` with that bath connected to nothing "
+                    "else.",
+                )
+            )
 
     # 8. Proportion: a habitable room shaped like a bowling alley is hard to
     #    furnish. Hallways/closets are *meant* to be skinny — they're not habitable,
