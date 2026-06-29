@@ -59,6 +59,17 @@ from .layout2 import (
     solve_layout2,
 )
 from .render import RenderConfig, render_svg, save_svg
+from .revit import (
+    RevitImportError,
+    RevitModel,
+    exchange_to_dsl,
+    exchange_to_plan,
+    plan_stair_runs,
+    roof_plan,
+    structural_grids,
+    to_revit_json,
+    to_revit_model,
+)
 from .structure import place_frame
 from .validation import Issue, Severity, ValidationReport, validate
 
@@ -106,6 +117,17 @@ __all__ = [
     "render_svg",
     "save_svg",
     "RenderConfig",
+    # Revit exchange (lowering to a Revit-shaped model + JSON)
+    "to_revit_model",
+    "to_revit_json",
+    "RevitModel",
+    # Revit exchange (reverse: reconstruct a plan / DSL from an exchange)
+    "exchange_to_plan",
+    "exchange_to_dsl",
+    "RevitImportError",
+    "plan_stair_runs",
+    "roof_plan",
+    "structural_grids",
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 

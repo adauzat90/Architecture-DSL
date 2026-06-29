@@ -1,0 +1,7 @@
+title: Export Exchange
+tooltip: >-
+  Compile a .barn source file and write the barndsl.revit/1 exchange JSON next
+  to it — without touching the Revit model. Handy for inspecting what "Build
+  Plan" will create, or for the JSON-first workflow. Requires the barndsl
+  package importable from pyRevit's CPython engine.
+author: barndsl

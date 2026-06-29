@@ -252,6 +252,104 @@ barndsl build examples/cedar_ridge.barn --frame --out cr.svg  # auto-frame any p
 > The frame is a **layout aid, not an engineered design** — member sizing,
 > connections, foundations and lateral bracing are the structural engineer's job.
 
+## Revit: lowering a plan to a buildable model
+
+A barndsl plan is **rectangles**; Revit is **levels + walls + hosted families
+(doors/windows) + rooms enclosed by walls + structural framing**. `barndsl revit`
+bridges the two — it *lowers* the plan into a Revit-shaped exchange and writes it
+as JSON for a **pyRevit extension** (a ribbon button inside Revit) to build:
+
+```bash
+barndsl revit examples/cedar_ridge.barn --out plan.json
+# Revit exchange: 1 level(s), 12 wall(s) (4 exterior), 17 opening(s), 9 room(s), 0 column(s)
+```
+
+The lowering is **pure Python** — no Revit, no .NET, no API key — so it runs and
+is tested anywhere; only the final element creation needs Revit. What it does:
+
+* **Coordinates pass through unchanged.** barndsl's convention (`x` east, `y`
+  north, feet) is exactly Revit's world XY plane, and Revit's internal unit is
+  the decimal foot. `z` comes from the floor level.
+* **Walls are deduplicated.** Every room edge is decomposed along its grid line
+  into atomic segments, each classified *interior* (a room on both sides) or
+  *exterior* (open footprint beyond), then contiguous like segments merge back
+  into runs. A partition shared by two rooms becomes **one** wall centreline, not
+  two coincident ones. Walls carry an `exterior` flag and a nominal `thickness`
+  hint so the consumer can pick a 2x6 shell vs. a 2x4 partition wall type.
+* **Openings host onto walls.** Each interior door, cased opening, exterior door
+  and window is matched to the wall id whose line carries it, with a centre
+  point, width, height, and (for windows) sill — ready to place as a family.
+* **Rooms become seed points.** A point inside each rectangle, with name/type/
+  area, for Revit to place a Room once the walls enclose it.
+* **Structure carries through.** A placed `frame` lowers to columns (posts) and
+  framing centrelines (bents/ridge); porches and stairs come across as reference
+  outlines.
+
+The JSON is the stable `barndsl.revit/1` schema. From Python it's
+`to_revit_model(plan)` (a typed `RevitModel`) or `to_revit_json(plan)`:
+
+```python
+from barndsl import compile_source, to_revit_json
+result = compile_source(open("cedar_ridge.barn").read())
+open("plan.json", "w").write(to_revit_json(result.plan))
+```
+
+### The reverse direction (round-trip)
+
+The exchange goes **both ways**. `exchange_to_plan` reconstructs a plan from a
+`barndsl.revit/1` document — rooms carry their rectangle, and each opening's wall
+and offset are re-derived from its geometry — so a model that came from (or was
+edited in) Revit can return to the DSL:
+
+```bash
+barndsl revit-import plan.json --out recovered.barn   # exchange JSON → DSL
+```
+
+```python
+from barndsl import exchange_to_plan, exchange_to_dsl
+import json
+data = json.load(open("plan.json"))
+plan = exchange_to_plan(data)          # → a Barndominium
+dsl  = exchange_to_dsl(data)           # → DSL source (via emit_dsl)
+```
+
+The round-trip is verified in the test suite: every gallery plan lowered to the
+exchange and reconstructed recovers the same rooms, door/window connections and
+envelope, and re-emits DSL that still compiles clean.
+
+### The pyRevit extension
+
+The Revit front-end that consumes the exchange lives in
+[`revit/`](revit/README.md): a **pyRevit extension** with a **barndsl** ribbon
+tab. Point pyRevit at the `revit/` folder as a custom extension directory and you
+get two buttons:
+
+* **Build Plan** — pick a compiled `.json` (or a `.barn`, compiled on the spot)
+  and it creates the levels, walls, correctly-**sized** doors and windows, rooms,
+  floor slabs, a footprint roof, structural members and grids, porch slabs and
+  multi-flight stairs in the active document, in **one transaction** (one undo
+  step). **Re-building is idempotent** — it replaces the previous barndsl build
+  instead of stacking duplicates (and never touches what you drew). Offers a
+  **Preview** (a real build that's rolled back) and writes a `*.buildlog.json`
+  report. Primary target: **Revit 2025**.
+* **Document** — make drawings from the built model: a floor-plan view per level
+  with room/door/window tags, native door/window/room schedules, and a sheet per
+  level. Idempotent (replaces a previous run's views/sheets/schedules).
+* **Export Exchange** — pick a `.barn` and write its exchange `.json` next to it
+  without touching the model.
+* **Diagnostics** — report the environment and which wall/floor/family types the
+  project offers (with readiness flags); the first thing to run when a build
+  doesn't produce what you expect.
+* **Model to DSL** *(experimental)* — the reverse: read the active model's rooms
+  and door/window instances and reconstruct `.barn` source from them.
+
+The extension is cleanly split: `lib/barndsl_revit/exchange.py` (loader/validator)
+and `lib/barndsl_revit/report.py` (build report + options) are **Revit-free** and
+covered by the repo test suite, while `lib/barndsl_revit/builder.py` does the
+Revit API element creation. A `config.json` sidecar maps each pass to named types
+in your template. See [`revit/README.md`](revit/README.md) for install,
+workflows, and debugging.
+
 ## The agent: a compile-fix loop
 
 The agent *writes architecture in the DSL*, compiles it, and feeds the compiler's
@@ -300,6 +398,8 @@ barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
+barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
+barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
@@ -327,6 +427,7 @@ src/barndsl/
   layout.py      # auto-layout v1: greedy abutment from an adjacency brief
   layout2.py     # auto-layout 2.0: space-filling `fill` engine (bands + slice + rectangular dual)
   structure.py   # auto post-and-beam frame placement (the `frame` directive)
+  revit.py       # lower the plan IR → Revit-shaped exchange JSON (barndsl.revit/1)
   render.py      # annotated 2D SVG renderer
   agent.py       # Claude write → compile → critique → revise loop
   cli.py         # `barndsl` command
@@ -350,6 +451,21 @@ tests/             # no API key required
   spec, with graceful fallback) rather than the heavier REL / planar-embedding
   pipeline, which remains the scaling path for very large room counts. See
   [`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md)
+- **Revit plug-in.** `barndsl revit` lowers a plan to the `barndsl.revit/1`
+  exchange (levels, deduplicated walls, hosted openings, room seeds, structural
+  members), and the **pyRevit extension** in [`revit/`](revit/README.md) reads it
+  and instantiates the walls, doors, windows, rooms and framing live in the
+  active Revit document — a `.barn` plan becomes an editable Revit model from a
+  ribbon button (targeting Revit 2025). Doors/windows are sized to the exchange
+  widths, porches build as floor slabs, and stairs as multi-flight runs
+  (straight or a switchback when the footprint is short). The exchange
+  round-trips: `exchange_to_plan` / `barndsl revit-import` reconstruct DSL from a
+  `barndsl.revit/1` document, and a *Model to DSL* button reads a live Revit model
+  back, and re-building is idempotent (replaces the prior build). A *Document*
+  button adds floor-plan views, room/door/window tags, schedules and a sheet per
+  level. The builder is unit-tested against a fake Revit API. Remaining work
+  genuinely needs a live Revit: validating the calls against Revit 2025 and
+  refining the experimental pieces (the gable-roof slope, the model reader).
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

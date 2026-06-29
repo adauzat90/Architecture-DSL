@@ -21,6 +21,87 @@ Possible follow-ups: feed `beam_linear_ft` into the roadmap's cost estimator;
 engineered member-sizing tables (span vs. section); lateral-bracing / shear-wall
 hints; honour an explicit interior bearing wall as a post line.
 
+## Revit plug-in — foundation DONE
+Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the
+`barndsl.revit/1` exchange) and a `barndsl revit FILE --out plan.json` command.
+Lowers the rectangle IR into a Revit-shaped model — per-level `RevitLevel`s,
+**deduplicated** wall centrelines (room edges decomposed to atomic segments,
+classified interior/exterior against the footprint, then merged into runs),
+openings hosted onto wall ids (interior doors / cased openings / exterior doors /
+windows, with width/height/sill), room seed points, and structural columns/framing
+from a placed `frame`; porches/stairs come across as reference areas. Pure Python,
+no Revit/.NET/API key; `tests/test_revit.py` pins the invariants (exterior walls
+trace the envelope perimeter, every opening lands on a real wall at its line,
+interior↔interior / exterior↔exterior hosting, room seeds inside their rectangles,
+multi-level walls, JSON round-trip). Coordinates pass straight through (barndsl
+feet/x-east/y-north == Revit's foot-based world XY).
+
+The **pyRevit extension** (chosen integration path) is in `revit/` — a barndsl
+ribbon tab with *Build Plan* and *Export Exchange* buttons, targeting **Revit
+2025** (.NET 8 / pyRevit 5 / CPython 3.12). Split into a Revit-free
+`exchange.py` (load/validate; tested in `tests/test_revit_exchange.py`) and a
+`builder.py` that creates levels, walls, **size-matched** doors/windows
+(duplicates the family and sets Width/Height type params, cached per size), rooms,
+structural columns/framing, porch floor slabs (`Floor.Create`), and best-effort
+straight stairs (StairsEditScope, after the main transaction). One transaction for
+everything but stairs; defensive per-element error handling.
+
+Debuggability (for in-Revit testing): a Revit-free `report.py` (BuildReport /
+BuildOptions, tested) records every element's outcome (created/skipped/failed +
+Revit id + reason) and renders markdown + a `*.buildlog.json`. *Build Plan* offers
+**Preview** (a real build, rolled back). A **Diagnostics** button reports the
+environment and the project's available wall/floor/door/window/structural types
+with readiness flags. A `config.json` sidecar maps each pass to **named** template
+types (auto-pick fallback).
+
+Round-trip: the exchange now goes both ways. `exchange_to_plan` / `barndsl
+revit-import` reconstruct a plan/DSL from a `barndsl.revit/1` document (rooms carry
+their rectangle; each opening's wall/offset is re-derived from geometry), verified
+by `tests/test_revit_roundtrip.py` (every gallery plan recovers its rooms/doors/
+windows/envelope and re-emits clean DSL). The exchange gained room rectangles +
+envelope/wings. A `Model to DSL` button reads a live Revit model (rooms +
+door/window instances) back into an exchange via `builder.read_model` (experimental;
+room types guessed from names — `naming.py`, tested).
+
+Multi-flight stairs: `plan_stair_runs` (pure, in `revit.py`, tested by
+`tests/test_revit_stairs.py`) lays out the flights for a stair footprint —
+straight, or a switchback (two flights + landing) when the straight run won't
+fit, or a flagged overrun — and rides in the exchange; the builder instantiates
+each flight via the Stairs component API with automatic landings.
+
+Builder testability: `tests/revit_fakes.py` is a minimal fake of the Revit/pyRevit
+API so `builder.py` runs in plain CPython; `tests/test_revit_builder.py` (22
+tests) covers wall-type selection, opening hosting, family sizing, dry-run
+rollback, named overrides, structure/porch/stair passes, `diagnose`, and
+`read_model`. Everything that can be tested without a live Revit now is.
+
+Building completion: the exchange + builder now also produce **floor slabs**
+(per level), **structural grids** (`structural_grids` — numbered bents + lettered
+eaves/interior-post lines from a placed frame), and a **footprint roof** (`roof_plan`
+— ridge along the long axis, pitch/rise; the builder lays a flat footprint roof,
+gable slope a manual refinement). All three have pure tested cores
+(`tests/test_revit_model_extras.py`) and harness-tested builder passes.
+
+Idempotent re-build — DONE: every created element is stamped barndsl-managed (in
+Comments); a re-build purges the prior managed set first (default; `replace`
+flag), so iterating replaces instead of duplicating and never touches hand-drawn
+elements. Levels are reused, stairs aren't purged. Harness-tested
+(`test_revit_builder.py`: marking, idempotence, no-replace duplicates, leaves
+unmanaged alone).
+
+Deliverables (Tier 2) — DONE: `builder.document(doc, options)` makes a floor-plan
+view per level, room/door/window tags in those views, native door/window/room
+schedules, and a sheet per level with the plan placed — all in one transaction,
+idempotent (barndsl-named views/sheets/schedules are replaced on re-document), and
+behind a *Document* ribbon button. Harness-tested in `tests/test_revit_document.py`
+(counts, two-level views/sheets, idempotence, skip-without-view-type/title-block,
+disable flags, managed-only tagging).
+
+Still needs a live Revit (not unit-testable here): validate every builder/document
+call against Revit 2025; harden the experimental reader (wall-type/level inference,
+non-rectangular rooms); the gable-roof slope; turned/multi-flight stair landings;
+and (a smaller follow-on) dimension strings, which aren't placed yet.
+
 ## Agent aids
 
 ### ~~Worked-example gallery (highest-leverage non-check aid)~~ — DONE

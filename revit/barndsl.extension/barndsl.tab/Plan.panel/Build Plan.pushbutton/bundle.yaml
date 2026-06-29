@@ -1,0 +1,8 @@
+title: Build Plan
+tooltip: >-
+  Build a barndsl plan into the active Revit model (target: Revit 2025). Pick a
+  compiled exchange (.json from `barndsl revit`) or a .barn source file (requires
+  the barndsl package importable from pyRevit's CPython engine). Creates levels,
+  walls, correctly-sized doors and windows, rooms, porch slabs, stairs, and —
+  when families are loaded — structural members. One undo step.
+author: barndsl
