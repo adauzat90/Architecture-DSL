@@ -63,8 +63,21 @@ envelope/wings. A `Model to DSL` button reads a live Revit model (rooms +
 door/window instances) back into an exchange via `builder.read_model` (experimental;
 room types guessed from names — `naming.py`, tested).
 
-Next: turned/multi-flight stairs; tighten the Revit reader (wall-type/level
-inference, non-rectangular rooms) for production round-trips.
+Multi-flight stairs: `plan_stair_runs` (pure, in `revit.py`, tested by
+`tests/test_revit_stairs.py`) lays out the flights for a stair footprint —
+straight, or a switchback (two flights + landing) when the straight run won't
+fit, or a flagged overrun — and rides in the exchange; the builder instantiates
+each flight via the Stairs component API with automatic landings.
+
+Builder testability: `tests/revit_fakes.py` is a minimal fake of the Revit/pyRevit
+API so `builder.py` runs in plain CPython; `tests/test_revit_builder.py` (22
+tests) covers wall-type selection, opening hosting, family sizing, dry-run
+rollback, named overrides, structure/porch/stair passes, `diagnose`, and
+`read_model`. Everything that can be tested without a live Revit now is.
+
+Next (needs a live Revit, not unit-testable here): validate the builder against
+Revit 2025; harden the experimental reader (wall-type/level inference,
+non-rectangular rooms).
 
 ## Agent aids
 

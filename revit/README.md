@@ -106,7 +106,7 @@ model. Use it to shake a plan out against a project template before committing.
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
 | `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
 | `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
-| `areas` (stairs) | A best-effort straight stair run between the two levels (**experimental** — falls back to a note if the Stairs API rejects the geometry). |
+| `areas` (stairs) | The flights the core planned for the footprint — a single **straight** run, or a **switchback** (two flights + an automatic landing) when the straight run won't fit — built via the Stairs component API. An overrun (neither fits) is built straight and flagged. Experimental: falls back to a note if the Stairs API rejects the geometry. |
 
 Walls, openings, rooms, structure and porches run in **one transaction**, so
 Revit's undo rolls them back in a single step; stairs build afterward in their
@@ -167,9 +167,11 @@ back to the auto-pick with a note in the report.
   door/window family and sets its Width/Height type parameters; a fixed-size
   family (no settable Width/Height) falls back to its default, with a note. Load
   parametric door/window families for best results.
-- **Stairs are experimental.** A straight run is derived from the footprint's
-  long axis; turns/landings and exact riser counts aren't modelled. If the
-  geometry is rejected, the stair is left for you to model (the rest is fine).
+- **Stairs are experimental.** The flight layout (straight vs. switchback, riser
+  count, run length) is computed deterministically by the core's `plan_stair_runs`
+  and *that* is unit-tested; the Revit instantiation of those flights is what a
+  real Revit is still needed to confirm. If the Stairs API rejects the geometry,
+  the stair is left for you to model (the rest of the build is fine).
 - Wall centrelines sit on the barndsl room-rectangle edges; Revit applies each
   wall type's thickness about that centreline. For exact interior dimensions,
   set the wall **Location Line** to a finish face, or model with thin types.
@@ -204,10 +206,17 @@ the Revit-reading step (`builder.read_model`) needs a running Revit.
 
 ## Testing
 
-The Revit-free halves are covered by the repo's normal test suite:
-`tests/test_revit_exchange.py` validates `exchange.py` against documents the core
-actually emits, and `tests/test_revit_report.py` covers the report/options layer
-(counts, dry-run wording, markdown/JSON, config round-trip). `builder.py` needs a
-running Revit; use **Preview** + the **build log** to exercise and debug it
-in-place. When filing an issue, attach the `*.buildlog.json` and the
-**Diagnostics** output.
+Everything that *can* be tested without Revit is. The Revit-free modules are
+covered directly: `tests/test_revit_exchange.py` (validate against real core
+output), `tests/test_revit_report.py` (counts, dry-run wording, markdown/JSON,
+config round-trip), `tests/test_revit_naming.py` (the name→type/id heuristics),
+and `tests/test_revit_stairs.py` (the stair-flight planner).
+
+`builder.py` itself is exercised against a **fake Revit API** (`tests/revit_fakes.py`
+supplies the DB/pyRevit/Stairs/`System` shapes) in `tests/test_revit_builder.py`:
+the wall-type pick, opening hosting, family **sizing** (duplicate-per-size), the
+**dry-run rollback**, **named overrides**, structure/porch/stair passes,
+`diagnose`, and `read_model`'s round-trip. These verify the builder *drives the
+API correctly* — only a running Revit confirms Revit does the right thing with
+the calls, so still validate in-place with **Preview** + the **build log**, and
+attach the `*.buildlog.json` and **Diagnostics** output to any issue.

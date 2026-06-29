@@ -451,11 +451,12 @@ tests/             # no API key required
   and instantiates the walls, doors, windows, rooms and framing live in the
   active Revit document — a `.barn` plan becomes an editable Revit model from a
   ribbon button (targeting Revit 2025). Doors/windows are sized to the exchange
-  widths, porches build as floor slabs, and stairs as straight runs. The exchange
+  widths, porches build as floor slabs, and stairs as multi-flight runs
+  (straight or a switchback when the footprint is short). The exchange
   round-trips: `exchange_to_plan` / `barndsl revit-import` reconstruct DSL from a
   `barndsl.revit/1` document, and a *Model to DSL* button reads a live Revit model
-  back. Next on this path: turned/multi-flight stairs, and tightening the Revit
-  reader (wall-type/level inference) for production round-trips.
+  back. The builder is unit-tested against a fake Revit API; remaining work is
+  validation against a live Revit and hardening the experimental reader.
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

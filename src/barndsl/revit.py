@@ -30,6 +30,7 @@ side), then merging contiguous like-classified segments back into runs.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 
 from .elements import (
@@ -56,6 +57,15 @@ INTERIOR_WALL_THICKNESS = inches(4.5)
 _PROBE = 0.05
 
 EXCHANGE_SCHEMA = "barndsl.revit/1"
+
+# --- stair geometry (IRC R311.7), shared with validation -------------------
+#: Max riser / min tread / min flight width, the same numbers the validator's
+#: STAIR_RUN check uses. A switchback (two side-by-side flights) needs ~2× width.
+MAX_RISER_HEIGHT = 7.75 / 12.0
+MIN_TREAD_DEPTH = 10.0 / 12.0
+MIN_STAIR_WIDTH = 3.0
+#: A comfortable flight width when the footprint allows more than the minimum.
+NICE_STAIR_WIDTH = 3.5
 
 
 # --- exchange dataclasses ----------------------------------------------------
@@ -446,6 +456,108 @@ def _location(orientation, pos, lo, hi):
     return (pos, mid) if orientation == "v" else (mid, pos)
 
 
+# --- stair run planning ------------------------------------------------------
+
+
+def plan_stair_runs(x: float, y: float, width: float, length: float, rise: float) -> dict:
+    """Plan the flights of a stair that climbs ``rise`` feet within a footprint.
+
+    Deterministic and **pure** (no Revit): given the footprint rectangle and the
+    total rise, derive the riser count (≤ 7¾ in each), the run length needed
+    (treads × 10 in), then choose a layout that fits:
+
+    * **straight** — one flight, when the run fits the footprint's long axis;
+    * **switchback** — two parallel flights with a landing at the turn, when the
+      straight run is too long but the footprint is wide enough for two flights;
+    * **overrun** — a single straight flight that exceeds the footprint, when
+      neither fits (``fits=False``, so the consumer can flag it).
+
+    Returns ``{risers, riser_height, tread, layout, fits, runs, landings}``.
+    Each run is ``{start, end, width, risers}`` with ``start``/``end`` in feet and
+    the path direction pointing *up* the flight; landings are ``{x,y,width,length}``
+    rectangles. Coordinates are in the plan's world frame.
+    """
+    rise = abs(float(rise))
+    risers = max(1, int(math.ceil(rise / MAX_RISER_HEIGHT))) if rise > 0 else 1
+    riser_h = rise / risers if risers else 0.0
+    treads = max(1, risers - 1)
+    run_needed = treads * MIN_TREAD_DEPTH
+
+    # Work in a local frame: `along` is the footprint's long axis, `across` the
+    # short one. Map back to world (x, y) via the axis unit vectors.
+    if length >= width:
+        along_vec, across_vec = (0.0, 1.0), (1.0, 0.0)
+        long_dim, short_dim = length, width
+    else:
+        along_vec, across_vec = (1.0, 0.0), (0.0, 1.0)
+        long_dim, short_dim = width, length
+
+    def pt(along, across):
+        return [
+            x + along_vec[0] * along + across_vec[0] * across,
+            y + along_vec[1] * along + across_vec[1] * across,
+        ]
+
+    tol = 1e-6
+    runs: list[dict] = []
+    landings: list[dict] = []
+
+    if run_needed <= long_dim + tol:
+        layout, fits = "straight", True
+        run_w = min(short_dim, NICE_STAIR_WIDTH)
+        start = (long_dim - run_needed) / 2.0
+        across_c = short_dim / 2.0
+        runs.append(
+            {"start": pt(start, across_c), "end": pt(start + run_needed, across_c),
+             "width": run_w, "risers": risers}
+        )
+    elif short_dim + tol >= 2 * MIN_STAIR_WIDTH and run_needed / 2.0 <= long_dim + tol:
+        layout, fits = "switchback", True
+        half = run_needed / 2.0
+        run_w = min(short_dim / 2.0, NICE_STAIR_WIDTH)
+        start = (long_dim - half) / 2.0
+        across1, across2 = short_dim / 4.0, 3.0 * short_dim / 4.0
+        r1 = (risers + 1) // 2
+        r2 = risers - r1
+        # Flight 1 ascends to the far end; flight 2 returns, parallel, offset across.
+        runs.append(
+            {"start": pt(start, across1), "end": pt(start + half, across1),
+             "width": run_w, "risers": r1}
+        )
+        if r2 > 0:
+            runs.append(
+                {"start": pt(start + half, across2), "end": pt(start, across2),
+                 "width": run_w, "risers": r2}
+            )
+        # Landing at the turn: spans the short dimension at the far end of the run.
+        land_lo = pt(start + half - run_w, 0.0)
+        runlen_w, runlen_l = (short_dim, run_w) if length >= width else (run_w, short_dim)
+        landings.append(
+            {"x": min(land_lo[0], pt(start + half, short_dim)[0]),
+             "y": min(land_lo[1], pt(start + half, short_dim)[1]),
+             "width": runlen_w, "length": runlen_l}
+        )
+    else:
+        layout, fits = "overrun", False
+        run_w = min(short_dim, NICE_STAIR_WIDTH)
+        start = max(0.0, (long_dim - run_needed) / 2.0)
+        across_c = short_dim / 2.0
+        runs.append(
+            {"start": pt(start, across_c), "end": pt(start + run_needed, across_c),
+             "width": run_w, "risers": risers}
+        )
+
+    return {
+        "risers": risers,
+        "riser_height": riser_h,
+        "tread": MIN_TREAD_DEPTH,
+        "layout": layout,
+        "fits": fits,
+        "runs": runs,
+        "landings": landings,
+    }
+
+
 # --- the public entry points -------------------------------------------------
 
 
@@ -602,6 +714,8 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             )
         )
     for s in plan.stairs:
+        rise = float(height) * abs(s.to_level - s.from_level)
+        stair_plan = plan_stair_runs(s.x, s.y, s.width, s.length, rise)
         areas.append(
             RevitArea(
                 id=s.id,
@@ -611,7 +725,12 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                 width=float(s.width),
                 length=float(s.length),
                 level=s.from_level,
-                meta={"from_level": s.from_level, "to_level": s.to_level},
+                meta={
+                    "from_level": s.from_level,
+                    "to_level": s.to_level,
+                    "rise": rise,
+                    "plan": stair_plan,
+                },
             )
         )
 

@@ -64,6 +64,7 @@ from .revit import (
     RevitModel,
     exchange_to_dsl,
     exchange_to_plan,
+    plan_stair_runs,
     to_revit_json,
     to_revit_model,
 )
@@ -122,6 +123,7 @@ __all__ = [
     "exchange_to_plan",
     "exchange_to_dsl",
     "RevitImportError",
+    "plan_stair_runs",
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 

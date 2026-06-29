@@ -34,6 +34,9 @@ from . import exchange as _exchange
 from . import naming as _naming
 from . import report as _report
 
+#: Code-minimum flight width (ft), used only as a fallback run width.
+MIN_STAIR_WIDTH = 3.0
+
 try:
     from pyrevit import script as _script
 
@@ -500,12 +503,30 @@ def _build_porches(doc, data, levels, res, report):
             report.failed("porch", p.get("id"), str(exc))
 
 
-def _build_stairs(doc, data, levels, report, dry_run):
-    """Best-effort straight-run stairs, each in its own edit scope.
+def _stair_runs_for(s):
+    """The planned flights for a stair area, falling back to a single straight
+    run derived from the footprint if the exchange carries no plan."""
+    plan = (s.get("meta", {}) or {}).get("plan")
+    if plan and plan.get("runs"):
+        return plan["runs"], plan.get("layout", "straight"), bool(plan.get("fits", True))
+    x, y, w, l = float(s["x"]), float(s["y"]), float(s["width"]), float(s["length"])
+    if l >= w:
+        cx = x + w / 2.0
+        run = {"start": [cx, y], "end": [cx, y + l], "width": w}
+    else:
+        cy = y + l / 2.0
+        run = {"start": [x, cy], "end": [x + w, cy], "width": l}
+    return [run], "straight", True
 
-    Runs after the main transaction (StairsEditScope manages its own
-    transactions). For a dry run the scope is cancelled instead of committed, so
-    the preview still exercises the API without persisting anything.
+
+def _build_stairs(doc, data, levels, report, dry_run):
+    """Build stairs from the planned flights, each in its own edit scope.
+
+    Uses the multi-flight plan the core computed (straight / switchback), creating
+    one ``StairsRun`` per flight and an automatic landing between consecutive
+    flights. Runs after the main transaction (StairsEditScope manages its own
+    transactions); a dry run cancels the scope instead of committing, so the
+    preview still exercises the API without persisting anything.
     """
     stairs = [a for a in data.get("areas", []) if a.get("kind") == "stair"]
     if not stairs:
@@ -513,6 +534,7 @@ def _build_stairs(doc, data, levels, report, dry_run):
 
     from Autodesk.Revit.DB.Architecture import (
         StairsEditScope,
+        StairsLanding,
         StairsRun,
         StairsRunJustification,
     )
@@ -529,27 +551,32 @@ def _build_stairs(doc, data, levels, report, dry_run):
             report.skipped("stair", s.get("id"), "missing base/top level")
             continue
 
-        x, y, w, l = float(s["x"]), float(s["y"]), float(s["width"]), float(s["length"])
-        if l >= w:
-            cx = x + w / 2.0
-            p1, p2, run_w = DB.XYZ(cx, y, base.Elevation), DB.XYZ(cx, y + l, base.Elevation), w
-        else:
-            cy = y + l / 2.0
-            p1, p2, run_w = DB.XYZ(x, cy, base.Elevation), DB.XYZ(x + w, cy, base.Elevation), l
-
+        runs, layout, fits = _stair_runs_for(s)
+        z = base.Elevation
         scope = StairsEditScope(doc, "barndsl stair")
         try:
             stairs_id = scope.Start(base.Id, top.Id)
             t = DB.Transaction(doc, "barndsl stair run")
             t.Start()
             try:
-                run = StairsRun.CreateStraightRun(
-                    doc, stairs_id, DB.Line.CreateBound(p1, p2), StairsRunJustification.Center
-                )
-                try:
-                    run.ActualRunWidth = run_w
-                except Exception:
-                    pass
+                created_runs = []
+                for spec in runs:
+                    p1 = DB.XYZ(float(spec["start"][0]), float(spec["start"][1]), z)
+                    p2 = DB.XYZ(float(spec["end"][0]), float(spec["end"][1]), z)
+                    run = StairsRun.CreateStraightRun(
+                        doc, stairs_id, DB.Line.CreateBound(p1, p2), StairsRunJustification.Center
+                    )
+                    try:
+                        run.ActualRunWidth = float(spec.get("width", MIN_STAIR_WIDTH))
+                    except Exception:
+                        pass
+                    created_runs.append(run)
+                # Automatic landings bridge consecutive flights (e.g. a switchback).
+                for a, b in zip(created_runs, created_runs[1:]):
+                    try:
+                        StairsLanding.CreateAutomaticLanding(doc, a.Id, b.Id)
+                    except Exception:
+                        pass
                 t.Commit()
             except Exception:
                 t.RollBack()
@@ -558,7 +585,10 @@ def _build_stairs(doc, data, levels, report, dry_run):
                 scope.Cancel()
             else:
                 scope.Commit(_SwallowFailures())
-            report.created("stair", s.get("id"), revit_id=_id_val(stairs_id))
+            msg = "%s, %d flight(s)" % (layout, len(runs))
+            if not fits:
+                msg += " — run exceeds the footprint; review"
+            report.created("stair", s.get("id"), revit_id=_id_val(stairs_id), message=msg)
         except Exception as exc:
             try:
                 if scope.IsActive:
