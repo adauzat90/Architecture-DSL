@@ -47,6 +47,25 @@ def _model_dict():
     return to_revit_model(plan).to_dict()
 
 
+def test_schema_constants_have_not_drifted():
+    # The schema string is declared once in the core (revit.EXCHANGE_SCHEMA) and
+    # again in the extension (exchange.SCHEMA), across an interpreter boundary the
+    # extension can't bridge by importing the core. This guards them explicitly so
+    # a bump in one place fails loudly here, not as a mystery "unsupported schema".
+    from barndsl.revit import EXCHANGE_SCHEMA
+
+    assert EXCHANGE_SCHEMA == exchange.SCHEMA
+
+
+def test_core_output_carries_every_required_section():
+    # The extension hard-requires these top-level sections (exchange._REQUIRED_KEYS).
+    # If the producer ever stops emitting one, building would fail in Revit; assert
+    # the core's document supplies them all so the contract is checked in CI.
+    doc = _model_dict()
+    for key in exchange._REQUIRED_KEYS:
+        assert key in doc, "core exchange is missing required section %r" % key
+
+
 def test_load_accepts_core_output():
     data = exchange.load(_model_dict())
     assert data["schema"] == exchange.SCHEMA

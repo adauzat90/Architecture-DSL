@@ -44,12 +44,12 @@ from .elements import (
     feet,
     inches,
 )
+from .constants import NATURAL_LIGHT_RATIO as _NAT_LIGHT_RATIO
 from .geometry import shared_edge
 
 # Glazed area a 1-ft-wide window contributes (head 6.67 - sill 3.0 ft tall),
 # used to size daylight windows; mirrors Window's defaults in elements.py.
 _GLASS_PER_FT = feet(6.67) - feet(3.0)
-_NAT_LIGHT_RATIO = 0.08
 
 
 # --- the brief --------------------------------------------------------------
@@ -109,7 +109,14 @@ class LayoutResult:
 
 
 def solve_layout(brief: LayoutBrief) -> LayoutResult:
-    """Place every room in ``brief`` and return a plan plus a satisfaction report."""
+    """Place every room in ``brief`` and return a plan plus a satisfaction report.
+
+    .. deprecated::
+        This is the v1 "greedy" abutment placer. New code should prefer
+        :func:`barndsl.layout2.solve_layout2` (the CLI default, reached via the
+        ``fill`` engine), which keeps habitable rooms on the perimeter and wastes
+        no footprint. v1 is retained for the ``--engine greedy`` fallback.
+    """
     specs = list(brief.rooms)
     if not specs:
         raise ValueError("Layout brief has no rooms.")
@@ -502,8 +509,14 @@ def _round_half_up(value: float) -> float:
 # --- textual brief ----------------------------------------------------------
 
 
-def parse_brief(text: str, name: str = "Layout") -> LayoutBrief:
-    """Parse a small textual brief into a :class:`LayoutBrief`.
+def parse_brief_fields(text: str, name: str, parse_room) -> dict:
+    """Parse the brief grammar shared by the v1 and v2 engines.
+
+    Both :func:`parse_brief` and :func:`barndsl.layout2.parse_brief2` accept the
+    *same* statements — only the ``room`` line differs (fixed ``W x L`` vs a size
+    program). This runs the common loop and delegates each room line to
+    ``parse_room(rest, raw)``, returning the keyword arguments common to both
+    :class:`LayoutBrief` and :class:`LayoutBrief2`.
 
     Grammar (one statement per line, ``#`` comments)::
 
@@ -513,14 +526,14 @@ def parse_brief(text: str, name: str = "Layout") -> LayoutBrief:
         note "free text"
         entry <room>              # which room gets the front door
         no-openings               # don't auto-add entry/windows
-        room <id>: <type> <W> x <L> [level <n>]
+        room <id>: <type> ...     # engine-specific; parsed by ``parse_room``
         adjacent <a> <b> [<c> ...]   # connect <a> to each of the rest (a hub)
 
     ``adjacent hall bed1 bed2 bath`` is shorthand for ``hall-bed1``,
     ``hall-bed2`` and ``hall-bath`` — exactly the "rooms off a spine" idiom.
     """
     plan_name = name
-    rooms: list[RoomSpec] = []
+    rooms: list = []
     adjacencies: list[tuple[str, str]] = []
     envelope: tuple[float, float] | None = None
     ceiling = feet(9)
@@ -551,7 +564,7 @@ def parse_brief(text: str, name: str = "Layout") -> LayoutBrief:
         elif head in ("no-openings", "no_openings"):
             add_openings = False
         elif head == "room":
-            rooms.append(_parse_room_line(rest, raw))
+            rooms.append(parse_room(rest, raw))
         elif head in ("adjacent", "adj"):
             members = rest.replace(",", " ").split()
             if len(members) < 2:
@@ -562,16 +575,30 @@ def parse_brief(text: str, name: str = "Layout") -> LayoutBrief:
         else:
             raise ValueError(f"Unknown brief statement: {raw!r}")
 
-    return LayoutBrief(
-        name=plan_name,
-        rooms=rooms,
-        adjacencies=adjacencies,
-        envelope=envelope,
-        ceiling=ceiling,
-        notes="\n".join(notes),
-        entry_room=entry_room,
-        add_openings=add_openings,
-    )
+    return {
+        "name": plan_name,
+        "rooms": rooms,
+        "adjacencies": adjacencies,
+        "envelope": envelope,
+        "ceiling": ceiling,
+        "notes": "\n".join(notes),
+        "entry_room": entry_room,
+        "add_openings": add_openings,
+    }
+
+
+def parse_brief(text: str, name: str = "Layout") -> LayoutBrief:
+    """Parse a small textual brief into a :class:`LayoutBrief`.
+
+    Room lines carry fixed sizes (``room <id>: <type> <W> x <L> [level <n>]``);
+    everything else is the shared grammar documented on :func:`parse_brief_fields`.
+
+    .. deprecated::
+        The v1 "greedy" engine is superseded by :func:`barndsl.layout2.solve_layout2`
+        (the CLI default). ``parse_brief``/``solve_layout`` remain for the
+        ``--engine greedy`` fallback and existing callers.
+    """
+    return LayoutBrief(**parse_brief_fields(text, name, _parse_room_line))
 
 
 def _parse_room_line(rest: str, raw: str) -> RoomSpec:
