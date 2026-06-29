@@ -44,12 +44,12 @@ from .elements import (
     feet,
     inches,
 )
+from .constants import NATURAL_LIGHT_RATIO as _NAT_LIGHT_RATIO
 from .geometry import shared_edge
 
 # Glazed area a 1-ft-wide window contributes (head 6.67 - sill 3.0 ft tall),
 # used to size daylight windows; mirrors Window's defaults in elements.py.
 _GLASS_PER_FT = feet(6.67) - feet(3.0)
-_NAT_LIGHT_RATIO = 0.08
 
 
 # --- the brief --------------------------------------------------------------

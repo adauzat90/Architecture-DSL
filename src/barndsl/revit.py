@@ -33,6 +33,12 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 
+from .constants import (
+    MAX_RISER_HEIGHT,
+    MIN_STAIR_WIDTH,
+    MIN_TREAD_DEPTH,
+    NICE_STAIR_WIDTH,
+)
 from .elements import (
     Barndominium,
     Direction,
@@ -59,14 +65,9 @@ _PROBE = 0.05
 
 EXCHANGE_SCHEMA = "barndsl.revit/1"
 
-# --- stair geometry (IRC R311.7), shared with validation -------------------
-#: Max riser / min tread / min flight width, the same numbers the validator's
-#: STAIR_RUN check uses. A switchback (two side-by-side flights) needs ~2× width.
-MAX_RISER_HEIGHT = 7.75 / 12.0
-MIN_TREAD_DEPTH = 10.0 / 12.0
-MIN_STAIR_WIDTH = 3.0
-#: A comfortable flight width when the footprint allows more than the minimum.
-NICE_STAIR_WIDTH = 3.5
+# Stair geometry (IRC R311.7) is shared with the validator: defined once in
+# constants.py (imported at the top of this module) and re-exported here, so
+# ``barndsl.revit.MIN_STAIR_WIDTH`` etc. keep resolving for callers and tests.
 
 #: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
 DEFAULT_ROOF_PITCH = 4.0 / 12.0

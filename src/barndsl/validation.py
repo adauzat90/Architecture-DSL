@@ -17,6 +17,12 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 
+from .constants import (
+    MAX_RISER_HEIGHT,
+    MIN_STAIR_WIDTH,
+    MIN_TREAD_DEPTH,
+    NATURAL_LIGHT_RATIO,
+)
 from .elements import (
     HABITABLE_TYPES,
     Barndominium,
@@ -61,7 +67,8 @@ MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
 STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
 STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
 DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
-NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
+# NATURAL_LIGHT_RATIO and the stair constants below live in constants.py (the
+# single source of truth) and are imported above; re-stated here in prose only.
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
@@ -89,11 +96,6 @@ MIN_EGRESS_AREA_GRADE = 5.0  # sq ft, at-grade floor (level 0)
 MIN_EGRESS_OPENING_WIDTH = 20 / 12  # 20 in clear
 MIN_EGRESS_OPENING_HEIGHT = 24 / 12  # 24 in clear
 MAX_EGRESS_SILL = 44 / 12  # sill <= 44 in above the finished floor
-
-# Stair geometry (IRC R311.7): a flight needs enough run to climb one storey.
-MAX_RISER_HEIGHT = 7.75 / 12  # 7-3/4 in max riser
-MIN_TREAD_DEPTH = 10 / 12  # 10 in min tread
-MIN_STAIR_WIDTH = 3.0  # 36 in; two side-by-side flights (a switchback) need ~6 ft
 
 
 class Severity(str, Enum):
