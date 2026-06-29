@@ -1345,17 +1345,7 @@ def _validate_access(plan: Barndominium, add) -> None:
         )
 
 
-def _validate_design_quality(plan: Barndominium, add) -> None:
-    """Soft, advisory checks (INFO) that nudge toward a livable layout.
-
-    These never block compilation — they flow through the *same* diagnostic
-    channel as code errors so the author (or the agent) gets quality guidance,
-    not just code-compliance. They mirror what a reviewing architect notices:
-    open-concept flow, bedroom privacy, and bath proximity.
-    """
-    graph = _door_graph(plan)
-    by_id = {r.id: r for r in plan.rooms}
-
+def _dq_kitchen_flow(plan: Barndominium, graph, by_id, add) -> None:
     # 1. Open-concept flow: a kitchen should connect to dining or living.
     for room in plan.rooms:
         if room.type is RoomType.KITCHEN:
@@ -1372,6 +1362,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_bed_privacy(plan: Barndominium, graph, by_id, add) -> None:
     # 2. Bedroom privacy: a bedroom shouldn't open straight onto a public room.
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
@@ -1394,6 +1386,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_bath_distance(plan: Barndominium, graph, by_id, add) -> None:
     # 3. Bath proximity: each bedroom should be near a bathroom.
     baths = {r.id for r in plan.rooms if r.type in BATH_TYPES}
     if baths:
@@ -1413,6 +1407,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                         )
                     )
 
+
+def _dq_private_passthrough(plan: Barndominium, graph, by_id, add) -> None:
     # 4. Pass-through privacy: you shouldn't have to walk through a bathroom (or,
     #    apart from its own ensuite/closet, a bedroom) to get between rooms. This
     #    is a circulation-*shape* defect — reachability alone (NO_ACCESS) misses
@@ -1456,6 +1452,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_entry_private(plan: Barndominium, graph, by_id, add) -> None:
     # 5. An exterior entry shouldn't open straight into a bathroom (a real
     #    defect → WARNING) or a bedroom (sometimes a patio door → INFO).
     for d in plan.exterior_doors:
@@ -1482,6 +1480,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+
+def _dq_wet_group(plan: Barndominium, graph, by_id, add) -> None:
     # 6. Plumbing economy: wet rooms (bath/kitchen/laundry/utility) are cheaper to
     #    run when they share a wall. If there are 3+ but none abut another wet
     #    room, the supply/waste runs are needlessly spread out.
@@ -1506,6 +1506,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+
+def _dq_no_closet(plan: Barndominium, graph, by_id, add) -> None:
     # 7. Storage: a bedroom needs a closet it can actually use — one reached by a
     #    door/opening *from that bedroom*, not merely a closet that happens to abut
     #    it (which might be a neighbour's, with no way in). Not code, so INFO.
@@ -1541,6 +1543,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_master_ensuite(plan: Barndominium, graph, by_id, add) -> None:
     # 8. Primary suite: on a floor with two or more full bathrooms, *some* bedroom
     #    should have a private (ensuite) bath rather than every bath only being a
     #    shared hall bath — that's the point of a second bath. INFO (a preference).
@@ -1587,6 +1591,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
             )
         )
 
+
+def _dq_bed_sound(plan: Barndominium, graph, by_id, add) -> None:
     # 8b. Acoustic buffer: two bedrooms that share a wall pass sound straight
     #     between them. The idiom is to stack each bedroom's closet on that wall
     #     (back-to-back), so the closets buffer the sleeping rooms — once buffered
@@ -1608,6 +1614,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_closet_shape(plan: Barndominium, graph, by_id, add) -> None:
     # 8c. Walk-in vs long, skinny closet: a closet with the floor area for a
     #     walk-in but shaped as a narrow strip wastes that floor. Small reach-ins
     #     (under the walk-in area) and wide/shallow closets (under the aspect
@@ -1633,6 +1641,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_hall_tight(plan: Barndominium, graph, by_id, add) -> None:
     # 8d. Comfort width: a hall at the 3 ft code minimum passes but feels tight
     #     for two people or moving furniture; 4 ft is the comfortable target.
     for room in plan.rooms:
@@ -1652,6 +1662,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+
+def _dq_no_back_door(plan: Barndominium, graph, by_id, add) -> None:
     # 8e. Front *and* back door: a home wants a second exterior door (a back/side
     #     door off the kitchen, mudroom or laundry) — for daily flow and a second
     #     way out. Garage/porch doors don't count as the house's back door.
@@ -1677,6 +1689,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
             )
         )
 
+
+def _dq_bath_oversize(plan: Barndominium, graph, by_id, add) -> None:
     # 8f. Ensuite proportion: a private bath shouldn't be larger than the bedroom
     #     it serves — that's a sign the suite is mis-proportioned. Only judged for
     #     a true ensuite (a bath reached only through this bedroom, closets aside).
@@ -1702,6 +1716,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_stair_blocks_door(plan: Barndominium, graph, by_id, add) -> None:
     # 8g. A door needs clear floor in front of it; a stair landing intruding on a
     #     doorway blocks it (you step off the stair straight into a swinging door).
     for s in plan.stairs:
@@ -1750,6 +1766,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_stair_wall(plan: Barndominium, graph, by_id, add) -> None:
     # 8h. Stairs belong along a wall, not marooned in the middle of a room (where
     #     they'd need railings all round and chop up the floor). We can't model
     #     mid-flight landings/turns, but we can flag a free-floating flight.
@@ -1767,6 +1785,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+
+def _dq_door_centered(plan: Barndominium, graph, by_id, add) -> None:
     # 8i. Door position: a swing door centred on a wall with usable wall on *both*
     #     flanks wastes the room — backing it to a corner leaves an unbroken run to
     #     line with furniture. Only swing leaves the author left to default (no
@@ -1798,6 +1818,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+
+def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
     # 8k. Door swings shouldn't overlap: two leaves sweeping into the same space
     #     foul each other. Build each swing's swept quarter-disc (matching the
     #     renderer) and test for overlap.
@@ -1836,6 +1858,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_envelope_module(plan: Barndominium, graph, by_id, add) -> None:
     # 8l. Material efficiency: exterior dimensions that land on a build module cut
     #     less sheet/board waste. Flag envelope and wing measurements off the module.
     off = []
@@ -1861,6 +1885,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
             )
         )
 
+
+def _dq_window_partition(plan: Barndominium, graph, by_id, add) -> None:
     # 8j. Windows shouldn't butt an interior partition where it meets the exterior
     #     wall — there's no room for framing/trim and it reads as off-balance. (A
     #     window flush to a true *building* corner is fine.)
@@ -1888,6 +1914,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+
+def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
     # 8. Proportion: a habitable room shaped like a bowling alley is hard to
     #    furnish. Hallways/closets are *meant* to be skinny — they're not habitable,
     #    so the HABITABLE_TYPES gate already excludes them.
@@ -1909,6 +1937,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
     # 9. Garage → sleeping room. IRC R302.5.1: a garage opening shall not open
     #    into a room used for sleeping. This is code-grounded, so it's a WARNING.
     garages = [r for r in plan.rooms if r.type is RoomType.GARAGE]
@@ -1927,12 +1957,15 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     )
                 )
 
+
+def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
     # 10. Garage with no interior people-door into the house. A vehicle `entry`
     #     satisfies reachability (NO_ACCESS), so this gap slips through: you'd have
     #     to go outside to get in. Only nudge when it actually abuts the house.
     house_types = {
         t for t in RoomType if t not in (RoomType.GARAGE, RoomType.PORCH)
     }
+    garages = [r for r in plan.rooms if r.type is RoomType.GARAGE]
     for g in garages:
         connected_inside = any(
             n in by_id and by_id[n].type in house_types for n in graph.get(g.id, ())
@@ -1956,6 +1989,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+
+def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
     # 11. A hallway exists to *distribute* circulation. One that opens onto a
     #     single room (or none) is just overhead. Exempt a hall that carries an
     #     exterior entry — a foyer/vestibule is legitimately a one-room hall.
@@ -2028,6 +2063,51 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     "cap the hall), or trim the hall back to its last doorway.",
                 )
             )
+
+
+#: The design-quality checks, run in order. Each is a standalone
+#: ``(plan, graph, by_id, add)`` function so it can be unit-tested in
+#: isolation; the driver below builds the shared derived state once.
+_DESIGN_QUALITY_CHECKS = (
+    _dq_kitchen_flow,
+    _dq_bed_privacy,
+    _dq_bath_distance,
+    _dq_private_passthrough,
+    _dq_entry_private,
+    _dq_wet_group,
+    _dq_no_closet,
+    _dq_master_ensuite,
+    _dq_bed_sound,
+    _dq_closet_shape,
+    _dq_hall_tight,
+    _dq_no_back_door,
+    _dq_bath_oversize,
+    _dq_stair_blocks_door,
+    _dq_stair_wall,
+    _dq_door_centered,
+    _dq_door_swing_clash,
+    _dq_envelope_module,
+    _dq_window_partition,
+    _dq_room_proportion,
+    _dq_garage_bedroom,
+    _dq_garage_no_entry,
+    _dq_hall_deadend,
+)
+
+
+def _validate_design_quality(plan: Barndominium, add) -> None:
+    """Soft, advisory checks (mostly INFO) that nudge toward a livable layout.
+
+    These never block compilation -- they flow through the *same* diagnostic
+    channel as code errors so the author (or the agent) gets quality guidance,
+    not just code-compliance. They mirror what a reviewing architect notices:
+    open-concept flow, bedroom privacy, and bath proximity. Each individual
+    check lives in its own ``_dq_*`` function (see ``_DESIGN_QUALITY_CHECKS``).
+    """
+    graph = _door_graph(plan)
+    by_id = {r.id: r for r in plan.rooms}
+    for check in _DESIGN_QUALITY_CHECKS:
+        check(plan, graph, by_id, add)
 
 
 def _validate_program(plan: Barndominium, add) -> None:
