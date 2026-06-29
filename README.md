@@ -332,6 +332,9 @@ get two buttons:
   instead of stacking duplicates (and never touches what you drew). Offers a
   **Preview** (a real build that's rolled back) and writes a `*.buildlog.json`
   report. Primary target: **Revit 2025**.
+* **Document** — make drawings from the built model: a floor-plan view per level
+  with room/door/window tags, native door/window/room schedules, and a sheet per
+  level. Idempotent (replaces a previous run's views/sheets/schedules).
 * **Export Exchange** — pick a `.barn` and write its exchange `.json` next to it
   without touching the model.
 * **Diagnostics** — report the environment and which wall/floor/family types the
@@ -458,10 +461,11 @@ tests/             # no API key required
   (straight or a switchback when the footprint is short). The exchange
   round-trips: `exchange_to_plan` / `barndsl revit-import` reconstruct DSL from a
   `barndsl.revit/1` document, and a *Model to DSL* button reads a live Revit model
-  back, and re-building is idempotent (replaces the prior build). The builder is
-  unit-tested against a fake Revit API. Next (deliverables & workflow):
-  room/door/window tags + dimensions, floor-plan views and a sheet per level, and
-  native door/window/room schedules.
+  back, and re-building is idempotent (replaces the prior build). A *Document*
+  button adds floor-plan views, room/door/window tags, schedules and a sheet per
+  level. The builder is unit-tested against a fake Revit API. Remaining work
+  genuinely needs a live Revit: validating the calls against Revit 2025 and
+  refining the experimental pieces (the gable-roof slope, the model reader).
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

@@ -1059,3 +1059,202 @@ def build(doc, data, options=None):
 
     _logger.info("barndsl %s", report.summary_line())
     return report
+
+
+# --- documentation: views, tags, schedules, sheets ---------------------------
+
+#: Created views/sheets/schedules are named with this prefix so a re-document
+#: can find and replace exactly what a previous run made.
+DOC_PREFIX = "barndsl - "
+
+
+def _view_family_type(doc, view_family):
+    for vft in _collect(doc, DB.ViewFamilyType):
+        try:
+            if vft.ViewFamily == view_family:
+                return vft
+        except Exception:
+            pass
+    return None
+
+
+def _managed_in_category(doc, bic):
+    out = []
+    try:
+        elems = (
+            DB.FilteredElementCollector(doc)
+            .OfCategory(bic)
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+    except Exception:
+        return out
+    for e in elems:
+        p = _comments_param(e)
+        try:
+            if p is not None and p.AsString() == MANAGED_MARK:
+                out.append(e)
+        except Exception:
+            pass
+    return out
+
+
+def _purge_documents(doc, report):
+    """Delete barndsl-named sheets, schedules and views from a prior run."""
+    removed = 0
+    for cls in (DB.ViewSheet, DB.ViewSchedule, DB.ViewPlan):
+        try:
+            views = _collect(doc, cls)
+        except Exception:
+            views = []
+        for v in list(views):
+            try:
+                if _name(v).startswith(DOC_PREFIX):
+                    doc.Delete(v.Id)
+                    removed += 1
+            except Exception:
+                pass
+    if removed:
+        report.note("replaced %d view/sheet/schedule(s) from a previous run" % removed)
+    return removed
+
+
+def _make_views(doc, levels, vft, report):
+    """One floor-plan view per level; returns ``{level_id_value: view}``."""
+    views = {}
+    if vft is None:
+        report.note("views skipped: no floor-plan view type in project")
+        return views
+    try:
+        if not vft.IsActive:
+            vft.Activate()
+            doc.Regenerate()
+    except Exception:
+        pass
+    for lv in levels:
+        name = DOC_PREFIX + _name(lv)
+        try:
+            view = DB.ViewPlan.Create(doc, vft.Id, lv.Id)
+            try:
+                view.Name = name
+            except Exception:
+                pass
+            views[_id_val(lv.Id)] = view
+            report.created("view", _name(lv), revit_id=_rid(view))
+        except Exception as exc:
+            report.failed("view", _name(lv), str(exc))
+    return views
+
+
+def _tag_in_view(doc, view, report):
+    """Place room/door/window tags for managed elements, in ``view``."""
+    # Room tags (NewRoomTag needs no tag type).
+    for rm in _managed_in_category(doc, DB.BuiltInCategory.OST_Rooms):
+        try:
+            loc = rm.Location.Point
+            uv = DB.UV(loc.X, loc.Y)
+            doc.Create.NewRoomTag(DB.LinkElementId(rm.Id), uv, view.Id)
+            report.created("tag", "room", revit_id=_rid(rm))
+        except Exception as exc:
+            report.failed("tag", "room", str(exc))
+
+    # Door / window tags.
+    for bic, label in (
+        (DB.BuiltInCategory.OST_Doors, "door"),
+        (DB.BuiltInCategory.OST_Windows, "window"),
+    ):
+        for inst in _managed_in_category(doc, bic):
+            try:
+                loc = inst.Location.Point
+                ref = DB.Reference(inst)
+                DB.IndependentTag.Create(
+                    doc, view.Id, ref, False, DB.TagMode.TM_ADDBY_CATEGORY,
+                    DB.TagOrientation.Horizontal, loc,
+                )
+                report.created("tag", label, revit_id=_rid(inst))
+            except Exception as exc:
+                report.failed("tag", label, str(exc))
+
+
+def _make_schedules(doc, report):
+    specs = [
+        (DB.BuiltInCategory.OST_Doors, "Doors"),
+        (DB.BuiltInCategory.OST_Windows, "Windows"),
+        (DB.BuiltInCategory.OST_Rooms, "Rooms"),
+    ]
+    for bic, label in specs:
+        try:
+            sched = DB.ViewSchedule.CreateSchedule(doc, DB.ElementId(bic))
+            try:
+                sched.Name = DOC_PREFIX + label
+            except Exception:
+                pass
+            report.created("schedule", label, revit_id=_rid(sched))
+        except Exception as exc:
+            report.failed("schedule", label, str(exc))
+
+
+def _make_sheets(doc, levels, views, title_block, report):
+    if title_block is None:
+        report.note("sheets skipped: no title block loaded")
+        return
+    try:
+        if not title_block.IsActive:
+            title_block.Activate()
+            doc.Regenerate()
+    except Exception:
+        pass
+    for lv in levels:
+        view = views.get(_id_val(lv.Id))
+        if view is None:
+            continue
+        try:
+            sheet = DB.ViewSheet.Create(doc, title_block.Id)
+            try:
+                sheet.Name = DOC_PREFIX + _name(lv) + " Plan"
+            except Exception:
+                pass
+            DB.Viewport.Create(doc, sheet.Id, view.Id, DB.XYZ(1.0, 1.0, 0.0))
+            report.created("sheet", _name(lv), revit_id=_rid(sheet))
+        except Exception as exc:
+            report.failed("sheet", _name(lv), str(exc))
+
+
+def document(doc, options=None):
+    """Create floor-plan views, tags, schedules and a sheet per level from the
+    model a build produced. Decoupled from :func:`build` (run it when you're
+    ready to document) and **idempotent**: a re-document replaces the barndsl
+    views/sheets/schedules a previous run made. Returns a :class:`BuildReport`.
+    """
+    if options is None:
+        options = _report.BuildOptions()
+    report = _report.BuildReport()
+
+    vft = _view_family_type(doc, DB.ViewFamily.FloorPlan)
+    title_block = (_symbols(doc, DB.BuiltInCategory.OST_TitleBlocks) or [None])[0]
+    report.resources["floor_plan_view_type"] = _name(vft) if vft else "(none)"
+    report.resources["title_block"] = (title_block.Family.Name if title_block else "(none)")
+
+    levels = sorted(_collect(doc, DB.Level), key=lambda e: e.Elevation)
+
+    t = DB.Transaction(doc, "barndsl documentation")
+    t.Start()
+    try:
+        if options.replace:
+            _purge_documents(doc, report)
+        views = _make_views(doc, levels, vft, report) if options.views else {}
+        if options.tags:
+            for view in views.values():
+                _tag_in_view(doc, view, report)
+        if options.schedules:
+            _make_schedules(doc, report)
+        if options.sheets:
+            _make_sheets(doc, levels, views, title_block, report)
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+        raise
+
+    _logger.info("barndsl document: %s", report.summary_line())
+    return report

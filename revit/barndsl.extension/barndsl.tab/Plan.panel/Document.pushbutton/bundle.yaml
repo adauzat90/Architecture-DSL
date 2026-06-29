@@ -1,0 +1,7 @@
+title: Document
+tooltip: >-
+  Create drawings from the barndsl model: a floor-plan view per level with room,
+  door and window tags, native door/window/room schedules, and a sheet per level
+  with the plan placed. Run after Build Plan. Idempotent — re-documenting
+  replaces the barndsl views/sheets/schedules from a previous run. One undo step.
+author: barndsl

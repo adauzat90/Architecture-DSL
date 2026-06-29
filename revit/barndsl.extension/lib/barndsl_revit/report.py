@@ -20,6 +20,8 @@ STATUSES = (CREATED, SKIPPED, FAILED)
 KINDS = (
     "level", "wall", "door", "window", "room", "column", "framing",
     "slab", "porch", "stair", "grid", "roof",
+    # documentation (the document() pass)
+    "view", "tag", "schedule", "sheet",
 )
 
 #: Names of the optional type/family overrides a build can specify, so the same
@@ -36,6 +38,8 @@ _OVERRIDE_KEYS = (
 _FLAG_KEYS = (
     "structure", "size_families", "porches", "stairs", "slabs", "grids", "roof",
     "replace", "dry_run", "verbose",
+    # document() pass
+    "views", "tags", "schedules", "sheets",
 )
 
 
@@ -56,6 +60,10 @@ class BuildOptions(object):
         replace=True,
         dry_run=False,
         verbose=False,
+        views=True,
+        tags=True,
+        schedules=True,
+        sheets=True,
         exterior_wall_type=None,
         interior_wall_type=None,
         door_family=None,
@@ -74,6 +82,10 @@ class BuildOptions(object):
         self.replace = bool(replace)
         self.dry_run = bool(dry_run)
         self.verbose = bool(verbose)
+        self.views = bool(views)
+        self.tags = bool(tags)
+        self.schedules = bool(schedules)
+        self.sheets = bool(sheets)
         self.exterior_wall_type = exterior_wall_type
         self.interior_wall_type = interior_wall_type
         self.door_family = door_family

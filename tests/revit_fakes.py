@@ -102,6 +102,37 @@ class BuiltInCategory:
     OST_StructuralColumns = "OST_StructuralColumns"
     OST_StructuralFraming = "OST_StructuralFraming"
     OST_Rooms = "OST_Rooms"
+    OST_RoomTags = "OST_RoomTags"
+    OST_TitleBlocks = "OST_TitleBlocks"
+
+
+class ViewFamily:
+    FloorPlan = "FloorPlan"
+
+
+class TagMode:
+    TM_ADDBY_CATEGORY = "TM_ADDBY_CATEGORY"
+
+
+class TagOrientation:
+    Horizontal = "Horizontal"
+
+
+class ElementId:
+    """A category/element id wrapper (distinct from the auto-id on elements)."""
+
+    def __init__(self, value):
+        self.Value = value
+
+
+class Reference:
+    def __init__(self, element):
+        self.element = element
+
+
+class LinkElementId:
+    def __init__(self, element_id):
+        self.LinkedElementId = element_id
 
 
 class WallKind:
@@ -297,6 +328,60 @@ class Room(FakeElement):
         return self._bb
 
 
+class ViewFamilyType(FakeElement):
+    def __init__(self, name, view_family, doc=None):
+        super().__init__(name, doc)
+        self.ViewFamily = view_family
+        self.IsActive = True
+
+    def Activate(self):
+        self.IsActive = True
+
+
+class ViewPlan(FakeElement):
+    @staticmethod
+    def Create(doc, vft_id, level_id):
+        v = ViewPlan("view", doc)
+        v.GenLevel = doc._by_id.get(level_id.Value)
+        doc.views.append(v)
+        doc.created.append(("view", v))
+        return v
+
+
+class ViewSchedule(FakeElement):
+    @staticmethod
+    def CreateSchedule(doc, category_id):
+        s = ViewSchedule("schedule", doc)
+        doc.schedules.append(s)
+        doc.created.append(("schedule", s))
+        return s
+
+
+class ViewSheet(FakeElement):
+    @staticmethod
+    def Create(doc, title_block_id):
+        sh = ViewSheet("sheet", doc)
+        doc.sheets.append(sh)
+        doc.created.append(("sheet", sh))
+        return sh
+
+
+class Viewport(FakeElement):
+    @staticmethod
+    def Create(doc, sheet_id, view_id, point):
+        vp = Viewport("viewport", doc)
+        doc.created.append(("viewport", vp))
+        return vp
+
+
+class IndependentTag(FakeElement):
+    @staticmethod
+    def Create(doc, view_id, reference, add_leader, tag_mode, orientation, point):
+        t = IndependentTag("tag", doc)
+        doc.created.append(("tag", t))
+        return t
+
+
 # --- collector / transaction / creator ---------------------------------------
 
 
@@ -357,6 +442,14 @@ class _Creator:
             raise Exception("forced NewFamilyInstance failure")
         inst = FamilyInstance("instance", self.doc)
         inst.set_param(BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM, 0.0)
+        # A placed instance is queryable by its symbol's category and carries a
+        # location point — as a real Revit instance would, so tags can find it.
+        sym = args[1] if len(args) >= 2 else None
+        cat = getattr(sym, "_category", None)
+        if args and isinstance(args[0], XYZ):
+            inst.Location = types.SimpleNamespace(Point=args[0])
+        if cat is not None:
+            self.doc.instances.setdefault(cat, []).append(inst)
         self.doc.created.append(("instance", inst, args))
         return inst
 
@@ -365,6 +458,11 @@ class _Creator:
             return None
         rm = FakeElement("placed-room", self.doc)
         rm.set_param(BuiltInParameter.ROOM_NAME, "", "String")
+        rm.Area = 1.0
+        rm.Location = types.SimpleNamespace(Point=XYZ(uv.U, uv.V, 0.0))
+        rm.LevelId = level.Id
+        # Queryable by a Rooms collector (and taggable), like a real placed room.
+        self.doc.placed_rooms.append(rm)
         self.doc.created.append(("room", rm))
         return rm
 
@@ -373,6 +471,11 @@ class _Creator:
         self.doc.created.append(("roof", roof))
         # Real Revit returns (roof, modelCurveMapping); the builder handles a tuple.
         return (roof, FakeElement("mapping", self.doc))
+
+    def NewRoomTag(self, link_element_id, uv, view_id):
+        t = FakeElement("room-tag", self.doc)
+        self.doc.created.append(("tag", t))
+        return t
 
 
 class _Application:
@@ -440,6 +543,10 @@ class FakeDocument:
         self.symbols = {}  # category -> [FamilySymbol]
         self.placed_rooms = []
         self.instances = {}  # category -> [FamilyInstance-ish]
+        self.view_family_types = []
+        self.views = []
+        self.schedules = []
+        self.sheets = []
         self.created = []  # (kind, element[, args]) appended as the builder builds
         self.commits = []
         self.rollbacks = []
@@ -459,6 +566,13 @@ class FakeDocument:
 
     def Delete(self, eid):
         self._by_id.pop(eid.Value, None)
+        for lst in (
+            self.views, self.schedules, self.sheets, self.levels, self.wall_types,
+            self.floor_types, self.roof_types, self.view_family_types, self.placed_rooms,
+        ):
+            for x in list(lst):
+                if x.Id.Value == eid.Value:
+                    lst.remove(x)
 
     def Regenerate(self):
         pass
@@ -491,6 +605,15 @@ class FakeDocument:
         rt = RoofType(name, self)
         self.roof_types.append(rt)
         return rt
+
+    def add_view_family_type(self, name, view_family=ViewFamily.FloorPlan):
+        vft = ViewFamilyType(name, view_family, self)
+        self.view_family_types.append(vft)
+        return vft
+
+    def add_title_block(self, family_name="A1 Title Block"):
+        sym = FamilySymbol(family_name, "A1", BuiltInCategory.OST_TitleBlocks, self)
+        return self.add_symbol(sym, BuiltInCategory.OST_TitleBlocks)
 
     def add_symbol(self, symbol, category):
         self.symbols.setdefault(category, []).append(symbol)
@@ -528,6 +651,14 @@ class FakeDocument:
             return list(self.floor_types)
         if cls is RoofType:
             return list(self.roof_types)
+        if cls is ViewFamilyType:
+            return list(self.view_family_types)
+        if cls is ViewPlan:
+            return list(self.views)
+        if cls is ViewSchedule:
+            return list(self.schedules)
+        if cls is ViewSheet:
+            return list(self.sheets)
         if cls is FamilySymbol:
             return list(self.symbols.get(cat, []))
         if cat == BuiltInCategory.OST_Rooms:
@@ -547,7 +678,9 @@ def _make_db_module():
         FailureProcessingResult, IFailuresPreprocessor, Structure, XYZ, UV, Line,
         CurveLoop, CurveArray, Element, Level, WallType, FloorType, RoofType, Grid,
         Family, FamilySymbol, Wall, Floor, FamilyInstance, FilteredElementCollector,
-        Transaction,
+        Transaction, ViewFamily, ViewFamilyType, ViewPlan, ViewSchedule, ViewSheet,
+        Viewport, IndependentTag, TagMode, TagOrientation, ElementId, Reference,
+        LinkElementId,
     ):
         setattr(db, obj.__name__, obj)
     return db

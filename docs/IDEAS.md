@@ -89,15 +89,18 @@ elements. Levels are reused, stairs aren't purged. Harness-tested
 (`test_revit_builder.py`: marking, idempotence, no-replace duplicates, leaves
 unmanaged alone).
 
-Next — deliverables & workflow (Tier 2):
-- Room/door/window **tags** + dimension strings.
-- Floor-plan **views** + a **sheet** per level.
-- Native **schedules** (door/window/room/area) surfacing the takeoff.
+Deliverables (Tier 2) — DONE: `builder.document(doc, options)` makes a floor-plan
+view per level, room/door/window tags in those views, native door/window/room
+schedules, and a sheet per level with the plan placed — all in one transaction,
+idempotent (barndsl-named views/sheets/schedules are replaced on re-document), and
+behind a *Document* ribbon button. Harness-tested in `tests/test_revit_document.py`
+(counts, two-level views/sheets, idempotence, skip-without-view-type/title-block,
+disable flags, managed-only tagging).
 
-Still needs a live Revit (not unit-testable here): validate the builder against
-Revit 2025; harden the experimental reader (wall-type/level inference,
-non-rectangular rooms); the gable-roof slope and turned/multi-flight stair
-landings.
+Still needs a live Revit (not unit-testable here): validate every builder/document
+call against Revit 2025; harden the experimental reader (wall-type/level inference,
+non-rectangular rooms); the gable-roof slope; turned/multi-flight stair landings;
+and (a smaller follow-on) dimension strings, which aren't placed yet.
 
 ## Agent aids
 

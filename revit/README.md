@@ -21,6 +21,7 @@ barndsl.extension/
   barndsl.tab/
     Plan.panel/
       Build Plan.pushbutton/      # pick a .json or .barn → build or preview it
+      Document.pushbutton/        # views + tags + schedules + a sheet per level
       Export Exchange.pushbutton/ # pick a .barn → write its .json (no model change)
       Diagnostics.pushbutton/     # report environment + available types/families
       Model to DSL.pushbutton/    # reverse: read the model → reconstruct .barn
@@ -125,6 +126,23 @@ never touches anything you drew by hand. It's all one undo step. Set
 `"replace": false` in the config to append instead (levels are always reused, and
 stairs aren't purged).
 
+## Documentation (the Document button)
+
+Build Plan makes the *model*; **Document** makes the *drawings* from it. Run it
+after a build and it creates, in one transaction:
+
+- a floor-plan **view** per level,
+- room / door / window **tags** in those views (only barndsl-managed elements),
+- native door / window / room **schedules**,
+- a **sheet** per level with the plan placed in a viewport.
+
+Views, sheets and schedules are named with a `barndsl - ` prefix and the pass is
+**idempotent** — re-documenting replaces the ones a previous run made (set
+`"replace": false` to append). It needs a floor-plan view type and, for sheets, a
+loaded title block (Diagnostics doesn't list these yet; if a sheet is skipped,
+load a title block family). Each sub-pass can be turned off with the `views`,
+`tags`, `schedules`, `sheets` config flags.
+
 ## Debugging a run
 
 Each build prints a **report** to the pyRevit output panel — a per-kind
@@ -169,6 +187,10 @@ folder). Unknown keys are ignored, so you can leave comments.
   "grids": true,
   "roof": true,
   "replace": true,
+  "views": true,
+  "tags": true,
+  "schedules": true,
+  "sheets": true,
   "verbose": false
 }
 ```
@@ -234,11 +256,13 @@ config round-trip), `tests/test_revit_naming.py` (the name→type/id heuristics)
 `tests/test_revit_model_extras.py` (floor slabs, structural grids, gable roof).
 
 `builder.py` itself is exercised against a **fake Revit API** (`tests/revit_fakes.py`
-supplies the DB/pyRevit/Stairs/`System` shapes) in `tests/test_revit_builder.py`:
-the wall-type pick, opening hosting, family **sizing** (duplicate-per-size), the
-**dry-run rollback**, **named overrides**, structure/slab/porch/grid/roof/stair
-passes (including the switchback → two runs + landing), `diagnose`, and
-`read_model`'s round-trip. These verify the builder *drives the API correctly* —
+supplies the DB/pyRevit/Stairs/views/`System` shapes). `tests/test_revit_builder.py`
+covers the wall-type pick, opening hosting, family **sizing** (duplicate-per-size),
+the **dry-run rollback**, **named overrides**, structure/slab/porch/grid/roof/stair
+passes (including the switchback → two runs + landing), the **idempotent re-build**,
+`diagnose`, and `read_model`'s round-trip; `tests/test_revit_document.py` covers
+the **Document** pass (views, tags, schedules, sheets, and its idempotent
+re-document). These verify the builder *drives the API correctly* —
 only a running Revit confirms Revit does the right thing with the calls, so still
 validate in-place with **Preview** + the **build log**, and attach the
 `*.buildlog.json` and **Diagnostics** output to any issue.
