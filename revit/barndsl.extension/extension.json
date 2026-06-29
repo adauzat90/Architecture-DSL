@@ -1,0 +1,6 @@
+{
+  "name": "barndsl",
+  "description": "Build barndsl architecture-DSL plans into Revit models.",
+  "author": "barndsl",
+  "builtin": false
+}

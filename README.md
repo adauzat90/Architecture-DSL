@@ -294,8 +294,24 @@ result = compile_source(open("cedar_ridge.barn").read())
 open("plan.json", "w").write(to_revit_json(result.plan))
 ```
 
-This is the **foundation** of the Revit integration; the pyRevit extension that
-reads the exchange and instantiates the elements is the next step on this path.
+### The pyRevit extension
+
+The Revit front-end that consumes the exchange lives in
+[`revit/`](revit/README.md): a **pyRevit extension** with a **barndsl** ribbon
+tab. Point pyRevit at the `revit/` folder as a custom extension directory and you
+get two buttons:
+
+* **Build Plan** — pick a compiled `.json` (or a `.barn`, compiled on the spot)
+  and it creates the levels, walls, doors, windows, rooms and structural members
+  in the active document, all in **one transaction** (one undo step).
+* **Export Exchange** — pick a `.barn` and write its exchange `.json` next to it
+  without touching the model.
+
+The extension is cleanly split: `lib/barndsl_revit/exchange.py` is a Revit-free
+loader/validator (covered by the repo test suite), and `lib/barndsl_revit/
+builder.py` does the Revit API element creation. See
+[`revit/README.md`](revit/README.md) for install and the JSON-first vs. live
+`.barn` workflows.
 
 ## The agent: a compile-fix loop
 
@@ -399,10 +415,11 @@ tests/             # no API key required
   [`docs/design/AUTO_LAYOUT_2.md`](docs/design/AUTO_LAYOUT_2.md)
 - **Revit plug-in.** `barndsl revit` lowers a plan to the `barndsl.revit/1`
   exchange (levels, deduplicated walls, hosted openings, room seeds, structural
-  members) — the pure-Python foundation. Next: a **pyRevit extension** with a
-  ribbon button that reads the exchange and instantiates the walls, doors,
-  windows, rooms and framing live in the active Revit document, so a `.barn`
-  plan becomes an editable Revit model in one click.
+  members), and the **pyRevit extension** in [`revit/`](revit/README.md) reads it
+  and instantiates the walls, doors, windows, rooms and framing live in the
+  active Revit document — a `.barn` plan becomes an editable Revit model from a
+  ribbon button. Next on this path: sized door/window family types from the
+  exchange widths, instantiating porches/stairs, and round-tripping edits back.
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 
