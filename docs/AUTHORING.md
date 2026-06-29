@@ -72,6 +72,7 @@ entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
+frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 ```
 
 - `<type>`: `living, kitchen, dining, bedroom, bathroom, half_bath, laundry,
@@ -238,6 +239,42 @@ walls are still computed from the envelope edges in plan view, so a loft **inset
 from the envelope (like the `30 x 12` example above, whose north wall is interior)
 can't take a window that counts for daylight/egress — put the loft against an
 envelope edge if it needs a real window.
+
+## Structure: auto-placing the post-and-beam frame
+
+A barndominium is a post-and-beam metal building. Add one `frame` line and the
+compiler places the structural skeleton over the footprint — you don't draw a
+single post:
+
+```barn
+frame bay 12 span 40 post 6      # all options optional; these are the defaults
+```
+
+What it derives, per footprint block (so an L/T/U `wing` plan frames each block):
+
+- The **ridge** runs along the block's **long axis**; **bents** (frames) span the
+  **short axis** and are spaced ≤ `bay` ft on centre along the long axis. So a
+  60×40 plan with `bay 12` gets 6 bents (every 12 ft) each spanning 40 ft.
+- **Posts** land at every bent on the two eave walls, up the gable end walls at
+  the same `bay` spacing, and at the four corners (coincident posts dedupe).
+- If the short-axis span exceeds `span` ft, an **interior support post** line is
+  added to split the beam. Keep `span` at or above your building width to stay a
+  clear span (the barndo norm); lower it to force interior posts.
+- `no-ridge` omits the ridge member.
+
+`barndsl build` draws the bents (solid), ridge (dashed), and posts (solid
+squares) over the plan, and the summary panel lists the bent/post counts and beam
+linear feet. Checks: `BAY_WIDE` (info — a bay wider than ~12 ft o.c.),
+`POST_OBSTRUCT` (info — an interior post stranded in a room's open floor; align a
+partition, closet, or island to it), and `POST_IN_OPENING` (**warning** — a post
+lands inside a window or exterior door; the post grid is fixed, so put openings in
+the bays *between* posts — a post at the opening's jamb is fine, only one inside it
+warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
+--frame`.
+
+> The frame is a **layout aid, not an engineered design.** It schedules a sane
+> post-and-beam grid for drawings and a rough takeoff; member sizing, connections,
+> footings and lateral bracing belong to a licensed structural engineer.
 
 ## The rules the compiler enforces
 

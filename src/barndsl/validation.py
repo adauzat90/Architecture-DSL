@@ -560,6 +560,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
     _validate_program(plan, add)
+    _validate_structure(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
         add(
@@ -2081,6 +2082,105 @@ def _validate_program(plan: Barndominium, add) -> None:
             **loc,
         )
     )
+
+
+#: An interior support post sitting at least this far (ft) from every wall of the
+#: room it lands in is out in the open floor — awkward to live around.
+POST_CLEAR_MARGIN = 1.5
+#: A bay spacing wider than this (ft on centre) is heavy for ordinary residential
+#: post-frame members — an info nudge, not a hard limit.
+COMFORT_BAY = 12.0
+
+
+def _validate_structure(plan: Barndominium, add) -> None:
+    """Nudge on an auto-placed structural frame (``frame`` directive).
+
+    Two info-level checks, never blocking: an interior support post stranded in a
+    room's open floor (``POST_OBSTRUCT``), and a bay spacing heavier than typical
+    residential post-frame (``BAY_WIDE``). The frame is a layout aid, so these
+    point at livability/economy, not engineered adequacy.
+    """
+    spec = plan.frame_spec
+    if spec is None:
+        return
+
+    loc = {}
+    if spec.line is not None:
+        loc = {"line": spec.line, "col": spec.col, "end_col": spec.end_col}
+
+    if spec.bay > COMFORT_BAY + 1e-6:
+        add(
+            Issue(
+                Severity.INFO,
+                "BAY_WIDE",
+                f"Frames are spaced up to {_f(spec.bay)} ft on centre — heavier than "
+                f"the ~{COMFORT_BAY:.0f} ft typical of residential post-frame.",
+                hint=f"Lower the spacing (e.g. `frame bay {COMFORT_BAY:.0f}`) or have "
+                "the engineer size the beams/posts for the wider bay.",
+                **loc,
+            )
+        )
+
+    for p in plan.posts:
+        if p.role != "interior":
+            continue
+        for room in plan.rooms:
+            if getattr(room, "level", 0) != 0:
+                continue
+            inset_x = min(p.x - room.x, room.x2 - p.x)
+            inset_y = min(p.y - room.y, room.y2 - p.y)
+            if inset_x > POST_CLEAR_MARGIN and inset_y > POST_CLEAR_MARGIN:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "POST_OBSTRUCT",
+                        f"An interior support post lands in the open floor of "
+                        f"'{room.id}' (about {p.x:g},{p.y:g}).",
+                        room=room.id,
+                        hint="Align a partition, closet, or island with the post line, "
+                        "or widen `span` so no interior support is needed.",
+                        **loc,
+                    )
+                )
+                break  # one note per post is enough
+
+    # A post standing inside a window/door opening can't be framed — you can't run
+    # a structural column through the glass. The post grid is the fixed discipline,
+    # so flag the opening to be shifted into a clear bay (between posts).
+    openings = [(w, "window") for w in plan.windows]
+    openings += [(d, "exterior door") for d in plan.exterior_doors]
+    for obj, kind in openings:
+        room = plan.room(obj.room)
+        if room is None or getattr(room, "level", 0) != 0:
+            continue
+        x1, y1, x2, y2 = opening_endpoints(room, obj.wall, obj.offset, obj.width)
+        horizontal = obj.wall in (Direction.NORTH, Direction.SOUTH)
+        wall_line = y1 if horizontal else x1
+        lo, hi = (
+            (min(x1, x2), max(x1, x2)) if horizontal else (min(y1, y2), max(y1, y2))
+        )
+        for p in plan.posts:
+            on_line = p.y if horizontal else p.x
+            along = p.x if horizontal else p.y
+            # Coincident with the wall and *inside* the clear opening (a post at the
+            # jamb is how an opening is framed, so endpoints don't count).
+            if abs(on_line - wall_line) <= 1e-6 and lo + 1e-6 < along < hi - 1e-6:
+                oloc = dict(loc)
+                if getattr(obj, "line", None) is not None:
+                    oloc = {"line": obj.line, "col": obj.col, "end_col": obj.end_col}
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "POST_IN_OPENING",
+                        f"A structural post at {p.x:g},{p.y:g} stands inside the "
+                        f"{kind} on '{obj.room}'s {obj.wall.value} wall.",
+                        room=obj.room,
+                        hint="Shift the opening along its wall into a clear bay "
+                        "(between posts), or change `frame bay` so no post lands on it.",
+                        **oloc,
+                    )
+                )
+                break  # one note per opening
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:

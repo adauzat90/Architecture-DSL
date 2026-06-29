@@ -3,8 +3,9 @@
     barndsl compile FILE.barn
         Compile a DSL file and print compiler-style diagnostics.
 
-    barndsl build FILE.barn [--out FILE.svg]
-        Compile, and if it's valid, render an annotated 2D floor plan.
+    barndsl build FILE.barn [--out FILE.svg] [--frame]
+        Compile, and if it's valid, render an annotated 2D floor plan. `--frame`
+        auto-places a default post-and-beam structural frame if the source has none.
 
     barndsl demo [--out FILE.svg]
         Compile and render the bundled example (examples/cedar_ridge.barn).
@@ -43,6 +44,11 @@ def _print_metrics(plan) -> None:
     print(f"  Bedrooms/baths:   {int(m['bedroom_count'])} / {m['bathroom_count']:.1f}")
     print(f"  Ext. wall area:   {m['exterior_wall_area_sqft']:.0f} sq ft")
     print(f"  Roof area (≈):    {m['roof_area_sqft']:.0f} sq ft")
+    if plan.frame_spec is not None or plan.posts:
+        print(
+            f"  Frame:            {int(m['frame_count'])} bents / "
+            f"{int(m['post_count'])} posts / {m['beam_linear_ft']:.0f} ft beam"
+        )
 
 
 def _program_summary(plan) -> str:
@@ -89,6 +95,14 @@ def _cmd_compile(args: argparse.Namespace) -> int:
 
 def _cmd_build(args: argparse.Namespace) -> int:
     result = compile_file(args.file)
+    if result.plan is not None and getattr(args, "frame", False) and result.plan.frame_spec is None:
+        # `--frame` auto-places a default post-and-beam frame even when the source
+        # has no `frame` directive — recompile from the emitted DSL so the new
+        # structure passes through the same checks.
+        from .emit import emit_dsl
+
+        result.plan.frame()
+        result = compile_source(emit_dsl(result.plan), name=result.plan.name)
     print(result.report(os.path.basename(args.file)))
     if result.plan is None:
         return 1
@@ -264,6 +278,11 @@ def main(argv: list[str] | None = None) -> int:
     p_build = sub.add_parser("build", help="compile and render a .barn file to SVG")
     p_build.add_argument("file", help="path to a .barn DSL file")
     p_build.add_argument("--out", default="barndo.svg", help="output SVG path")
+    p_build.add_argument(
+        "--frame",
+        action="store_true",
+        help="auto-place a default post-and-beam frame if the source has none",
+    )
     p_build.set_defaults(func=_cmd_build)
 
     p_demo = sub.add_parser("demo", help="compile and render the bundled example")

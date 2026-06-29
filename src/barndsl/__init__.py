@@ -23,10 +23,13 @@ Agentic workflow (needs `pip install 'barndsl[agent]'` + ANTHROPIC_API_KEY)::
 from .builder import barndominium
 from .elements import (
     Barndominium,
+    Beam,
     Direction,
     ExteriorDoor,
+    FrameSpec,
     InteriorDoor,
     Porch,
+    Post,
     ProgramSpec,
     Room,
     RoomType,
@@ -56,6 +59,7 @@ from .layout2 import (
     solve_layout2,
 )
 from .render import RenderConfig, render_svg, save_svg
+from .structure import place_frame
 from .validation import Issue, Severity, ValidationReport, validate
 
 __all__ = [
@@ -70,6 +74,10 @@ __all__ = [
     "Porch",
     "Stair",
     "ProgramSpec",
+    "Post",
+    "Beam",
+    "FrameSpec",
+    "place_frame",
     "feet",
     "inches",
     # compiler front-end

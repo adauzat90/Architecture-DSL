@@ -41,6 +41,10 @@ WALL = "#2b2b2b"
 WINDOW_COLOR = "#2F6FB0"
 DIM_COLOR = "#888888"
 TEXT_COLOR = "#222222"
+# Structural overlay (post-and-beam frame).
+BEAM_COLOR = "#B5651D"  # frame/bent beams — a steel/timber rust tone
+RIDGE_COLOR = "#8A4B12"  # ridge member, slightly darker
+POST_COLOR = "#5A3210"  # solid columns
 
 
 @dataclass
@@ -166,6 +170,7 @@ class _Renderer:
             self._draw_porches()
             self._draw_envelope()
             self._draw_rooms()
+            self._draw_structure()
             self._draw_windows()
             self._draw_doors()
             self._draw_dimensions()
@@ -185,6 +190,7 @@ class _Renderer:
             self._draw_porches()
         self._draw_envelope()
         self._draw_rooms(level=lvl)
+        self._draw_structure(level=lvl)
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
         self._draw_stairs(lvl)
@@ -248,6 +254,33 @@ class _Renderer:
             cy = self.sy(r.center[1])
             self._text(cx, cy - 4, r.display_name, size=12, weight="bold")
             self._text(cx, cy + 11, f"{r.area:.0f} sq ft", size=10, fill="#555555")
+
+    def _draw_structure(self, level: int = 0):
+        """Overlay the post-and-beam frame: beam centrelines + solid posts.
+
+        Structure lives on the ground level (level 0); on a multi-level drawing it
+        appears only on that block.
+        """
+        if level != 0 or not (self.plan.beams or self.plan.posts):
+            return
+        for b in self.plan.beams:
+            if getattr(b, "level", 0) != 0:
+                continue
+            color = RIDGE_COLOR if b.role == "ridge" else BEAM_COLOR
+            dash = "7 4" if b.role == "ridge" else None
+            self._line(
+                self.sx(b.x1), self.sy(b.y1), self.sx(b.x2), self.sy(b.y2),
+                color, 2.2, dash=dash,
+            )
+        for p in self.plan.posts:
+            if getattr(p, "level", 0) != 0:
+                continue
+            # Draw at least a visible nib even for a small section.
+            s = max(p.size * self.c.scale, 5.0)
+            self._rect(
+                self.sx(p.x) - s / 2, self.sy(p.y) - s / 2, s, s,
+                fill=POST_COLOR, stroke=POST_COLOR, sw=0.8,
+            )
 
     def _draw_windows(self, level: int | None = None):
         for win in self.plan.windows:
@@ -505,6 +538,15 @@ class _Renderer:
             ("Ext. wall area", f"{m['exterior_wall_area_sqft']:.0f} sq ft"),
             ("Roof area (≈)", f"{m['roof_area_sqft']:.0f} sq ft"),
         ]
+        if self.plan.frame_spec is not None or self.plan.posts:
+            fs = self.plan.frame_spec
+            rows += [
+                ("Frames (bents)", f"{int(m['frame_count'])}"),
+                ("Posts", f"{int(m['post_count'])}"),
+                ("Beam length", f"{m['beam_linear_ft']:.0f} ft"),
+            ]
+            if fs is not None:
+                rows.append(("Bay spacing", f"≤ {fs.bay:g}′ o.c."))
         for label, value in rows:
             y += 20
             self._text(cx, y, label, size=11, anchor="start", fill="#555555")

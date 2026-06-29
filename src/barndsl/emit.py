@@ -41,6 +41,13 @@ def emit_dsl(plan: Barndominium) -> str:
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")
+    if plan.frame_spec is not None:
+        fs = plan.frame_spec
+        # `post` is stored in feet; emit it back in inches (how it's authored).
+        line = f"frame bay {_n(fs.bay)} span {_n(fs.span)} post {_n(fs.post * 12)}"
+        if not fs.ridge:
+            line += " no-ridge"
+        out.append(line)
 
     if plan.rooms:
         out.append("")
