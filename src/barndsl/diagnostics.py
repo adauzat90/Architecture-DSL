@@ -143,6 +143,9 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Error: a door's `into` names a room it doesn't connect. Warning: the "
            "leaf can't fully open because the room it swings into is shallower "
            "than the door is wide — swing it the other way or narrow it."),
+        _c("DOOR_BLOCKS_HALL", I, "Door swings into a hallway",
+           "A door swings into a hallway and, open, its leaf leaves under a 3 ft "
+           "passage beside it — it blocks circulation. Swing it into the room."),
         _c("DOOR_NARROW", W, "Door too narrow",
            "A swinging interior door is below the 30 in minimum clear width."),
         _c("DOOR_SIZE", I, "Non-standard door width",

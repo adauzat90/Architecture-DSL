@@ -488,13 +488,23 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                     sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
                 else:
                     sug = f"shrink one of them or enlarge the envelope"
+                # A collision is often a relative-anchor chain pushing a room onto
+                # one already placed — surface that so the fix is re-anchoring, not
+                # guessing at a shrink.
+                placed = next((r for r in (b, a) if r.placement is not None), None)
+                note = (
+                    f" ('{placed.id}' is placed `{placed.placement}` — re-anchor it "
+                    "one room deep off a spine, or pin it with `at x,y`)"
+                    if placed is not None
+                    else ""
+                )
                 add(
                     Issue(
                         Severity.ERROR,
                         "OVERLAP",
                         f"Rooms '{a.id}' and '{b.id}' overlap by {_f(ov)} sq ft.",
                         room=a.id,
-                        hint=f"Reposition so they don't intersect — e.g. {sug}.",
+                        hint=f"Reposition so they don't intersect — e.g. {sug}.{note}",
                     )
                 )
 
@@ -710,6 +720,26 @@ def _validate_doors(plan: Barndominium, add) -> None:
                                 hint="Swing it into the other room (`into "
                                 f"{(b if target is a else a).id}`), narrow the door, or "
                                 "deepen the room.",
+                                **loc,
+                            )
+                        )
+                    elif (
+                        target.type is RoomType.HALLWAY
+                        and depth - door.width + 1e-6 < MIN_HALLWAY_WIDTH
+                    ):
+                        # It opens, but a leaf swung into a narrow hall leaves less
+                        # than a 3 ft passage beside it — it blocks circulation.
+                        other = b if target is a else a
+                        add(
+                            Issue(
+                                Severity.INFO,
+                                "DOOR_BLOCKS_HALL",
+                                f"This door swings into the hallway '{target.id}'; open, "
+                                f"its leaf leaves only {_f(max(0.0, depth - door.width))} "
+                                "ft of passage, blocking circulation.",
+                                room=target.id,
+                                hint=f"Swing it into '{other.id}' instead (`into "
+                                f"{other.id}`) so the hall stays clear.",
                                 **loc,
                             )
                         )

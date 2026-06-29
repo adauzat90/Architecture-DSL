@@ -877,3 +877,58 @@ entry living south width 3 offset 4
     r = compile_source(src)
     extra = next((d for d in r.errors if d.code == "EXTRA_TOKENS"), None)
     assert extra is not None and "align" in extra.hint and "before `size`" in extra.hint
+
+
+# --- DOOR_BLOCKS_HALL + OVERLAP placement hint (round-2 soft observations) ---
+
+_BLOCKS_SRC = """\
+plan "Blocks"
+envelope 40 x 22
+ceiling 9
+room living: living  at 0,0  size 40 x 15
+room hall:   hallway at 0,15 size 40 x 3
+room bed:    bedroom at 0,18  size 20 x 4
+room bed2:   bedroom at 20,18 size 20 x 4
+door living - hall width 3 {swing}
+door hall - bed width 2.67 into bed
+door hall - bed2 width 2.67 into bed2
+entry living south width 3 offset 10
+window living south width 12 offset 4
+window bed north width 4 offset 4
+window bed2 north width 4 offset 4
+"""
+
+
+def test_door_into_a_narrow_hall_blocks_circulation():
+    r = compile_source(_BLOCKS_SRC.format(swing="into hall"))
+    assert "DOOR_BLOCKS_HALL" in _codes(r, "info")
+
+
+def test_door_swinging_into_the_room_does_not_block_the_hall():
+    r = compile_source(_BLOCKS_SRC.format(swing="into living"))
+    assert "DOOR_BLOCKS_HALL" not in _codes(r, "info")
+
+
+def test_unannotated_door_is_not_flagged_for_hall_blocking():
+    # Without `into` we don't know the swing direction, so we don't guess.
+    r = compile_source(_BLOCKS_SRC.format(swing=""))
+    assert "DOOR_BLOCKS_HALL" not in _codes(r, "info")
+
+
+def test_door_blocks_hall_is_registered():
+    assert "DOOR_BLOCKS_HALL" in REGISTRY
+
+
+def test_overlap_hint_surfaces_a_relative_anchor_collision():
+    src = """\
+plan "Collide"
+envelope 30 x 20
+ceiling 9
+room living: living  at 0,0  size 14 x 20
+room kitchen: kitchen at 14,0 size 16 x 20
+room pantry: pantry west-of kitchen size 6 x 20
+entry living south width 3 offset 4
+"""
+    r = compile_source(src)
+    hint = next(d.hint for d in r.errors if d.code == "OVERLAP")
+    assert "west_of kitchen" in hint and "re-anchor" in hint
