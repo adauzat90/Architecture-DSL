@@ -49,6 +49,7 @@ from .layout import (
     RoomSpec,
     _add_openings,
     _connect_adjacencies,
+    parse_brief_fields,
 )
 
 #: Rooms forming the open core; they tile the first band and share vertical walls.
@@ -1098,59 +1099,11 @@ def parse_brief2(text: str, name: str = "Layout") -> LayoutBrief2:
 
     Plus ``plan``, ``envelope`` (optional — omit to size to fit), ``ceiling``,
     ``note``, ``entry <room>``, ``no-openings``, and ``adjacent <a> <b> [...]``
-    (connect ``<a>`` to each of the rest).
+    (connect ``<a>`` to each of the rest). The non-room statements are parsed by
+    the shared :func:`barndsl.layout.parse_brief_fields`; only the room line
+    (a size *program*) is v2-specific.
     """
-    plan_name = name
-    rooms: list[RoomSpec2] = []
-    adjacencies: list[tuple[str, str]] = []
-    envelope: tuple[float, float] | None = None
-    ceiling = feet(9)
-    notes: list[str] = []
-    entry_room: str | None = None
-    add_openings = True
-
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        head, _, rest = line.partition(" ")
-        head, rest = head.lower(), rest.strip()
-        if head == "plan":
-            plan_name = rest.strip().strip('"') or plan_name
-        elif head == "envelope":
-            parts = rest.lower().replace("x", " ").split()
-            if len(parts) < 2:
-                raise ValueError(f"Bad envelope line: {raw!r}")
-            envelope = (float(parts[0]), float(parts[1]))
-        elif head == "ceiling":
-            ceiling = float(rest)
-        elif head == "note":
-            notes.append(rest.strip().strip('"'))
-        elif head == "entry":
-            entry_room = rest.strip()
-        elif head in ("no-openings", "no_openings"):
-            add_openings = False
-        elif head == "room":
-            rooms.append(_parse_room2(rest, raw))
-        elif head in ("adjacent", "adj"):
-            members = rest.replace(",", " ").split()
-            if len(members) < 2:
-                raise ValueError(f"`adjacent` needs at least two rooms: {raw!r}")
-            for other in members[1:]:
-                adjacencies.append((members[0], other))
-        else:
-            raise ValueError(f"Unknown brief statement: {raw!r}")
-
-    return LayoutBrief2(
-        name=plan_name,
-        rooms=rooms,
-        adjacencies=adjacencies,
-        envelope=envelope,
-        ceiling=ceiling,
-        notes="\n".join(notes),
-        entry_room=entry_room,
-        add_openings=add_openings,
-    )
+    return LayoutBrief2(**parse_brief_fields(text, name, _parse_room2))
 
 
 def _parse_room2(rest: str, raw: str) -> RoomSpec2:
