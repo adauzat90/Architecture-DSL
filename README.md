@@ -294,6 +294,29 @@ result = compile_source(open("cedar_ridge.barn").read())
 open("plan.json", "w").write(to_revit_json(result.plan))
 ```
 
+### The reverse direction (round-trip)
+
+The exchange goes **both ways**. `exchange_to_plan` reconstructs a plan from a
+`barndsl.revit/1` document — rooms carry their rectangle, and each opening's wall
+and offset are re-derived from its geometry — so a model that came from (or was
+edited in) Revit can return to the DSL:
+
+```bash
+barndsl revit-import plan.json --out recovered.barn   # exchange JSON → DSL
+```
+
+```python
+from barndsl import exchange_to_plan, exchange_to_dsl
+import json
+data = json.load(open("plan.json"))
+plan = exchange_to_plan(data)          # → a Barndominium
+dsl  = exchange_to_dsl(data)           # → DSL source (via emit_dsl)
+```
+
+The round-trip is verified in the test suite: every gallery plan lowered to the
+exchange and reconstructed recovers the same rooms, door/window connections and
+envelope, and re-emits DSL that still compiles clean.
+
 ### The pyRevit extension
 
 The Revit front-end that consumes the exchange lives in
@@ -311,6 +334,8 @@ get two buttons:
 * **Diagnostics** — report the environment and which wall/floor/family types the
   project offers (with readiness flags); the first thing to run when a build
   doesn't produce what you expect.
+* **Model to DSL** *(experimental)* — the reverse: read the active model's rooms
+  and door/window instances and reconstruct `.barn` source from them.
 
 The extension is cleanly split: `lib/barndsl_revit/exchange.py` (loader/validator)
 and `lib/barndsl_revit/report.py` (build report + options) are **Revit-free** and
@@ -368,6 +393,7 @@ barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
+barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
@@ -425,9 +451,11 @@ tests/             # no API key required
   and instantiates the walls, doors, windows, rooms and framing live in the
   active Revit document — a `.barn` plan becomes an editable Revit model from a
   ribbon button (targeting Revit 2025). Doors/windows are sized to the exchange
-  widths, porches build as floor slabs, and stairs as straight runs. Next on this
-  path: turned/multi-flight stairs, mapping room/wall types to a Revit template's
-  named types, and round-tripping edits from Revit back to the DSL.
+  widths, porches build as floor slabs, and stairs as straight runs. The exchange
+  round-trips: `exchange_to_plan` / `barndsl revit-import` reconstruct DSL from a
+  `barndsl.revit/1` document, and a *Model to DSL* button reads a live Revit model
+  back. Next on this path: turned/multi-flight stairs, and tightening the Revit
+  reader (wall-type/level inference) for production round-trips.
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

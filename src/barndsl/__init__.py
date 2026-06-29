@@ -59,7 +59,14 @@ from .layout2 import (
     solve_layout2,
 )
 from .render import RenderConfig, render_svg, save_svg
-from .revit import RevitModel, to_revit_json, to_revit_model
+from .revit import (
+    RevitImportError,
+    RevitModel,
+    exchange_to_dsl,
+    exchange_to_plan,
+    to_revit_json,
+    to_revit_model,
+)
 from .structure import place_frame
 from .validation import Issue, Severity, ValidationReport, validate
 
@@ -111,6 +118,10 @@ __all__ = [
     "to_revit_model",
     "to_revit_json",
     "RevitModel",
+    # Revit exchange (reverse: reconstruct a plan / DSL from an exchange)
+    "exchange_to_plan",
+    "exchange_to_dsl",
+    "RevitImportError",
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 

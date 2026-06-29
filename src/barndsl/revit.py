@@ -136,7 +136,9 @@ class RevitRoom:
 
     Revit creates a room by placing it at a point within a wall-bounded loop.
     ``point`` is the room centre; the consumer places the room there once the
-    walls exist, then sets its name/number.
+    walls exist, then sets its name/number. The source rectangle
+    ``(x, y, width, length)`` rides along so the exchange can be reconstructed
+    back into a plan (see :func:`exchange_to_plan`).
     """
 
     id: str
@@ -145,6 +147,10 @@ class RevitRoom:
     level: int
     point: tuple[float, float]
     area: float
+    x: float
+    y: float
+    width: float
+    length: float
 
 
 @dataclass
@@ -187,6 +193,9 @@ class RevitModel:
 
     name: str
     ceiling_height: float
+    envelope_width: float
+    envelope_length: float
+    wings: list[tuple[float, float, float, float]]
     levels: list[RevitLevel]
     walls: list[RevitWall]
     openings: list[RevitOpening]
@@ -200,7 +209,13 @@ class RevitModel:
         return {
             "schema": EXCHANGE_SCHEMA,
             "units": "feet",
-            "plan": {"name": self.name, "ceiling_height": self.ceiling_height},
+            "plan": {
+                "name": self.name,
+                "ceiling_height": self.ceiling_height,
+                "envelope_width": self.envelope_width,
+                "envelope_length": self.envelope_length,
+                "wings": [list(w) for w in self.wings],
+            },
             "levels": [asdict(l) for l in self.levels],
             "walls": [
                 {
@@ -239,6 +254,10 @@ class RevitModel:
                     "level": r.level,
                     "point": list(r.point),
                     "area": r.area,
+                    "x": r.x,
+                    "y": r.y,
+                    "width": r.width,
+                    "length": r.length,
                 }
                 for r in self.rooms
             ],
@@ -541,6 +560,10 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             level=getattr(r, "level", 0),
             point=(float(r.center[0]), float(r.center[1])),
             area=float(r.area),
+            x=float(r.x),
+            y=float(r.y),
+            width=float(r.width),
+            length=float(r.length),
         )
         for r in plan.rooms
     ]
@@ -595,6 +618,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
     return RevitModel(
         name=plan.name,
         ceiling_height=float(height),
+        envelope_width=float(plan.envelope_width),
+        envelope_length=float(plan.envelope_length),
+        wings=[(float(w.x), float(w.y), float(w.width), float(w.length)) for w in plan.wings],
         levels=levels,
         walls=walls,
         openings=openings,
@@ -608,3 +634,151 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
 def to_revit_json(plan: Barndominium, indent: int | None = 2) -> str:
     """Lower ``plan`` and serialise the exchange to a JSON string."""
     return to_revit_model(plan).to_json(indent=indent)
+
+
+# --- the reverse direction: exchange → plan ----------------------------------
+#
+# The inverse of :func:`to_revit_model`. Reconstructs a :class:`Barndominium`
+# from a ``barndsl.revit/1`` exchange dict, so a model that originated in (or was
+# round-tripped through) Revit can come back to the DSL via :func:`emit_dsl`.
+# Rooms carry their source rectangle, and each opening's host wall + location let
+# its wall/offset be re-derived — so the reconstruction is geometric, not a
+# stored copy of the DSL.
+
+
+class RevitImportError(ValueError):
+    """The exchange can't be reconstructed into a plan."""
+
+
+def _infer_exterior_wall(room: Room, location, width: float, tol: float = 1e-3):
+    """Return ``(Direction, offset)`` for an opening on ``room``'s exterior wall.
+
+    Picks the room edge the opening's centre lies on, and measures the offset
+    from that wall's south/west start corner to the opening's near edge — the
+    inverse of :func:`barndsl.geometry.opening_endpoints`.
+    """
+    x, y = location
+    if abs(x - room.x) <= tol:
+        return Direction.WEST, (y - width / 2.0) - room.y
+    if abs(x - room.x2) <= tol:
+        return Direction.EAST, (y - width / 2.0) - room.y
+    if abs(y - room.y) <= tol:
+        return Direction.SOUTH, (x - width / 2.0) - room.x
+    if abs(y - room.y2) <= tol:
+        return Direction.NORTH, (x - width / 2.0) - room.x
+    return None, None
+
+
+def _infer_interior_offset(a: Room, b: Room, location, width: float):
+    """Offset of an interior opening from the south/west end of the shared wall."""
+    edge = shared_edge(a, b)
+    if edge is None:
+        return None
+    along = location[1] if edge.orientation == "v" else location[0]
+    return (along - width / 2.0) - edge.lo
+
+
+def exchange_to_plan(data: dict) -> Barndominium:
+    """Reconstruct a :class:`Barndominium` from a ``barndsl.revit/1`` exchange.
+
+    The inverse of :func:`to_revit_model`. Rebuilds the envelope/wings, rooms,
+    interior and exterior doors, windows, porches and stairs by re-deriving each
+    opening's wall and offset from its geometry. Frame/program/notes aren't
+    carried in the exchange, so they aren't restored. Raises
+    :class:`RevitImportError` on a document that isn't this schema.
+    """
+    if not isinstance(data, dict) or data.get("schema") != EXCHANGE_SCHEMA:
+        raise RevitImportError(
+            "not a %s exchange (got schema %r)" % (EXCHANGE_SCHEMA, (data or {}).get("schema"))
+        )
+    if data.get("units", "feet") != "feet":
+        raise RevitImportError("unsupported units %r" % data.get("units"))
+
+    from .elements import Barndominium
+
+    pinfo = data.get("plan", {})
+    plan = Barndominium(name=pinfo.get("name", "Imported Plan"))
+    plan.envelope(
+        float(pinfo.get("envelope_width", 0.0)),
+        float(pinfo.get("envelope_length", 0.0)),
+    )
+    plan.ceiling(float(pinfo.get("ceiling_height", feet(9))))
+    for wing in pinfo.get("wings", []) or []:
+        wx, wy, ww, wl = wing
+        plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))
+
+    # Rooms first — openings resolve against them.
+    for r in data.get("rooms", []):
+        plan.add_room(
+            r["id"],
+            r["type"],
+            x=float(r["x"]),
+            y=float(r["y"]),
+            width=float(r["width"]),
+            length=float(r["length"]),
+            level=int(r.get("level", 0)),
+        )
+
+    for o in data.get("openings", []):
+        rooms = o.get("rooms", [])
+        width = float(o.get("width", 0.0))
+        loc = o.get("location", [0.0, 0.0])
+        if o.get("category") == "window":
+            room = plan.room(rooms[0]) if rooms else None
+            if room is None:
+                continue
+            wall, offset = _infer_exterior_wall(room, loc, width)
+            if wall is None:
+                continue
+            head = float(o.get("sill", 0.0)) + float(o.get("height", 0.0))
+            plan.add_window(
+                room.id, wall, width=width, offset=max(0.0, offset),
+                sill_height=float(o.get("sill", 0.0)), head_height=head,
+            )
+        elif o.get("exterior"):
+            room = plan.room(rooms[0]) if rooms else None
+            if room is None:
+                continue
+            wall, offset = _infer_exterior_wall(room, loc, width)
+            if wall is None:
+                continue
+            plan.entrance(
+                room.id, wall, width=width, offset=max(0.0, offset),
+                egress=bool(o.get("egress", True)),
+            )
+        else:  # interior door or cased opening
+            if len(rooms) < 2:
+                continue
+            a, b = plan.room(rooms[0]), plan.room(rooms[1])
+            if a is None or b is None:
+                continue
+            offset = _infer_interior_offset(a, b, loc, width)
+            plan.connect(
+                a.id, b.id, width=width, kind=o.get("kind", "swing"),
+                offset=None if offset is None else max(0.0, offset),
+            )
+
+    for area in data.get("areas", []):
+        meta = area.get("meta", {})
+        if area.get("kind") == "porch":
+            plan.add_porch(
+                area["id"], x=float(area["x"]), y=float(area["y"]),
+                width=float(area["width"]), length=float(area["length"]),
+                covered=bool(meta.get("covered", True)),
+            )
+        elif area.get("kind") == "stair":
+            plan.add_stair(
+                area["id"], x=float(area["x"]), y=float(area["y"]),
+                width=float(area["width"]), length=float(area["length"]),
+                from_level=int(meta.get("from_level", area.get("level", 0))),
+                to_level=int(meta.get("to_level", 1)),
+            )
+
+    return plan
+
+
+def exchange_to_dsl(data: dict) -> str:
+    """Reconstruct a plan from an exchange and serialise it to DSL source."""
+    from .emit import emit_dsl
+
+    return emit_dsl(exchange_to_plan(data))

@@ -31,6 +31,7 @@ import sys
 from pyrevit import DB, revit
 
 from . import exchange as _exchange
+from . import naming as _naming
 from . import report as _report
 
 try:
@@ -627,6 +628,188 @@ def diagnose(doc):
         "structural_framing": bool(info["structural_framing_families"]),
     }
     return info
+
+
+# --- reading a Revit model back into an exchange (experimental) --------------
+
+
+def _double(elem, bip):
+    try:
+        p = elem.get_Parameter(bip)
+        if p is not None and p.StorageType == DB.StorageType.Double:
+            return p.AsDouble()
+    except Exception:
+        pass
+    return None
+
+
+def read_model(doc, report=None):
+    """Read the active model's rooms and door/window instances into a
+    ``barndsl.revit/1`` exchange dict — the input to ``exchange_to_plan``.
+
+    **Experimental.** Rooms come from placed Revit Rooms (bounding box → the
+    rectangle the DSL needs; name → a best-guess room type); openings from door/
+    window instances, connected to rooms via their FromRoom/ToRoom. Coordinates
+    are normalised so the south-west corner sits at the origin (the DSL
+    convention). Walls and structure aren't read back — the reconstruction is
+    room- and opening-driven. Records what it read into ``report``.
+    """
+    if report is None:
+        report = _report.BuildReport()
+
+    levels = sorted(_collect(doc, DB.Level), key=lambda e: e.Elevation)
+    level_index = {}
+    for i, lv in enumerate(levels):
+        level_index[_id_val(lv.Id)] = i
+    ceiling = 9.0
+    if len(levels) >= 2:
+        gap = levels[1].Elevation - levels[0].Elevation
+        if gap > 0:
+            ceiling = gap
+
+    used_ids = set()
+    rooms = []
+    room_id_by_eid = {}
+    room_level_by_id = {}
+    minx = miny = None
+
+    rm_collector = (
+        DB.FilteredElementCollector(doc)
+        .OfCategory(DB.BuiltInCategory.OST_Rooms)
+        .WhereElementIsNotElementType()
+        .ToElements()
+    )
+    for rm in rm_collector:
+        try:
+            if rm.Area <= 0 or rm.Location is None:
+                report.skipped("room", _name(rm) or "?", "unplaced")
+                continue
+            bb = rm.get_BoundingBox(None)
+            if bb is None:
+                continue
+            x, y = bb.Min.X, bb.Min.Y
+            w, l = bb.Max.X - x, bb.Max.Y - y
+        except Exception as exc:
+            report.failed("room", "?", str(exc))
+            continue
+        nm = None
+        try:
+            p = rm.get_Parameter(DB.BuiltInParameter.ROOM_NAME)
+            nm = p.AsString() if p is not None else None
+        except Exception:
+            nm = None
+        nm = nm or "Room"
+        rid = _naming.slug_id(nm, used_ids)
+        lvl = level_index.get(_id_val(rm.LevelId), 0)
+        room_id_by_eid[_id_val(rm.Id)] = rid
+        room_level_by_id[rid] = lvl
+        minx = x if minx is None else min(minx, x)
+        miny = y if miny is None else min(miny, y)
+        rooms.append(
+            {"_eid": _id_val(rm.Id), "id": rid, "name": nm, "type": _naming.guess_room_type(nm),
+             "level": lvl, "x": x, "y": y, "width": w, "length": l, "area": rm.Area}
+        )
+        report.created("room", rid)
+
+    if not rooms:
+        report.note("no placed rooms found to read")
+    ox = minx or 0.0
+    oy = miny or 0.0
+    for r in rooms:
+        r["x"] -= ox
+        r["y"] -= oy
+        r.pop("_eid", None)
+        r["point"] = [r["x"] + r["width"] / 2.0, r["y"] + r["length"] / 2.0]
+
+    openings = []
+
+    def _read_openings(bic, is_window):
+        insts = (
+            DB.FilteredElementCollector(doc)
+            .OfCategory(bic)
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+        for inst in insts:
+            kindlabel = "window" if is_window else "door"
+            try:
+                loc = inst.Location.Point
+            except Exception:
+                report.skipped(kindlabel, "?", "no location point")
+                continue
+            sym = getattr(inst, "Symbol", None)
+            width = _double(sym, DB.BuiltInParameter.FAMILY_WIDTH_PARAM) if sym else None
+            height = _double(sym, DB.BuiltInParameter.FAMILY_HEIGHT_PARAM) if sym else None
+            width = width or 3.0
+            height = height or 6.667
+            try:
+                from_room = inst.FromRoom
+                to_room = inst.ToRoom
+            except Exception:
+                from_room = to_room = None
+            connected = []
+            for rm in (from_room, to_room):
+                if rm is not None:
+                    rid = room_id_by_eid.get(_id_val(rm.Id))
+                    if rid:
+                        connected.append(rid)
+            label = _name(inst) or kindlabel
+            point = [loc.X - ox, loc.Y - oy]
+            if is_window:
+                if not connected:
+                    report.skipped("window", label, "not bounded by a known room")
+                    continue
+                sill = _double(inst, DB.BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM) or 0.0
+                openings.append(
+                    {"id": "win%d" % len(openings), "category": "window", "kind": "window",
+                     "level": room_level_by_id.get(connected[0], 0), "location": point,
+                     "width": width, "height": height, "sill": sill, "exterior": True,
+                     "egress": False, "rooms": connected[:1], "host_wall": None}
+                )
+                report.created("window", label)
+            else:
+                interior = len(connected) >= 2
+                openings.append(
+                    {"id": "door%d" % len(openings),
+                     "category": "door", "kind": "swing" if interior else "exterior",
+                     "level": room_level_by_id.get(connected[0], 0) if connected else 0,
+                     "location": point, "width": width, "height": height, "sill": 0.0,
+                     "exterior": not interior, "egress": not interior,
+                     "rooms": connected[:2] if interior else connected[:1], "host_wall": None}
+                )
+                if not connected:
+                    report.skipped("door", label, "not bounded by a known room")
+                    openings.pop()
+                else:
+                    report.created("door", label)
+
+    _read_openings(DB.BuiltInCategory.OST_Doors, False)
+    _read_openings(DB.BuiltInCategory.OST_Windows, True)
+
+    xs = [r["x"] + r["width"] for r in rooms] or [0.0]
+    ys = [r["y"] + r["length"] for r in rooms] or [0.0]
+    exchange = {
+        "schema": _exchange.SCHEMA,
+        "units": "feet",
+        "plan": {
+            "name": getattr(doc, "Title", "Revit Model"),
+            "ceiling_height": ceiling,
+            "envelope_width": max(xs),
+            "envelope_length": max(ys),
+            "wings": [],
+        },
+        "levels": [
+            {"index": i, "name": _name(lv), "elevation": lv.Elevation, "height": ceiling}
+            for i, lv in enumerate(levels)
+        ]
+        or [{"index": 0, "name": "Level 1", "elevation": 0.0, "height": ceiling}],
+        "walls": [],
+        "openings": openings,
+        "rooms": rooms,
+        "structure": {"columns": [], "framing": []},
+        "areas": [],
+    }
+    return exchange, report
 
 
 # --- entry point -------------------------------------------------------------

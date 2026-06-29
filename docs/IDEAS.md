@@ -54,8 +54,17 @@ environment and the project's available wall/floor/door/window/structural types
 with readiness flags. A `config.json` sidecar maps each pass to **named** template
 types (auto-pick fallback).
 
-Next: turned/multi-flight stairs; round-trip edits from Revit back to the DSL (the
-exchange is one-way today).
+Round-trip: the exchange now goes both ways. `exchange_to_plan` / `barndsl
+revit-import` reconstruct a plan/DSL from a `barndsl.revit/1` document (rooms carry
+their rectangle; each opening's wall/offset is re-derived from geometry), verified
+by `tests/test_revit_roundtrip.py` (every gallery plan recovers its rooms/doors/
+windows/envelope and re-emits clean DSL). The exchange gained room rectangles +
+envelope/wings. A `Model to DSL` button reads a live Revit model (rooms +
+door/window instances) back into an exchange via `builder.read_model` (experimental;
+room types guessed from names — `naming.py`, tested).
+
+Next: turned/multi-flight stairs; tighten the Revit reader (wall-type/level
+inference, non-rectangular rooms) for production round-trips.
 
 ## Agent aids
 

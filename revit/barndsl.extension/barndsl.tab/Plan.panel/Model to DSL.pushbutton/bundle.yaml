@@ -1,0 +1,7 @@
+title: Model to DSL
+tooltip: >-
+  Experimental. Read the active model's placed rooms and door/window instances
+  and reconstruct barndsl DSL source (.barn) from them — the reverse of Build
+  Plan. Room types are guessed from room names; walls/structure aren't read back.
+  Requires the barndsl package importable from pyRevit's CPython engine.
+author: barndsl

@@ -16,18 +16,20 @@ barndsl.extension/
   lib/barndsl_revit/
     exchange.py     # pure: load + validate a barndsl.revit/1 document (no Revit)
     report.py       # pure: build report + options (no Revit)
-    builder.py      # Revit API: create elements from the exchange
+    naming.py       # pure: name → room-type / DSL-id heuristics (no Revit)
+    builder.py      # Revit API: create elements; read a model back to an exchange
   barndsl.tab/
     Plan.panel/
       Build Plan.pushbutton/      # pick a .json or .barn → build or preview it
       Export Exchange.pushbutton/ # pick a .barn → write its .json (no model change)
       Diagnostics.pushbutton/     # report environment + available types/families
+      Model to DSL.pushbutton/    # reverse: read the model → reconstruct .barn
 ```
 
-The two halves are deliberately split: `exchange.py` and `report.py` are
-**Revit-free** (and covered by the repo's test suite), so all the bookkeeping,
-validation and formatting is verified without Revit; only `builder.py` touches
-the API.
+The two halves are deliberately split: `exchange.py`, `report.py` and `naming.py`
+are **Revit-free** (and covered by the repo's test suite), so all the
+bookkeeping, validation, formatting and heuristics are verified without Revit;
+only `builder.py` touches the API.
 
 ## Requirements
 
@@ -173,8 +175,32 @@ back to the auto-pick with a note in the report.
   set the wall **Location Line** to a finish face, or model with thin types.
 - Rooms only place where walls actually enclose the seed point. A plan whose
   rooms don't fully tile the footprint may leave some seeds unplaced (reported).
-- Edits made in Revit don't round-trip back to the DSL yet (the exchange is
-  currently one-way: barndsl → Revit).
+
+## Reading a model back (Model to DSL)
+
+The exchange round-trips, so **Model to DSL** reconstructs `.barn` source from the
+active document — the reverse of *Build Plan*. It reads each placed Revit Room
+(its bounding box becomes the room rectangle; its name is mapped to a best-guess
+room type) and each door/window instance (connected to rooms via FromRoom/ToRoom),
+assembles a `barndsl.revit/1` exchange, and runs it through the barndsl core
+(`exchange_to_plan` → `emit_dsl`). A `*.readlog.json` is written next to the
+output for debugging the read.
+
+This is **experimental** and needs the `barndsl` package on the CPython engine.
+Caveats to review in the output before trusting it:
+
+- **Room types are guessed from names** (`Master Bath` → bathroom, `Great Room` →
+  living, …); an unrecognised name falls back to `other`. Rename rooms or fix the
+  type in the `.barn`.
+- **Rooms must be placed and bounded.** Unplaced rooms are skipped; an opening
+  whose FromRoom/ToRoom isn't a known room is skipped (reported).
+- **Walls and structure aren't read back** — the reconstruction is room- and
+  opening-driven, and the DSL re-derives walls. Non-rectangular rooms collapse to
+  their bounding box.
+
+The pure reconstruction (`exchange_to_plan`) and the name heuristics are covered
+by the repo suite (`tests/test_revit_roundtrip.py`, `tests/test_revit_naming.py`);
+the Revit-reading step (`builder.read_model`) needs a running Revit.
 
 ## Testing
 

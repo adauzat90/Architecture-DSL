@@ -24,6 +24,10 @@
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
         (levels, deduplicated walls, hosted doors/windows, room seeds, structural
         members) for the pyRevit extension to build inside Revit.
+
+    barndsl revit-import FILE.json [--out FILE.barn]
+        The reverse: reconstruct DSL source from a `barndsl.revit/1` exchange
+        (e.g. one read back out of Revit). Prints the DSL, or writes it with --out.
 """
 
 from __future__ import annotations
@@ -250,6 +254,37 @@ def _cmd_revit(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_revit_import(args: argparse.Namespace) -> int:
+    import json
+
+    from .revit import RevitImportError, exchange_to_plan
+
+    with open(args.file, encoding="utf-8") as fh:
+        data = json.load(fh)
+    try:
+        plan = exchange_to_plan(data)
+    except RevitImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    # Re-compile the reconstructed DSL so the import is validated through the
+    # same pipeline, and the user sees any diagnostics on the recovered plan.
+    from .emit import emit_dsl
+
+    src = emit_dsl(plan)
+    result = compile_source(src, name=plan.name)
+    print(result.report(os.path.basename(args.file)))
+    print("\n" + _program_summary(plan))
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(src)
+        print(f"\nWrote {args.out}")
+    else:
+        print("\n--- reconstructed DSL ---")
+        print(src.rstrip())
+    return 0 if result.ok else 1
+
+
 def _cmd_explain(args: argparse.Namespace) -> int:
     from .diagnostics import REGISTRY, explain
 
@@ -365,6 +400,15 @@ def main(argv: list[str] | None = None) -> int:
         help="auto-place a default post-and-beam frame if the source has none",
     )
     p_revit.set_defaults(func=_cmd_revit)
+
+    p_revit_import = sub.add_parser(
+        "revit-import", help="reconstruct DSL from a barndsl.revit/1 exchange JSON"
+    )
+    p_revit_import.add_argument("file", help="path to a barndsl.revit/1 JSON file")
+    p_revit_import.add_argument(
+        "--out", default=None, help="write the reconstructed .barn here (else print)"
+    )
+    p_revit_import.set_defaults(func=_cmd_revit_import)
 
     p_explain = sub.add_parser(
         "explain", help="explain a diagnostic code (or list them all)"
