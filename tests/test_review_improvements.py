@@ -1047,3 +1047,24 @@ def test_closet_shape_is_registered():
     from barndsl.diagnostics import REGISTRY as REG
 
     assert "CLOSET_SHAPE" in REG
+
+
+# --- exterior doors must actually render (regression) ------------------------
+
+
+def test_exterior_door_is_drawn_in_the_svg():
+    from barndsl import render_svg
+
+    # One room + one entry, no interior swing doors: any swing arc in the SVG
+    # must be the exterior door. Guards a regression where the exterior-door
+    # draw loop was orphaned after a method return and silently stopped running.
+    src = """\
+plan "Ext"
+envelope 20 x 16
+ceiling 9
+room living: living at 0,0 size 20 x 16
+entry living south width 3 offset 8
+window living west width 8 offset 4
+"""
+    svg = render_svg(compile_source(src).plan)
+    assert " A " in svg  # _door_symbol draws a swing arc; exterior doors use it

@@ -292,6 +292,18 @@ class _Renderer:
             else:  # cased opening
                 self._opening_symbol(ox, oy, edge.orientation, w)
 
+        for door in self.plan.exterior_doors:
+            room = self.plan.room(door.room)
+            if not room:
+                continue
+            if level is not None and room.level != level:
+                continue
+            x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
+            if door.wall in (Direction.NORTH, Direction.SOUTH):
+                self._door_symbol(min(x1, x2), y1, "h", door.width)
+            else:
+                self._door_symbol(x1, min(y1, y2), "v", door.width)
+
     @staticmethod
     def _swing_sgn(door, a, b, edge) -> float | None:
         """+1/-1 for the side the leaf swings into, or None to let the symbol
@@ -304,18 +316,6 @@ class _Renderer:
         return (1.0 if cx > edge.pos else -1.0) if edge.orientation == "v" else (
             1.0 if cy > edge.pos else -1.0
         )
-
-        for door in self.plan.exterior_doors:
-            room = self.plan.room(door.room)
-            if not room:
-                continue
-            if level is not None and room.level != level:
-                continue
-            x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
-            if door.wall in (Direction.NORTH, Direction.SOUTH):
-                self._door_symbol(min(x1, x2), y1, "h", door.width)
-            else:
-                self._door_symbol(x1, min(y1, y2), "v", door.width)
 
     def _door_symbol(
         self,
