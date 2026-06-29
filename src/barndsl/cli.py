@@ -201,11 +201,11 @@ def _cmd_layout(args: argparse.Namespace) -> int:
         else:  # the space-filling v2 engine (default); fill = auto-select topology
             from .layout2 import parse_brief2, solve_layout2
 
-            brief = parse_brief2(text)
+            brief2 = parse_brief2(text)
             if args.no_openings:
-                brief.add_openings = False
+                brief2.add_openings = False
             topology = "auto" if args.engine == "fill" else args.engine
-            out = solve_layout2(brief, engine=topology)
+            out = solve_layout2(brief2, engine=topology)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

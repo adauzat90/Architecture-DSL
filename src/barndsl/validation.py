@@ -16,6 +16,7 @@ import math
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol
 
 from .constants import (
     EPSILON,
@@ -37,6 +38,20 @@ from .geometry import (
     shared_edge,
     wall_faces_outside,
 )
+
+
+class _WallOpening(Protocol):
+    """Structural view shared by a :class:`Window` and an :class:`ExteriorDoor`:
+    an opening positioned on a single wall. Lets a check iterate both kinds
+    together without losing their common ``room``/``wall``/``offset``/``width``."""
+
+    room: str
+    wall: Direction
+    offset: float
+    width: float
+    line: int | None
+    col: int | None
+    end_col: int | None
 
 # Approximate IRC-derived thresholds (feet unless noted).
 MIN_CEILING = 7.0
@@ -1048,34 +1063,34 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     )
                 )
 
-    for door in plan.exterior_doors:
-        if door.room not in room_ids:
+    for xdoor in plan.exterior_doors:
+        if xdoor.room not in room_ids:
             add(
                 Issue(
                     Severity.ERROR,
                     "DOOR_REF",
-                    f"Exterior door references unknown room '{door.room}'.",
-                    room=door.room,
+                    f"Exterior door references unknown room '{xdoor.room}'.",
+                    room=xdoor.room,
                     hint="Reference an existing room id.",
-                    **_door_loc(door),
+                    **_door_loc(xdoor),
                 )
             )
             continue
-        room = plan.room(door.room)
+        room = plan.room(xdoor.room)
         if room is not None and room.type in (RoomType.GARAGE, RoomType.SHOP):
             continue  # a garage/shop opening is an overhead door, not a leaf size
-        nearest = _nearest_std(door.width * 12, STD_EXTERIOR_DOOR_WIDTHS_IN)
-        if abs(nearest - door.width * 12) > DOOR_SIZE_TOL_IN:
+        nearest = _nearest_std(xdoor.width * 12, STD_EXTERIOR_DOOR_WIDTHS_IN)
+        if abs(nearest - xdoor.width * 12) > DOOR_SIZE_TOL_IN:
             add(
                 Issue(
                     Severity.INFO,
                     "DOOR_SIZE",
-                    f"Exterior door on '{door.room}' is {door.width * 12:.0f} in, "
+                    f"Exterior door on '{xdoor.room}' is {xdoor.width * 12:.0f} in, "
                     "not a standard size.",
-                    room=door.room,
+                    room=xdoor.room,
                     hint=f"Use a stock width, e.g. `width {nearest / 12:g}` "
                     f"({nearest} in); 36 in is the usual entry.",
-                    **_door_loc(door),
+                    **_door_loc(xdoor),
                 )
             )
 
@@ -1098,6 +1113,7 @@ def _validate_openings(plan: Barndominium, add) -> None:
             )
             continue
         room = plan.room(w.room)
+        assert room is not None  # guaranteed: w.room was checked against room_ids
         if w.head_height <= w.sill_height + EPSILON:
             add(
                 Issue(
@@ -1141,6 +1157,7 @@ def _validate_openings(plan: Barndominium, add) -> None:
         if d.room not in room_ids:
             continue  # DOOR_REF already raised in _validate_doors
         room = plan.room(d.room)
+        assert room is not None  # guaranteed: d.room was checked against room_ids
         wlen = _wall_length(room, d.wall)
         if _runs_off_wall(d.offset, d.width, wlen):
             add(
@@ -1170,10 +1187,11 @@ def _validate_openings(plan: Barndominium, add) -> None:
     # Two openings can't occupy the same run of wall. Group every wall-positioned
     # opening (window or entry) by (room, wall) and flag overlapping spans.
     spans: dict[tuple[str, Direction], list[tuple]] = {}
-    for o, kind in (
+    openings: list[tuple[_WallOpening, str]] = [
         *((w, "window") for w in plan.windows),
         *((d, "entry") for d in plan.exterior_doors),
-    ):
+    ]
+    for o, kind in openings:
         if o.room not in room_ids:
             continue  # *_REF already raised
         spans.setdefault((o.room, o.wall), []).append(
@@ -1753,12 +1771,12 @@ def _dq_stair_blocks_door(plan: Barndominium, graph, by_id, add) -> None:
                         "or move the door so its approach is clear.",
                     )
                 )
-        for d in plan.exterior_doors:
-            r = by_id.get(d.room)
+        for xd in plan.exterior_doors:
+            r = by_id.get(xd.room)
             if r is None or r.level not in levels:
                 continue
-            zx1, zy1, zx2, zy2 = _ext_door_zone(r, d, DOOR_CLEARANCE_DEPTH)
-            key = f"ext:{d.room}:{d.wall.value}"
+            zx1, zy1, zx2, zy2 = _ext_door_zone(r, xd, DOOR_CLEARANCE_DEPTH)
+            key = f"ext:{xd.room}:{xd.wall.value}"
             if key not in blocked and s.overlaps_rect(zx1, zy1, zx2, zy2):
                 blocked.add(key)
                 add(
@@ -1766,7 +1784,7 @@ def _dq_stair_blocks_door(plan: Barndominium, graph, by_id, add) -> None:
                         Severity.WARNING,
                         "STAIR_BLOCKS_DOOR",
                         f"Stair '{s.id}' intrudes on the clear floor in front of the "
-                        f"exterior door into '{d.room}', blocking it.",
+                        f"exterior door into '{xd.room}', blocking it.",
                         room=s.id,
                         hint="Shift the stair off the doorway (place it along a wall), "
                         "or move the entry so its approach is clear.",
@@ -1841,12 +1859,12 @@ def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
         region = _interior_swing_region(plan, d, a, b, edge)
         if region is not None:
             swings.append((f"'{d.room_a}'-'{d.room_b}'", region, d.line, d.col, d.end_col))
-    for d in plan.exterior_doors:
-        r = by_id.get(d.room)
+    for xd in plan.exterior_doors:
+        r = by_id.get(xd.room)
         if r is None:
             continue
-        swings.append((f"the entry to '{d.room}'", _exterior_swing_region(plan, r, d),
-                       d.line, d.col, d.end_col))
+        swings.append((f"the entry to '{xd.room}'", _exterior_swing_region(plan, r, xd),
+                       xd.line, xd.col, xd.end_col))
     for i in range(len(swings)):
         for j in range(i + 1, len(swings)):
             if _convex_overlap(swings[i][1], swings[j][1]):
@@ -2044,11 +2062,11 @@ def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
             lo, hi = _door_interval(edge, d)
             along_axis = (edge.orientation == "h") if long_x else (edge.orientation == "v")
             marks.append((lo, hi) if along_axis else (edge.pos, edge.pos))
-        for d in plan.exterior_doors:
-            if d.room != room.id:
+        for xd in plan.exterior_doors:
+            if xd.room != room.id:
                 continue
-            x1, y1, x2, y2 = opening_endpoints(room, d.wall, d.offset, d.width)
-            ns = d.wall in (Direction.NORTH, Direction.SOUTH)
+            x1, y1, x2, y2 = opening_endpoints(room, xd.wall, xd.offset, xd.width)
+            ns = xd.wall in (Direction.NORTH, Direction.SOUTH)
             if long_x:
                 marks.append((min(x1, x2), max(x1, x2)) if ns else (x1, x1))
             else:
@@ -2158,7 +2176,7 @@ def _validate_program(plan: Barndominium, add) -> None:
             )
     if not mismatches:
         return
-    loc = {}
+    loc: dict = {}
     if spec.line is not None:
         loc = {"line": spec.line, "col": spec.col, "end_col": spec.end_col}
     add(
@@ -2193,7 +2211,7 @@ def _validate_structure(plan: Barndominium, add) -> None:
     if spec is None:
         return
 
-    loc = {}
+    loc: dict = {}
     if spec.line is not None:
         loc = {"line": spec.line, "col": spec.col, "end_col": spec.end_col}
 
@@ -2236,13 +2254,13 @@ def _validate_structure(plan: Barndominium, add) -> None:
     # A post standing inside a window/door opening can't be framed — you can't run
     # a structural column through the glass. The post grid is the fixed discipline,
     # so flag the opening to be shifted into a clear bay (between posts).
-    openings = [(w, "window") for w in plan.windows]
+    openings: list[tuple[_WallOpening, str]] = [(w, "window") for w in plan.windows]
     openings += [(d, "exterior door") for d in plan.exterior_doors]
     for obj, kind in openings:
-        room = plan.room(obj.room)
-        if room is None or getattr(room, "level", 0) != 0:
+        oroom = plan.room(obj.room)
+        if oroom is None or getattr(oroom, "level", 0) != 0:
             continue
-        x1, y1, x2, y2 = opening_endpoints(room, obj.wall, obj.offset, obj.width)
+        x1, y1, x2, y2 = opening_endpoints(oroom, obj.wall, obj.offset, obj.width)
         horizontal = obj.wall in (Direction.NORTH, Direction.SOUTH)
         wall_line = y1 if horizontal else x1
         lo, hi = (

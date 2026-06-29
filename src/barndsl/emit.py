@@ -72,7 +72,7 @@ def emit_dsl(plan: Barndominium) -> str:
                 if kind != "swing":  # name pocket/sliding; swing is the default
                     line += f" {kind}"
                 line += f" width {_n(d.width)}"
-            if getattr(d, "offset", None) is not None:
+            if d.offset is not None:
                 line += f" offset {_n(d.offset)}"
             if getattr(d, "swing_into", None) is not None:
                 line += f" into {d.swing_into}"
@@ -82,9 +82,9 @@ def emit_dsl(plan: Barndominium) -> str:
 
     if plan.exterior_doors:
         out.append("")
-        for d in plan.exterior_doors:
-            line = f"entry {d.room} {d.wall.value} width {_n(d.width)} offset {_n(d.offset)}"
-            if not d.egress:
+        for xd in plan.exterior_doors:
+            line = f"entry {xd.room} {xd.wall.value} width {_n(xd.width)} offset {_n(xd.offset)}"
+            if not xd.egress:
                 line += " no-egress"
             out.append(line)
 

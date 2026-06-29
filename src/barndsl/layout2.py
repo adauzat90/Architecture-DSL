@@ -79,8 +79,12 @@ class RoomSpec2:
 
     id: str
     type: RoomType | str
-    area: float | None = None
-    min_dim: float | None = None
+    #: Target floor area; ``0`` (the default) means "derive it from
+    #: ``width``/``length``". Always a positive float once constructed.
+    area: float = 0.0
+    #: Smallest allowed side; ``0`` means "pick a sensible default per type".
+    #: Always a positive float once constructed.
+    min_dim: float = 0.0
     width: float | None = None
     length: float | None = None
     label: str | None = None
@@ -88,7 +92,7 @@ class RoomSpec2:
 
     def __post_init__(self) -> None:
         self.type = RoomType(self.type)
-        if self.area is None:
+        if not self.area:
             if self.width is None or self.length is None:
                 raise ValueError(
                     f"Room '{self.id}': give an area=, or both width= and length=."
@@ -97,7 +101,7 @@ class RoomSpec2:
         self.area = float(self.area)
         if not math.isfinite(self.area) or self.area <= 0:
             raise ValueError(f"Room '{self.id}': area must be positive and finite.")
-        if self.min_dim is None:
+        if not self.min_dim:
             if self.width is not None and self.length is not None:
                 self.min_dim = min(float(self.width), float(self.length))
             else:
@@ -548,7 +552,7 @@ def _dimension(bands: list[_Band], env_w: float, env_l: float):
         for i, spec in enumerate(band.rooms):
             x0, x1 = xlines[i], xlines[i + 1]
             placed[spec.id] = Room(
-                spec.id, spec.type, x0, y0, x1 - x0, y1 - y0, spec.label, spec.level
+                spec.id, RoomType(spec.type), x0, y0, x1 - x0, y1 - y0, spec.label, spec.level
             )
     return placed
 
@@ -723,10 +727,12 @@ def _carve(node: _Slice, x0: float, y0: float, x1: float, y1: float, placed: dic
     if node.spec is not None:
         rx0, ry0 = round(x0, 2), round(y0, 2)
         placed[node.spec.id] = Room(
-            node.spec.id, node.spec.type, rx0, ry0,
+            node.spec.id, RoomType(node.spec.type), rx0, ry0,
             round(x1, 2) - rx0, round(y1, 2) - ry0, node.spec.label, node.spec.level,
         )
         return
+    # A non-leaf slice always has both children (set together in the tree build).
+    assert node.a is not None and node.b is not None
     frac = node.a.area / node.area if node.area else 0.5
     if (x1 - x0) >= (y1 - y0):  # vertical cut, side by side
         cut = _split_at(x0, x1, frac, node.a.min_dim, node.b.min_dim)
@@ -988,7 +994,7 @@ def _dimension_dual(
         x0, x1 = X[xi[rects[i][0]]], X[xi[rects[i][2]]]
         y0, y1 = Y[yi[rects[i][1]]], Y[yi[rects[i][3]]]
         placed[s.id] = Room(
-            s.id, s.type, x0, y0, round(x1 - x0, 2), round(y1 - y0, 2), s.label, s.level
+            s.id, RoomType(s.type), x0, y0, round(x1 - x0, 2), round(y1 - y0, 2), s.label, s.level
         )
     return placed
 
@@ -1008,7 +1014,7 @@ def _solve_dual(
         return None
     idx = {s.id: i for i, s in enumerate(specs)}
     required = {
-        tuple(sorted((idx[a], idx[b]))) for a in adj for b in adj[a]
+        (min(idx[a], idx[b]), max(idx[a], idx[b])) for a in adj for b in adj[a]
     }
     perimeter = {i for i, s in enumerate(specs) if s.type in HABITABLE_TYPES}
     sols = _dual_topologies(n, perimeter, required)
@@ -1122,7 +1128,7 @@ def _parse_room2(rest: str, raw: str) -> RoomSpec2:
     if "area" in rest_toks:
         i = rest_toks.index("area")
         area = float(rest_toks[i + 1])
-        min_dim = None
+        min_dim = 0.0
         if "min" in rest_toks:
             min_dim = float(rest_toks[rest_toks.index("min") + 1])
         return RoomSpec2(rid, rtype, area=area, min_dim=min_dim)

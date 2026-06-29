@@ -36,10 +36,9 @@ jobs:
         run: pytest -q
 
   typecheck:
-    name: typecheck (informational)
+    name: typecheck (mypy)
     runs-on: ubuntu-latest
-    # Non-blocking: surfaces the type-error backlog without failing the build.
-    continue-on-error: true
+    # Hard gate: the type-error backlog has been paid down, so keep the tree clean.
     steps:
       - uses: actions/checkout@v4
 

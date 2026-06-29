@@ -58,10 +58,10 @@ select = ["F", "E", "W"]
 ignore = ["E741", "E731", "E501"]
 
 [tool.mypy]
-# Type-checking is informational for now: the codebase is fully annotated but
-# has a backlog of ~130 type errors (pydantic dynamics, narrowing gaps). CI runs
-# mypy as a non-blocking job so the backlog is visible without gating merges;
-# the intent is to ratchet `strict`-ness up as the backlog is paid down.
+# The codebase is fully annotated and type-clean: the former ~130-error backlog
+# (loop-variable union collisions, optional-field narrowing, mixed-opening
+# iteration) has been paid down, so CI now gates on mypy. Keep it green; the next
+# step is to ratchet `strict`-ness up one flag at a time.
 python_version = "3.10"
 ignore_missing_imports = true
 warn_unused_ignores = true
