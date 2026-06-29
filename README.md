@@ -304,15 +304,20 @@ get two buttons:
 * **Build Plan** — pick a compiled `.json` (or a `.barn`, compiled on the spot)
   and it creates the levels, walls, correctly-**sized** doors and windows, rooms,
   porch slabs, stairs and structural members in the active document, in **one
-  transaction** (one undo step). Primary target: **Revit 2025**.
+  transaction** (one undo step). Offers a **Preview** (a real build that's rolled
+  back) and writes a `*.buildlog.json` report. Primary target: **Revit 2025**.
 * **Export Exchange** — pick a `.barn` and write its exchange `.json` next to it
   without touching the model.
+* **Diagnostics** — report the environment and which wall/floor/family types the
+  project offers (with readiness flags); the first thing to run when a build
+  doesn't produce what you expect.
 
-The extension is cleanly split: `lib/barndsl_revit/exchange.py` is a Revit-free
-loader/validator (covered by the repo test suite), and `lib/barndsl_revit/
-builder.py` does the Revit API element creation. See
-[`revit/README.md`](revit/README.md) for install and the JSON-first vs. live
-`.barn` workflows.
+The extension is cleanly split: `lib/barndsl_revit/exchange.py` (loader/validator)
+and `lib/barndsl_revit/report.py` (build report + options) are **Revit-free** and
+covered by the repo test suite, while `lib/barndsl_revit/builder.py` does the
+Revit API element creation. A `config.json` sidecar maps each pass to named types
+in your template. See [`revit/README.md`](revit/README.md) for install,
+workflows, and debugging.
 
 ## The agent: a compile-fix loop
 

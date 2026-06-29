@@ -1,0 +1,8 @@
+title: Diagnostics
+tooltip: >-
+  Report the environment and what the active document offers a build: Revit and
+  pyRevit versions, the CPython engine, whether the barndsl package is
+  importable, and the wall types, floor types, door/window families and
+  structural families available (with readiness flags). Run this first when a
+  build doesn't produce what you expect. Changes nothing.
+author: barndsl

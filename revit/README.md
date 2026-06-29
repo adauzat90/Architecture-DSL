@@ -15,12 +15,19 @@ barndsl.extension/
   extension.json
   lib/barndsl_revit/
     exchange.py     # pure: load + validate a barndsl.revit/1 document (no Revit)
+    report.py       # pure: build report + options (no Revit)
     builder.py      # Revit API: create elements from the exchange
   barndsl.tab/
     Plan.panel/
-      Build Plan.pushbutton/      # pick a .json or .barn → build it in the model
+      Build Plan.pushbutton/      # pick a .json or .barn → build or preview it
       Export Exchange.pushbutton/ # pick a .barn → write its .json (no model change)
+      Diagnostics.pushbutton/     # report environment + available types/families
 ```
+
+The two halves are deliberately split: `exchange.py` and `report.py` are
+**Revit-free** (and covered by the repo's test suite), so all the bookkeeping,
+validation and formatting is verified without Revit; only `builder.py` touches
+the API.
 
 ## Requirements
 
@@ -65,6 +72,13 @@ the JSON-first workflow — nothing breaks.
 
 ## Workflows
 
+**Check the project first.** Run **barndsl → Plan → Diagnostics** — it reports
+the Revit / pyRevit / Python versions, whether `barndsl` is importable, and which
+wall types, floor types, door/window families and structural families the
+document has, with ✅/⚠️ readiness flags. Each build pass auto-picks from these,
+so this tells you up front what will build and what will be skipped. It changes
+nothing.
+
 **JSON-first (no Python in Revit needed):**
 1. In a terminal: `barndsl revit examples/cedar_ridge.barn --out cedar_ridge.json`
 2. In Revit: **barndsl → Plan → Build Plan**, pick `cedar_ridge.json`.
@@ -74,6 +88,11 @@ the JSON-first workflow — nothing breaks.
   step.
 - **Export Exchange** picks a `.barn` and writes its `.json` next to it without
   changing the model — useful for inspecting what *Build Plan* will create.
+
+**Build or Preview.** *Build Plan* asks whether to **Build** or **Preview (dry
+run)**. A preview does a *real* build and then rolls it back, so you see exactly
+what would be created — and any per-element API errors — without changing the
+model. Use it to shake a plan out against a project template before committing.
 
 ## What gets built
 
@@ -90,10 +109,55 @@ the JSON-first workflow — nothing breaks.
 Walls, openings, rooms, structure and porches run in **one transaction**, so
 Revit's undo rolls them back in a single step; stairs build afterward in their
 own edit scopes (the Stairs API manages its own transactions). Every element is
-created defensively: if one fails (e.g. a missing family), it's recorded as a
-note in the output and the rest still build. The builder also accepts
-`structure`, `size_families`, `porches`, and `stairs` flags (all default on) to
-turn passes off.
+created defensively: if one fails (e.g. a missing family), it's recorded in the
+report and the rest still build.
+
+## Debugging a run
+
+Each build prints a **report** to the pyRevit output panel — a per-kind
+created/skipped/failed table, the types/families it used, and a list of every
+element that needs attention with the reason (e.g. `room bath — skipped: point
+not in an enclosed region`). It also writes the full report as
+`<source>.buildlog.json` next to the file you picked, so you can attach it when
+reporting an issue. Each record carries the created Revit element id, so you can
+select/zoom to it in Revit.
+
+When something doesn't build:
+
+1. Run **Diagnostics** — is the resource (wall type, door family, …) even in the
+   project? ⚠️ flags tell you what's missing.
+2. Run **Build Plan → Preview** — a no-commit dry run surfaces the exact
+   per-element error without touching the model.
+3. Read the **build log** — the `failed`/`skipped` records name the element and
+   the reason.
+
+## Mapping to a project template (config)
+
+By default each pass auto-picks (exterior/interior wall type by Function, the
+first loaded door/window/structural family, the first non-foundation floor type).
+To pin a pass to a **named** type from your template, drop a `config.json` next
+to the source (`<source>.config.json`, or `barndsl_revit.config.json` in the same
+folder). Unknown keys are ignored, so you can leave comments.
+
+```json
+{
+  "exterior_wall_type": "Exterior - Brick on Mtl. Stud",
+  "interior_wall_type": "Interior - 4 7/8\" Partition (1-hr)",
+  "door_family": "Single-Flush",
+  "window_family": "Fixed",
+  "floor_type": "Generic 12\"",
+  "column_family": "HSS-Hollow Structural Section-Column",
+  "beam_family": "W-Wide Flange",
+  "size_families": true,
+  "structure": true,
+  "porches": true,
+  "stairs": true,
+  "verbose": false
+}
+```
+
+Names come straight from **Diagnostics**. A named type that isn't found falls
+back to the auto-pick with a note in the report.
 
 ### Known limitations
 
@@ -114,6 +178,10 @@ turn passes off.
 
 ## Testing
 
-The Revit-free half (`exchange.py`) is covered by the repo's normal test suite
-(`tests/test_revit_exchange.py`), which validates it against documents the core
-actually emits. `builder.py` needs a running Revit and is exercised manually.
+The Revit-free halves are covered by the repo's normal test suite:
+`tests/test_revit_exchange.py` validates `exchange.py` against documents the core
+actually emits, and `tests/test_revit_report.py` covers the report/options layer
+(counts, dry-run wording, markdown/JSON, config round-trip). `builder.py` needs a
+running Revit; use **Preview** + the **build log** to exercise and debug it
+in-place. When filing an issue, attach the `*.buildlog.json` and the
+**Diagnostics** output.

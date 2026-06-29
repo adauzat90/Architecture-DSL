@@ -3,79 +3,52 @@
 
 Talks to the **Revit API**, so it only imports cleanly *inside* Revit (under
 pyRevit). Import it lazily from a pushbutton script — never from the Revit-free
-:mod:`barndsl_revit.exchange`.
+:mod:`barndsl_revit.exchange` / :mod:`barndsl_revit.report`.
 
-**Primary target: Revit 2025** (.NET 8 / pyRevit 5, CPython 3.12 engine). The
-code sticks to APIs current in 2025: ``Floor.Create`` (the old ``NewFloor`` is
-gone), ``ElementId.Value`` in favour of the deprecated ``IntegerValue``, and the
-Stairs-by-component API. It avoids removed members, so it should also run on
-recent prior versions, but 2025 is what it's written against.
+**Primary target: Revit 2025** (.NET 8 / pyRevit 5, CPython 3.12 engine). Uses
+APIs current in 2025 (``Floor.Create``; ``ElementId.Value`` over the deprecated
+``IntegerValue``; the component Stairs API) and avoids removed members.
 
-What it builds, in one transaction (plus stairs in their own edit scope after):
+Built for debugging a real run:
 
-* **Levels** — reuse an existing level at the same elevation, else create one.
-* **Walls** — a wall per exchange segment, on its level, at its height, using an
-  *exterior* or *interior* wall type chosen from the project.
-* **Doors / windows** — a hosted family instance on the matched wall. When
-  ``size_families`` is on, the base family symbol is duplicated and its
-  Width/Height type parameters are set to the exchange's values (cached and
-  reused), so openings come out the right size instead of the family default.
-* **Rooms** — placed at each seed point once the walls enclose it, then named.
-* **Structure** — structural columns at posts and framing along beams, when those
-  families are loaded.
-* **Porches** — a floor slab from each porch outline.
-* **Stairs** — a best-effort straight run between the two levels (experimental;
-  falls back to a note if the Stairs API rejects the geometry).
+* Every element's outcome (created / skipped / failed, with the Revit id and a
+  reason) is recorded in a :class:`barndsl_revit.report.BuildReport`, which
+  renders to markdown for the pyRevit panel and JSON for a build-log file.
+* :func:`build` honours a :class:`~barndsl_revit.report.BuildOptions` — toggle
+  passes, sizing, and map any pass to a **named** wall/floor/family type from the
+  project template instead of auto-picking.
+* **Dry run** does a real build and then rolls it back, so a preview surfaces the
+  exact per-element API errors without committing anything.
+* :func:`diagnose` reports the environment and the types/families available in
+  the active document — what the *Diagnostics* button shows.
 
-Everything is defensive: a single element that fails is recorded as a warning and
-the build continues. Coordinates and units pass straight through — the exchange
-is in feet (Revit's internal unit), ``x`` east / ``y`` north matching world XY.
+Coordinates and units pass straight through — feet (Revit's internal unit), ``x``
+east / ``y`` north matching world XY.
 """
+
+import sys
 
 from pyrevit import DB, revit
 
 from . import exchange as _exchange
+from . import report as _report
 
-_TOL = 1e-6
+try:
+    from pyrevit import script as _script
 
+    _logger = _script.get_logger()
+except Exception:  # pragma: no cover - only hit outside a pyRevit command
 
-class BuildSummary(object):
-    """Counts of what got created, plus any per-element warnings."""
+    class _NullLogger(object):
+        def _noop(self, *a, **k):
+            pass
 
-    def __init__(self):
-        self.levels = 0
-        self.walls = 0
-        self.doors = 0
-        self.windows = 0
-        self.rooms = 0
-        self.columns = 0
-        self.framing = 0
-        self.porches = 0
-        self.stairs = 0
-        self.warnings = []
+        debug = info = warning = error = _noop
 
-    def warn(self, message):
-        self.warnings.append(message)
-
-    def as_line(self):
-        return (
-            "%d level(s), %d wall(s), %d door(s), %d window(s), %d room(s), "
-            "%d column(s), %d framing, %d porch(es), %d stair(s)"
-            % (
-                self.levels,
-                self.walls,
-                self.doors,
-                self.windows,
-                self.rooms,
-                self.columns,
-                self.framing,
-                self.porches,
-                self.stairs,
-            )
-        )
+    _logger = _NullLogger()
 
 
-# --- helpers -----------------------------------------------------------------
+# --- low-level helpers -------------------------------------------------------
 
 
 def _xyz(point, z):
@@ -84,6 +57,15 @@ def _xyz(point, z):
 
 def _collect(doc, of_class):
     return DB.FilteredElementCollector(doc).OfClass(of_class).ToElements()
+
+
+def _symbols(doc, bic):
+    return (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.FamilySymbol)
+        .OfCategory(bic)
+        .ToElements()
+    )
 
 
 def _id_val(element_id):
@@ -98,12 +80,38 @@ def _id_val(element_id):
         return element_id.IntegerValue
 
 
+def _rid(elem):
+    try:
+        return _id_val(elem.Id)
+    except Exception:
+        return None
+
+
+def _name(elem):
+    try:
+        return elem.Name
+    except Exception:
+        try:
+            return DB.Element.Name.GetValue(elem)
+        except Exception:
+            return ""
+
+
+def _wall_function(wt):
+    try:
+        return str(wt.Function)
+    except Exception:
+        return "?"
+
+
+def _basic_wall_types(doc):
+    return [wt for wt in _collect(doc, DB.WallType) if wt.Kind == DB.WallKind.Basic]
+
+
 def _pick_wall_types(doc):
-    """Return ``(exterior_type, interior_type)`` — the best wall types available."""
+    """Auto-pick ``(exterior, interior)`` basic wall types by Function."""
     exterior = interior = fallback = None
-    for wt in _collect(doc, DB.WallType):
-        if wt.Kind != DB.WallKind.Basic:
-            continue
+    for wt in _basic_wall_types(doc):
         if fallback is None:
             fallback = wt
         try:
@@ -114,44 +122,49 @@ def _pick_wall_types(doc):
             exterior = wt
         elif fn == DB.WallFunction.Interior and interior is None:
             interior = wt
-    exterior = exterior or fallback
-    interior = interior or fallback
-    return exterior, interior
+    return (exterior or fallback), (interior or fallback)
 
 
-def _first_floor_type(doc):
-    fallback = None
+def _floor_types(doc):
+    out = []
     for ft in _collect(doc, DB.FloorType):
         try:
             if ft.IsFoundationSlab:
                 continue
         except Exception:
             pass
-        return ft
-    return fallback
-
-
-def _ensure_levels(doc, data, summary):
-    """Map each exchange level index to a Revit :class:`Level` (reuse or create)."""
-    existing = list(_collect(doc, DB.Level))
-    out = {}
-    for lvl in data["levels"]:
-        elev = float(lvl["elevation"])
-        match = None
-        for e in existing:
-            if abs(e.Elevation - elev) <= 1e-3:
-                match = e
-                break
-        if match is None:
-            match = DB.Level.Create(doc, elev)
-            existing.append(match)
-            summary.levels += 1
-            try:
-                match.Name = lvl["name"]
-            except Exception:
-                pass
-        out[lvl["index"]] = match
+        out.append(ft)
     return out
+
+
+def _wall_type_named(doc, name):
+    if not name:
+        return None
+    for wt in _basic_wall_types(doc):
+        if _name(wt) == name:
+            return wt
+    return None
+
+
+def _floor_type_named(doc, name):
+    if not name:
+        return None
+    for ft in _collect(doc, DB.FloorType):
+        if _name(ft) == name:
+            return ft
+    return None
+
+
+def _symbol_named(doc, bic, family_name):
+    if not family_name:
+        return None
+    for s in _symbols(doc, bic):
+        try:
+            if s.Family.Name == family_name:
+                return s
+        except Exception:
+            pass
+    return None
 
 
 def _activate(symbol, doc):
@@ -159,17 +172,6 @@ def _activate(symbol, doc):
         symbol.Activate()
         doc.Regenerate()
     return symbol
-
-
-def _first_symbol(doc, bic):
-    """First loaded :class:`FamilySymbol` of a built-in category, or ``None``."""
-    col = (
-        DB.FilteredElementCollector(doc)
-        .OfClass(DB.FamilySymbol)
-        .OfCategory(bic)
-        .ToElements()
-    )
-    return col[0] if col else None
 
 
 def _set_double_param(elem, bips, names, value):
@@ -190,54 +192,6 @@ def _set_double_param(elem, bips, names, value):
     return False
 
 
-def _sized_symbol(doc, base, width, height, cache, summary):
-    """Return a family symbol of ``base``'s family sized ``width`` x ``height``.
-
-    Duplicates the base type once per distinct size (named ``barndsl WxH``) and
-    sets its Width/Height type parameters, caching the result. Reuses an existing
-    same-named type on re-runs. Falls back to the base symbol if the family has
-    no settable Width/Height (e.g. a fixed-size family).
-    """
-    key = (_id_val(base.Id), round(float(width), 4), round(float(height), 4))
-    if key in cache:
-        return cache[key]
-
-    target_name = "barndsl %.2fx%.2f" % (float(width), float(height))
-    fam = base.Family
-    sym = None
-    try:
-        for sid in fam.GetFamilySymbolIds():
-            s = doc.GetElement(sid)
-            if s is not None and s.Name == target_name:
-                sym = s
-                break
-    except Exception:
-        sym = None
-
-    if sym is None:
-        try:
-            sym = base.Duplicate(target_name)
-        except Exception as exc:
-            summary.warn("could not size family '%s': %s" % (target_name, exc))
-            cache[key] = _activate(base, doc)
-            return cache[key]
-        set_w = _set_double_param(
-            sym, [DB.BuiltInParameter.FAMILY_WIDTH_PARAM], ["Width"], width
-        )
-        set_h = _set_double_param(
-            sym, [DB.BuiltInParameter.FAMILY_HEIGHT_PARAM], ["Height"], height
-        )
-        doc.Regenerate()
-        if not (set_w or set_h):
-            summary.warn(
-                "family '%s' has no settable Width/Height; using its default size"
-                % base.Family.Name
-            )
-
-    cache[key] = _activate(sym, doc)
-    return cache[key]
-
-
 def _rect_loop(x, y, w, l, z):
     pts = [
         DB.XYZ(x, y, z),
@@ -251,103 +205,218 @@ def _rect_loop(x, y, w, l, z):
     return loop
 
 
+# --- resource resolution (named override → auto-pick) ------------------------
+
+
+class _Resources(object):
+    def __init__(self):
+        self.ext_wall = None
+        self.int_wall = None
+        self.door = None
+        self.window = None
+        self.floor = None
+        self.column = None
+        self.beam = None
+
+
+def _resolve_resources(doc, options, report):
+    """Pick the wall/floor/family types, honouring named overrides.
+
+    A missing named override falls back to an auto-pick and adds a note. The
+    chosen names are recorded in ``report.resources`` for the report header.
+    """
+    res = _Resources()
+    auto_ext, auto_int = _pick_wall_types(doc)
+
+    def named_or(name, finder, fallback, label):
+        if name:
+            found = finder(name)
+            if found is not None:
+                return found
+            report.note("%s '%s' not found in project; using an auto-pick" % (label, name))
+        return fallback
+
+    res.ext_wall = named_or(
+        options.exterior_wall_type, lambda n: _wall_type_named(doc, n), auto_ext, "exterior wall type"
+    )
+    res.int_wall = named_or(
+        options.interior_wall_type, lambda n: _wall_type_named(doc, n), auto_int, "interior wall type"
+    )
+    res.door = named_or(
+        options.door_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_Doors, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_Doors) or [None])[0],
+        "door family",
+    )
+    res.window = named_or(
+        options.window_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_Windows, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_Windows) or [None])[0],
+        "window family",
+    )
+    res.floor = named_or(
+        options.floor_type,
+        lambda n: _floor_type_named(doc, n),
+        (_floor_types(doc) or [None])[0],
+        "floor type",
+    )
+    res.column = named_or(
+        options.column_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_StructuralColumns, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_StructuralColumns) or [None])[0],
+        "structural-column family",
+    )
+    res.beam = named_or(
+        options.beam_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_StructuralFraming, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_StructuralFraming) or [None])[0],
+        "structural-framing family",
+    )
+
+    report.resources["exterior_wall"] = _name(res.ext_wall) if res.ext_wall else "(none)"
+    report.resources["interior_wall"] = _name(res.int_wall) if res.int_wall else "(none)"
+    report.resources["door_family"] = res.door.Family.Name if res.door else "(none loaded)"
+    report.resources["window_family"] = res.window.Family.Name if res.window else "(none loaded)"
+    report.resources["floor_type"] = _name(res.floor) if res.floor else "(none)"
+    return res
+
+
 # --- element passes ----------------------------------------------------------
 
 
-def _build_walls(doc, data, levels, ext_type, int_type, summary):
-    """Create walls; return ``{exchange_wall_id: Wall}`` for opening hosting."""
+def _ensure_levels(doc, data, report):
+    existing = list(_collect(doc, DB.Level))
+    out = {}
+    for lvl in data["levels"]:
+        elev = float(lvl["elevation"])
+        match = None
+        for e in existing:
+            if abs(e.Elevation - elev) <= 1e-3:
+                match = e
+                break
+        if match is None:
+            match = DB.Level.Create(doc, elev)
+            existing.append(match)
+            try:
+                match.Name = lvl["name"]
+            except Exception:
+                pass
+            report.created("level", lvl["name"], revit_id=_rid(match))
+        out[lvl["index"]] = match
+    return out
+
+
+def _build_walls(doc, data, levels, res, report):
     made = {}
     for w in data["walls"]:
         level = levels.get(w["level"])
         if level is None:
-            summary.warn("wall %s: no level %r" % (w["id"], w["level"]))
+            report.skipped("wall", w["id"], "no level %r" % w["level"])
             continue
         z = level.Elevation
         try:
             curve = DB.Line.CreateBound(_xyz(w["start"], z), _xyz(w["end"], z))
         except Exception:
-            summary.warn("wall %s: degenerate segment, skipped" % w["id"])
+            report.skipped("wall", w["id"], "degenerate segment")
             continue
-        wtype = ext_type if w.get("exterior") else int_type
+        wtype = res.ext_wall if w.get("exterior") else res.int_wall
         try:
             wall = DB.Wall.Create(
                 doc, curve, wtype.Id, level.Id, float(w["height"]), 0.0, False, False
             )
             made[w["id"]] = wall
-            summary.walls += 1
+            report.created("wall", w["id"], revit_id=_rid(wall))
         except Exception as exc:
-            summary.warn("wall %s: %s" % (w["id"], exc))
+            _logger.warning("wall %s: %s", w["id"], exc)
+            report.failed("wall", w["id"], str(exc))
     return made
 
 
-def _build_openings(doc, data, levels, walls, summary, size_families):
-    door_base = _activate(_first_symbol(doc, DB.BuiltInCategory.OST_Doors), doc)
-    win_base = _activate(_first_symbol(doc, DB.BuiltInCategory.OST_Windows), doc)
+def _sized_symbol(doc, base, width, height, cache, report):
+    key = (_id_val(base.Id), round(float(width), 4), round(float(height), 4))
+    if key in cache:
+        return cache[key]
+    target_name = "barndsl %.2fx%.2f" % (float(width), float(height))
+    fam = base.Family
+    sym = None
+    try:
+        for sid in fam.GetFamilySymbolIds():
+            s = doc.GetElement(sid)
+            if s is not None and _name(s) == target_name:
+                sym = s
+                break
+    except Exception:
+        sym = None
+    if sym is None:
+        try:
+            sym = base.Duplicate(target_name)
+        except Exception as exc:
+            report.note("could not size family '%s': %s" % (target_name, exc))
+            cache[key] = _activate(base, doc)
+            return cache[key]
+        set_w = _set_double_param(sym, [DB.BuiltInParameter.FAMILY_WIDTH_PARAM], ["Width"], width)
+        set_h = _set_double_param(sym, [DB.BuiltInParameter.FAMILY_HEIGHT_PARAM], ["Height"], height)
+        doc.Regenerate()
+        if not (set_w or set_h):
+            report.note(
+                "family '%s' has no settable Width/Height; using its default size" % fam.Name
+            )
+    cache[key] = _activate(sym, doc)
+    return cache[key]
+
+
+def _build_openings(doc, data, levels, walls, res, options, report):
+    door_base = _activate(res.door, doc)
+    win_base = _activate(res.window, doc)
     st = DB.Structure.StructuralType.NonStructural
-    size_cache = {}
+    cache = {}
 
     for o in data["openings"]:
+        kind = "window" if o["category"] == "window" else "door"
         host = walls.get(o.get("host_wall"))
         if host is None:
-            summary.warn("opening %s: no host wall, skipped" % o["id"])
+            report.skipped(kind, o["id"], "no host wall")
             continue
         level = levels.get(o["level"])
-        is_window = o["category"] == "window"
-        base = win_base if is_window else door_base
+        base = win_base if kind == "window" else door_base
         if base is None:
-            summary.warn(
-                "opening %s: no %s family loaded, skipped"
-                % (o["id"], "window" if is_window else "door")
-            )
+            report.skipped(kind, o["id"], "no %s family loaded" % kind)
             continue
-
-        if size_families:
-            sym = _sized_symbol(
-                doc, base, o.get("width", 0.0), o.get("height", 0.0), size_cache, summary
-            )
+        if options.size_families:
+            sym = _sized_symbol(doc, base, o.get("width", 0.0), o.get("height", 0.0), cache, report)
         else:
             sym = base
-
         point = _xyz(o["location"], level.Elevation if level else 0.0)
         try:
             inst = doc.Create.NewFamilyInstance(point, sym, host, level, st)
         except Exception as exc:
-            summary.warn("opening %s: %s" % (o["id"], exc))
+            _logger.warning("opening %s: %s", o["id"], exc)
+            report.failed(kind, o["id"], str(exc))
             continue
-        if is_window:
+        if kind == "window":
             try:
                 p = inst.get_Parameter(DB.BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM)
                 if p is not None and not p.IsReadOnly:
                     p.Set(float(o.get("sill", 0.0)))
             except Exception:
                 pass
-            summary.windows += 1
-        else:
-            summary.doors += 1
-
-    if data["openings"] and not size_families:
-        summary.warn(
-            "openings used their family's default size (sizing was disabled)"
-        )
+        report.created(kind, o["id"], revit_id=_rid(inst))
 
 
-def _build_rooms(doc, data, levels, summary):
+def _build_rooms(doc, data, levels, report):
     for r in data["rooms"]:
         level = levels.get(r["level"])
         if level is None:
-            summary.warn("room %s: no level %r" % (r["id"], r["level"]))
+            report.skipped("room", r["id"], "no level %r" % r["level"])
             continue
         uv = DB.UV(float(r["point"][0]), float(r["point"][1]))
         try:
             room = doc.Create.NewRoom(level, uv)
         except Exception as exc:
-            summary.warn(
-                "room %s: could not place (walls may not enclose it): %s"
-                % (r["id"], exc)
-            )
+            report.failed("room", r["id"], "could not place (walls may not enclose it): %s" % exc)
             continue
         if room is None:
-            summary.warn("room %s: point not in an enclosed region" % r["id"])
+            report.skipped("room", r["id"], "point not in an enclosed region")
             continue
         try:
             p = room.get_Parameter(DB.BuiltInParameter.ROOM_NAME)
@@ -355,90 +424,87 @@ def _build_rooms(doc, data, levels, summary):
                 p.Set(r.get("name", r["id"]))
         except Exception:
             pass
-        summary.rooms += 1
+        report.created("room", r["id"], revit_id=_rid(room))
 
 
-def _build_structure(doc, data, levels, summary):
+def _build_structure(doc, data, levels, res, report):
     structure = data.get("structure", {})
     columns = structure.get("columns", [])
     framing = structure.get("framing", [])
     if not columns and not framing:
         return
-
-    col_sym = _activate(_first_symbol(doc, DB.BuiltInCategory.OST_StructuralColumns), doc)
-    beam_sym = _activate(_first_symbol(doc, DB.BuiltInCategory.OST_StructuralFraming), doc)
+    col_sym = _activate(res.column, doc)
+    beam_sym = _activate(res.beam, doc)
 
     if columns and col_sym is None:
-        summary.warn("structural columns skipped: no structural-column family loaded")
-    for c in columns:
+        report.note("structural columns skipped: no structural-column family loaded")
+    for i, c in enumerate(columns):
         if col_sym is None:
             break
         level = levels.get(c["level"])
         if level is None:
             continue
+        src = "post %d" % i
         try:
-            doc.Create.NewFamilyInstance(
-                _xyz(c["point"], level.Elevation),
-                col_sym,
-                level,
-                DB.Structure.StructuralType.Column,
+            inst = doc.Create.NewFamilyInstance(
+                _xyz(c["point"], level.Elevation), col_sym, level, DB.Structure.StructuralType.Column
             )
-            summary.columns += 1
+            report.created("column", src, revit_id=_rid(inst))
         except Exception as exc:
-            summary.warn("column at %s: %s" % (c["point"], exc))
+            report.failed("column", src, str(exc))
 
     if framing and beam_sym is None:
-        summary.warn("structural framing skipped: no structural-framing family loaded")
-    for f in framing:
+        report.note("structural framing skipped: no structural-framing family loaded")
+    for i, f in enumerate(framing):
         if beam_sym is None:
             break
         level = levels.get(f["level"])
         z = level.Elevation if level else 0.0
+        src = "%s %d" % (f.get("role", "beam"), i)
         try:
             curve = DB.Line.CreateBound(_xyz(f["start"], z), _xyz(f["end"], z))
-            doc.Create.NewFamilyInstance(
+            inst = doc.Create.NewFamilyInstance(
                 curve, beam_sym, level, DB.Structure.StructuralType.Beam
             )
-            summary.framing += 1
+            report.created("framing", src, revit_id=_rid(inst))
         except Exception as exc:
-            summary.warn("framing %s->%s: %s" % (f["start"], f["end"], exc))
+            report.failed("framing", src, str(exc))
 
 
-def _build_porches(doc, data, levels, summary):
+def _build_porches(doc, data, levels, res, report):
     porches = [a for a in data.get("areas", []) if a.get("kind") == "porch"]
     if not porches:
         return
-    ftype = _first_floor_type(doc)
-    if ftype is None:
-        summary.warn("porches skipped: no floor type in project")
+    if res.floor is None:
+        report.note("porches skipped: no floor type in project")
+        for p in porches:
+            report.skipped("porch", p.get("id"), "no floor type")
         return
     level0 = levels.get(0)
     if level0 is None:
-        summary.warn("porches skipped: no ground level")
+        report.note("porches skipped: no ground level")
         return
     from System.Collections.Generic import List
 
     for p in porches:
         try:
             loop = _rect_loop(
-                float(p["x"]), float(p["y"]), float(p["width"]), float(p["length"]),
-                level0.Elevation,
+                float(p["x"]), float(p["y"]), float(p["width"]), float(p["length"]), level0.Elevation
             )
             loops = List[DB.CurveLoop]()
             loops.Add(loop)
-            DB.Floor.Create(doc, loops, ftype.Id, level0.Id)
-            summary.porches += 1
+            floor = DB.Floor.Create(doc, loops, res.floor.Id, level0.Id)
+            report.created("porch", p.get("id"), revit_id=_rid(floor))
         except Exception as exc:
-            summary.warn("porch %s: %s" % (p.get("id"), exc))
+            report.failed("porch", p.get("id"), str(exc))
 
 
-def _build_stairs(doc, data, levels, summary):
+def _build_stairs(doc, data, levels, report, dry_run):
     """Best-effort straight-run stairs, each in its own edit scope.
 
-    Run *after* the main transaction has committed (the levels must exist and
-    StairsEditScope manages its own transactions). Experimental: if the Stairs
-    API rejects the derived geometry, it's logged and the stair is left for the
-    user to model — the rest of the build is unaffected.
+    Runs after the main transaction (StairsEditScope manages its own
+    transactions). For a dry run the scope is cancelled instead of committed, so
+    the preview still exercises the API without persisting anything.
     """
     stairs = [a for a in data.get("areas", []) if a.get("kind") == "stair"]
     if not stairs:
@@ -459,14 +525,14 @@ def _build_stairs(doc, data, levels, summary):
         base = levels.get(meta.get("from_level", s.get("level", 0)))
         top = levels.get(meta.get("to_level"))
         if base is None or top is None:
-            summary.warn("stair %s: missing base/top level" % s.get("id"))
+            report.skipped("stair", s.get("id"), "missing base/top level")
             continue
 
         x, y, w, l = float(s["x"]), float(s["y"]), float(s["width"]), float(s["length"])
-        if l >= w:  # run north-south, full length, centred east-west
+        if l >= w:
             cx = x + w / 2.0
             p1, p2, run_w = DB.XYZ(cx, y, base.Elevation), DB.XYZ(cx, y + l, base.Elevation), w
-        else:  # run east-west
+        else:
             cy = y + l / 2.0
             p1, p2, run_w = DB.XYZ(x, cy, base.Elevation), DB.XYZ(x + w, cy, base.Elevation), l
 
@@ -487,63 +553,134 @@ def _build_stairs(doc, data, levels, summary):
             except Exception:
                 t.RollBack()
                 raise
-            scope.Commit(_SwallowFailures())
-            summary.stairs += 1
+            if dry_run:
+                scope.Cancel()
+            else:
+                scope.Commit(_SwallowFailures())
+            report.created("stair", s.get("id"), revit_id=_id_val(stairs_id))
         except Exception as exc:
             try:
                 if scope.IsActive:
                     scope.Cancel()
             except Exception:
                 pass
-            summary.warn(
-                "stair %s: could not build (left as a reference, model manually): %s"
-                % (s.get("id"), exc)
-            )
+            _logger.warning("stair %s: %s", s.get("id"), exc)
+            report.failed("stair", s.get("id"), "left as a reference, model manually: %s" % exc)
+
+
+# --- diagnostics -------------------------------------------------------------
+
+
+def diagnose(doc):
+    """Return a dict describing the environment and the active document's
+    resources — what the *Diagnostics* button surfaces, and the first thing to
+    check when a build doesn't produce what you expect."""
+    info = {}
+    try:
+        app = doc.Application
+        info["revit"] = "%s (%s) build %s" % (
+            app.VersionNumber, app.VersionName, app.VersionBuild
+        )
+    except Exception as exc:
+        info["revit"] = "? (%s)" % exc
+    info["document"] = getattr(doc, "Title", "?")
+    info["python"] = sys.version.split()[0]
+    try:
+        import pyrevit
+
+        info["pyrevit"] = getattr(pyrevit, "__version__", "?")
+    except Exception:
+        info["pyrevit"] = "?"
+    try:
+        import barndsl
+
+        info["barndsl"] = "importable (v%s)" % getattr(barndsl, "__version__", "?")
+    except Exception as exc:
+        info["barndsl"] = "NOT importable — use the JSON workflow (%s)" % exc
+
+    info["wall_types"] = [
+        "%s [%s]" % (_name(wt), _wall_function(wt)) for wt in _basic_wall_types(doc)
+    ]
+    info["floor_types"] = [_name(ft) for ft in _floor_types(doc)]
+    info["door_families"] = sorted(
+        set(s.Family.Name for s in _symbols(doc, DB.BuiltInCategory.OST_Doors))
+    )
+    info["window_families"] = sorted(
+        set(s.Family.Name for s in _symbols(doc, DB.BuiltInCategory.OST_Windows))
+    )
+    info["structural_column_families"] = sorted(
+        set(s.Family.Name for s in _symbols(doc, DB.BuiltInCategory.OST_StructuralColumns))
+    )
+    info["structural_framing_families"] = sorted(
+        set(s.Family.Name for s in _symbols(doc, DB.BuiltInCategory.OST_StructuralFraming))
+    )
+    levels = sorted(_collect(doc, DB.Level), key=lambda e: e.Elevation)
+    info["levels"] = ["%s @ %.2f ft" % (_name(e), e.Elevation) for e in levels]
+
+    # Readiness flags a tester can act on at a glance.
+    info["ready"] = {
+        "walls": bool(_basic_wall_types(doc)),
+        "doors": bool(info["door_families"]),
+        "windows": bool(info["window_families"]),
+        "floors": bool(info["floor_types"]),
+        "structural_columns": bool(info["structural_column_families"]),
+        "structural_framing": bool(info["structural_framing_families"]),
+    }
+    return info
 
 
 # --- entry point -------------------------------------------------------------
 
 
-def build(doc, data, structure=True, size_families=True, porches=True, stairs=True):
+def build(doc, data, options=None):
     """Build a Revit model from an exchange ``data`` dict in the active ``doc``.
 
-    ``data`` may be a raw dict (run through :func:`barndsl_revit.exchange.load`
-    here) or one already loaded. Returns a :class:`BuildSummary`. Walls,
-    openings, rooms, structure and porches go in one transaction (a single undo
-    step); stairs are built afterward in their own edit scopes.
+    ``data`` may be a raw dict (validated here) or one already loaded. ``options``
+    is a :class:`~barndsl_revit.report.BuildOptions` (defaults if omitted).
+    Returns a :class:`~barndsl_revit.report.BuildReport`.
+
+    Walls, openings, rooms, structure and porches run in one transaction;
+    **for a dry run that transaction is rolled back** (so the preview is real but
+    nothing persists). Stairs run afterward in their own edit scopes.
     """
+    if options is None:
+        options = _report.BuildOptions()
     data = _exchange.load(data)
-    summary = BuildSummary()
-    for problem in _exchange.validate(data):
-        summary.warn(problem)
+    report = _report.BuildReport(dry_run=options.dry_run)
+    report.problems = _exchange.validate(data)
 
-    ext_type, int_type = _pick_wall_types(doc)
-    if ext_type is None or int_type is None:
-        summary.warn("no basic wall type found in this project; nothing built")
-        return summary
+    res = _resolve_resources(doc, options, report)
+    if res.ext_wall is None or res.int_wall is None:
+        report.note("no basic wall type found in this project; nothing built")
+        return report
 
-    t = DB.Transaction(doc, "Build barndsl plan")
+    label = "Preview barndsl plan" if options.dry_run else "Build barndsl plan"
+    t = DB.Transaction(doc, label)
     t.Start()
     try:
-        levels = _ensure_levels(doc, data, summary)
-        walls = _build_walls(doc, data, levels, ext_type, int_type, summary)
-        _build_openings(doc, data, levels, walls, summary, size_families)
-        _build_rooms(doc, data, levels, summary)
-        if structure:
-            _build_structure(doc, data, levels, summary)
-        if porches:
-            _build_porches(doc, data, levels, summary)
-        t.Commit()
+        levels = _ensure_levels(doc, data, report)
+        walls = _build_walls(doc, data, levels, res, report)
+        _build_openings(doc, data, levels, walls, res, options, report)
+        _build_rooms(doc, data, levels, report)
+        if options.structure:
+            _build_structure(doc, data, levels, res, report)
+        if options.porches:
+            _build_porches(doc, data, levels, res, report)
     except Exception:
-        t.RollBack()
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
         raise
 
-    # Stairs manage their own transactions, so they run after the main commit
-    # (`levels` stays bound — function scope, and the commit above succeeded).
-    if stairs:
-        try:
-            _build_stairs(doc, data, levels, summary)
-        except Exception as exc:
-            summary.warn("stairs pass failed: %s" % exc)
+    if options.dry_run:
+        t.RollBack()
+    else:
+        t.Commit()
 
-    return summary
+    if options.stairs:
+        try:
+            _build_stairs(doc, data, levels, report, options.dry_run)
+        except Exception as exc:
+            report.note("stairs pass failed: %s" % exc)
+
+    _logger.info("barndsl %s", report.summary_line())
+    return report

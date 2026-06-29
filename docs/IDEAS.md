@@ -46,9 +46,16 @@ structural columns/framing, porch floor slabs (`Floor.Create`), and best-effort
 straight stairs (StairsEditScope, after the main transaction). One transaction for
 everything but stairs; defensive per-element error handling.
 
-Next: turned/multi-flight stairs; map room/wall/family choices to a Revit
-template's named types; round-trip edits from Revit back to the DSL (the exchange
-is one-way today).
+Debuggability (for in-Revit testing): a Revit-free `report.py` (BuildReport /
+BuildOptions, tested) records every element's outcome (created/skipped/failed +
+Revit id + reason) and renders markdown + a `*.buildlog.json`. *Build Plan* offers
+**Preview** (a real build, rolled back). A **Diagnostics** button reports the
+environment and the project's available wall/floor/door/window/structural types
+with readiness flags. A `config.json` sidecar maps each pass to **named** template
+types (auto-pick fallback).
+
+Next: turned/multi-flight stairs; round-trip edits from Revit back to the DSL (the
+exchange is one-way today).
 
 ## Agent aids
 
