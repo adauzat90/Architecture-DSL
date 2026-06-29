@@ -45,13 +45,16 @@ Shipped alongside the checks below:
 ## Candidate checks shipped — DONE
 Shipped as conservative `info` nudges (never block a compile):
 
-- ~~`ROOM_TIGHT`~~ — type-aware usable minimums (kitchen ~70 sq ft, full bath
-  ~35). `half_bath` is exempt; bedrooms stay covered by `BEDROOM_AREA`.
+- ~~`ROOM_TIGHT`~~ — type-aware usable minimums by area *and* shortest side
+  (kitchen ~70; full bath ~48 / ≥ 6 ft; half bath ~30 / ≥ 5 ft). Bedrooms stay
+  covered by `BEDROOM_AREA`. (Half-bath minimums added in the second review round.)
 - ~~`BATH_VENT`~~ — a windowless bathroom needs mechanical ventilation (R303.3).
   The DSL can't model fans, so it's a reminder, not a hard check.
 - ~~`HALL_DEADEND`~~ — a hallway opening onto ≤ 1 room isn't earning its
   footprint. Gated: a hall carrying an exterior entry (a foyer/vestibule) is
-  exempt, and a hall connecting two rooms (a pass-through) doesn't fire.
+  exempt, and a hall connecting two rooms (a pass-through) doesn't fire. Extended
+  in the second review round to also flag a hall that runs past its last doorway
+  into a blank wall (a dead-end stub).
 
 ## Widened `program` directive — DONE
 `NO_LAUNDRY` / `NO_DINING` were too soft to emit unconditionally (an eat-in
@@ -69,5 +72,33 @@ the `program` directive now lets the author declare the intent and the existing
 The clauses round-trip through `emit_dsl` and the builder takes
 `program(beds, baths, requires={...}, min_area=...)`.
 
-## Candidate checks held for later
-(none currently — the soft room-presence checks are now covered by `program`.)
+## Second review round — from the HTML design-review feedback — DONE
+Rules distilled from a pass through `tools/design_review` (every diagnostic that
+fired was confirmed correct; the value was in the notes). All ship as `info`
+nudges except `STAIR_BLOCKS_DOOR` (a real circulation defect → warning):
+
+- ~~`HALL_TIGHT`~~ — a hall at the 3 ft code minimum; 4 ft is comfortable.
+- ~~`HALL_DEADEND` stub~~ — a hall running past its last door (see above).
+- ~~`NO_BACK_DOOR`~~ — a home with a single people-door wants a front *and* a
+  back/side door (garage/porch doors don't count).
+- ~~`BATH_OVERSIZE`~~ — a private ensuite larger than the bedroom it serves.
+- ~~`STAIR_BLOCKS_DOOR`~~ (warning) — a stair footprint intruding on a doorway's
+  clear floor. ~~`STAIR_WALL`~~ — a stair marooned mid-room instead of along a wall.
+- ~~`DOOR_CENTERED`~~ — a swing door floating mid-wall; back it to a corner.
+- ~~`WINDOW_PARTITION`~~ — a window butting an interior partition at the exterior
+  wall (no room for framing/trim); pull it off the corner, space windows evenly.
+- ~~half-bath sizing~~ — full bath 6×8 / half bath 5×6 minimums (folded into
+  `ROOM_TIGHT` as area + shortest-side floors).
+
+The four gallery plans were re-tuned to model these (4 ft halls, corner-backed
+doors via `offset`, a back door each, no hall stub, the two-story stair run along
+a wall) and still pin 0/0/0.
+
+## Held for later — not modelable today
+- **Stair landings / turns.** The feedback asked stairs to "land halfway and
+  turn." We model a stair as a footprint + level span, not individual risers, so
+  a mid-flight landing/turn can't be verified — `STAIR_WALL` + `STAIR_RUN` are the
+  closest proxies. Would need a stepped stair model.
+- **Even window spacing.** `WINDOW_PARTITION` catches the concrete failure (a
+  window jammed against a partition); true even-spacing scoring across a façade is
+  more subjective and is left out for now.

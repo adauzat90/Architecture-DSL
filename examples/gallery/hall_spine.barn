@@ -1,8 +1,10 @@
 # 3-bed / 2-bath with a hallway spine — the classic barndo split: open
-# living/kitchen/dining up front, a full-width hall feeding the bedrooms.
-# Two secondary beds share the hall bath; the primary suite gets its own
-# ensuite and walk-in. Each bedroom has its own closet (with a door); the
-# two baths sit back-to-back on a shared wet wall.
+# living/kitchen/dining up front, a 4 ft hall feeding the bedrooms. Two
+# secondary beds share the hall bath; the primary suite gets its own ensuite
+# and walk-in. Each bedroom has its own closet (with a door); the two baths sit
+# back-to-back on a shared wet wall. Interior doors are backed to a corner
+# (offset) so each room keeps an unbroken wall to furnish, and a side door off
+# the dining gives the house a second way out.
 plan "Birch Hollow"
 envelope 68 x 32
 ceiling 10
@@ -13,34 +15,36 @@ room living:  living  at 0,0   size 26 x 15
 room kitchen: kitchen at 26,0  size 20 x 15
 room dining:  dining  at 46,0  size 22 x 15
 
-# --- the spine ---
-room hall: hallway at 0,15 size 68 x 3
+# --- the spine: 4 ft, ending at the master door (no dead-end stub) ---
+room hall: hallway at 0,15 size 62 x 4
 
 # --- secondary bedrooms + shared bath (west) ---
-room bed1:    bedroom  at 0,18   size 13 x 14
-room closet1: closet   at 13,18  size 4 x 14
-room bed2:    bedroom  at 17,18  size 13 x 14
-room closet2: closet   at 30,18  size 4 x 14
-room bath1:   bathroom at 34,18  size 8 x 14
+room bed1:    bedroom  at 0,19   size 13 x 13
+room closet1: closet   at 13,19  size 4 x 13
+room bed2:    bedroom  at 17,19  size 13 x 13
+room closet2: closet   at 30,19  size 4 x 13
+room bath1:   bathroom at 34,19  size 8 x 13
 
-# --- primary suite (east): ensuite backs onto the shared bath (wet wall) ---
-room mbath:   bathroom at 42,18  size 6 x 14
-room master:  bedroom  at 48,18  size 14 x 14
-room mcloset: closet   at 62,18  size 6 x 14
+# --- primary suite (east): ensuite backs onto the shared bath (wet wall);
+#     the walk-in fills the NE corner so the hall needn't run past it ---
+room mbath:   bathroom at 42,19  size 6 x 13
+room master:  bedroom  at 48,19  size 14 x 13
+room mcloset: closet   at 62,15  size 6 x 17
 
 open living - kitchen width 10
 open kitchen - dining width 10
 open living - hall width 4
-door hall - bed1 width 3
-door hall - bed2 width 3
-door hall - bath1 width 2.67
-door hall - master width 3
-door bed1 - closet1 width 2.5
-door bed2 - closet2 width 2.5
-door master - mbath width 2.67
-door master - mcloset width 2.5
+door hall - bed1 width 3 offset 0.5
+door hall - bed2 width 3 offset 0.5
+door hall - bath1 width 2.67 offset 0.5
+door hall - master width 3 offset 0.5
+door bed1 - closet1 width 2.5 offset 0.5
+door bed2 - closet2 width 2.5 offset 0.5
+door master - mbath width 2.67 offset 0.5
+door master - mcloset width 2.5 offset 0.5
 
 entry living south width 3 offset 20
+entry dining east width 3 offset 6
 window living south width 10 offset 2
 window kitchen south width 8 offset 6
 window dining south width 8 offset 6

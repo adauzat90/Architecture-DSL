@@ -273,6 +273,9 @@ envelope edge if it needs a real window.
 - `GARAGE_BEDROOM` — a `garage` opening directly into a **bedroom**. A garage
   must not open into a sleeping room (IRC R302.5.1) — buffer it with a mudroom or
   hall.
+- `STAIR_BLOCKS_DOOR` — a `stair` footprint intrudes on the clear floor in front
+  of a door, so you'd step off the flight straight into a swinging door. Place the
+  stair along a wall, clear of door approaches.
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
   `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
   — it's a contract check, not a code error — so it's a warning.
@@ -284,9 +287,28 @@ envelope edge if it needs a real window.
 - `BATH_DISTANCE` — keep a bath within a door or two of the bedrooms.
 - `WET_GROUP` — cluster wet rooms (bath/kitchen/laundry/utility) onto a shared
   plumbing wall; 3+ that share no walls means longer, costlier runs.
-- `NO_CLOSET` — a bedroom with no adjacent closet (per bedroom).
+- `NO_CLOSET` — a bedroom with no closet reached *by a door* from it.
 - `ROOM_PROPORTION` — a habitable room more elongated than ~3:1 is hard to
   furnish.
+- `ROOM_TIGHT` — a room below the floor its use needs: kitchen ~70, full bath ~48
+  (≥ 6 ft short side), half bath ~30 (≥ 5 ft) sq ft.
+- `HALL_TIGHT` — a hallway at the 3 ft code minimum; 4 ft is comfortable.
+- `HALL_DEADEND` — a hall that serves ≤ 1 room, **or** runs well past its last
+  doorway into a blank wall (a dead-end stub). Trim it back or put a room there.
+- `NO_BACK_DOOR` — a home with a single exterior door; add a back/side door (off
+  the kitchen, mudroom or laundry) for daily flow and a second way out.
+- `DOOR_CENTERED` — a swing door floating mid-wall; back it to a corner (`offset`)
+  so one side keeps an unbroken wall to furnish.
+- `DOOR_SIZE` — a swing door off the stock leaf sizes; use `open` for a wide
+  cased passage instead of a 96 in "door".
+- `WINDOW_PARTITION` — a window butting an interior partition where it meets the
+  exterior wall; pull it toward the centre or a building corner, and space windows
+  evenly.
+- `BED_SOUND` — two bedrooms share a wall; stack their closets on it to buffer
+  sound. `CLOSET_SHAPE` — a walk-in-sized closet shaped as a skinny strip.
+- `MASTER_ENSUITE` — 2+ full baths but none is a private ensuite.
+- `BATH_OVERSIZE` — an ensuite larger than the bedroom it serves.
+- `STAIR_WALL` — a stair marooned mid-room rather than run along a wall.
 - `GARAGE_NO_ENTRY` — a `garage` that abuts the house but has no interior
   people-door into it (you'd have to go outside to get in).
 - `AREA_UNUSED` — a lot of footprint is unallocated.
@@ -323,19 +345,20 @@ room kitchen: kitchen  east-of living    size 22 x 14
 room bath:    bathroom east-of kitchen   size 8 x 14
 room hall:    hallway  north-of kitchen  size 30 x 4
 room bed1:    bedroom  north-of hall     size 11 x 12
-room c1:      closet   east-of bed1      size 3 x 12
+room c1:      closet   east-of bed1      size 4 x 12
 room bed2:    bedroom  east-of c1        size 11 x 12
-room c2:      closet   east-of bed2      size 5 x 12
+room c2:      closet   east-of bed2      size 4 x 12
 
-door living - kitchen width 8
+open living - kitchen width 8                # cased opening, not a 96 in door
 door living - hall width 3
 door hall - bath width 2.67
-door hall - bed1 width 2.67
-door hall - bed2 width 2.67
-door bed1 - c1 width 2.5
-door bed2 - c2 width 2.5
+door hall - bed1 width 2.67 offset 0.5       # backed to a corner, not centred
+door hall - bed2 width 2.67 offset 0.5
+door bed1 - c1 width 2.5 offset 0.5
+door bed2 - c2 width 2.5 offset 0.5
 
 entry living south width 3 offset 8
+entry living west width 3 offset 24          # a back/side door — front + back
 
 window living west width 14 offset 8
 window kitchen south width 8 offset 6

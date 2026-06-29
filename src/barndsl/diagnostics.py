@@ -123,9 +123,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("HALL_WIDTH", E, "Hallway too narrow",
            "A hallway is below the 3 ft (36 in) minimum width (R311.6)."),
         _c("ROOM_TIGHT", I, "Room below a workable size",
-           "A room is smaller than the usable floor area its function needs "
-           "(kitchen ~70 sq ft, full bath ~35). Half-baths are exempt; bedrooms "
-           "are covered by BEDROOM_AREA."),
+           "A room is smaller than the usable floor its function needs — by area "
+           "(kitchen ~70, full bath ~48, half bath ~30 sq ft) or by shortest side "
+           "(full bath >= 6 ft, half bath >= 5 ft, so the fixtures fit across it). "
+           "Bedrooms are covered by BEDROOM_AREA."),
         # --- doors ----------------------------------------------------------
         _c("SELF_DOOR", E, "Door to self",
            "An interior door connects a room to itself."),
@@ -216,10 +217,36 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("BATH_VENT", I, "Windowless bathroom",
            "A bathroom has no exterior window, so it needs mechanical ventilation "
            "(IRC R303.3). The DSL can't model fans — confirm an exhaust fan."),
-        _c("HALL_DEADEND", I, "Hallway serves one room",
-           "A hallway opens onto at most one room, so it isn't earning its "
-           "footprint as circulation. A hall carrying an exterior entry (a foyer) "
-           "is exempt."),
+        _c("HALL_DEADEND", I, "Hallway dead end",
+           "A hallway opens onto at most one room (a 1-room foyer is exempt), or it "
+           "runs well past its last doorway into a blank wall — a dead-end stub. "
+           "Trim it back to its last door, or put a room at the dead end."),
+        _c("HALL_TIGHT", I, "Hallway tight",
+           "A hallway meets the 3 ft code minimum but is under the 4 ft that's "
+           "comfortable for two people or moving furniture."),
+        _c("NO_BACK_DOOR", I, "Only one exterior door",
+           "A home wants a front *and* a back door — a second exterior door (off "
+           "the kitchen, mudroom or laundry, on another wall) for daily flow and a "
+           "second way out. Garage/porch doors don't count."),
+        _c("BATH_OVERSIZE", I, "Ensuite larger than its bedroom",
+           "A private (ensuite) bath is larger than the bedroom it serves, a sign "
+           "the suite is mis-proportioned. A bath should be the same size or smaller."),
+        _c("STAIR_BLOCKS_DOOR", W, "Stair blocks a doorway",
+           "A stair's footprint intrudes on the clear floor in front of a door, so "
+           "you'd step off the stair straight into the doorway. Place the stair "
+           "along a wall, clear of door approaches."),
+        _c("STAIR_WALL", I, "Stair floats free of any wall",
+           "A stair sits in the middle of a room rather than along an exterior or "
+           "partition wall, where it would need railings all round and chops up the "
+           "floor. (Mid-flight landings/turns aren't modelled.)"),
+        _c("DOOR_CENTERED", I, "Door floats mid-wall",
+           "A swing door is centred on a wall with usable wall on both flanks; "
+           "backing it to a corner leaves one unbroken run to line with furniture. "
+           "Only un-positioned swing leaves are flagged."),
+        _c("WINDOW_PARTITION", I, "Window butts an interior wall",
+           "A window sits against an interior partition where it meets the exterior "
+           "wall — no room for framing/trim, and it reads off-balance. Pull it "
+           "toward the wall centre or a true building corner; space windows evenly."),
         _c("PRIVATE_PASSTHROUGH", W, "Routed through a private room",
            "A room is reachable only by passing through a bathroom or someone "
            "else's bedroom — a circulation defect."),

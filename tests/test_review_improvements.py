@@ -222,10 +222,21 @@ def test_room_tight_flags_small_kitchen_and_full_bath():
     assert "bath" in tight
 
 
-def test_room_tight_exempts_half_bath():
+def test_room_tight_flags_a_cramped_half_bath():
+    # A 4x4 (16 sq ft) powder room is below the ~30 sq ft / 5 ft-short-side floor.
     r = compile_source(_TIGHT_SRC.format(kw=6))
     tight = {d.room for d in r.infos if d.code == "ROOM_TIGHT"}
-    assert "powder" not in tight  # a powder room is fine small
+    assert "powder" in tight
+
+
+def test_room_tight_silent_for_a_workable_half_bath():
+    # 5x6 = 30 sq ft, short side 5 ft — a fine powder room.
+    src = _TIGHT_SRC.format(kw=10).replace(
+        "room powder: half_bath at 22,6  size 4 x 4",
+        "room powder: half_bath at 16,8  size 6 x 5",
+    )
+    tight = {d.room for d in compile_source(src).infos if d.code == "ROOM_TIGHT"}
+    assert "powder" not in tight
 
 
 def test_room_tight_silent_for_a_workable_kitchen():
@@ -1068,3 +1079,287 @@ window living west width 8 offset 4
 """
     svg = render_svg(compile_source(src).plan)
     assert " A " in svg  # _door_symbol draws a swing arc; exterior doors use it
+
+
+# ===========================================================================
+# Second review round — rules distilled from the HTML design-review feedback
+# ===========================================================================
+
+# --- HALL_TIGHT: 3 ft is legal but 4 ft is comfortable -----------------------
+
+_HALLW = """\
+plan "HallW"
+envelope 40 x 30
+ceiling 9
+room living: living  at 0,0 size 40 x 15
+room hall:   hallway at 0,15 size 40 x {w}
+room bed1:   bedroom at 0,{y}  size 16 x 12
+room bed2:   bedroom at 16,{y} size 16 x 12
+open living - hall width 4
+door hall - bed1 width 3 offset 0.5
+door hall - bed2 width 3 offset 0.5
+entry living south width 3 offset 4
+entry living west width 3 offset 4
+window living south width 12 offset 4
+window bed1 north width 5 offset 5
+window bed2 north width 5 offset 5
+"""
+
+
+def test_hall_tight_flags_a_three_foot_hall():
+    r = compile_source(_HALLW.format(w=3, y=18))
+    assert "HALL_TIGHT" in _codes(r, "info")
+    assert "HALL_WIDTH" not in _codes(r, "error")  # 3 ft is still legal
+
+
+def test_hall_tight_silent_at_four_feet():
+    r = compile_source(_HALLW.format(w=4, y=19))
+    assert "HALL_TIGHT" not in _codes(r, "info")
+
+
+# --- HALL_DEADEND: a stub running past the last doorway ----------------------
+
+_STUB = """\
+plan "Stub"
+envelope {ew} x 30
+ceiling 9
+room hall:   hallway at 0,0 size {hw} x 4
+room living: living  at 0,4 size 15 x 26
+room bed:    bedroom at 15,4 size 13 x 26
+door hall - living width 4 offset 1
+door hall - bed width 3 offset 1
+entry hall south width 3 offset 4
+window living west width 10 offset 8
+window bed north width 5 offset 5
+"""
+
+
+def test_hall_deadend_flags_a_stub_past_the_last_door():
+    # Hall runs to x=40 but the last room ends at x=28 — a 12 ft dead-end stub.
+    r = compile_source(_STUB.format(ew=40, hw=40))
+    deadends = [d for d in r.infos if d.code == "HALL_DEADEND"]
+    assert deadends and "past its last doorway" in deadends[0].message
+
+
+def test_hall_deadend_silent_when_trimmed_to_the_last_door():
+    r = compile_source(_STUB.format(ew=28, hw=28))
+    assert "HALL_DEADEND" not in _codes(r, "info")
+
+
+# --- NO_BACK_DOOR: a home wants a front and a back door ----------------------
+
+_BACK = """\
+plan "Back"
+envelope 30 x 24
+ceiling 9
+room living:  living  at 0,0  size 18 x 24
+room kitchen: kitchen at 18,0 size 12 x 24
+open living - kitchen width 8
+entry living south width 3 offset 4
+{extra}
+window living west width 10 offset 6
+window kitchen east width 6 offset 8
+"""
+
+
+def test_no_back_door_flags_a_single_entrance():
+    assert "NO_BACK_DOOR" in _codes(compile_source(_BACK.format(extra="")), "info")
+
+
+def test_no_back_door_silent_with_two_entrances():
+    r = compile_source(_BACK.format(extra="entry kitchen east width 3 offset 4"))
+    assert "NO_BACK_DOOR" not in _codes(r, "info")
+
+
+def test_garage_door_is_not_a_back_door():
+    # A vehicle door on the garage doesn't give the *house* a second way out.
+    src = """\
+plan "Garage"
+envelope 40 x 24
+ceiling 9
+room living: living at 0,0 size 22 x 24
+room garage: garage at 22,0 size 18 x 24
+door living - garage width 2.67
+entry living south width 3 offset 4
+entry garage south width 9 offset 4 no-egress
+window living west width 10 offset 6
+"""
+    assert "NO_BACK_DOOR" in _codes(compile_source(src), "info")
+
+
+# --- BATH_OVERSIZE: an ensuite bigger than its bedroom -----------------------
+
+_ENSUITE = """\
+plan "Suite"
+envelope 30 x 30
+ceiling 10
+room living:  living   at 0,0  size 30 x 12
+room hall:    hallway  at 0,12 size 30 x 4
+room master:  bedroom  at 0,16 size 10 x 14
+room mbath:   bathroom at 10,16 size {bx} x 14
+open living - hall width 4
+door hall - master width 3 offset 1
+door master - mbath width 2.67 offset 1
+{shared}
+entry living south width 3 offset 4
+entry living west width 3 offset 4
+window living south width 12 offset 4
+window master north width 5 offset 2
+"""
+
+
+def test_bath_oversize_flags_an_ensuite_bigger_than_its_bedroom():
+    # master 140 sq ft, ensuite 224 sq ft.
+    r = compile_source(_ENSUITE.format(bx=16, shared=""))
+    over = {d.room for d in r.infos if d.code == "BATH_OVERSIZE"}
+    assert "mbath" in over
+
+
+def test_bath_oversize_silent_for_a_smaller_ensuite():
+    r = compile_source(_ENSUITE.format(bx=6, shared=""))
+    assert "BATH_OVERSIZE" not in _codes(r, "info")
+
+
+def test_bath_oversize_ignores_a_shared_bath():
+    # The big bath also opens to the hall, so it isn't a private ensuite.
+    r = compile_source(_ENSUITE.format(bx=16, shared="door hall - mbath width 2.67 offset 1"))
+    assert "BATH_OVERSIZE" not in _codes(r, "info")
+
+
+# --- STAIR_BLOCKS_DOOR / STAIR_WALL ------------------------------------------
+
+_LVL = """\
+plan "Lvl"
+envelope 24 x 20
+ceiling 8
+room living: living   at 0,0  size 24 x 14
+room bath:   bathroom at 16,14 size 8 x 6
+room loft:   loft     at 0,0  size 24 x 14 level 1
+stair flight at {sx},{sy} size 4 x 11 from 0 to 1
+door living - bath width 2.67 offset 2
+entry living south width 3 offset 4
+window living south width 10 offset 6
+window bath east width 3 offset 1
+"""
+
+
+def test_stair_blocks_door_when_it_intrudes_on_a_doorway():
+    # Stair x17..21 sits in front of the living-bath door (x18..20.67).
+    r = compile_source(_LVL.format(sx=17, sy=2))
+    assert "STAIR_BLOCKS_DOOR" in _codes(r, "warning")
+
+
+def test_stair_blocks_door_silent_when_clear():
+    # Stair along the west wall, far from the east-side door.
+    r = compile_source(_LVL.format(sx=0, sy=2))
+    assert "STAIR_BLOCKS_DOOR" not in _codes(r, "warning")
+
+
+def test_stair_wall_flags_a_free_floating_flight():
+    r = compile_source(_LVL.format(sx=8, sy=2))  # marooned mid-living
+    assert "STAIR_WALL" in _codes(r, "info")
+
+
+def test_stair_wall_silent_against_a_wall():
+    r = compile_source(_LVL.format(sx=0, sy=2))  # flush to the west envelope wall
+    assert "STAIR_WALL" not in _codes(r, "info")
+
+
+# --- DOOR_CENTERED: back a swing door to a corner ----------------------------
+
+_DC = """\
+plan "DC"
+envelope 30 x 24
+ceiling 9
+room living: living  at 0,0  size 30 x 12
+room hall:   hallway at 0,12 size 30 x 4
+room bed:    bedroom at 0,16 size 16 x 8
+{conn}
+open living - hall width 4
+entry living south width 3 offset 4
+entry living west width 3 offset 4
+window living south width 12 offset 4
+window bed north width 5 offset 5
+"""
+
+
+def test_door_centered_flags_a_mid_wall_swing():
+    r = compile_source(_DC.format(conn="door hall - bed width 3"))
+    centred = {(d.room) for d in r.infos if d.code == "DOOR_CENTERED"}
+    assert centred  # the hall-bed door floats 6.5 ft from each corner
+
+
+def test_door_centered_cleared_by_an_offset():
+    r = compile_source(_DC.format(conn="door hall - bed width 3 offset 0.5"))
+    assert "DOOR_CENTERED" not in _codes(r, "info")
+
+
+def test_door_centered_exempts_a_cased_opening():
+    r = compile_source(_DC.format(conn="open hall - bed width 3"))
+    assert "DOOR_CENTERED" not in _codes(r, "info")
+
+
+# --- WINDOW_PARTITION: a window butting an interior wall ---------------------
+
+_WP = """\
+plan "WP"
+envelope 30 x 20
+ceiling 9
+room living:  living  at 0,0  size 15 x 20
+room kitchen: kitchen at 15,0 size 15 x 20
+open living - kitchen width 8
+entry living south width 3 offset 4
+entry kitchen south width 3 offset 4
+window {win}
+window kitchen north width 5 offset 5
+"""
+
+
+def test_window_partition_flags_a_window_against_a_partition():
+    # Window far edge lands exactly on the living-kitchen junction at x=15.
+    r = compile_source(_WP.format(win="living south width 5 offset 10"))
+    assert "WINDOW_PARTITION" in _codes(r, "info")
+
+
+def test_window_partition_silent_when_centred():
+    r = compile_source(_WP.format(win="living south width 5 offset 5"))
+    assert "WINDOW_PARTITION" not in _codes(r, "info")
+
+
+def test_window_partition_exempts_a_true_building_corner():
+    # Flush to x=0, but that's the building's SW corner, not a partition.
+    r = compile_source(_WP.format(win="living south width 5 offset 0"))
+    assert "WINDOW_PARTITION" not in _codes(r, "info")
+
+
+# --- ROOM_TIGHT short-side floor for a full bath -----------------------------
+
+
+def test_room_tight_flags_a_narrow_full_bath():
+    # 4 x 13 = 52 sq ft (over the 48 area floor) but only 4 ft across.
+    src = """\
+plan "Narrow"
+envelope 30 x 20
+ceiling 9
+room living: living   at 0,0  size 26 x 20
+room bath:   bathroom at 26,0 size 4 x 13
+door living - bath width 2.67
+entry living south width 3 offset 4
+entry living west width 3 offset 4
+window living south width 12 offset 4
+window bath east width 2 offset 5
+"""
+    tight = [d for d in compile_source(src).infos if d.code == "ROOM_TIGHT" and d.room == "bath"]
+    assert tight and "short side" in tight[0].message
+
+
+# --- all the new codes are catalogued ---------------------------------------
+
+
+def test_second_round_codes_are_registered():
+    for code in (
+        "HALL_TIGHT", "NO_BACK_DOOR", "BATH_OVERSIZE", "STAIR_BLOCKS_DOOR",
+        "STAIR_WALL", "DOOR_CENTERED", "WINDOW_PARTITION",
+    ):
+        assert code in REGISTRY
+        assert explain(code) and "Unknown" not in explain(code)
