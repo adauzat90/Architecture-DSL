@@ -55,6 +55,8 @@ def _ready_doc(**kw):
         doc.add_wall_type("Int", function=WallFunction.Interior)
     if kw.get("floor", True):
         doc.add_floor_type("Generic 12")
+    if kw.get("roof", True):
+        doc.add_roof_type("Gable Metal")
     if kw.get("doors", True):
         doc.add_family(BIC.OST_Doors, "Single-Flush")
     if kw.get("windows", True):
@@ -266,6 +268,74 @@ def test_porch_skipped_without_floor_type():
     doc = _ready_doc(floor=False)
     rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
     assert rep.count(status="created", kind="porch") == 0
+
+
+# --- slabs, grids, roof ------------------------------------------------------
+
+
+def test_floor_slabs_build():
+    doc = _ready_doc()
+    rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
+    # cedar_ridge is a single rectangle → one ground slab.
+    assert rep.count(status="created", kind="slab") == 1
+
+
+def test_slabs_skipped_without_floor_type():
+    doc = _ready_doc(floor=False)
+    rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
+    assert rep.count(status="created", kind="slab") == 0
+
+
+def _framed_exchange():
+    with open(os.path.join(EXAMPLES, "cedar_ridge.barn"), encoding="utf-8") as fh:
+        plan = compile_source(fh.read()).plan
+    plan.frame()
+    from barndsl import emit_dsl
+
+    plan = compile_source(emit_dsl(plan), name=plan.name).plan
+    return to_revit_model(plan).to_dict()
+
+
+def test_grids_build_from_a_frame():
+    data = _framed_exchange()
+    doc = _ready_doc()
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="grid") == len(data["grids"]) > 0
+    # Grid names are set from the labels.
+    grid_names = [g.Name for k, g in ((e[0], e[1]) for e in doc.created) if k == "grid"]
+    assert "1" in grid_names and "A" in grid_names
+
+
+def test_no_grids_without_a_frame():
+    doc = _ready_doc()
+    rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
+    assert rep.count(kind="grid") == 0
+
+
+def test_roof_builds_as_footprint_roof():
+    doc = _ready_doc()
+    rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
+    assert rep.count(status="created", kind="roof") == 1
+    assert any(k == "roof" for k, *_ in doc.created)
+
+
+def test_roof_skipped_without_roof_type():
+    doc = _ready_doc(roof=False)
+    rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
+    assert rep.count(status="created", kind="roof") == 0
+    assert any(r.kind == "roof" and r.status == "skipped" for r in rep.records)
+
+
+def test_slabs_grids_roof_can_be_disabled():
+    data = _framed_exchange()
+    doc = _ready_doc()
+    opts = report.BuildOptions(slabs=False, grids=False, roof=False)
+    rep = builder.build(doc, data, opts)
+    assert rep.count(kind="slab") == 0
+    assert rep.count(kind="grid") == 0
+    assert rep.count(kind="roof") == 0
+    # Walls etc. still built.
+    assert rep.count(status="created", kind="wall") > 0
 
 
 # --- stairs ------------------------------------------------------------------

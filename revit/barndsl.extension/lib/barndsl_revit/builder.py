@@ -221,6 +221,7 @@ class _Resources(object):
         self.floor = None
         self.column = None
         self.beam = None
+        self.roof_type = None
 
 
 def _resolve_resources(doc, options, report):
@@ -282,6 +283,12 @@ def _resolve_resources(doc, options, report):
     report.resources["door_family"] = res.door.Family.Name if res.door else "(none loaded)"
     report.resources["window_family"] = res.window.Family.Name if res.window else "(none loaded)"
     report.resources["floor_type"] = _name(res.floor) if res.floor else "(none)"
+
+    try:
+        res.roof_type = (_collect(doc, DB.RoofType) or [None])[0]
+    except Exception:
+        res.roof_type = None
+    report.resources["roof_type"] = _name(res.roof_type) if res.roof_type else "(none)"
     return res
 
 
@@ -517,6 +524,95 @@ def _stair_runs_for(s):
         cy = y + l / 2.0
         run = {"start": [x, cy], "end": [x + w, cy], "width": l}
     return [run], "straight", True
+
+
+def _build_slabs(doc, data, levels, res, report):
+    slabs = data.get("slabs", [])
+    if not slabs:
+        return
+    if res.floor is None:
+        report.note("floor slabs skipped: no floor type in project")
+        for s in slabs:
+            report.skipped("slab", "level %s" % s.get("level"), "no floor type")
+        return
+    from System.Collections.Generic import List
+
+    for s in slabs:
+        src = "level %s" % s.get("level")
+        level = levels.get(s["level"])
+        if level is None:
+            report.skipped("slab", src, "no level")
+            continue
+        try:
+            loop = _rect_loop(
+                float(s["x"]), float(s["y"]), float(s["width"]), float(s["length"]), level.Elevation
+            )
+            loops = List[DB.CurveLoop]()
+            loops.Add(loop)
+            floor = DB.Floor.Create(doc, loops, res.floor.Id, level.Id)
+            report.created("slab", src, revit_id=_rid(floor))
+        except Exception as exc:
+            report.failed("slab", src, str(exc))
+
+
+def _build_grids(doc, data, report):
+    grids = data.get("grids", [])
+    if not grids:
+        return
+    for g in grids:
+        label = str(g.get("label", "?"))
+        try:
+            line = DB.Line.CreateBound(
+                DB.XYZ(float(g["start"][0]), float(g["start"][1]), 0.0),
+                DB.XYZ(float(g["end"][0]), float(g["end"][1]), 0.0),
+            )
+            grid = DB.Grid.Create(doc, line)
+            try:
+                grid.Name = label
+            except Exception:
+                pass
+            report.created("grid", label, revit_id=_rid(grid))
+        except Exception as exc:
+            report.failed("grid", label, str(exc))
+
+
+def _build_roof(doc, data, levels, res, report):
+    """A footprint roof over the building (experimental).
+
+    Builds a flat footprint roof from the roof outline; the gable pitch the
+    exchange carries is left as a manual refinement (sloping the eave edges needs
+    the model-curve mapping a live Revit returns).
+    """
+    roof = data.get("roof")
+    if not roof:
+        return
+    if res.roof_type is None:
+        report.note("roof skipped: no roof type in project")
+        report.skipped("roof", "roof", "no roof type")
+        return
+    level = levels.get(roof.get("top_level", 0))
+    if level is None:
+        report.skipped("roof", "roof", "no top level")
+        return
+    try:
+        arr = DB.CurveArray()
+        for seg in roof.get("outline", []):
+            (x1, y1), (x2, y2) = seg
+            arr.Append(
+                DB.Line.CreateBound(
+                    DB.XYZ(float(x1), float(y1), level.Elevation),
+                    DB.XYZ(float(x2), float(y2), level.Elevation),
+                )
+            )
+        result = doc.Create.NewFootPrintRoof(arr, level, res.roof_type)
+        roof_el = result[0] if isinstance(result, tuple) else result
+        report.created(
+            "roof", "roof", revit_id=_rid(roof_el),
+            message="footprint roof; gable pitch is a manual refinement",
+        )
+    except Exception as exc:
+        _logger.warning("roof: %s", exc)
+        report.failed("roof", "roof", "experimental: %s" % exc)
 
 
 def _build_stairs(doc, data, levels, report, dry_run):
@@ -877,8 +973,14 @@ def build(doc, data, options=None):
         _build_rooms(doc, data, levels, report)
         if options.structure:
             _build_structure(doc, data, levels, res, report)
+        if options.slabs:
+            _build_slabs(doc, data, levels, res, report)
         if options.porches:
             _build_porches(doc, data, levels, res, report)
+        if options.grids:
+            _build_grids(doc, data, report)
+        if options.roof:
+            _build_roof(doc, data, levels, res, report)
     except Exception:
         if t.HasStarted() and not t.HasEnded():
             t.RollBack()

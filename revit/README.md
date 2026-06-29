@@ -105,6 +105,9 @@ model. Use it to shake a plan out against a project template before committing.
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
 | `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
+| `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
+| `grids` | Structural grid lines (`Grid.Create`) from a placed `frame`: numbered (`1, 2, …`) along the bents, lettered (`A, B, …`) across the eaves and any interior post line. None without a frame. |
+| `roof` | A footprint roof (`NewFootPrintRoof`) over the building outline (**experimental** — the gable pitch the exchange carries is a manual refinement). |
 | `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
 | `areas` (stairs) | The flights the core planned for the footprint — a single **straight** run, or a **switchback** (two flights + an automatic landing) when the straight run won't fit — built via the Stairs component API. An overrun (neither fits) is built straight and flagged. Experimental: falls back to a note if the Stairs API rejects the geometry. |
 
@@ -172,6 +175,11 @@ back to the auto-pick with a note in the report.
   and *that* is unit-tested; the Revit instantiation of those flights is what a
   real Revit is still needed to confirm. If the Stairs API rejects the geometry,
   the stair is left for you to model (the rest of the build is fine).
+- **The roof is a flat footprint roof.** Its outline/ridge/pitch are computed by
+  the core's `roof_plan` (tested), but the builder lays down a flat footprint roof
+  and leaves the gable pitch as a manual refinement — sloping the eave edges needs
+  the model-curve mapping only a live Revit returns. For an L/T/U footprint the
+  outline is the bounding rectangle.
 - Wall centrelines sit on the barndsl room-rectangle edges; Revit applies each
   wall type's thickness about that centreline. For exact interior dimensions,
   set the wall **Location Line** to a finish face, or model with thin types.
@@ -210,13 +218,15 @@ Everything that *can* be tested without Revit is. The Revit-free modules are
 covered directly: `tests/test_revit_exchange.py` (validate against real core
 output), `tests/test_revit_report.py` (counts, dry-run wording, markdown/JSON,
 config round-trip), `tests/test_revit_naming.py` (the name→type/id heuristics),
-and `tests/test_revit_stairs.py` (the stair-flight planner).
+`tests/test_revit_stairs.py` (the stair-flight planner), and
+`tests/test_revit_model_extras.py` (floor slabs, structural grids, gable roof).
 
 `builder.py` itself is exercised against a **fake Revit API** (`tests/revit_fakes.py`
 supplies the DB/pyRevit/Stairs/`System` shapes) in `tests/test_revit_builder.py`:
 the wall-type pick, opening hosting, family **sizing** (duplicate-per-size), the
-**dry-run rollback**, **named overrides**, structure/porch/stair passes,
-`diagnose`, and `read_model`'s round-trip. These verify the builder *drives the
-API correctly* — only a running Revit confirms Revit does the right thing with
-the calls, so still validate in-place with **Preview** + the **build log**, and
-attach the `*.buildlog.json` and **Diagnostics** output to any issue.
+**dry-run rollback**, **named overrides**, structure/slab/porch/grid/roof/stair
+passes (including the switchback → two runs + landing), `diagnose`, and
+`read_model`'s round-trip. These verify the builder *drives the API correctly* —
+only a running Revit confirms Revit does the right thing with the calls, so still
+validate in-place with **Preview** + the **build log**, and attach the
+`*.buildlog.json` and **Diagnostics** output to any issue.

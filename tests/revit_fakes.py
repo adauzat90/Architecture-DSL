@@ -210,6 +210,27 @@ class FloorType(FakeElement):
         self.IsFoundationSlab = foundation
 
 
+class RoofType(FakeElement):
+    pass
+
+
+class Grid(FakeElement):
+    @staticmethod
+    def Create(doc, line):
+        g = Grid("grid", doc)
+        g.line = line
+        doc.created.append(("grid", g))
+        return g
+
+
+class CurveArray:
+    def __init__(self):
+        self.curves = []
+
+    def Append(self, c):
+        self.curves.append(c)
+
+
 class Family:
     def __init__(self, name, ids_provider):
         self.Name = name
@@ -343,6 +364,12 @@ class _Creator:
         self.doc.created.append(("room", rm))
         return rm
 
+    def NewFootPrintRoof(self, curve_array, level, roof_type):
+        roof = FakeElement("roof", self.doc)
+        self.doc.created.append(("roof", roof))
+        # Real Revit returns (roof, modelCurveMapping); the builder handles a tuple.
+        return (roof, FakeElement("mapping", self.doc))
+
 
 class _Application:
     VersionNumber = "2025"
@@ -405,6 +432,7 @@ class FakeDocument:
         self.levels = []
         self.wall_types = []
         self.floor_types = []
+        self.roof_types = []
         self.symbols = {}  # category -> [FamilySymbol]
         self.placed_rooms = []
         self.instances = {}  # category -> [FamilyInstance-ish]
@@ -452,6 +480,11 @@ class FakeDocument:
         self.floor_types.append(ft)
         return ft
 
+    def add_roof_type(self, name):
+        rt = RoofType(name, self)
+        self.roof_types.append(rt)
+        return rt
+
     def add_symbol(self, symbol, category):
         self.symbols.setdefault(category, []).append(symbol)
         return symbol
@@ -483,6 +516,8 @@ class FakeDocument:
             return list(self.wall_types)
         if cls is FloorType:
             return list(self.floor_types)
+        if cls is RoofType:
+            return list(self.roof_types)
         if cls is FamilySymbol:
             return list(self.symbols.get(cat, []))
         if cat == BuiltInCategory.OST_Rooms:
@@ -500,8 +535,9 @@ def _make_db_module():
     for obj in (
         BuiltInParameter, BuiltInCategory, WallKind, WallFunction, StorageType,
         FailureProcessingResult, IFailuresPreprocessor, Structure, XYZ, UV, Line,
-        CurveLoop, Element, Level, WallType, FloorType, Family, FamilySymbol, Wall,
-        Floor, FamilyInstance, FilteredElementCollector, Transaction,
+        CurveLoop, CurveArray, Element, Level, WallType, FloorType, RoofType, Grid,
+        Family, FamilySymbol, Wall, Floor, FamilyInstance, FilteredElementCollector,
+        Transaction,
     ):
         setattr(db, obj.__name__, obj)
     return db

@@ -67,6 +67,9 @@ MIN_STAIR_WIDTH = 3.0
 #: A comfortable flight width when the footprint allows more than the minimum.
 NICE_STAIR_WIDTH = 3.5
 
+#: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
+DEFAULT_ROOF_PITCH = 4.0 / 12.0
+
 
 # --- exchange dataclasses ----------------------------------------------------
 
@@ -184,6 +187,17 @@ class RevitFraming:
 
 
 @dataclass
+class RevitSlab:
+    """A floor slab on a level, from a footprint rectangle."""
+
+    level: int
+    x: float
+    y: float
+    width: float
+    length: float
+
+
+@dataclass
 class RevitArea:
     """A non-enclosed reference outline (porch slab / stair footprint)."""
 
@@ -213,6 +227,9 @@ class RevitModel:
     columns: list[RevitColumn]
     framing: list[RevitFraming]
     areas: list[RevitArea]
+    slabs: list[RevitSlab]
+    grids: list[dict]
+    roof: dict | None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -292,6 +309,9 @@ class RevitModel:
                 ],
             },
             "areas": [asdict(a) for a in self.areas],
+            "slabs": [asdict(s) for s in self.slabs],
+            "grids": list(self.grids),
+            "roof": self.roof,
         }
 
     def to_json(self, indent: int | None = 2) -> str:
@@ -558,6 +578,92 @@ def plan_stair_runs(x: float, y: float, width: float, length: float, rise: float
     }
 
 
+# --- roof & structural grids -------------------------------------------------
+
+
+def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PITCH) -> dict:
+    """A gable-roof plan over the building's bounding box (pure, no Revit).
+
+    The ridge runs the **long** axis at the centre; the two eaves are the long
+    edges. ``rise`` is the ridge height above the eaves for the given ``pitch``
+    (rise:run) over half the short span. The outline is the bounding rectangle —
+    a simplification for L/T/U footprints (a gable over the bounds), which the
+    builder can refine. Returns ``{top_level, pitch, rise, ridge, eaves,
+    outline, gable_axis}``; coordinates are ``[x, y]`` in feet.
+    """
+    minx, miny, maxx, maxy = plan.bounds()
+    w, l = maxx - minx, maxy - miny
+    long_is_y = l >= w
+    span = min(w, l)
+    rise = (span / 2.0) * pitch
+    if long_is_y:
+        mid = (minx + maxx) / 2.0
+        ridge = {"start": [mid, miny], "end": [mid, maxy]}
+        eaves = [
+            {"start": [minx, miny], "end": [minx, maxy]},
+            {"start": [maxx, miny], "end": [maxx, maxy]},
+        ]
+        gable_axis = "y"
+    else:
+        mid = (miny + maxy) / 2.0
+        ridge = {"start": [minx, mid], "end": [maxx, mid]}
+        eaves = [
+            {"start": [minx, miny], "end": [maxx, miny]},
+            {"start": [minx, maxy], "end": [maxx, maxy]},
+        ]
+        gable_axis = "x"
+    outline = [
+        [[minx, miny], [maxx, miny]],
+        [[maxx, miny], [maxx, maxy]],
+        [[maxx, maxy], [minx, maxy]],
+        [[minx, maxy], [minx, miny]],
+    ]
+    return {
+        "top_level": top_level,
+        "pitch": pitch,
+        "rise": rise,
+        "ridge": ridge,
+        "eaves": eaves,
+        "outline": outline,
+        "gable_axis": gable_axis,
+    }
+
+
+def structural_grids(plan: Barndominium) -> list[dict]:
+    """Structural grid lines derived from a placed ``frame`` (pure, no Revit).
+
+    Bents become **numbered** grids (``1, 2, …``) along the building's long axis,
+    each coincident with its bent; the eave walls plus any interior support-post
+    line become **lettered** grids (``A, B, …``) across. Empty when no frame is
+    placed. Each grid is ``{label, start, end}`` with ``[x, y]`` endpoints.
+    """
+    bents = [b for b in plan.beams if b.role == "frame"]
+    if not bents:
+        return []
+    minx, miny, maxx, maxy = plan.bounds()
+    long_is_y = (maxy - miny) >= (maxx - minx)
+    grids: list[dict] = []
+
+    def station(b):
+        return (b.y1 + b.y2) / 2.0 if long_is_y else (b.x1 + b.x2) / 2.0
+
+    for i, b in enumerate(sorted(bents, key=station), start=1):
+        grids.append({"label": str(i), "start": [b.x1, b.y1], "end": [b.x2, b.y2]})
+
+    letters = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    if long_is_y:
+        coords = {round(minx, 4), round(maxx, 4)}
+        coords.update(round(p.x, 4) for p in plan.posts if p.role == "interior" and minx < p.x < maxx)
+        for i, cx in enumerate(sorted(coords)):
+            grids.append({"label": letters[i % len(letters)], "start": [cx, miny], "end": [cx, maxy]})
+    else:
+        coords = {round(miny, 4), round(maxy, 4)}
+        coords.update(round(p.y, 4) for p in plan.posts if p.role == "interior" and miny < p.y < maxy)
+        for i, cy in enumerate(sorted(coords)):
+            grids.append({"label": letters[i % len(letters)], "start": [minx, cy], "end": [maxx, cy]})
+    return grids
+
+
 # --- the public entry points -------------------------------------------------
 
 
@@ -734,12 +840,35 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             )
         )
 
+    # Floor slabs: the footprint at ground, each upper level's room extent above.
+    slabs: list[RevitSlab] = []
+    for sx, sy, sw, sl in plan.footprint_sections():
+        slabs.append(RevitSlab(0, float(sx), float(sy), float(sw), float(sl)))
+    for lvl in level_indexes:
+        if lvl == 0:
+            continue
+        rs = [r for r in plan.rooms if getattr(r, "level", 0) == lvl]
+        if not rs:
+            continue
+        x0 = min(r.x for r in rs)
+        y0 = min(r.y for r in rs)
+        slabs.append(
+            RevitSlab(lvl, float(x0), float(y0),
+                      float(max(r.x2 for r in rs) - x0), float(max(r.y2 for r in rs) - y0))
+        )
+
+    grids = structural_grids(plan)
+    roof = roof_plan(plan, max(level_indexes)) if plan.rooms else None
+
     return RevitModel(
         name=plan.name,
         ceiling_height=float(height),
         envelope_width=float(plan.envelope_width),
         envelope_length=float(plan.envelope_length),
         wings=[(float(w.x), float(w.y), float(w.width), float(w.length)) for w in plan.wings],
+        slabs=slabs,
+        grids=grids,
+        roof=roof,
         levels=levels,
         walls=walls,
         openings=openings,

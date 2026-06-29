@@ -17,7 +17,10 @@ FAILED = "failed"
 STATUSES = (CREATED, SKIPPED, FAILED)
 
 #: The element kinds the builder reports on, in display order.
-KINDS = ("level", "wall", "door", "window", "room", "column", "framing", "porch", "stair")
+KINDS = (
+    "level", "wall", "door", "window", "room", "column", "framing",
+    "slab", "porch", "stair", "grid", "roof",
+)
 
 #: Names of the optional type/family overrides a build can specify, so the same
 #: list drives :meth:`BuildOptions.from_dict`, ``to_dict`` and the config docs.
@@ -30,7 +33,10 @@ _OVERRIDE_KEYS = (
     "column_family",
     "beam_family",
 )
-_FLAG_KEYS = ("structure", "size_families", "porches", "stairs", "dry_run", "verbose")
+_FLAG_KEYS = (
+    "structure", "size_families", "porches", "stairs", "slabs", "grids", "roof",
+    "dry_run", "verbose",
+)
 
 
 class BuildOptions(object):
@@ -44,6 +50,9 @@ class BuildOptions(object):
         size_families=True,
         porches=True,
         stairs=True,
+        slabs=True,
+        grids=True,
+        roof=True,
         dry_run=False,
         verbose=False,
         exterior_wall_type=None,
@@ -58,6 +67,9 @@ class BuildOptions(object):
         self.size_families = bool(size_families)
         self.porches = bool(porches)
         self.stairs = bool(stairs)
+        self.slabs = bool(slabs)
+        self.grids = bool(grids)
+        self.roof = bool(roof)
         self.dry_run = bool(dry_run)
         self.verbose = bool(verbose)
         self.exterior_wall_type = exterior_wall_type

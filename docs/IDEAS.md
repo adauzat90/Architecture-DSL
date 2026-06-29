@@ -75,9 +75,25 @@ tests) covers wall-type selection, opening hosting, family sizing, dry-run
 rollback, named overrides, structure/porch/stair passes, `diagnose`, and
 `read_model`. Everything that can be tested without a live Revit now is.
 
-Next (needs a live Revit, not unit-testable here): validate the builder against
+Building completion: the exchange + builder now also produce **floor slabs**
+(per level), **structural grids** (`structural_grids` — numbered bents + lettered
+eaves/interior-post lines from a placed frame), and a **footprint roof** (`roof_plan`
+— ridge along the long axis, pitch/rise; the builder lays a flat footprint roof,
+gable slope a manual refinement). All three have pure tested cores
+(`tests/test_revit_model_extras.py`) and harness-tested builder passes.
+
+Next — deliverables & workflow (Tier 2):
+- **Idempotent re-build / sync** — track created elements and update/delete on
+  re-run instead of stacking duplicates (the diff is unit-testable; the apply
+  side needs a live Revit).
+- Room/door/window **tags** + dimension strings.
+- Floor-plan **views** + a **sheet** per level.
+- Native **schedules** (door/window/room/area) surfacing the takeoff.
+
+Still needs a live Revit (not unit-testable here): validate the builder against
 Revit 2025; harden the experimental reader (wall-type/level inference,
-non-rectangular rooms).
+non-rectangular rooms); the gable-roof slope and turned/multi-flight stair
+landings.
 
 ## Agent aids
 

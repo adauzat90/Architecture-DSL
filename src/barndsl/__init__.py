@@ -65,6 +65,8 @@ from .revit import (
     exchange_to_dsl,
     exchange_to_plan,
     plan_stair_runs,
+    roof_plan,
+    structural_grids,
     to_revit_json,
     to_revit_model,
 )
@@ -124,6 +126,8 @@ __all__ = [
     "exchange_to_dsl",
     "RevitImportError",
     "plan_stair_runs",
+    "roof_plan",
+    "structural_grids",
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 
