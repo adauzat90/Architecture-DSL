@@ -117,8 +117,9 @@ placed don't match a declared `program` line).
 (a bedroom with no closet reached *by a door* — an abutting one with no door
 doesn't count), `MASTER_ENSUITE` (2+ full baths but no bedroom has a
 private ensuite), `BED_SOUND` (two bedrooms share a wall — stack their closets
-back-to-back on it to buffer sound), `ROOM_TIGHT` (kitchen < ~70 or full bath <
-~35 sq ft), `BATH_VENT`
+back-to-back on it to buffer sound), `CLOSET_SHAPE` (a closet big enough for a
+walk-in but shaped as a long skinny strip), `ROOM_TIGHT` (kitchen < ~70 or full
+bath < ~35 sq ft), `BATH_VENT`
 (a windowless bath — confirm a fan), `HALL_DEADEND` (a hall serving ≤ 1 room),
 `ROOM_PROPORTION` (a habitable room more elongated than ~3:1), `DOOR_SIZE` (a
 swing door that isn't a stock leaf width — interior 30/32/36 in, exterior 36),

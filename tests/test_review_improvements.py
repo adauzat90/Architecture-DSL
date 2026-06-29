@@ -1003,3 +1003,47 @@ window living north width 6 offset 4
 
 def test_bed_sound_is_registered():
     assert "BED_SOUND" in REGISTRY
+
+
+# --- CLOSET_SHAPE: walk-in vs long, skinny closet ---------------------------
+
+
+def _closet_codes(width, length):
+    plan = (
+        barndominium("Closet").envelope(width=40, length=30).ceiling(9)
+        .add_room("bed", "bedroom", x=0, y=0, width=14, length=14)
+        .add_room("c", "closet", x=14, y=0, width=width, length=length)
+        .connect("bed", "c", width=2.5)
+        .add_room("living", "living", x=0, y=14, width=40, length=16)
+        .connect("bed", "living", width=2.67)
+        .entrance("living", "south", width=3, offset=10)
+        .add_window("bed", "west", width=4, offset=4)
+        .add_window("living", "south", width=12, offset=4)
+    )
+    return {i.code for i in validate(plan).infos}
+
+
+def test_long_skinny_closet_suggests_a_walkin():
+    assert "CLOSET_SHAPE" in _closet_codes(2.5, 12)   # 30 sq ft, 4.8:1
+
+
+def test_square_walkin_closet_is_fine():
+    assert "CLOSET_SHAPE" not in _closet_codes(6, 6)   # a walk-in
+
+
+def test_small_reach_in_closet_is_exempt():
+    assert "CLOSET_SHAPE" not in _closet_codes(2, 8)   # 16 sq ft — a normal reach-in
+
+
+def test_wide_shallow_closet_is_exempt():
+    assert "CLOSET_SHAPE" not in _closet_codes(10, 3)  # 3.3:1 — a wide reach-in
+
+
+def test_walkable_long_closet_is_exempt():
+    assert "CLOSET_SHAPE" not in _closet_codes(4, 12)  # 4 ft deep — a long walk-in
+
+
+def test_closet_shape_is_registered():
+    from barndsl.diagnostics import REGISTRY as REG
+
+    assert "CLOSET_SHAPE" in REG

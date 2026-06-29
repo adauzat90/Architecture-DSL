@@ -49,6 +49,8 @@ NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
+CLOSET_WALKIN_ASPECT = 4.0  # a closet skinnier than this (long:short) is "long skinny"
+MIN_WALKIN_AREA = 24.0  # a closet this big is worth shaping as a walk-in, not a strip
 
 # Emergency-escape opening minimums (IRC R310). The area is the net *clear*
 # opening; we approximate it from the modelled width × (head − sill), which is
@@ -1394,6 +1396,31 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                         room=ba.id,
                         hint="Buffer them: stack a closet on each side of the shared "
                         "wall (back-to-back), or put a hall/closet between the bedrooms.",
+                    )
+                )
+
+    # 8c. Walk-in vs long, skinny closet: a closet with the floor area for a
+    #     walk-in but shaped as a narrow strip wastes that floor. Small reach-ins
+    #     (under the walk-in area) and wide/shallow closets (under the aspect
+    #     bar) are fine and exempt.
+    for room in plan.rooms:
+        if room.type is RoomType.CLOSET:
+            short = room.min_dimension
+            long = max(room.width, room.length)
+            if (
+                short > 1e-6
+                and room.area >= MIN_WALKIN_AREA
+                and long / short >= CLOSET_WALKIN_ASPECT
+            ):
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "CLOSET_SHAPE",
+                        f"Closet '{room.id}' is {_f(room.width)} x {_f(room.length)} "
+                        f"({long / short:.1f}:1) — a long, skinny closet.",
+                        room=room.id,
+                        hint="With this much floor a walk-in is more usable — aim for a "
+                        "more square footprint (under ~3:1), at least 4 ft deep.",
                     )
                 )
 

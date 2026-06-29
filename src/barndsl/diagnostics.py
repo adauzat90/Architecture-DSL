@@ -229,6 +229,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("WET_GROUP", I, "Scattered plumbing",
            "Three or more wet rooms (bath/kitchen/laundry/utility) share no "
            "walls, spreading plumbing runs out."),
+        _c("CLOSET_SHAPE", I, "Long, skinny closet",
+           "A closet has the floor area for a walk-in but is shaped as a narrow "
+           "strip (>= 4:1). A more square footprint (under ~3:1, >= 4 ft deep) is "
+           "a usable walk-in. Small reach-ins and wide/shallow closets are exempt."),
         _c("BED_SOUND", I, "Bedrooms share a party wall",
            "Two bedrooms share a wall directly, so sound carries between them. "
            "Stack each bedroom's closet on the shared wall (back-to-back) to buffer "
