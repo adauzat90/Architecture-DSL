@@ -290,6 +290,16 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "The rooms placed don't match the declared `program`: exact bed/bath "
            "counts, an at-least requirement for another room type (e.g. "
            "`1 laundry`), or a minimum conditioned `area`."),
+        # --- structural frame (the `frame` directive) -----------------------
+        _c("POST_OBSTRUCT", I, "Support post in open floor",
+           "An auto-placed interior support post (needed where the beam span "
+           "exceeds the configured limit) lands out in a room's open floor rather "
+           "than on a wall line. Align a partition/closet/island to it, or widen "
+           "`span` so no interior support is needed."),
+        _c("BAY_WIDE", I, "Wide frame bay spacing",
+           "The frame's bay spacing is wider than typical residential post-frame "
+           "(~12 ft on centre). Legal with adequately sized members, but it asks "
+           "more of the beams and posts — lower `bay` or have them engineered."),
         # --- agent layer ----------------------------------------------------
         _c("DESIGN", I, "Architect's critique",
            "A design-quality suggestion folded in from the agent's architect review."),

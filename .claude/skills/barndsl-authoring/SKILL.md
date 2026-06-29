@@ -138,6 +138,15 @@ doors *at* the hall ends so the corridor terminates at doorways, not blank walls
 (`HALL_DEADEND` is measured from the last doorway). `barndsl explain <CODE>`
 prints the rationale for any code.
 
+**Structure (optional).** Add a `frame [bay <ft>] [span <ft>] [post <in>]
+[no-ridge]` line and the compiler auto-places the post-and-beam skeleton (bents
+≤ `bay` ft o.c. along the long axis, each spanning the short axis, a ridge over
+them, interior support posts where the span exceeds `span`). It draws over the
+plan and adds a structural takeoff. Info nudges: `BAY_WIDE` (bay > ~12 ft o.c.),
+`POST_OBSTRUCT` (an interior post stranded in open floor — align a partition to
+it). It's a layout aid, not an engineered design. `barndsl build FILE --frame`
+frames a plan that has no `frame` line.
+
 > Checks are approximate, loosely IRC-based — not a substitute for a licensed
 > designer or the AHJ.
 

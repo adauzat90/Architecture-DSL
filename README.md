@@ -55,6 +55,7 @@ entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
+frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 ```
 
 `<placement>` is absolute — `at <x>,<y>` — or **relative**: `east-of`,
@@ -213,6 +214,40 @@ print(out.unsatisfied)        # adjacencies the packing couldn't honour
 print(emit_dsl(out.plan))     # → DSL source, ready to compile/render
 ```
 
+## Structure: automatic beam placement
+
+A barndominium is a **post-and-beam** metal building, and the app can place that
+skeleton for you. Add a `frame` directive and the compiler derives the structural
+grid from the footprint — deterministically, no API key:
+
+```barn
+frame bay 12 span 40 post 6
+```
+
+* **Bents (frames)** are spaced no more than `bay` feet on centre along the
+  building's long axis; each is a beam/truss spanning the short axis between the
+  two eave walls.
+* A **ridge** member runs the length over the bents (`no-ridge` omits it).
+* **Posts** land at every bent on the eave walls, up the gable end walls at the
+  same bay spacing, and at the corners.
+* When the span exceeds `span` feet, an **interior support post** line is added
+  to split the beam; the validator flags one that strands in a room's open floor
+  (`POST_OBSTRUCT`) so you can align a partition to it.
+
+`barndsl build plan.barn --out plan.svg` draws the bents, ridge, and posts over
+the floor plan, and the summary panel reports the bent count, post count, and
+beam linear feet for the takeoff. No `frame` directive in the source? `barndsl
+build plan.barn --frame` places a default frame for you. From Python it's
+`plan.frame(bay=12, span=40, post=inches(6))`, or `place_frame(plan, spec)`.
+
+```bash
+barndsl build examples/frame_demo.barn --out frame_demo.svg   # frame over the plan
+barndsl build examples/cedar_ridge.barn --frame --out cr.svg  # auto-frame any plan
+```
+
+> The frame is a **layout aid, not an engineered design** — member sizing,
+> connections, foundations and lateral bracing are the structural engineer's job.
+
 ## The agent: a compile-fix loop
 
 The agent *writes architecture in the DSL*, compiles it, and feeds the compiler's
@@ -287,6 +322,7 @@ src/barndsl/
   diagnostics.py # registry of every diagnostic code (powers `explain`)
   layout.py      # auto-layout v1: greedy abutment from an adjacency brief
   layout2.py     # auto-layout 2.0: space-filling `fill` engine (bands + slice + rectangular dual)
+  structure.py   # auto post-and-beam frame placement (the `frame` directive)
   render.py      # annotated 2D SVG renderer
   agent.py       # Claude write → compile → critique → revise loop
   cli.py         # `barndsl` command
@@ -296,6 +332,7 @@ examples/
   birch_run.brief    # an adjacency brief for `barndsl layout`
   pinwheel.brief     # a non-sliceable brief that exercises the rectangular dual
   lshape.barn        # an L-shaped (rectilinear) footprint via `wing`
+  frame_demo.barn    # a plan with the auto-placed post-and-beam `frame`
   gallery/           # four verified-clean (0/0/0) worked plans to few-shot from
 tests/             # no API key required
 ```

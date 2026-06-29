@@ -3,6 +3,22 @@
 Parked ideas for improving barndsl, especially **agent plan-generation quality**.
 Not yet scheduled; capture here so they aren't lost.
 
+## Structural frame placement — DONE
+Shipped: a `frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]` directive that
+auto-places the post-and-beam skeleton over the footprint (`src/barndsl/structure.py`,
+`place_frame`). Bents are spaced ≤ `bay` ft o.c. along each footprint block's long
+axis, span the short axis, get eave/gable/corner posts and (unless `no-ridge`) a
+ridge member; interior support posts split a span over `span` ft. Deterministic and
+round-trips through `emit`. The renderer overlays bents/ridge/posts and the panel
+reports a structural takeoff (bent/post counts, beam linear feet); `metrics()` gains
+`post_count`/`beam_count`/`frame_count`/`beam_linear_ft`. Two info nudges,
+`BAY_WIDE` and `POST_OBSTRUCT`. `barndsl build FILE --frame` frames a plan with no
+directive. Explicitly a layout aid, not an engineered design.
+
+Possible follow-ups: feed `beam_linear_ft` into the roadmap's cost estimator;
+engineered member-sizing tables (span vs. section); lateral-bracing / shear-wall
+hints; honour an explicit interior bearing wall as a post line.
+
 ## Agent aids
 
 ### ~~Worked-example gallery (highest-leverage non-check aid)~~ — DONE

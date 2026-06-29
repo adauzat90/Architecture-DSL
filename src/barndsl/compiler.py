@@ -21,6 +21,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
+    frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 
 ``<placement>`` is ``at <x>,<y>`` (absolute), ``east-of|west-of|north-of|
 south-of <room>`` (abut an already-defined room), or one of each to pin a corner.
@@ -35,13 +36,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .elements import Barndominium, Direction, RoomType
+from .elements import Barndominium, Direction, FrameSpec, RoomType, inches
 from .validation import Issue, Severity, ValidationReport, validate
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "note", "program", "room", "door",
-    "open", "entry", "window", "porch", "stair"
+    "open", "entry", "window", "porch", "stair", "frame"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -100,6 +101,12 @@ Statements:
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
         # room on each level so it links them (and makes the upper floor reachable).
+  frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]
+        # auto-place the post-and-beam structural frame over the footprint: bents
+        # spaced <= bay ft along the long axis (default 12), each spanning the short
+        # axis, interior support posts where that span exceeds <span> ft (default
+        # 40), a ridge member over them (no-ridge omits it). post = nominal section
+        # in inches (default 6). A layout aid, not an engineered design.
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -797,6 +804,41 @@ def _parse_statement(
                 "BAD_LEVEL", str(exc), sid_tok.col, end_col=sid_tok.end_col,
                 hint="A stair connects two different levels, e.g. `from 0 to 1`.",
             )
+    elif key == "frame":
+        # `frame [bay <ft>] [span <ft>] [post <in>] [ridge|no-ridge]`.
+        # Defaults match FrameSpec; placement runs after parse (place_frame).
+        bay, span, post, ridge = 12.0, 40.0, inches(6), True
+        while c.peek() is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "bay":
+                bay = c.number("bay spacing")
+            elif opt == "span":
+                span = c.number("max beam span")
+            elif opt == "post":
+                post = inches(c.number("post size in inches"))
+            elif opt == "ridge":
+                ridge = True
+            elif opt in ("no-ridge", "noridge"):
+                ridge = False
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown frame option '{opt}'.",
+                    c.toks[c.i - 1].col,
+                    hint="Options: bay <ft>, span <ft>, post <in>, no-ridge.",
+                    end_col=c.toks[c.i - 1].end_col,
+                )
+        if bay <= 0 or span <= 0 or post <= 0:
+            raise _ParseError(
+                "BAD_NUMBER",
+                "frame bay/span/post must be positive.",
+                kw.col,
+                hint="e.g. `frame bay 12 span 40 post 6`.",
+                end_col=kw.end_col,
+            )
+        # Set the spec now; place the structure after the whole file parses (so
+        # the envelope/wings are known regardless of statement order).
+        plan.frame_spec = FrameSpec(bay, span, post, ridge, lineno, kw.col, kw.end_col)
     else:
         raise _ParseError(
             "UNKNOWN_STMT",
@@ -968,6 +1010,13 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
     # program that doesn't parse. Fix syntax first.
     if any(d.severity is Severity.ERROR for d in diagnostics):
         return CompileResult(None, diagnostics, source)
+
+    # Derive the structural frame (if requested) before checks, so the validator
+    # and renderer see the placed posts/beams.
+    if plan.frame_spec is not None:
+        from .structure import place_frame
+
+        place_frame(plan)
 
     report: ValidationReport = validate(plan)
     for iss in report.issues:

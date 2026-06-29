@@ -1,0 +1,59 @@
+# Frame Demo — Cedar Ridge with the structural post-and-beam frame placed
+# automatically by the `frame` directive. Build it to see the bents, ridge, and
+# posts drawn over the floor plan:
+#   barndsl compile examples/frame_demo.barn --metrics
+#   barndsl build   examples/frame_demo.barn --out frame_demo.svg
+# See README → "Structure: automatic beam placement".
+
+plan "Frame Demo"
+envelope 60 x 40
+ceiling 12
+note "3 bed / 1 bath with an auto-placed post-and-beam frame."
+
+# Auto post-and-beam frame: bents every <=12 ft along the 60 ft length, each
+# spanning the 40 ft width (= the 40 ft single-span limit, so no interior posts),
+# with a ridge over the bents. A layout aid — member sizing is the engineer's job.
+frame bay 12 span 40 post 6
+
+# --- Open living core (south-west) ---
+room great_room: living  at 0,0   size 28 x 26
+room dining:     dining   at 28,0  size 18 x 14
+room kitchen:    kitchen  at 28,14 size 18 x 12
+
+# --- Shop / garage bay (full-height east) ---
+room shop: shop at 46,0 size 14 x 40
+
+# --- Hallway spine ---
+room hall: hallway at 0,26 size 46 x 3
+
+# --- Bedrooms + bath (north) ---
+room master_bed: bedroom  at 0,29  size 16 x 11
+room bed_2:      bedroom  at 16,29 size 12 x 11
+room bed_3:      bedroom  at 28,29 size 10 x 11
+room bath:       bathroom at 38,29 size 8 x 11
+
+# --- Interior circulation ---
+open great_room - dining width 10
+open dining - kitchen width 8
+open great_room - hall width 4
+door hall - master_bed width 2.67
+door hall - bed_2 width 2.67
+door hall - bed_3 width 2.67
+door hall - bath width 2.67
+
+# --- Entrances ---
+entry great_room south width 3 offset 20
+entry shop south width 10 offset 2 no-egress
+
+# --- Glazing ---
+window great_room west width 6 offset 4
+window great_room west width 6 offset 16
+window great_room south width 8 offset 8
+window dining south width 8 offset 2
+window master_bed north width 5 offset 5
+window bed_2 north width 4 offset 4
+window bed_3 north width 4 offset 3
+window bath north width 3 offset 2
+
+# --- Covered front porch (outside the envelope) ---
+porch front_porch at 0,-8 size 28 x 8 covered
