@@ -56,6 +56,9 @@ class RenderConfig:
     panel_width: float = 240.0
     gutter: float = 28.0
     font: str = "Helvetica, Arial, sans-serif"
+    #: Print each room's W×L dimensions under its label (skipped for rooms too
+    #: small to fit the extra line legibly).
+    show_room_dims: bool = True
 
 
 def render_svg(plan: Barndominium, config: RenderConfig | None = None) -> str:
@@ -68,6 +71,46 @@ def save_svg(plan: Barndominium, path: str, config: RenderConfig | None = None) 
     svg = render_svg(plan, config)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(svg)
+    return path
+
+
+#: Raster/vector targets beyond SVG, each needing the optional ``cairosvg`` extra.
+RASTER_FORMATS = ("png", "pdf")
+
+
+def save_render(
+    plan: Barndominium,
+    path: str,
+    fmt: str | None = None,
+    config: RenderConfig | None = None,
+) -> str:
+    """Render ``plan`` to ``path`` as SVG, PNG, or PDF.
+
+    ``fmt`` defaults to the file extension. PNG/PDF need the optional ``cairosvg``
+    dependency (``pip install 'barndsl[raster]'``); a clear ImportError is raised
+    if it's missing rather than failing deep in the converter.
+    """
+    fmt = (fmt or path.rsplit(".", 1)[-1]).lower()
+    if fmt == "svg":
+        return save_svg(plan, path, config)
+    if fmt not in RASTER_FORMATS:
+        raise ValueError(
+            f"unsupported render format {fmt!r}; use one of: svg, "
+            + ", ".join(RASTER_FORMATS)
+        )
+    try:
+        import cairosvg  # type: ignore
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise ImportError(
+            f"{fmt.upper()} output needs cairosvg — install it with "
+            "`pip install 'barndsl[raster]'` (or `pip install cairosvg`)."
+        ) from exc
+
+    svg = render_svg(plan, config).encode("utf-8")
+    if fmt == "png":
+        cairosvg.svg2png(bytestring=svg, write_to=path)
+    else:  # pdf
+        cairosvg.svg2pdf(bytestring=svg, write_to=path)
     return path
 
 
@@ -252,8 +295,17 @@ class _Renderer:
             self._rect(x, y, w, h, fill=ROOM_COLORS.get(r.type, "#f0f0f0"), stroke=WALL, sw=1.5)
             cx = self.sx(r.center[0])
             cy = self.sy(r.center[1])
-            self._text(cx, cy - 4, r.display_name, size=12, weight="bold")
-            self._text(cx, cy + 11, f"{r.area:.0f} sq ft", size=10, fill="#555555")
+            # With dimensions, lift the label so name / size / area stack evenly.
+            dims = self.c.show_room_dims and w >= 64 and h >= 52
+            if dims:
+                self._text(cx, cy - 11, r.display_name, size=12, weight="bold")
+                self._text(
+                    cx, cy + 3, f"{r.width:g}′ × {r.length:g}′", size=9, fill="#777777"
+                )
+                self._text(cx, cy + 16, f"{r.area:.0f} sq ft", size=10, fill="#555555")
+            else:
+                self._text(cx, cy - 4, r.display_name, size=12, weight="bold")
+                self._text(cx, cy + 11, f"{r.area:.0f} sq ft", size=10, fill="#555555")
 
     def _draw_structure(self, level: int = 0):
         """Overlay the post-and-beam frame: beam centrelines + solid posts.

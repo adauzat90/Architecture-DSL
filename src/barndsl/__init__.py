@@ -58,7 +58,15 @@ from .layout2 import (
     parse_brief2,
     solve_layout2,
 )
-from .render import RenderConfig, render_svg, save_svg
+from .dxf import save_dxf, to_dxf
+from .render import RenderConfig, render_svg, save_render, save_svg
+from .schedule import (
+    door_rows,
+    room_rows,
+    schedules_csv,
+    schedules_markdown,
+    window_rows,
+)
 from .revit import (
     RevitImportError,
     RevitModel,
@@ -116,7 +124,17 @@ __all__ = [
     # rendering
     "render_svg",
     "save_svg",
+    "save_render",
     "RenderConfig",
+    # schedules (room/door/window, no Revit)
+    "schedules_markdown",
+    "schedules_csv",
+    "room_rows",
+    "door_rows",
+    "window_rows",
+    # DXF (CAD interchange)
+    "to_dxf",
+    "save_dxf",
     # Revit exchange (lowering to a Revit-shaped model + JSON)
     "to_revit_model",
     "to_revit_json",
