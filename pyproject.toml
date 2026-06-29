@@ -37,6 +37,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so tests can import the `tools` package (it lives
+# at the root, not under src/, so it isn't installed). Without this, the bare
+# `pytest` console script CI uses can't import it (only `python -m pytest` would).
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py310"
