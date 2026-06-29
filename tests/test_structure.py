@@ -151,8 +151,66 @@ def test_post_obstruct_info_for_a_stranded_interior_post():
 
 
 def test_structure_codes_are_registered():
-    for code in ("POST_OBSTRUCT", "BAY_WIDE"):
+    for code in ("POST_OBSTRUCT", "BAY_WIDE", "POST_IN_OPENING"):
         assert code in REGISTRY
+
+
+def test_post_in_opening_flags_a_window_over_a_post():
+    # 60 ft / 12 ft bay → a post at x=12 on the south wall; a window spanning
+    # x=8..16 there stands on it.
+    src = """\
+plan "Clash"
+envelope 60 x 40
+ceiling 12
+frame bay 12 span 40 post 6
+room a: living at 0,0 size 60 x 40
+entry a south width 3 offset 30
+window a south width 8 offset 8
+"""
+    r = compile_source(src)
+    clash = [d for d in r.warnings if d.code == "POST_IN_OPENING"]
+    assert clash and clash[0].room == "a"
+
+
+def test_post_at_a_jamb_does_not_flag():
+    # A window whose edge lands on a post (x=12) is fine — that's how an opening
+    # is framed. Window x=12..20 has its jamb on the post, nothing inside it.
+    src = """\
+plan "Jamb"
+envelope 60 x 40
+ceiling 12
+frame bay 12 span 40 post 6
+room a: living at 0,0 size 60 x 40
+entry a south width 3 offset 30
+window a south width 8 offset 12
+"""
+    r = compile_source(src)
+    assert "POST_IN_OPENING" not in {d.code for d in r.warnings}
+
+
+def test_post_in_opening_flags_an_exterior_door():
+    src = """\
+plan "DoorClash"
+envelope 60 x 40
+ceiling 12
+frame bay 12 span 40 post 6
+room a: living at 0,0 size 60 x 40
+entry a south width 6 offset 9
+window a north width 4 offset 4
+"""
+    r = compile_source(src)
+    clash = [d for d in r.warnings if d.code == "POST_IN_OPENING"]
+    assert clash and "exterior door" in clash[0].message
+
+
+def test_frame_demo_has_no_post_window_conflicts():
+    from pathlib import Path
+
+    from barndsl import compile_file
+
+    demo = Path(__file__).resolve().parent.parent / "examples" / "frame_demo.barn"
+    r = compile_file(str(demo))
+    assert "POST_IN_OPENING" not in {d.code for d in r.warnings}
 
 
 def test_no_frame_means_no_structure_and_no_structural_infos():

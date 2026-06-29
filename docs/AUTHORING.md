@@ -264,10 +264,13 @@ What it derives, per footprint block (so an L/T/U `wing` plan frames each block)
 
 `barndsl build` draws the bents (solid), ridge (dashed), and posts (solid
 squares) over the plan, and the summary panel lists the bent/post counts and beam
-linear feet. Two info nudges: `BAY_WIDE` (a bay wider than ~12 ft o.c.) and
-`POST_OBSTRUCT` (an interior post stranded in a room's open floor — align a
-partition, closet, or island to it). To frame a plan that has no `frame` line,
-`barndsl build plan.barn --frame`.
+linear feet. Checks: `BAY_WIDE` (info — a bay wider than ~12 ft o.c.),
+`POST_OBSTRUCT` (info — an interior post stranded in a room's open floor; align a
+partition, closet, or island to it), and `POST_IN_OPENING` (**warning** — a post
+lands inside a window or exterior door; the post grid is fixed, so put openings in
+the bays *between* posts — a post at the opening's jamb is fine, only one inside it
+warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
+--frame`.
 
 > The frame is a **layout aid, not an engineered design.** It schedules a sane
 > post-and-beam grid for drawings and a rough takeoff; member sizing, connections,

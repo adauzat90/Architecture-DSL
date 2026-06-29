@@ -296,6 +296,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "exceeds the configured limit) lands out in a room's open floor rather "
            "than on a wall line. Align a partition/closet/island to it, or widen "
            "`span` so no interior support is needed."),
+        _c("POST_IN_OPENING", W, "Post inside a window/door",
+           "An auto-placed structural post coincides with a window or exterior "
+           "door opening — you can't frame an opening through a column. Shift the "
+           "opening along its wall into a clear bay (between posts), or change the "
+           "`frame bay` spacing so no post lands on it. A post at the opening's "
+           "jamb is fine (that's how it's framed); only a post inside it flags."),
         _c("BAY_WIDE", I, "Wide frame bay spacing",
            "The frame's bay spacing is wider than typical residential post-frame "
            "(~12 ft on centre). Legal with adequately sized members, but it asks "

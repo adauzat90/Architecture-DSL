@@ -11,9 +11,11 @@ axis, span the short axis, get eave/gable/corner posts and (unless `no-ridge`) a
 ridge member; interior support posts split a span over `span` ft. Deterministic and
 round-trips through `emit`. The renderer overlays bents/ridge/posts and the panel
 reports a structural takeoff (bent/post counts, beam linear feet); `metrics()` gains
-`post_count`/`beam_count`/`frame_count`/`beam_linear_ft`. Two info nudges,
-`BAY_WIDE` and `POST_OBSTRUCT`. `barndsl build FILE --frame` frames a plan with no
-directive. Explicitly a layout aid, not an engineered design.
+`post_count`/`beam_count`/`frame_count`/`beam_linear_ft`. Checks: `BAY_WIDE` and
+`POST_OBSTRUCT` (info), and `POST_IN_OPENING` (warning — a post landing inside a
+window/door, since the post grid is fixed and openings go in the bays between
+posts). `barndsl build FILE --frame` frames a plan with no directive. Explicitly a
+layout aid, not an engineered design.
 
 Possible follow-ups: feed `beam_linear_ft` into the roadmap's cost estimator;
 engineered member-sizing tables (span vs. section); lateral-bracing / shear-wall

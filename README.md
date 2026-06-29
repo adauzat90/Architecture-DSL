@@ -233,6 +233,10 @@ frame bay 12 span 40 post 6
 * When the span exceeds `span` feet, an **interior support post** line is added
   to split the beam; the validator flags one that strands in a room's open floor
   (`POST_OBSTRUCT`) so you can align a partition to it.
+* The post grid is the fixed discipline, so windows and doors belong in the
+  **bays between posts**. A window or exterior door that a post lands inside is
+  flagged (`POST_IN_OPENING`) — shift the opening into a clear bay (a post at the
+  opening's jamb is fine; only one *inside* it warns).
 
 `barndsl build plan.barn --out plan.svg` draws the bents, ridge, and posts over
 the floor plan, and the summary panel reports the bent count, post count, and

@@ -2144,6 +2144,44 @@ def _validate_structure(plan: Barndominium, add) -> None:
                 )
                 break  # one note per post is enough
 
+    # A post standing inside a window/door opening can't be framed — you can't run
+    # a structural column through the glass. The post grid is the fixed discipline,
+    # so flag the opening to be shifted into a clear bay (between posts).
+    openings = [(w, "window") for w in plan.windows]
+    openings += [(d, "exterior door") for d in plan.exterior_doors]
+    for obj, kind in openings:
+        room = plan.room(obj.room)
+        if room is None or getattr(room, "level", 0) != 0:
+            continue
+        x1, y1, x2, y2 = opening_endpoints(room, obj.wall, obj.offset, obj.width)
+        horizontal = obj.wall in (Direction.NORTH, Direction.SOUTH)
+        wall_line = y1 if horizontal else x1
+        lo, hi = (
+            (min(x1, x2), max(x1, x2)) if horizontal else (min(y1, y2), max(y1, y2))
+        )
+        for p in plan.posts:
+            on_line = p.y if horizontal else p.x
+            along = p.x if horizontal else p.y
+            # Coincident with the wall and *inside* the clear opening (a post at the
+            # jamb is how an opening is framed, so endpoints don't count).
+            if abs(on_line - wall_line) <= 1e-6 and lo + 1e-6 < along < hi - 1e-6:
+                oloc = dict(loc)
+                if getattr(obj, "line", None) is not None:
+                    oloc = {"line": obj.line, "col": obj.col, "end_col": obj.end_col}
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "POST_IN_OPENING",
+                        f"A structural post at {p.x:g},{p.y:g} stands inside the "
+                        f"{kind} on '{obj.room}'s {obj.wall.value} wall.",
+                        room=obj.room,
+                        hint="Shift the opening along its wall into a clear bay "
+                        "(between posts), or change `frame bay` so no post lands on it.",
+                        **oloc,
+                    )
+                )
+                break  # one note per opening
+
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:
     has_egress_door = any(

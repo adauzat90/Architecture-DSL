@@ -45,11 +45,11 @@ door hall - bath width 2.67
 entry great_room south width 3 offset 20
 entry shop south width 10 offset 2 no-egress
 
-# --- Glazing ---
+# --- Glazing (windows sit in the bays *between* posts; posts are every 12 ft) ---
 window great_room west width 6 offset 4
-window great_room west width 6 offset 16
-window great_room south width 8 offset 8
-window dining south width 8 offset 2
+window great_room west width 6 offset 12
+window great_room south width 8 offset 2
+window dining south width 6 offset 10
 window master_bed north width 5 offset 5
 window bed_2 north width 4 offset 4
 window bed_3 north width 4 offset 3
