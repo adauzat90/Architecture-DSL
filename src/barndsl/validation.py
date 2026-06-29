@@ -682,7 +682,7 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                 elif north_fits:
                     sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
                 else:
-                    sug = f"shrink one of them or enlarge the envelope"
+                    sug = "shrink one of them or enlarge the envelope"
                 # A collision is often a relative-anchor chain pushing a room onto
                 # one already placed — surface that so the fix is re-anchoring, not
                 # guessing at a shrink.

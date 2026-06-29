@@ -19,7 +19,7 @@ import io
 from dataclasses import dataclass
 from typing import Callable
 
-from .elements import Barndominium, RoomType
+from .elements import Barndominium
 from .validation import exterior_walls
 
 

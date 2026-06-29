@@ -25,6 +25,8 @@ raster = ["cairosvg>=2.7"]
 dev = [
     "pytest>=8.0",
     "anthropic>=0.49",
+    "ruff>=0.6",
+    "mypy>=1.10",
 ]
 
 [project.scripts]
@@ -35,3 +37,32 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+# Pyflakes (F) catches real defects — unused imports, undefined names, dead
+# bindings — and is the primary reason this gate exists. The pycodestyle (E/W)
+# rules cover obvious style slips. We deliberately leave a couple of pervasive,
+# low-value rules off rather than churn the geometry code:
+#   E741  "ambiguous variable name" — `l` reads as *length* throughout the
+#         coordinate math (x, y, w, l), a domain convention, not a hazard.
+#   E731  "lambda assignment" — used locally as small, named comparators.
+#   E501  "line too long" — the DSL reference tables (docstrings) and the
+#         embedded HTML/CSS/JS in tools/design_review.py are intentionally wide;
+#         reflowing them hurts readability for no real gain.
+select = ["F", "E", "W"]
+ignore = ["E741", "E731", "E501"]
+
+[tool.mypy]
+# Type-checking is informational for now: the codebase is fully annotated but
+# has a backlog of ~130 type errors (pydantic dynamics, narrowing gaps). CI runs
+# mypy as a non-blocking job so the backlog is visible without gating merges;
+# the intent is to ratchet `strict`-ness up as the backlog is paid down.
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+files = ["src/barndsl"]

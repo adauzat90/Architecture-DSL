@@ -526,7 +526,6 @@ class _Renderer:
                 self._text(cx, cy, f"{s.display_name} ↓{s.from_level}", size=9, fill="#8a7f63")
 
     def _draw_dimensions(self):
-        scale = self.c.scale
         # Overall dimensions span the whole footprint (incl. wings), not just the
         # primary envelope block.
         fx0, fy0, fx1, fy1 = self.plan.bounds()

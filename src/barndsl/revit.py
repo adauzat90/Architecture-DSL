@@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass, field
 from .elements import (
     Barndominium,
     Direction,
+    Room,
     feet,
     inches,
 )
