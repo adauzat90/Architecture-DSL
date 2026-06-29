@@ -287,6 +287,33 @@ def test_stairs_dry_run_cancels_scope():
     assert doc.stair_cancels == 1 and doc.stair_commits == 0
 
 
+def test_switchback_stair_builds_two_runs_and_a_landing():
+    # A 7x7 stair footprint can't fit a straight 9 ft climb, so the planner folds
+    # it into a switchback — and the builder should instantiate two runs + a landing.
+    dsl = """\
+plan "SB"
+envelope 24 x 20
+ceiling 9
+room living: living at 0,0 size 17 x 20
+room well: hallway at 17,0 size 7 x 20
+room loft: loft at 17,0 size 7 x 20 level 1
+stair flight at 17,0 size 7 x 7 from 0 to 1
+open living - well width 4
+entry living south width 3 offset 8
+window living south width 6 offset 2
+window loft south width 4 offset 1
+"""
+    data = _exchange(dsl)
+    stair_area = [a for a in data["areas"] if a["kind"] == "stair"][0]
+    assert stair_area["meta"]["plan"]["layout"] == "switchback"
+
+    doc = _ready_doc(two_levels=True)
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="stair") == 1
+    assert sum(1 for k, *_ in doc.created if k == "stair_run") == 2
+    assert sum(1 for k, *_ in doc.created if k == "stair_landing") == 1
+
+
 def test_stairs_disabled():
     doc = _ready_doc(two_levels=True)
     opts = report.BuildOptions(stairs=False)
