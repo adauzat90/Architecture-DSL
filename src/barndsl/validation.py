@@ -76,6 +76,10 @@ DOOR_CLEARANCE_DEPTH = 3.0
 #: A window whose edge lands this close to an interior-partition corner collides
 #: with that wall's framing/trim — pull it toward the centre or the building corner.
 WINDOW_WALL_CLEAR = 0.5
+#: Exterior dimensions should land on this module (ft) for efficient material use.
+BUILD_MODULE = 3.0
+#: Two door swings overlapping by less than this (ft) are treated as just grazing.
+SWING_CLASH_EPS = 0.02
 
 # Emergency-escape opening minimums (IRC R310). The area is the net *clear*
 # opening; we approximate it from the modelled width × (head − sill), which is
@@ -293,6 +297,99 @@ def _stair_against_wall(plan: Barndominium, s) -> bool:
             if abs(sy - ry) <= tol and min(s.x2, r.x2) - max(s.x, r.x) > tol:
                 return True
     return False
+
+
+def _off_module(value: float, module: float = BUILD_MODULE, tol: float = 1e-6) -> bool:
+    """Is ``value`` not a whole multiple of ``module``?"""
+    return abs(value - round(value / module) * module) > tol
+
+
+def _swing_sgn(door, a: Room, b: Room, edge) -> float | None:
+    """Mirror the renderer: +1/-1 for the side the leaf swings into, or None to
+    fall back to the keep-inside-the-envelope heuristic."""
+    into = door.swing_into
+    room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
+    if room is None:
+        return None
+    cx, cy = room.center
+    if edge.orientation == "v":
+        return 1.0 if cx > edge.pos else -1.0
+    return 1.0 if cy > edge.pos else -1.0
+
+
+def _swing_region(
+    plan: Barndominium, orientation: str, ox: float, oy: float, w: float,
+    hinge_far: bool, sgn: float | None, samples: int = 4,
+) -> list[tuple[float, float]]:
+    """The quarter-disc the leaf sweeps, as a small convex polygon (pie slice),
+    in plan coordinates — matching :meth:`SVGRenderer._door_symbol`."""
+    if orientation == "v":
+        if sgn is None:
+            sgn = 1.0 if (ox + w) <= plan.envelope_width else -1.0
+        hinge = (ox, oy + w) if hinge_far else (ox, oy)
+        latch = (ox, oy) if hinge_far else (ox, oy + w)
+        tip = (ox + sgn * w, hinge[1])
+    else:
+        if sgn is None:
+            sgn = 1.0 if (oy + w) <= plan.envelope_length else -1.0
+        hinge = (ox + w, oy) if hinge_far else (ox, oy)
+        latch = (ox, oy) if hinge_far else (ox + w, oy)
+        tip = (hinge[0], oy + sgn * w)
+    a0 = math.atan2(latch[1] - hinge[1], latch[0] - hinge[0])
+    a1 = math.atan2(tip[1] - hinge[1], tip[0] - hinge[0])
+    d = a1 - a0
+    while d <= -math.pi:
+        d += 2 * math.pi
+    while d > math.pi:
+        d -= 2 * math.pi
+    pts = [hinge]
+    for i in range(samples + 1):
+        ang = a0 + d * i / samples
+        pts.append((hinge[0] + w * math.cos(ang), hinge[1] + w * math.sin(ang)))
+    return pts
+
+
+def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
+    """The swept region of an interior swing door, or None if it doesn't swing."""
+    if door.kind != "swing":
+        return None
+    w = door.width
+    start = edge.lo + door.offset if door.offset is not None else edge.mid - w / 2.0
+    hinge_far = door.hinge == "far"
+    sgn = _swing_sgn(door, a, b, edge)
+    if edge.orientation == "v":
+        return _swing_region(plan, "v", edge.pos, start, w, hinge_far, sgn)
+    return _swing_region(plan, "h", start, edge.pos, w, hinge_far, sgn)
+
+
+def _exterior_swing_region(plan: Barndominium, room: Room, door):
+    """The swept region of an exterior door (renderer hinges near, keeps inside)."""
+    x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
+    if door.wall in (Direction.NORTH, Direction.SOUTH):
+        return _swing_region(plan, "h", min(x1, x2), y1, door.width, False, None)
+    return _swing_region(plan, "v", x1, min(y1, y2), door.width, False, None)
+
+
+def _convex_overlap(poly_a, poly_b, eps: float = SWING_CLASH_EPS) -> bool:
+    """Do two convex polygons overlap by more than ``eps`` (separating-axis test)?
+
+    Axes are the unit edge normals of both polygons; if any axis separates the
+    projections (with an ``eps`` gap, in feet), they don't overlap."""
+    for poly in (poly_a, poly_b):
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            nx, ny = -(y2 - y1), (x2 - x1)
+            length = math.hypot(nx, ny)
+            if length < 1e-12:
+                continue
+            nx, ny = nx / length, ny / length
+            a_proj = [nx * px + ny * py for px, py in poly_a]
+            b_proj = [nx * px + ny * py for px, py in poly_b]
+            if max(a_proj) < min(b_proj) + eps or max(b_proj) < min(a_proj) + eps:
+                return False
+    return True
 
 
 def _suggest_int(value: float, cap: float = 1e4) -> int | None:
@@ -1692,10 +1789,74 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     f"floating {_f(margin)} ft from each corner.",
                     room=a.id,
                     hint=f"Back it toward a corner — e.g. `door {a.id} - {b.id} ... "
-                    "offset <n>` — so one side keeps a full wall run for furniture.",
+                    "offset 0.5` (~6 in off the wall for trim) — so one side keeps a "
+                    "full wall run for furniture.",
                     **_door_loc(d),
                 )
             )
+
+    # 8k. Door swings shouldn't overlap: two leaves sweeping into the same space
+    #     foul each other. Build each swing's swept quarter-disc (matching the
+    #     renderer) and test for overlap.
+    swings = []
+    for d in plan.interior_doors:
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None or a.level != b.level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        region = _interior_swing_region(plan, d, a, b, edge)
+        if region is not None:
+            swings.append((f"'{d.room_a}'-'{d.room_b}'", region, d.line, d.col, d.end_col))
+    for d in plan.exterior_doors:
+        r = by_id.get(d.room)
+        if r is None:
+            continue
+        swings.append((f"the entry to '{d.room}'", _exterior_swing_region(plan, r, d),
+                       d.line, d.col, d.end_col))
+    for i in range(len(swings)):
+        for j in range(i + 1, len(swings)):
+            if _convex_overlap(swings[i][1], swings[j][1]):
+                lbl_i, _, line, col, end_col = swings[i]
+                lbl_j = swings[j][0]
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "DOOR_SWING_CLASH",
+                        f"The swings of {lbl_i} and {lbl_j} overlap — the leaves "
+                        "would foul each other.",
+                        line=line, col=col, end_col=end_col,
+                        hint="Move one door along its wall, narrow it, swing it the "
+                        "other way (`into <room>` / `hinge near|far`), or make one a "
+                        "pocket/sliding door so the leaves don't collide.",
+                    )
+                )
+
+    # 8l. Material efficiency: exterior dimensions that land on a build module cut
+    #     less sheet/board waste. Flag envelope and wing measurements off the module.
+    off = []
+    for label, value in (
+        ("envelope width", plan.envelope_width),
+        ("envelope length", plan.envelope_length),
+    ):
+        if _off_module(value):
+            off.append(f"{label} {_f(value)}")
+    for i, wing in enumerate(plan.wings):
+        for label, value in (("width", wing.width), ("length", wing.length)):
+            if _off_module(value):
+                off.append(f"wing {i + 1} {label} {_f(value)}")
+    if off:
+        add(
+            Issue(
+                Severity.INFO,
+                "ENVELOPE_MODULE",
+                f"Exterior dimensions off the {_f(BUILD_MODULE)} ft build module: "
+                f"{', '.join(off)}.",
+                hint=f"Round exterior measurements to a multiple of {_f(BUILD_MODULE)} ft "
+                "so sheet goods and framing cut with less waste.",
+            )
+        )
 
     # 8j. Windows shouldn't butt an interior partition where it meets the exterior
     #     wall — there's no room for framing/trim and it reads as off-balance. (A
@@ -1800,18 +1961,21 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
         if room.type is not RoomType.HALLWAY:
             continue
         served = len(graph.get(room.id, ()))
-        if served <= 1 and room.id not in hall_entries:
-            add(
-                Issue(
-                    Severity.INFO,
-                    "HALL_DEADEND",
-                    f"Hallway '{room.id}' opens onto {served} room(s); a hall that "
-                    "serves one room isn't earning its footprint.",
-                    room=room.id,
-                    hint="Open that room off a larger space and drop the hall, or "
-                    "extend the hall so it distributes to more rooms.",
+        if served <= 1:
+            # A 1-room hall isn't a distributing spine: flag it as overhead (unless
+            # it's a foyer carrying the entry), and never stub-check it.
+            if room.id not in hall_entries:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "HALL_DEADEND",
+                        f"Hallway '{room.id}' opens onto {served} room(s); a hall that "
+                        "serves one room isn't earning its footprint.",
+                        room=room.id,
+                        hint="Open that room off a larger space and drop the hall, or "
+                        "extend the hall so it distributes to more rooms.",
+                    )
                 )
-            )
             continue
         # A hall that *does* distribute can still waste a stub: it runs on past its
         # last doorway into a blank wall, so you walk into a dead end and back out.
@@ -1819,14 +1983,22 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
         axis_lo, axis_hi = (room.x, room.x2) if long_x else (room.y, room.y2)
         if axis_hi - axis_lo <= room.min_dimension + 1e-6:
             continue  # roughly square (a foyer/landing), not a corridor
+        # Measure from each *doorway*, not the room's whole abutting wall: a hall
+        # running past its last door reads as a dead end even if a room's wall
+        # lines the rest of it. So the served span is between the first and last
+        # doorway along the hall.
         marks: list[tuple[float, float]] = []
-        for n in graph.get(room.id, ()):
-            nb = by_id.get(n)
+        for d in plan.interior_doors:
+            if room.id not in (d.room_a, d.room_b):
+                continue
+            other = d.room_b if d.room_a == room.id else d.room_a
+            nb = by_id.get(other)
             edge = shared_edge(room, nb) if nb else None
             if edge is None:
                 continue
+            lo, hi = _door_interval(edge, d)
             along_axis = (edge.orientation == "h") if long_x else (edge.orientation == "v")
-            marks.append((edge.lo, edge.hi) if along_axis else (edge.pos, edge.pos))
+            marks.append((lo, hi) if along_axis else (edge.pos, edge.pos))
         for d in plan.exterior_doors:
             if d.room != room.id:
                 continue
@@ -1849,8 +2021,8 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                     f"Hallway '{room.id}' runs {_f(stub)} ft past its last doorway "
                     "into a blank wall — a dead-end stub of circulation.",
                     room=room.id,
-                    hint="Trim the hall back to its last door, or put a room/closet at "
-                    "the dead end so the run is earning its footprint.",
+                    hint="Put the end room's door at the hall end (extend that room to "
+                    "cap the hall), or trim the hall back to its last doorway.",
                 )
             )
 

@@ -128,10 +128,14 @@ door), `DOOR_CENTERED` (a swing door floating mid-wall — back it to a corner w
 `offset`), `WINDOW_PARTITION` (a window butting an interior partition — pull it off
 the corner and space windows evenly), `ROOM_PROPORTION` (a habitable room more
 elongated than ~3:1), `DOOR_SIZE` (a swing door that isn't a stock leaf width —
-interior 30/32/36 in, exterior 36), `STAIR_WALL` (a stair marooned mid-room),
+interior 30/32/36 in, exterior 36), `DOOR_SWING_CLASH` (two leaves sweep into the
+same space — move/narrow one or make it pocket/sliding), `STAIR_WALL` (a stair
+marooned mid-room), `ENVELOPE_MODULE` (an exterior dim off the 3 ft build module),
 `GARAGE_NO_ENTRY`, `AREA_UNUSED`. **Warnings** also include `STAIR_BLOCKS_DOOR` (a
 stair footprint on a doorway's clear floor). Heed when you can; they don't block.
-Use `open` (not a wide `door`) for cased openings. `barndsl explain <CODE>`
+Use `open` (not a wide `door`) for cased openings. For a hall, put the end rooms'
+doors *at* the hall ends so the corridor terminates at doorways, not blank walls
+(`HALL_DEADEND` is measured from the last doorway). `barndsl explain <CODE>`
 prints the rationale for any code.
 
 > Checks are approximate, loosely IRC-based — not a substitute for a licensed
@@ -158,21 +162,21 @@ door (clears `NO_BACK_DOOR`):
 
 ```barn
 plan "Maple Two-Bed"
-envelope 50 x 30
+envelope 51 x 30
 ceiling 10
 
 room living:  living   at 0,0            size 20 x 30
 room kitchen: kitchen  east-of living    size 22 x 14
-room bath:    bathroom east-of kitchen   size 8 x 14
-room hall:    hallway  north-of kitchen  size 30 x 4
+room bath:    bathroom east-of kitchen   size 9 x 14
+room hall:    hallway  north-of kitchen  size 31 x 4
 room bed1:    bedroom  north-of hall     size 11 x 12
 room c1:      closet   east-of bed1      size 4 x 12
 room bed2:    bedroom  east-of c1        size 11 x 12
-room c2:      closet   east-of bed2      size 4 x 12
+room c2:      closet   east-of bed2      size 5 x 12
 
 open living - kitchen width 8
 door living - hall width 3
-door hall - bath width 2.67
+door hall - bath width 2.67 offset 5.83
 door hall - bed1 width 2.67 offset 0.5
 door hall - bed2 width 2.67 offset 0.5
 door bed1 - c1 width 2.5 offset 0.5
@@ -196,9 +200,9 @@ than writing from scratch:
 | File | Shape | Shows |
 |------|-------|-------|
 | `cottage.barn` | 1 bed / 1 bath | relative anchors, `open` core, hall-buffered bedroom |
-| `hall_spine.barn` | 3 bed / 2 bath | hall spine, primary suite with a private ensuite, wet-wall baths, per-bedroom closets |
-| `lshape.barn` | 2 bed / 1 bath, `wing` | L-footprint, interior seam walls, a suite off the spine |
-| `two_story.barn` | 1 bed + loft | `level`, `loft`, a `stair` whose run fits the storey |
+| `hall_spine.barn` | 3 bed / 2 bath | hall spine capped by doorways, ensuite + wet-wall baths, back-to-back walk-in closets buffering the beds |
+| `lshape.barn` | 2 bed / 2 bath, `wing` | L-footprint, interior seam walls, a primary suite with its own ensuite + walk-in |
+| `two_story.barn` | 1 bed + loft | `level`, `loft`, a `stair` along the wall whose run fits the storey |
 
 ```bash
 barndsl compile examples/gallery/hall_spine.barn   # read it, then adapt

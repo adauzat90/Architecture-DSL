@@ -276,6 +276,8 @@ envelope edge if it needs a real window.
 - `STAIR_BLOCKS_DOOR` — a `stair` footprint intrudes on the clear floor in front
   of a door, so you'd step off the flight straight into a swinging door. Place the
   stair along a wall, clear of door approaches.
+- `STAIR_GEOMETRY` / `STAIR_OOB` / `STAIR_LEVELS` (errors), `STAIR_RUN` /
+  `STAIR_FLOAT` — a stair with bad geometry, too short a run, or landing in no room.
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
   `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
   — it's a contract check, not a code error — so it's a warning.
@@ -294,7 +296,12 @@ envelope edge if it needs a real window.
   (≥ 6 ft short side), half bath ~30 (≥ 5 ft) sq ft.
 - `HALL_TIGHT` — a hallway at the 3 ft code minimum; 4 ft is comfortable.
 - `HALL_DEADEND` — a hall that serves ≤ 1 room, **or** runs well past its last
-  doorway into a blank wall (a dead-end stub). Trim it back or put a room there.
+  **doorway** into a blank wall (a dead-end stub). Put the end room's door *at*
+  the hall end (extend that room to cap the hall), or trim the hall back.
+- `DOOR_SWING_CLASH` — two door leaves sweep into the same space and foul each
+  other; move one along its wall, swing it the other way, or make it pocket/sliding.
+- `ENVELOPE_MODULE` — an exterior (envelope/wing) dimension isn't a multiple of
+  the 3 ft build module; rounding to it cuts sheet goods and framing with less waste.
 - `NO_BACK_DOOR` — a home with a single exterior door; add a back/side door (off
   the kitchen, mudroom or laundry) for daily flow and a second way out.
 - `DOOR_CENTERED` — a swing door floating mid-wall; back it to a corner (`offset`)
@@ -336,22 +343,22 @@ closet and the bath sits on the kitchen's wet wall, which is what clears the
 
 ```barn
 plan "Maple Two-Bed"
-envelope 50 x 30
+envelope 51 x 30                              # exterior dims on the 3 ft module
 ceiling 10
 note "2 bed / 1 bath, open living-kitchen, bedrooms + closets off a hall."
 
 room living:  living   at 0,0            size 20 x 30
 room kitchen: kitchen  east-of living    size 22 x 14
-room bath:    bathroom east-of kitchen   size 8 x 14
-room hall:    hallway  north-of kitchen  size 30 x 4
+room bath:    bathroom east-of kitchen   size 9 x 14
+room hall:    hallway  north-of kitchen  size 31 x 4
 room bed1:    bedroom  north-of hall     size 11 x 12
 room c1:      closet   east-of bed1      size 4 x 12
 room bed2:    bedroom  east-of c1        size 11 x 12
-room c2:      closet   east-of bed2      size 4 x 12
+room c2:      closet   east-of bed2      size 5 x 12
 
 open living - kitchen width 8                # cased opening, not a 96 in door
 door living - hall width 3
-door hall - bath width 2.67
+door hall - bath width 2.67 offset 5.83      # at the hall's far end (caps the run)
 door hall - bed1 width 2.67 offset 0.5       # backed to a corner, not centred
 door hall - bed2 width 2.67 offset 0.5
 door bed1 - c1 width 2.5 offset 0.5

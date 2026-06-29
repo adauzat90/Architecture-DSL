@@ -281,8 +281,15 @@ def _hall(doors: str, entry: str = "living south width 3 offset 4"):
 
 
 def test_hall_serving_two_rooms_is_not_a_deadend():
-    r = _hall("door living - hall width 3\ndoor hall - bed width 2.67")
+    # Doors at either end span the hall — no stub past the last doorway.
+    r = _hall("door living - hall width 3 offset 0.5\ndoor hall - bed width 2.67 offset 20.83")
     assert "HALL_DEADEND" not in _codes(r, "info")
+
+
+def test_hall_deadend_flags_doors_bunched_in_the_middle():
+    # Both doors dead-centre of a 24 ft hall leave ~10 ft stubs at both ends.
+    r = _hall("door living - hall width 3\ndoor hall - bed width 2.67")
+    assert "HALL_DEADEND" in _codes(r, "info")
 
 
 def test_hall_serving_one_room_is_a_deadend():
@@ -1127,7 +1134,7 @@ room hall:   hallway at 0,0 size {hw} x 4
 room living: living  at 0,4 size 15 x 26
 room bed:    bedroom at 15,4 size 13 x 26
 door hall - living width 4 offset 1
-door hall - bed width 3 offset 1
+door hall - bed width 3 offset 9.5
 entry hall south width 3 offset 4
 window living west width 10 offset 8
 window bed north width 5 offset 5
@@ -1363,3 +1370,93 @@ def test_second_round_codes_are_registered():
     ):
         assert code in REGISTRY
         assert explain(code) and "Unknown" not in explain(code)
+
+
+# ===========================================================================
+# Third review round — swing clash + build module (from the HTML feedback)
+# ===========================================================================
+
+# --- DOOR_SWING_CLASH --------------------------------------------------------
+
+_CLASH = """\
+plan "Clash"
+envelope 30 x 24
+ceiling 9
+room living: living at 0,0 size 30 x 12
+room bed:    bedroom at 0,12 size 18 x 12
+room closet: closet  at 18,12 size 6 x 12
+{doors}
+entry living south width 3 offset 4
+entry living west width 3 offset 4
+window living south width 12 offset 4
+window bed north width 5 offset 6
+"""
+
+
+def test_door_swing_clash_flags_overlapping_leaves():
+    # Both leaves hinge at the shared SE corner of the bedroom and sweep into it.
+    r = compile_source(_CLASH.format(
+        doors="door living - bed width 3 into bed offset 15 hinge far\n"
+              "door bed - closet width 2.5 into bed offset 0.5 hinge near"))
+    assert "DOOR_SWING_CLASH" in _codes(r, "info")
+
+
+def test_door_swing_clash_silent_when_doors_are_apart():
+    r = compile_source(_CLASH.format(
+        doors="door living - bed width 3 offset 0.5\n"
+              "door bed - closet width 2.5 into bed offset 0.5 hinge near"))
+    assert "DOOR_SWING_CLASH" not in _codes(r, "info")
+
+
+def test_door_swing_clash_avoided_by_a_pocket_door():
+    # A pocket leaf has no swing arc, so it can't clash.
+    r = compile_source(_CLASH.format(
+        doors="door living - bed width 3 into bed offset 15 hinge far\n"
+              "door bed - closet pocket 2.5 offset 0.5"))
+    assert "DOOR_SWING_CLASH" not in _codes(r, "info")
+
+
+# --- ENVELOPE_MODULE ---------------------------------------------------------
+
+_MOD = """\
+plan "Mod"
+envelope {ew} x {el}
+ceiling 9
+room living: living at 0,0 size {ew} x {el}
+entry living south width 3 offset 3
+window living west width 6 offset 4
+"""
+
+
+def test_envelope_module_flags_off_module_dimensions():
+    r = compile_source(_MOD.format(ew=31, el=24))  # 31 isn't a multiple of 3
+    mod = [d for d in r.infos if d.code == "ENVELOPE_MODULE"]
+    assert mod and "31" in mod[0].message
+
+
+def test_envelope_module_silent_on_module():
+    r = compile_source(_MOD.format(ew=30, el=24))  # both multiples of 3
+    assert "ENVELOPE_MODULE" not in _codes(r, "info")
+
+
+def test_envelope_module_flags_a_wing():
+    src = """\
+plan "Wing"
+envelope 30 x 24
+wing 9 x 10 at 30,0
+ceiling 9
+room living: living at 0,0 size 30 x 24
+room ext:    office at 30,0 size 9 x 10
+door living - ext width 2.67
+entry living south width 3 offset 3
+window living west width 6 offset 4
+window ext east width 3 offset 3
+"""
+    mod = [d for d in compile_source(src).infos if d.code == "ENVELOPE_MODULE"]
+    assert mod and "wing 1 length 10" in mod[0].message  # 10 isn't a multiple of 3
+
+
+def test_round_three_codes_are_registered():
+    for code in ("DOOR_SWING_CLASH", "ENVELOPE_MODULE"):
+        assert code in REGISTRY
+        assert "Unknown" not in explain(code)

@@ -247,6 +247,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A window sits against an interior partition where it meets the exterior "
            "wall — no room for framing/trim, and it reads off-balance. Pull it "
            "toward the wall centre or a true building corner; space windows evenly."),
+        _c("DOOR_SWING_CLASH", I, "Door swings overlap",
+           "Two door leaves sweep into the same space and would foul each other. "
+           "Move one along its wall, narrow it, swing it the other way (`into` / "
+           "`hinge`), or make one a pocket/sliding door."),
+        _c("ENVELOPE_MODULE", I, "Exterior dimension off the build module",
+           "An exterior (envelope or wing) measurement isn't a whole multiple of the "
+           "3 ft build module. Rounding exterior dimensions to the module cuts sheet "
+           "goods and framing with less waste."),
         _c("PRIVATE_PASSTHROUGH", W, "Routed through a private room",
            "A room is reachable only by passing through a bathroom or someone "
            "else's bedroom — a circulation defect."),

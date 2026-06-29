@@ -94,6 +94,26 @@ The four gallery plans were re-tuned to model these (4 ft halls, corner-backed
 doors via `offset`, a back door each, no hall stub, the two-story stair run along
 a wall) and still pin 0/0/0.
 
+## Third review round — from a second design-review pass — DONE
+Again every diagnostic that fired was confirmed correct; the value was in the
+notes. Shipped:
+
+- ~~`DOOR_SWING_CLASH`~~ — two door leaves whose swept quarter-discs overlap.
+  Builds each swing the way the renderer draws it (hinge/`into` or the
+  keep-inside fallback) and tests overlap with a separating-axis check, so the
+  warning matches the picture. Pocket/sliding/cased doors have no arc and are exempt.
+- ~~`ENVELOPE_MODULE`~~ — an exterior (envelope or wing) dimension that isn't a
+  whole multiple of the 3 ft build module, for efficient sheet-goods/framing cuts.
+- ~~`HALL_DEADEND` measured from the doorway~~ — the stub is now measured from the
+  last *door's* position, not the room's whole abutting wall. A hall that runs
+  past its last doorway flags even if a room's wall lines the rest; the cure is to
+  put the end room's door at the hall end (and extend the room to cap it).
+
+The gallery was reworked again to model all of this: 3 ft-module envelopes
+(33/69/36/39), end-room doors at the hall ends, `hall_spine`'s two beds split by a
+stacked pair of square walk-in closets (which also buffers sound), and an ensuite
+added to `lshape`'s primary suite. All four still pin 0/0/0.
+
 ## Held for later — not modelable today
 - **Stair landings / turns.** The feedback asked stairs to "land halfway and
   turn." We model a stair as a footprint + level span, not individual risers, so
