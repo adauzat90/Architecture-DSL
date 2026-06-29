@@ -8,6 +8,7 @@ areas and a rough material takeoff.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
@@ -353,7 +354,30 @@ class _Renderer:
         self._line(hx, hy, lx, ly, "#ffffff", 4.0)
         self._line(hx, hy, tx, ty, WALL, 1.2)
         r = w * self.c.scale
-        self._path(f"M {tx:.1f} {ty:.1f} A {r:.1f} {r:.1f} 0 0 1 {lx:.1f} {ly:.1f}", "#999999", 0.8)
+        # Pick the sweep flag that centres the arc on the hinge, so the swing
+        # always bulges *away* from it (convex). A fixed flag is right for only
+        # half the orientation/hinge/side combinations — the rest read concave.
+        sweep = self._arc_sweep((hx, hy), (tx, ty), (lx, ly), r)
+        self._path(
+            f"M {tx:.1f} {ty:.1f} A {r:.1f} {r:.1f} 0 0 {sweep} {lx:.1f} {ly:.1f}",
+            "#999999", 0.8,
+        )
+
+    @staticmethod
+    def _arc_sweep(hinge, tip, latch, r) -> int:
+        """SVG sweep flag whose minor arc (large-arc 0) from ``tip`` to ``latch``
+        is centred on ``hinge`` — the door pivots about the hinge, so its swing
+        arc must be the one centred there. All points are in screen space."""
+        (x1, y1), (x2, y2) = tip, latch
+        dx, dy = (x1 - x2) / 2.0, (y1 - y2) / 2.0
+        denom = dx * dx + dy * dy
+        if denom < 1e-9:
+            return 1
+        coef = math.sqrt(max(0.0, (r * r) / denom - 1.0))
+        # Centre SVG uses with sweep-flag 1 (large-arc 0 ⇒ sign = +1):
+        cx = coef * dy + (x1 + x2) / 2.0
+        cy = -coef * dx + (y1 + y2) / 2.0
+        return 1 if abs(cx - hinge[0]) + abs(cy - hinge[1]) < 1e-6 else 0
 
     def _opening_symbol(self, ox: float, oy: float, orientation: str, w: float):
         """Draw a cased opening (walk-through) as a plain gap with jamb ticks.
