@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .constants import (
+    EPSILON,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
@@ -158,7 +159,7 @@ class ValidationReport:
 # --- helpers ----------------------------------------------------------------
 
 
-def exterior_walls(plan: Barndominium, room: Room, tol: float = 1e-6) -> list[Direction]:
+def exterior_walls(plan: Barndominium, room: Room, tol: float = EPSILON) -> list[Direction]:
     """Walls of ``room`` that lie on the building envelope (can take windows).
 
     For a plain rectangular footprint this is the four envelope edges; for an
@@ -232,6 +233,13 @@ def _nearest_std(width_in: float, sizes: tuple[int, ...]) -> int:
     return min(sizes, key=lambda s: abs(s - width_in))
 
 
+def _runs_off_wall(offset: float, width: float, wall_length: float) -> bool:
+    """True if an opening at ``offset`` of ``width`` spills past either end of a
+    ``wall_length`` run (within :data:`EPSILON`). Shared by the door, window and
+    exterior-door bounds checks so the tolerance handling lives in one place."""
+    return offset < -EPSILON or offset + width > wall_length + EPSILON
+
+
 def _door_interval(edge, door) -> tuple[float, float]:
     """The door's span along its shared wall, in world coordinates.
 
@@ -278,7 +286,7 @@ def _building_corner(plan: Barndominium, room: Room, wall: Direction, at_end: bo
 def _stair_against_wall(plan: Barndominium, s) -> bool:
     """Does a stair sit along a wall (envelope edge or a room partition) rather
     than floating free in the middle of a room?"""
-    tol = 1e-6
+    tol = EPSILON
     if (
         abs(s.x) <= tol
         or abs(s.y) <= tol
@@ -301,7 +309,7 @@ def _stair_against_wall(plan: Barndominium, s) -> bool:
     return False
 
 
-def _off_module(value: float, module: float = BUILD_MODULE, tol: float = 1e-6) -> bool:
+def _off_module(value: float, module: float = BUILD_MODULE, tol: float = EPSILON) -> bool:
     """Is ``value`` not a whole multiple of ``module``?"""
     return abs(value - round(value / module) * module) > tol
 
@@ -452,7 +460,7 @@ def _components_excluding(
 # --- entry point ------------------------------------------------------------
 
 
-def _check_wings(plan: Barndominium, add, tol: float = 1e-6) -> None:
+def _check_wings(plan: Barndominium, add, tol: float = EPSILON) -> None:
     """Validate ``wing`` blocks: positive size, and a single connected footprint."""
     if not plan.wings:
         return
@@ -629,7 +637,7 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                         "to cover that area.",
                     )
                 )
-        elif room.x < -1e-6 or room.y < -1e-6 or over_x > 1e-6 or over_y > 1e-6:
+        elif room.x < -EPSILON or room.y < -EPSILON or over_x > EPSILON or over_y > EPSILON:
             # Phrase the fix differently for a relatively-placed room, which has
             # no x,y token to "set" — point at align/offset/size instead.
             relative = room.placement is not None
@@ -638,13 +646,13 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                 fixes.append("set its x to >= 0")
             if not relative and room.y < 0:
                 fixes.append("set its y to >= 0")
-            if over_x > 1e-6:
+            if over_x > EPSILON:
                 move_x = plan.envelope_width - room.width
                 fixes.append(
                     f"reduce its width by {_f(over_x)} ft"
                     + ("" if relative or move_x < 0 else f" or move it west to x={_f(move_x)}")
                 )
-            if over_y > 1e-6:
+            if over_y > EPSILON:
                 move_y = plan.envelope_length - room.length
                 fixes.append(
                     f"reduce its length by {_f(over_y)} ft"
@@ -674,8 +682,8 @@ def _validate_geometry(plan: Barndominium, add) -> None:
             ov = a.overlaps(b)
             if ov > 0.5:  # ignore hairline floating-point overlaps
                 # Prefer a fix that keeps 'b' inside the envelope.
-                east_fits = a.x2 + b.width <= plan.envelope_width + 1e-6
-                north_fits = a.y2 + b.length <= plan.envelope_length + 1e-6
+                east_fits = a.x2 + b.width <= plan.envelope_width + EPSILON
+                north_fits = a.y2 + b.length <= plan.envelope_length + EPSILON
                 ox = min(a.x2, b.x2) - max(a.x, b.x)
                 oy = min(a.y2, b.y2) - max(a.y, b.y)
                 prefer_east = (ox <= oy and east_fits) or (not north_fits and east_fits)
@@ -735,7 +743,7 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
             if room.area < MIN_BEDROOM_AREA:
-                need_len = _suggest_int(MIN_BEDROOM_AREA / max(room.width, 1e-6))
+                need_len = _suggest_int(MIN_BEDROOM_AREA / max(room.width, EPSILON))
                 hint = (
                     f"Enlarge it, e.g. `size {_f(room.width)} x {need_len}`."
                     if need_len is not None
@@ -776,7 +784,7 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
         floor = MIN_USABLE_AREA.get(room.type)
         short_floor = MIN_ROOM_SHORT_SIDE.get(room.type)
         if floor is not None and 0 < room.area < floor:
-            need_len = _suggest_int(floor / max(room.width, 1e-6))
+            need_len = _suggest_int(floor / max(room.width, EPSILON))
             sizing = (
                 f" e.g. `size {_f(room.width)} x {need_len}`"
                 if need_len is not None
@@ -876,7 +884,7 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         **loc,
                     )
                 )
-            elif edge.length + 1e-6 < door.width:
+            elif edge.length + EPSILON < door.width:
                 add(
                     Issue(
                         Severity.WARNING,
@@ -888,9 +896,8 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         **loc,
                     )
                 )
-            elif door.offset is not None and (
-                door.offset < -1e-6
-                or door.offset + door.width > edge.length + 1e-6
+            elif door.offset is not None and _runs_off_wall(
+                door.offset, door.width, edge.length
             ):
                 add(
                     Issue(
@@ -921,7 +928,7 @@ def _validate_doors(plan: Barndominium, add) -> None:
                 elif edge is not None and door.kind == "swing":
                     target = a if door.swing_into == a.id else b
                     depth = target.width if edge.orientation == "v" else target.length
-                    if depth + 1e-6 < door.width:
+                    if depth + EPSILON < door.width:
                         add(
                             Issue(
                                 Severity.WARNING,
@@ -937,7 +944,7 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         )
                     elif (
                         target.type is RoomType.HALLWAY
-                        and depth - door.width + 1e-6 < MIN_HALLWAY_WIDTH
+                        and depth - door.width + EPSILON < MIN_HALLWAY_WIDTH
                     ):
                         # It opens, but a leaf swung into a narrow hall leaves less
                         # than a 3 ft passage beside it — it blocks circulation.
@@ -1028,7 +1035,7 @@ def _validate_doors(plan: Barndominium, add) -> None:
             continue
         spans.sort(key=lambda s: s[0])
         for (a_lo, a_hi, _), (b_lo, b_hi, d2) in zip(spans, spans[1:]):
-            if min(a_hi, b_hi) - max(a_lo, b_lo) > 1e-6:
+            if min(a_hi, b_hi) - max(a_lo, b_lo) > EPSILON:
                 add(
                     Issue(
                         Severity.ERROR,
@@ -1091,7 +1098,7 @@ def _validate_openings(plan: Barndominium, add) -> None:
             )
             continue
         room = plan.room(w.room)
-        if w.head_height <= w.sill_height + 1e-6:
+        if w.head_height <= w.sill_height + EPSILON:
             add(
                 Issue(
                     Severity.WARNING,
@@ -1104,7 +1111,7 @@ def _validate_openings(plan: Barndominium, add) -> None:
                 )
             )
         wlen = _wall_length(room, w.wall)
-        if w.offset < -1e-6 or w.offset + w.width > wlen + 1e-6:
+        if _runs_off_wall(w.offset, w.width, wlen):
             add(
                 Issue(
                     Severity.ERROR,
@@ -1135,7 +1142,7 @@ def _validate_openings(plan: Barndominium, add) -> None:
             continue  # DOOR_REF already raised in _validate_doors
         room = plan.room(d.room)
         wlen = _wall_length(room, d.wall)
-        if d.offset < -1e-6 or d.offset + d.width > wlen + 1e-6:
+        if _runs_off_wall(d.offset, d.width, wlen):
             add(
                 Issue(
                     Severity.ERROR,
@@ -1176,7 +1183,7 @@ def _validate_openings(plan: Barndominium, add) -> None:
         items.sort()  # by start offset
         for (a_lo, a_hi, a_kind, a_o), (b_lo, b_hi, b_kind, b_o) in zip(items, items[1:]):
             ov = min(a_hi, b_hi) - max(a_lo, b_lo)
-            if ov > 1e-6:
+            if ov > EPSILON:
                 add(
                     Issue(
                         Severity.ERROR,
@@ -1218,7 +1225,7 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                       room=s.id, hint="e.g. `from 0 to 1`."))
         over_x = max(0.0, s.x2 - plan.envelope_width)
         over_y = max(0.0, s.y2 - plan.envelope_length)
-        if s.x < -1e-6 or s.y < -1e-6 or over_x > 1e-6 or over_y > 1e-6:
+        if s.x < -EPSILON or s.y < -EPSILON or over_x > EPSILON or over_y > EPSILON:
             add(Issue(Severity.ERROR, "STAIR_OOB",
                       f"Stair '{s.id}' extends outside the "
                       f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
@@ -1239,9 +1246,9 @@ def _validate_stairs(plan: Barndominium, add) -> None:
             risers = max(1, math.ceil(rise / MAX_RISER_HEIGHT))
             run_needed = max(1, risers - 1) * MIN_TREAD_DEPTH
             long_dim, short_dim = max(s.width, s.length), min(s.width, s.length)
-            could_switchback = short_dim + 1e-6 >= 2 * MIN_STAIR_WIDTH
+            could_switchback = short_dim + EPSILON >= 2 * MIN_STAIR_WIDTH
             needed = run_needed / 2 if could_switchback else run_needed
-            if long_dim + 1e-6 < needed:
+            if long_dim + EPSILON < needed:
                 add(Issue(
                     Severity.WARNING, "STAIR_RUN",
                     f"Stair '{s.id}' is {_f(long_dim)} ft long, too short to climb "
@@ -1601,7 +1608,7 @@ def _dq_bed_sound(plan: Barndominium, graph, by_id, add) -> None:
     for i, ba in enumerate(beds):
         for bb in beds[i + 1 :]:
             edge = shared_edge(ba, bb)
-            if edge is not None and edge.length + 1e-6 >= MIN_SOUND_BUFFER_WALL:
+            if edge is not None and edge.length + EPSILON >= MIN_SOUND_BUFFER_WALL:
                 add(
                     Issue(
                         Severity.INFO,
@@ -1625,7 +1632,7 @@ def _dq_closet_shape(plan: Barndominium, graph, by_id, add) -> None:
             short = room.min_dimension
             long = max(room.width, room.length)
             if (
-                short > 1e-6
+                short > EPSILON
                 and room.area >= MIN_WALKIN_AREA
                 and long / short >= CLOSET_WALKIN_ASPECT
             ):
@@ -1703,7 +1710,7 @@ def _dq_bath_oversize(plan: Barndominium, graph, by_id, add) -> None:
                 m == bed.id or (m in by_id and by_id[m].type is RoomType.CLOSET)
                 for m in graph.get(bath.id, ())
             )
-            if private and bath.area > bed.area + 1e-6:
+            if private and bath.area > bed.area + EPSILON:
                 add(
                     Issue(
                         Severity.INFO,
@@ -1923,7 +1930,7 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
         if room.type in HABITABLE_TYPES:
             short = room.min_dimension
             long = max(room.width, room.length)
-            if short > 1e-6 and long / short > MAX_ROOM_ASPECT:
+            if short > EPSILON and long / short > MAX_ROOM_ASPECT:
                 add(
                     Issue(
                         Severity.INFO,
@@ -2019,7 +2026,7 @@ def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
         # last doorway into a blank wall, so you walk into a dead end and back out.
         long_x = room.width >= room.length
         axis_lo, axis_hi = (room.x, room.x2) if long_x else (room.y, room.y2)
-        if axis_hi - axis_lo <= room.min_dimension + 1e-6:
+        if axis_hi - axis_lo <= room.min_dimension + EPSILON:
             continue  # roughly square (a foyer/landing), not a corridor
         # Measure from each *doorway*, not the room's whole abutting wall: a hall
         # running past its last door reads as a dead end even if a room's wall
@@ -2145,7 +2152,7 @@ def _validate_program(plan: Barndominium, add) -> None:
                 )
     if spec.min_area is not None:
         interior = m["interior_sqft"]
-        if math.isfinite(interior) and interior + 1e-6 < spec.min_area:
+        if math.isfinite(interior) and interior + EPSILON < spec.min_area:
             mismatches.append(
                 f"{_f(spec.min_area)} sq ft declared but {interior:.0f} placed"
             )
@@ -2190,7 +2197,7 @@ def _validate_structure(plan: Barndominium, add) -> None:
     if spec.line is not None:
         loc = {"line": spec.line, "col": spec.col, "end_col": spec.end_col}
 
-    if spec.bay > COMFORT_BAY + 1e-6:
+    if spec.bay > COMFORT_BAY + EPSILON:
         add(
             Issue(
                 Severity.INFO,
@@ -2246,7 +2253,7 @@ def _validate_structure(plan: Barndominium, add) -> None:
             along = p.x if horizontal else p.y
             # Coincident with the wall and *inside* the clear opening (a post at the
             # jamb is how an opening is framed, so endpoints don't count).
-            if abs(on_line - wall_line) <= 1e-6 and lo + 1e-6 < along < hi - 1e-6:
+            if abs(on_line - wall_line) <= EPSILON and lo + EPSILON < along < hi - EPSILON:
                 oloc = dict(loc)
                 if getattr(obj, "line", None) is not None:
                     oloc = {"line": obj.line, "col": obj.col, "end_col": obj.end_col}
@@ -2267,7 +2274,7 @@ def _validate_structure(plan: Barndominium, add) -> None:
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:
     has_egress_door = any(
-        d.egress and d.width + 1e-6 >= MIN_EGRESS_DOOR_WIDTH for d in plan.exterior_doors
+        d.egress and d.width + EPSILON >= MIN_EGRESS_DOOR_WIDTH for d in plan.exterior_doors
     )
     if plan.exterior_doors and not has_egress_door:
         add(
@@ -2314,14 +2321,14 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                 def _win_ok(w) -> bool:
                     h = max(0.0, w.head_height - w.sill_height)
                     return (
-                        w.width + 1e-6 >= MIN_EGRESS_OPENING_WIDTH
-                        and h + 1e-6 >= MIN_EGRESS_OPENING_HEIGHT
-                        and w.width * h + 1e-6 >= min_area
-                        and w.sill_height <= MAX_EGRESS_SILL + 1e-6
+                        w.width + EPSILON >= MIN_EGRESS_OPENING_WIDTH
+                        and h + EPSILON >= MIN_EGRESS_OPENING_HEIGHT
+                        and w.width * h + EPSILON >= min_area
+                        and w.sill_height <= MAX_EGRESS_SILL + EPSILON
                     )
 
                 door_ok = any(
-                    d.width + 1e-6 >= MIN_EGRESS_OPENING_WIDTH for d in ext_doors
+                    d.width + EPSILON >= MIN_EGRESS_OPENING_WIDTH for d in ext_doors
                 )
                 if not (door_ok or any(_win_ok(w) for w in ext_windows)):
                     if ext_windows:
@@ -2373,7 +2380,7 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                 w.glazed_area for w in plan.windows_for(room.id) if w.wall in walls
             )
             required = room.area * NATURAL_LIGHT_RATIO
-            if glazing + 1e-6 < required:
+            if glazing + EPSILON < required:
                 add_width = max(0.0, (required - glazing) / _WINDOW_TYP_HEIGHT)
                 suggest = _suggest_int(add_width)
                 if walls and suggest is not None:

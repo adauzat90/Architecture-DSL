@@ -12,6 +12,12 @@ these names, so existing access paths (``barndsl.revit.MAX_RISER_HEIGHT``,
 
 from __future__ import annotations
 
+#: Geometry tolerance (feet). Coordinates within this distance are treated as
+#: coincident — it absorbs floating-point round-off when comparing edges, offsets
+#: and overlaps. Named here so the validator's many bounds checks share one
+#: value instead of sprinkling bare ``1e-6`` literals.
+EPSILON = 1e-6
+
 # --- stair geometry (IRC R311.7) --------------------------------------------
 #: Max riser height: 7-3/4 in. A flight needs enough run to climb one storey.
 MAX_RISER_HEIGHT = 7.75 / 12.0
