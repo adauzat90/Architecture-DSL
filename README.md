@@ -302,8 +302,9 @@ tab. Point pyRevit at the `revit/` folder as a custom extension directory and yo
 get two buttons:
 
 * **Build Plan** — pick a compiled `.json` (or a `.barn`, compiled on the spot)
-  and it creates the levels, walls, doors, windows, rooms and structural members
-  in the active document, all in **one transaction** (one undo step).
+  and it creates the levels, walls, correctly-**sized** doors and windows, rooms,
+  porch slabs, stairs and structural members in the active document, in **one
+  transaction** (one undo step). Primary target: **Revit 2025**.
 * **Export Exchange** — pick a `.barn` and write its exchange `.json` next to it
   without touching the model.
 
@@ -418,8 +419,10 @@ tests/             # no API key required
   members), and the **pyRevit extension** in [`revit/`](revit/README.md) reads it
   and instantiates the walls, doors, windows, rooms and framing live in the
   active Revit document — a `.barn` plan becomes an editable Revit model from a
-  ribbon button. Next on this path: sized door/window family types from the
-  exchange widths, instantiating porches/stairs, and round-tripping edits back.
+  ribbon button (targeting Revit 2025). Doors/windows are sized to the exchange
+  widths, porches build as floor slabs, and stairs as straight runs. Next on this
+  path: turned/multi-flight stairs, mapping room/wall types to a Revit template's
+  named types, and round-tripping edits from Revit back to the DSL.
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 

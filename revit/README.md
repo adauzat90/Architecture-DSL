@@ -24,8 +24,12 @@ barndsl.extension/
 
 ## Requirements
 
-- **Revit** 2022 or newer (any version pyRevit supports).
-- **[pyRevit](https://github.com/pyrevitlabs/pyRevit)** installed.
+- **Revit 2025** — the primary, developed-against target (.NET 8). The builder
+  uses APIs current in 2025 (`Floor.Create`, `ElementId.Value`, the Stairs
+  component API) and avoids removed members, so recent prior versions should work
+  too, but 2025 is what it's tuned for.
+- **[pyRevit](https://github.com/pyrevitlabs/pyRevit) 5** or newer (the build
+  that supports Revit 2025; ships the CPython 3.12 engine the buttons run on).
 - For building straight from a `.barn` (and for *Export Exchange*), the
   **`barndsl` package importable from pyRevit's CPython engine** — the button
   scripts use the `#! python3` engine. If barndsl isn't on that engine's path,
@@ -77,26 +81,36 @@ the JSON-first workflow — nothing breaks.
 |---|---|
 | `levels` | Reused if one exists at the same elevation, else a new `Level`. |
 | `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). |
-| `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall, using the first loaded door/window family symbol. Window sill heights are applied. |
+| `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
 | `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
+| `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
+| `areas` (stairs) | A best-effort straight stair run between the two levels (**experimental** — falls back to a note if the Stairs API rejects the geometry). |
 
-The whole build runs in **one transaction**, so Revit's undo rolls it back in a
-single step. Every element is created defensively: if one fails (e.g. a missing
-family), it's recorded as a note in the output and the rest still build.
+Walls, openings, rooms, structure and porches run in **one transaction**, so
+Revit's undo rolls them back in a single step; stairs build afterward in their
+own edit scopes (the Stairs API manages its own transactions). Every element is
+created defensively: if one fails (e.g. a missing family), it's recorded as a
+note in the output and the rest still build. The builder also accepts
+`structure`, `size_families`, `porches`, and `stairs` flags (all default on) to
+turn passes off.
 
-### Known limitations (scaffold stage)
+### Known limitations
 
-- Openings use their **family's default width/height** — the exchange carries the
-  intended width, but door/window sizes are a *type* property in Revit, so swap
-  to an appropriately sized family type after building if it matters.
+- **Opening sizing needs a flexible family.** Sizing duplicates the loaded
+  door/window family and sets its Width/Height type parameters; a fixed-size
+  family (no settable Width/Height) falls back to its default, with a note. Load
+  parametric door/window families for best results.
+- **Stairs are experimental.** A straight run is derived from the footprint's
+  long axis; turns/landings and exact riser counts aren't modelled. If the
+  geometry is rejected, the stair is left for you to model (the rest is fine).
 - Wall centrelines sit on the barndsl room-rectangle edges; Revit applies each
   wall type's thickness about that centreline. For exact interior dimensions,
   set the wall **Location Line** to a finish face, or model with thin types.
 - Rooms only place where walls actually enclose the seed point. A plan whose
   rooms don't fully tile the footprint may leave some seeds unplaced (reported).
-- Porches and stairs are carried in the exchange as reference `areas` but are not
-  yet instantiated by the builder.
+- Edits made in Revit don't round-trip back to the DSL yet (the exchange is
+  currently one-way: barndsl → Revit).
 
 ## Testing
 

@@ -36,9 +36,19 @@ interior↔interior / exterior↔exterior hosting, room seeds inside their recta
 multi-level walls, JSON round-trip). Coordinates pass straight through (barndsl
 feet/x-east/y-north == Revit's foot-based world XY).
 
-Next: a **pyRevit extension** (chosen integration path) — a ribbon button that
-imports this core, compiles a `.barn`, and instantiates walls/doors/windows/rooms/
-framing in the active Revit document from the exchange.
+The **pyRevit extension** (chosen integration path) is in `revit/` — a barndsl
+ribbon tab with *Build Plan* and *Export Exchange* buttons, targeting **Revit
+2025** (.NET 8 / pyRevit 5 / CPython 3.12). Split into a Revit-free
+`exchange.py` (load/validate; tested in `tests/test_revit_exchange.py`) and a
+`builder.py` that creates levels, walls, **size-matched** doors/windows
+(duplicates the family and sets Width/Height type params, cached per size), rooms,
+structural columns/framing, porch floor slabs (`Floor.Create`), and best-effort
+straight stairs (StairsEditScope, after the main transaction). One transaction for
+everything but stairs; defensive per-element error handling.
+
+Next: turned/multi-flight stairs; map room/wall/family choices to a Revit
+template's named types; round-trip edits from Revit back to the DSL (the exchange
+is one-way today).
 
 ## Agent aids
 
