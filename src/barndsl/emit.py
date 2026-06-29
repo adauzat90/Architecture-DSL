@@ -33,6 +33,10 @@ def emit_dsl(plan: Barndominium) -> str:
         line = f"program {spec.beds} bed"
         if spec.baths is not None:
             line += f" {spec.baths} bath"
+        for rtype, n in spec.required.items():
+            line += f" {n} {rtype.value}"
+        if spec.min_area is not None:
+            line += f" area {_n(spec.min_area)}"
         out.append(line)
     for note in (plan.notes or "").splitlines():
         if note.strip():
@@ -52,8 +56,22 @@ def emit_dsl(plan: Barndominium) -> str:
     if plan.interior_doors:
         out.append("")
         for d in plan.interior_doors:
-            kw = "door" if getattr(d, "leaf", True) else "open"
-            out.append(f"{kw} {d.room_a} - {d.room_b} width {_n(d.width)}")
+            kind = getattr(d, "kind", "swing" if getattr(d, "leaf", True) else "cased")
+            if kind == "cased":
+                # Emit the terse `open` shorthand for a cased opening.
+                line = f"open {d.room_a} - {d.room_b} width {_n(d.width)}"
+            else:
+                line = f"door {d.room_a} - {d.room_b}"
+                if kind != "swing":  # name pocket/sliding; swing is the default
+                    line += f" {kind}"
+                line += f" width {_n(d.width)}"
+            if getattr(d, "offset", None) is not None:
+                line += f" offset {_n(d.offset)}"
+            if getattr(d, "swing_into", None) is not None:
+                line += f" into {d.swing_into}"
+            if getattr(d, "hinge", None) is not None:
+                line += f" hinge {d.hinge}"
+            out.append(line)
 
     if plan.exterior_doors:
         out.append("")
@@ -66,9 +84,14 @@ def emit_dsl(plan: Barndominium) -> str:
     if plan.windows:
         out.append("")
         for w in plan.windows:
-            out.append(
-                f"window {w.room} {w.wall.value} width {_n(w.width)} offset {_n(w.offset)}"
-            )
+            line = f"window {w.room} {w.wall.value} width {_n(w.width)} offset {_n(w.offset)}"
+            # Only emit sill/head when they differ from the defaults, to keep the
+            # common case terse while round-tripping a custom (e.g. transom) window.
+            if abs(w.sill_height - 3.0) > 1e-6:
+                line += f" sill {_n(w.sill_height)}"
+            if abs(w.head_height - 6.67) > 1e-6:
+                line += f" head {_n(w.head_height)}"
+            out.append(line)
 
     if plan.porches:
         out.append("")

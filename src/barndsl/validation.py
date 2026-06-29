@@ -24,18 +24,76 @@ from .elements import (
     Room,
     RoomType,
 )
-from .geometry import rect_in_footprint, shared_edge, wall_faces_outside
+from .geometry import (
+    opening_endpoints,
+    rect_in_footprint,
+    shared_edge,
+    wall_faces_outside,
+)
 
 # Approximate IRC-derived thresholds (feet unless noted).
 MIN_CEILING = 7.0
 MIN_BEDROOM_AREA = 70.0
 MIN_BEDROOM_DIMENSION = 7.0
-MIN_HALLWAY_WIDTH = 3.0  # 36 in
+MIN_HALLWAY_WIDTH = 3.0  # 36 in — hard minimum (HALL_WIDTH error)
+COMFORT_HALLWAY_WIDTH = 4.0  # a hall under this passes code but feels tight (HALL_TIGHT)
+#: A hallway that runs this far past its last served door is a circulation stub
+#: (a dead end) — wasted footprint you walk into and back out of.
+MIN_HALL_STUB = 2.5
+#: Type-aware usable-area floors (sq ft) plus a shortest-side floor (ft). Only the
+#: rooms whose use needs a clear minimum of fixtures/clearances. A full bath wants
+#: a 5 ft tub run plus a vanity and a clear floor (~6x8); a half bath (powder
+#: room) just a toilet + sink (~5x6). Bedrooms are covered by BEDROOM_AREA.
+MIN_USABLE_AREA: dict[RoomType, float] = {
+    RoomType.KITCHEN: 70.0,  # counters + appliances + a working aisle
+    RoomType.BATHROOM: 48.0,  # full bath: tub/shower + toilet + vanity (~6x8)
+    RoomType.HALF_BATH: 30.0,  # powder room: toilet + sink (~5x6)
+}
+#: Shortest-side floor (ft) for rooms where a narrow strip can't hold the fixtures.
+MIN_ROOM_SHORT_SIDE: dict[RoomType, float] = {
+    RoomType.BATHROOM: 6.0,
+    RoomType.HALF_BATH: 5.0,
+}
 MIN_EGRESS_DOOR_WIDTH = 32 / 12  # 32 in clear; matches inches(32) exactly
 MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
+# Manufactured door leaf widths (inches). A door off these isn't orderable
+# off-the-shelf; the check nudges to the nearest. Doubles (60/72) included.
+STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
+STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
+DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
 NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
+MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
+CLOSET_WALKIN_ASPECT = 4.0  # a closet skinnier than this (long:short) is "long skinny"
+MIN_WALKIN_AREA = 24.0  # a closet this big is worth shaping as a walk-in, not a strip
+#: A swing door centred on a wall with at least this much clear wall on *both*
+#: flanks is floating mid-wall; backing it to a corner frees a usable wall run.
+DOOR_CORNER_MARGIN = 2.0
+#: Clear floor a doorway needs in front of it (a landing/approach), ft. A stair
+#: intruding into this blocks the door.
+DOOR_CLEARANCE_DEPTH = 3.0
+#: A window whose edge lands this close to an interior-partition corner collides
+#: with that wall's framing/trim — pull it toward the centre or the building corner.
+WINDOW_WALL_CLEAR = 0.5
+#: Exterior dimensions should land on this module (ft) for efficient material use.
+BUILD_MODULE = 3.0
+#: Two door swings overlapping by less than this (ft) are treated as just grazing.
+SWING_CLASH_EPS = 0.02
+
+# Emergency-escape opening minimums (IRC R310). The area is the net *clear*
+# opening; we approximate it from the modelled width × (head − sill), which is
+# generous for a single-hung sash but matches the project's "loosely IRC" stance.
+MIN_EGRESS_AREA = 5.7  # sq ft, upper floors
+MIN_EGRESS_AREA_GRADE = 5.0  # sq ft, at-grade floor (level 0)
+MIN_EGRESS_OPENING_WIDTH = 20 / 12  # 20 in clear
+MIN_EGRESS_OPENING_HEIGHT = 24 / 12  # 24 in clear
+MAX_EGRESS_SILL = 44 / 12  # sill <= 44 in above the finished floor
+
+# Stair geometry (IRC R311.7): a flight needs enough run to climb one storey.
+MAX_RISER_HEIGHT = 7.75 / 12  # 7-3/4 in max riser
+MIN_TREAD_DEPTH = 10 / 12  # 10 in min tread
+MIN_STAIR_WIDTH = 3.0  # 36 in; two side-by-side flights (a switchback) need ~6 ft
 
 
 class Severity(str, Enum):
@@ -79,13 +137,17 @@ class ValidationReport:
         return [i for i in self.issues if i.severity is Severity.WARNING]
 
     @property
+    def infos(self) -> list[Issue]:
+        return [i for i in self.issues if i.severity is Severity.INFO]
+
+    @property
     def is_valid(self) -> bool:
         return not self.errors
 
     def summary(self) -> str:
-        e, w = len(self.errors), len(self.warnings)
+        e, w, n = len(self.errors), len(self.warnings), len(self.infos)
         status = "VALID" if self.is_valid else "INVALID"
-        return f"{status} — {e} error(s), {w} warning(s)"
+        return f"{status} — {e} error(s), {w} warning(s), {n} info(s)"
 
     def __str__(self) -> str:
         return "\n".join([self.summary(), *(str(i) for i in self.issues)])
@@ -120,7 +182,6 @@ def exterior_walls(plan: Barndominium, room: Room, tol: float = 1e-6) -> list[Di
         for w in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST)
         if wall_faces_outside(sections, room, w)
     ]
-    return walls
 
 
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
@@ -162,6 +223,173 @@ def _door_graph(plan: Barndominium) -> dict[str, set[str]]:
 def _wall_length(room: Room, wall: Direction) -> float:
     """Length of ``room``'s named wall (north/south run east-west = width)."""
     return room.width if wall in (Direction.NORTH, Direction.SOUTH) else room.length
+
+
+def _nearest_std(width_in: float, sizes: tuple[int, ...]) -> int:
+    """The manufactured door width (inches) closest to ``width_in``."""
+    return min(sizes, key=lambda s: abs(s - width_in))
+
+
+def _door_interval(edge, door) -> tuple[float, float]:
+    """The door's span along its shared wall, in world coordinates.
+
+    ``offset`` is measured from the south/west end of the shared wall (``edge.lo``);
+    ``None`` centres the door on the wall.
+    """
+    if door.offset is None:
+        lo = edge.mid - door.width / 2.0
+    else:
+        lo = edge.lo + door.offset
+    return lo, lo + door.width
+
+
+def _zone_from_edge(edge, lo: float, hi: float, depth: float) -> tuple[float, float, float, float]:
+    """The clear-floor rectangle straddling a wall edge over span ``[lo, hi]``.
+
+    Extends ``depth`` ft to either side of the wall (into both rooms it divides).
+    """
+    if edge.orientation == "v":  # constant x; span runs in y
+        return edge.pos - depth, lo, edge.pos + depth, hi
+    return lo, edge.pos - depth, hi, edge.pos + depth
+
+
+def _ext_door_zone(room: Room, door, depth: float) -> tuple[float, float, float, float]:
+    """The clear-floor rectangle just inside an exterior door."""
+    x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
+    if door.wall in (Direction.NORTH, Direction.SOUTH):
+        return min(x1, x2), y1 - depth, max(x1, x2), y1 + depth
+    return x1 - depth, min(y1, y2), x1 + depth, max(y1, y2)
+
+
+def _building_corner(plan: Barndominium, room: Room, wall: Direction, at_end: bool) -> bool:
+    """Is the given end of ``room``'s ``wall`` a *building* corner (vs an interior
+    partition junction)? A corner is a building corner when the perpendicular wall
+    meeting it there is also on the envelope."""
+    ext = set(exterior_walls(plan, room))
+    if wall in (Direction.SOUTH, Direction.NORTH):
+        perp = Direction.EAST if at_end else Direction.WEST
+    else:  # vertical wall: ends run south->north
+        perp = Direction.NORTH if at_end else Direction.SOUTH
+    return perp in ext
+
+
+def _stair_against_wall(plan: Barndominium, s) -> bool:
+    """Does a stair sit along a wall (envelope edge or a room partition) rather
+    than floating free in the middle of a room?"""
+    tol = 1e-6
+    if (
+        abs(s.x) <= tol
+        or abs(s.y) <= tol
+        or abs(s.x2 - plan.envelope_width) <= tol
+        or abs(s.y2 - plan.envelope_length) <= tol
+    ):
+        return True
+    # A room (on either level the stair links) sharing a full edge counts.
+    for r in plan.rooms:
+        if r.level not in (s.from_level, s.to_level):
+            continue
+        # Vertical contact (shared constant x), overlapping in y.
+        for sx, rx in ((s.x, r.x2), (s.x2, r.x)):
+            if abs(sx - rx) <= tol and min(s.y2, r.y2) - max(s.y, r.y) > tol:
+                return True
+        # Horizontal contact (shared constant y), overlapping in x.
+        for sy, ry in ((s.y, r.y2), (s.y2, r.y)):
+            if abs(sy - ry) <= tol and min(s.x2, r.x2) - max(s.x, r.x) > tol:
+                return True
+    return False
+
+
+def _off_module(value: float, module: float = BUILD_MODULE, tol: float = 1e-6) -> bool:
+    """Is ``value`` not a whole multiple of ``module``?"""
+    return abs(value - round(value / module) * module) > tol
+
+
+def _swing_sgn(door, a: Room, b: Room, edge) -> float | None:
+    """Mirror the renderer: +1/-1 for the side the leaf swings into, or None to
+    fall back to the keep-inside-the-envelope heuristic."""
+    into = door.swing_into
+    room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
+    if room is None:
+        return None
+    cx, cy = room.center
+    if edge.orientation == "v":
+        return 1.0 if cx > edge.pos else -1.0
+    return 1.0 if cy > edge.pos else -1.0
+
+
+def _swing_region(
+    plan: Barndominium, orientation: str, ox: float, oy: float, w: float,
+    hinge_far: bool, sgn: float | None, samples: int = 4,
+) -> list[tuple[float, float]]:
+    """The quarter-disc the leaf sweeps, as a small convex polygon (pie slice),
+    in plan coordinates — matching :meth:`SVGRenderer._door_symbol`."""
+    if orientation == "v":
+        if sgn is None:
+            sgn = 1.0 if (ox + w) <= plan.envelope_width else -1.0
+        hinge = (ox, oy + w) if hinge_far else (ox, oy)
+        latch = (ox, oy) if hinge_far else (ox, oy + w)
+        tip = (ox + sgn * w, hinge[1])
+    else:
+        if sgn is None:
+            sgn = 1.0 if (oy + w) <= plan.envelope_length else -1.0
+        hinge = (ox + w, oy) if hinge_far else (ox, oy)
+        latch = (ox, oy) if hinge_far else (ox + w, oy)
+        tip = (hinge[0], oy + sgn * w)
+    a0 = math.atan2(latch[1] - hinge[1], latch[0] - hinge[0])
+    a1 = math.atan2(tip[1] - hinge[1], tip[0] - hinge[0])
+    d = a1 - a0
+    while d <= -math.pi:
+        d += 2 * math.pi
+    while d > math.pi:
+        d -= 2 * math.pi
+    pts = [hinge]
+    for i in range(samples + 1):
+        ang = a0 + d * i / samples
+        pts.append((hinge[0] + w * math.cos(ang), hinge[1] + w * math.sin(ang)))
+    return pts
+
+
+def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
+    """The swept region of an interior swing door, or None if it doesn't swing."""
+    if door.kind != "swing":
+        return None
+    w = door.width
+    start = edge.lo + door.offset if door.offset is not None else edge.mid - w / 2.0
+    hinge_far = door.hinge == "far"
+    sgn = _swing_sgn(door, a, b, edge)
+    if edge.orientation == "v":
+        return _swing_region(plan, "v", edge.pos, start, w, hinge_far, sgn)
+    return _swing_region(plan, "h", start, edge.pos, w, hinge_far, sgn)
+
+
+def _exterior_swing_region(plan: Barndominium, room: Room, door):
+    """The swept region of an exterior door (renderer hinges near, keeps inside)."""
+    x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
+    if door.wall in (Direction.NORTH, Direction.SOUTH):
+        return _swing_region(plan, "h", min(x1, x2), y1, door.width, False, None)
+    return _swing_region(plan, "v", x1, min(y1, y2), door.width, False, None)
+
+
+def _convex_overlap(poly_a, poly_b, eps: float = SWING_CLASH_EPS) -> bool:
+    """Do two convex polygons overlap by more than ``eps`` (separating-axis test)?
+
+    Axes are the unit edge normals of both polygons; if any axis separates the
+    projections (with an ``eps`` gap, in feet), they don't overlap."""
+    for poly in (poly_a, poly_b):
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            nx, ny = -(y2 - y1), (x2 - x1)
+            length = math.hypot(nx, ny)
+            if length < 1e-12:
+                continue
+            nx, ny = nx / length, ny / length
+            a_proj = [nx * px + ny * py for px, py in poly_a]
+            b_proj = [nx * px + ny * py for px, py in poly_b]
+            if max(a_proj) < min(b_proj) + eps or max(b_proj) < min(a_proj) + eps:
+                return False
+    return True
 
 
 def _suggest_int(value: float, cap: float = 1e4) -> int | None:
@@ -454,13 +682,23 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                     sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
                 else:
                     sug = f"shrink one of them or enlarge the envelope"
+                # A collision is often a relative-anchor chain pushing a room onto
+                # one already placed — surface that so the fix is re-anchoring, not
+                # guessing at a shrink.
+                placed = next((r for r in (b, a) if r.placement is not None), None)
+                note = (
+                    f" ('{placed.id}' is placed `{placed.placement}` — re-anchor it "
+                    "one room deep off a spine, or pin it with `at x,y`)"
+                    if placed is not None
+                    else ""
+                )
                 add(
                     Issue(
                         Severity.ERROR,
                         "OVERLAP",
                         f"Rooms '{a.id}' and '{b.id}' overlap by {_f(ov)} sq ft.",
                         room=a.id,
-                        hint=f"Reposition so they don't intersect — e.g. {sug}.",
+                        hint=f"Reposition so they don't intersect — e.g. {sug}.{note}",
                     )
                 )
 
@@ -530,6 +768,40 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
                     f"{MIN_HALLWAY_WIDTH:.0f} ft.",
                     room=room.id,
                     hint=f"Widen it to >= {MIN_HALLWAY_WIDTH:.0f} ft.",
+                )
+            )
+        floor = MIN_USABLE_AREA.get(room.type)
+        short_floor = MIN_ROOM_SHORT_SIDE.get(room.type)
+        if floor is not None and 0 < room.area < floor:
+            need_len = _suggest_int(floor / max(room.width, 1e-6))
+            sizing = (
+                f" e.g. `size {_f(room.width)} x {need_len}`"
+                if need_len is not None
+                else ""
+            )
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ROOM_TIGHT",
+                    f"{room.type.value.replace('_', ' ').capitalize()} '{room.id}' is "
+                    f"{_f(room.area)} sq ft; a workable {room.type.value.replace('_', ' ')} "
+                    f"wants about {floor:.0f} sq ft.",
+                    room=room.id,
+                    hint=f"Enlarge it to >= {floor:.0f} sq ft{sizing}.",
+                )
+            )
+        elif short_floor is not None and 0 < room.min_dimension < short_floor:
+            # Big enough by area but too narrow to fit the fixtures across it
+            # (e.g. a 4 ft-wide full bath can't take a tub on the short wall).
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ROOM_TIGHT",
+                    f"{room.type.value.replace('_', ' ').capitalize()} '{room.id}' is only "
+                    f"{_f(room.min_dimension)} ft on its short side; a workable "
+                    f"{room.type.value.replace('_', ' ')} wants >= {short_floor:.0f} ft.",
+                    room=room.id,
+                    hint=f"Widen the short side to >= {short_floor:.0f} ft.",
                 )
             )
 
@@ -613,6 +885,73 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         **loc,
                     )
                 )
+            elif door.offset is not None and (
+                door.offset < -1e-6
+                or door.offset + door.width > edge.length + 1e-6
+            ):
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "DOOR_OOB",
+                        f"Door between '{a.id}' and '{b.id}' runs off their "
+                        f"{_f(edge.length)} ft shared wall (offset {_f(door.offset)} + "
+                        f"width {_f(door.width)}).",
+                        room=a.id,
+                        hint=f"Keep offset >= 0 and offset + width <= {_f(edge.length)}, "
+                        "or drop the offset to centre it.",
+                        **loc,
+                    )
+                )
+            if door.swing_into is not None:
+                if door.swing_into not in (a.id, b.id):
+                    add(
+                        Issue(
+                            Severity.ERROR,
+                            "DOOR_SWING",
+                            f"Door swings into '{door.swing_into}', which it doesn't "
+                            f"connect (it joins '{a.id}' and '{b.id}').",
+                            room=a.id,
+                            hint=f"Set `into {a.id}` or `into {b.id}`.",
+                            **loc,
+                        )
+                    )
+                elif edge is not None and door.kind == "swing":
+                    target = a if door.swing_into == a.id else b
+                    depth = target.width if edge.orientation == "v" else target.length
+                    if depth + 1e-6 < door.width:
+                        add(
+                            Issue(
+                                Severity.WARNING,
+                                "DOOR_SWING",
+                                f"A {door.width * 12:.0f} in door can't fully open into "
+                                f"'{target.id}' — only {_f(depth)} ft deep at the wall.",
+                                room=target.id,
+                                hint="Swing it into the other room (`into "
+                                f"{(b if target is a else a).id}`), narrow the door, or "
+                                "deepen the room.",
+                                **loc,
+                            )
+                        )
+                    elif (
+                        target.type is RoomType.HALLWAY
+                        and depth - door.width + 1e-6 < MIN_HALLWAY_WIDTH
+                    ):
+                        # It opens, but a leaf swung into a narrow hall leaves less
+                        # than a 3 ft passage beside it — it blocks circulation.
+                        other = b if target is a else a
+                        add(
+                            Issue(
+                                Severity.INFO,
+                                "DOOR_BLOCKS_HALL",
+                                f"This door swings into the hallway '{target.id}'; open, "
+                                f"its leaf leaves only {_f(max(0.0, depth - door.width))} "
+                                "ft of passage, blocking circulation.",
+                                room=target.id,
+                                hint=f"Swing it into '{other.id}' instead (`into "
+                                f"{other.id}`) so the hall stays clear.",
+                                **loc,
+                            )
+                        )
         if door.leaf and door.width < MIN_INTERIOR_DOOR_WIDTH:
             # An open cased passage (leaf=False) is wide by design — the narrow
             # check only applies to swinging doors.
@@ -628,6 +967,22 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     **loc,
                 )
             )
+        elif door.leaf:
+            # A swing door that *is* wide enough should still be an orderable size.
+            nearest = _nearest_std(door.width * 12, STD_INTERIOR_DOOR_WIDTHS_IN)
+            if abs(nearest - door.width * 12) > DOOR_SIZE_TOL_IN:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "DOOR_SIZE",
+                        f"Interior door between '{door.room_a}' and '{door.room_b}' is "
+                        f"{door.width * 12:.0f} in, not a standard leaf size.",
+                        room=door.room_a,
+                        hint=f"Use a stock width, e.g. `width {nearest / 12:g}` "
+                        f"({nearest} in).",
+                        **loc,
+                    )
+                )
         if not door.leaf and a and b:
             # A walk-through (`open`) gives no privacy; a bathroom needs a door.
             bath = next((r for r in (a, b) if r.type in BATH_TYPES), None)
@@ -646,6 +1001,43 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     )
                 )
 
+    # Two doors/openings between the same pair share one wall — they can't overlap
+    # on it. (Positioned or centred; centred ones coincide, so a stray duplicate
+    # connection is caught too.)
+    by_pair: dict[frozenset, list] = {}
+    for door in plan.interior_doors:
+        a, b = plan.room(door.room_a), plan.room(door.room_b)
+        if not (a and b) or a.level != b.level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        w = min(door.width, edge.length)
+        if door.offset is None:
+            start = edge.mid - w / 2
+        else:
+            start = edge.lo + max(0.0, min(door.offset, edge.length - w))
+        by_pair.setdefault(frozenset((door.room_a, door.room_b)), []).append(
+            (start, start + w, door)
+        )
+    for spans in by_pair.values():
+        if len(spans) < 2:
+            continue
+        spans.sort(key=lambda s: s[0])
+        for (a_lo, a_hi, _), (b_lo, b_hi, d2) in zip(spans, spans[1:]):
+            if min(a_hi, b_hi) - max(a_lo, b_lo) > 1e-6:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "OPENING_CLASH",
+                        f"Two doors between '{d2.room_a}' and '{d2.room_b}' overlap "
+                        "on their shared wall.",
+                        room=d2.room_a,
+                        hint="Offset them apart, or use a single door.",
+                        **_door_loc(d2),
+                    )
+                )
+
     for door in plan.exterior_doors:
         if door.room not in room_ids:
             add(
@@ -655,6 +1047,24 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     f"Exterior door references unknown room '{door.room}'.",
                     room=door.room,
                     hint="Reference an existing room id.",
+                    **_door_loc(door),
+                )
+            )
+            continue
+        room = plan.room(door.room)
+        if room is not None and room.type in (RoomType.GARAGE, RoomType.SHOP):
+            continue  # a garage/shop opening is an overhead door, not a leaf size
+        nearest = _nearest_std(door.width * 12, STD_EXTERIOR_DOOR_WIDTHS_IN)
+        if abs(nearest - door.width * 12) > DOOR_SIZE_TOL_IN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "DOOR_SIZE",
+                    f"Exterior door on '{door.room}' is {door.width * 12:.0f} in, "
+                    "not a standard size.",
+                    room=door.room,
+                    hint=f"Use a stock width, e.g. `width {nearest / 12:g}` "
+                    f"({nearest} in); 36 in is the usual entry.",
                     **_door_loc(door),
                 )
             )
@@ -678,6 +1088,18 @@ def _validate_openings(plan: Barndominium, add) -> None:
             )
             continue
         room = plan.room(w.room)
+        if w.head_height <= w.sill_height + 1e-6:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "WINDOW_SILL",
+                    f"Window on '{w.room}' has its head ({_f(w.head_height)} ft) at "
+                    f"or below its sill ({_f(w.sill_height)} ft) — it has no glass.",
+                    room=w.room,
+                    hint="Set head above sill, e.g. `sill 3 head 6.5`.",
+                    **_door_loc(w),
+                )
+            )
         wlen = _wall_length(room, w.wall)
         if w.offset < -1e-6 or w.offset + w.width > wlen + 1e-6:
             add(
@@ -735,6 +1157,37 @@ def _validate_openings(plan: Barndominium, add) -> None:
                 )
             )
 
+    # Two openings can't occupy the same run of wall. Group every wall-positioned
+    # opening (window or entry) by (room, wall) and flag overlapping spans.
+    spans: dict[tuple[str, Direction], list[tuple]] = {}
+    for o, kind in (
+        *((w, "window") for w in plan.windows),
+        *((d, "entry") for d in plan.exterior_doors),
+    ):
+        if o.room not in room_ids:
+            continue  # *_REF already raised
+        spans.setdefault((o.room, o.wall), []).append(
+            (o.offset, o.offset + o.width, kind, o)
+        )
+    for (rid, wall), items in spans.items():
+        items.sort()  # by start offset
+        for (a_lo, a_hi, a_kind, a_o), (b_lo, b_hi, b_kind, b_o) in zip(items, items[1:]):
+            ov = min(a_hi, b_hi) - max(a_lo, b_lo)
+            if ov > 1e-6:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "OPENING_CLASH",
+                        f"Two openings overlap on the {wall.value} wall of '{rid}': "
+                        f"the {a_kind} at {_f(a_lo)}–{_f(a_hi)} ft and the {b_kind} at "
+                        f"{_f(b_lo)}–{_f(b_hi)} ft share {_f(ov)} ft.",
+                        room=rid,
+                        hint="Move one along the wall or narrow it so their offsets "
+                        "don't overlap.",
+                        **_door_loc(b_o),
+                    )
+                )
+
 
 def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
     """Rooms on ``level`` whose footprint the stair lands in."""
@@ -749,7 +1202,8 @@ def _validate_stairs(plan: Barndominium, add) -> None:
     for s in plan.stairs:
         if not all(math.isfinite(v) for v in (s.x, s.y, s.width, s.length)):
             add(Issue(Severity.ERROR, "STAIR_GEOMETRY",
-                      f"Stair '{s.id}' has non-finite coordinates or size.", room=s.id))
+                      f"Stair '{s.id}' has non-finite coordinates or size.", room=s.id,
+                      hint="Use finite measurements in feet (no nan/inf)."))
             continue
         if s.width <= 0 or s.length <= 0:
             add(Issue(Severity.ERROR, "STAIR_SIZE",
@@ -766,6 +1220,33 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                       f"Stair '{s.id}' extends outside the "
                       f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
                       room=s.id, hint="Keep its footprint inside the envelope."))
+        # Does the footprint hold the run one storey demands? A straight flight
+        # needs (risers-1)·tread of horizontal run; a switchback halves that but
+        # needs a footprint wide enough for two flights side by side. Only flag
+        # when even a switchback wouldn't fit — keeps this conservative.
+        if (
+            s.width > 0
+            and s.length > 0
+            and s.from_level != s.to_level
+            and s.from_level >= 0
+            and s.to_level >= 0
+            and plan.ceiling_height > 0
+        ):
+            rise = plan.ceiling_height * abs(s.to_level - s.from_level)
+            risers = max(1, math.ceil(rise / MAX_RISER_HEIGHT))
+            run_needed = max(1, risers - 1) * MIN_TREAD_DEPTH
+            long_dim, short_dim = max(s.width, s.length), min(s.width, s.length)
+            could_switchback = short_dim + 1e-6 >= 2 * MIN_STAIR_WIDTH
+            needed = run_needed / 2 if could_switchback else run_needed
+            if long_dim + 1e-6 < needed:
+                add(Issue(
+                    Severity.WARNING, "STAIR_RUN",
+                    f"Stair '{s.id}' is {_f(long_dim)} ft long, too short to climb "
+                    f"{_f(rise)} ft: ~{risers} risers need about {_f(run_needed)} ft "
+                    "of run (a 7.75 in riser / 10 in tread).",
+                    room=s.id,
+                    hint=f"Lengthen its footprint to >= {_f(run_needed)} ft, or make it "
+                    f">= {_f(2 * MIN_STAIR_WIDTH)} ft wide to fit a switchback."))
         lower = _stair_rooms(plan, s, s.from_level)
         upper = _stair_rooms(plan, s, s.to_level)
         if not lower or not upper:
@@ -1022,27 +1503,387 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
-    # 7. Storage: a bedroom with no closet beside it is a real, noticeable omission
-    #    (not code, so INFO — some plans use wardrobes instead).
+    # 7. Storage: a bedroom needs a closet it can actually use — one reached by a
+    #    door/opening *from that bedroom*, not merely a closet that happens to abut
+    #    it (which might be a neighbour's, with no way in). Not code, so INFO.
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
-            has_closet = any(
+            own_closet = any(
                 by_id[n].type is RoomType.CLOSET
-                for n in geometric_neighbors(plan, room.id)
+                for n in graph.get(room.id, ())
                 if n in by_id
             )
-            if not has_closet:
+            if not own_closet:
+                # Distinguish "no closet at all" from "a closet abuts but with no
+                # door" — the second is the subtler omission, so name it.
+                abuts_closet = any(
+                    by_id[n].type is RoomType.CLOSET
+                    for n in geometric_neighbors(plan, room.id)
+                    if n in by_id
+                )
+                detail = (
+                    "has a closet beside it but no door into it"
+                    if abuts_closet
+                    else "has no closet"
+                )
                 add(
                     Issue(
                         Severity.INFO,
                         "NO_CLOSET",
-                        f"Bedroom '{room.id}' has no adjacent closet.",
+                        f"Bedroom '{room.id}' {detail}.",
                         room=room.id,
-                        hint=f"Add a closet against it, e.g. `room {room.id}_closet: "
-                        f"closet east-of {room.id} size 6 x 3` and `door {room.id} - "
-                        f"{room.id}_closet`.",
+                        hint=f"Give it its own closet with a door, e.g. "
+                        f"`room {room.id}_closet: closet east-of {room.id} size 6 x 3` "
+                        f"and `door {room.id} - {room.id}_closet`.",
                     )
                 )
+
+    # 8. Primary suite: on a floor with two or more full bathrooms, *some* bedroom
+    #    should have a private (ensuite) bath rather than every bath only being a
+    #    shared hall bath — that's the point of a second bath. INFO (a preference).
+    beds_by_level: dict[int, list[Room]] = {}
+    full_baths_by_level: dict[int, int] = {}
+    for r in plan.rooms:
+        if r.type is RoomType.BEDROOM:
+            beds_by_level.setdefault(r.level, []).append(r)
+        elif r.type is RoomType.BATHROOM:
+            full_baths_by_level[r.level] = full_baths_by_level.get(r.level, 0) + 1
+
+    def _bedroom_ensuite(bed_id: str) -> bool:
+        # A full bath reached only through this bedroom (a closet off it is fine);
+        # a bath also opening to a hall or another room is a shared bath.
+        return any(
+            by_id[n].type is RoomType.BATHROOM
+            and all(
+                m == bed_id or (m in by_id and by_id[m].type is RoomType.CLOSET)
+                for m in graph.get(n, ())
+            )
+            for n in graph.get(bed_id, ())
+            if n in by_id
+        )
+
+    for level, beds in beds_by_level.items():
+        nbaths = full_baths_by_level.get(level, 0)
+        if nbaths < 2 or not beds:
+            continue
+        # Satisfied as long as *any* bedroom has a private ensuite — don't depend
+        # on an arbitrary "largest bedroom" tiebreak (two equal-area bedrooms used
+        # to flip a false positive). The largest just names where to add one.
+        if any(_bedroom_ensuite(b.id) for b in beds):
+            continue
+        master = max(beds, key=lambda r: r.area)
+        add(
+            Issue(
+                Severity.INFO,
+                "MASTER_ENSUITE",
+                f"This floor has {nbaths} full baths but none is a private ensuite — "
+                f"the primary bedroom (e.g. '{master.id}') should have its own.",
+                room=master.id,
+                hint=f"Make one bath open only off a bedroom, e.g. "
+                f"`door {master.id} - <bath>` with that bath connected to nothing else.",
+            )
+        )
+
+    # 8b. Acoustic buffer: two bedrooms that share a wall pass sound straight
+    #     between them. The idiom is to stack each bedroom's closet on that wall
+    #     (back-to-back), so the closets buffer the sleeping rooms — once buffered
+    #     the bedrooms no longer share a wall and this clears.
+    beds = [r for r in plan.rooms if r.type is RoomType.BEDROOM]
+    for i, ba in enumerate(beds):
+        for bb in beds[i + 1 :]:
+            edge = shared_edge(ba, bb)
+            if edge is not None and edge.length + 1e-6 >= MIN_SOUND_BUFFER_WALL:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BED_SOUND",
+                        f"Bedrooms '{ba.id}' and '{bb.id}' share a {_f(edge.length)} ft "
+                        "wall — sound carries straight between the sleeping rooms.",
+                        room=ba.id,
+                        hint="Buffer them: stack a closet on each side of the shared "
+                        "wall (back-to-back), or put a hall/closet between the bedrooms.",
+                    )
+                )
+
+    # 8c. Walk-in vs long, skinny closet: a closet with the floor area for a
+    #     walk-in but shaped as a narrow strip wastes that floor. Small reach-ins
+    #     (under the walk-in area) and wide/shallow closets (under the aspect
+    #     bar) are fine and exempt.
+    for room in plan.rooms:
+        if room.type is RoomType.CLOSET:
+            short = room.min_dimension
+            long = max(room.width, room.length)
+            if (
+                short > 1e-6
+                and room.area >= MIN_WALKIN_AREA
+                and long / short >= CLOSET_WALKIN_ASPECT
+            ):
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "CLOSET_SHAPE",
+                        f"Closet '{room.id}' is {_f(room.width)} x {_f(room.length)} "
+                        f"({long / short:.1f}:1) — a long, skinny closet.",
+                        room=room.id,
+                        hint="With this much floor a walk-in is more usable — aim for a "
+                        "more square footprint (under ~3:1), at least 4 ft deep.",
+                    )
+                )
+
+    # 8d. Comfort width: a hall at the 3 ft code minimum passes but feels tight
+    #     for two people or moving furniture; 4 ft is the comfortable target.
+    for room in plan.rooms:
+        if (
+            room.type is RoomType.HALLWAY
+            and MIN_HALLWAY_WIDTH <= room.min_dimension < COMFORT_HALLWAY_WIDTH - 1e-9
+        ):
+            add(
+                Issue(
+                    Severity.INFO,
+                    "HALL_TIGHT",
+                    f"Hallway '{room.id}' is {_f(room.min_dimension)} ft wide — legal "
+                    f"(>= {MIN_HALLWAY_WIDTH:.0f} ft) but tight; {COMFORT_HALLWAY_WIDTH:.0f} "
+                    "ft is comfortable for two people and moving furniture.",
+                    room=room.id,
+                    hint=f"Widen it to >= {COMFORT_HALLWAY_WIDTH:.0f} ft.",
+                )
+            )
+
+    # 8e. Front *and* back door: a home wants a second exterior door (a back/side
+    #     door off the kitchen, mudroom or laundry) — for daily flow and a second
+    #     way out. Garage/porch doors don't count as the house's back door.
+    people_doors = [
+        d
+        for d in plan.exterior_doors
+        if d.room in by_id and by_id[d.room].type not in (RoomType.GARAGE, RoomType.PORCH)
+    ]
+    if plan.rooms and plan.exterior_doors and len(people_doors) < 2:
+        where = (
+            f" (only one, on '{people_doors[0].room}')"
+            if people_doors
+            else " (the only exterior door is a garage/utility door)"
+        )
+        add(
+            Issue(
+                Severity.INFO,
+                "NO_BACK_DOOR",
+                f"Plan has a single exterior entrance{where}; a home wants a front "
+                "and a back door.",
+                hint="Add a second exterior door on another wall — e.g. off the "
+                "kitchen, a mudroom or the laundry — `entry <room> <wall>`.",
+            )
+        )
+
+    # 8f. Ensuite proportion: a private bath shouldn't be larger than the bedroom
+    #     it serves — that's a sign the suite is mis-proportioned. Only judged for
+    #     a true ensuite (a bath reached only through this bedroom, closets aside).
+    for bed in (r for r in plan.rooms if r.type is RoomType.BEDROOM):
+        for n in graph.get(bed.id, ()):
+            bath = by_id.get(n)
+            if bath is None or bath.type is not RoomType.BATHROOM:
+                continue
+            private = all(
+                m == bed.id or (m in by_id and by_id[m].type is RoomType.CLOSET)
+                for m in graph.get(bath.id, ())
+            )
+            if private and bath.area > bed.area + 1e-6:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BATH_OVERSIZE",
+                        f"Ensuite '{bath.id}' ({_f(bath.area)} sq ft) is larger than the "
+                        f"bedroom '{bed.id}' it serves ({_f(bed.area)} sq ft).",
+                        room=bath.id,
+                        hint="A bath should be the same size or smaller than its "
+                        "bedroom — shrink the bath or enlarge the bedroom.",
+                    )
+                )
+
+    # 8g. A door needs clear floor in front of it; a stair landing intruding on a
+    #     doorway blocks it (you step off the stair straight into a swinging door).
+    for s in plan.stairs:
+        levels = (s.from_level, s.to_level)
+        blocked: set[str] = set()
+        for d in plan.interior_doors:
+            a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+            if a is None or b is None or a.level != b.level or a.level not in levels:
+                continue
+            edge = shared_edge(a, b)
+            if edge is None:
+                continue
+            lo, hi = _door_interval(edge, d)
+            zx1, zy1, zx2, zy2 = _zone_from_edge(edge, lo, hi, DOOR_CLEARANCE_DEPTH)
+            key = f"{a.id}-{b.id}"
+            if key not in blocked and s.overlaps_rect(zx1, zy1, zx2, zy2):
+                blocked.add(key)
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "STAIR_BLOCKS_DOOR",
+                        f"Stair '{s.id}' intrudes on the clear floor in front of the "
+                        f"'{a.id}'-'{b.id}' doorway, blocking it.",
+                        room=s.id,
+                        hint="Shift the stair off the doorway (place it along a wall), "
+                        "or move the door so its approach is clear.",
+                    )
+                )
+        for d in plan.exterior_doors:
+            r = by_id.get(d.room)
+            if r is None or r.level not in levels:
+                continue
+            zx1, zy1, zx2, zy2 = _ext_door_zone(r, d, DOOR_CLEARANCE_DEPTH)
+            key = f"ext:{d.room}:{d.wall.value}"
+            if key not in blocked and s.overlaps_rect(zx1, zy1, zx2, zy2):
+                blocked.add(key)
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "STAIR_BLOCKS_DOOR",
+                        f"Stair '{s.id}' intrudes on the clear floor in front of the "
+                        f"exterior door into '{d.room}', blocking it.",
+                        room=s.id,
+                        hint="Shift the stair off the doorway (place it along a wall), "
+                        "or move the entry so its approach is clear.",
+                    )
+                )
+
+    # 8h. Stairs belong along a wall, not marooned in the middle of a room (where
+    #     they'd need railings all round and chop up the floor). We can't model
+    #     mid-flight landings/turns, but we can flag a free-floating flight.
+    for s in plan.stairs:
+        if not _stair_against_wall(plan, s):
+            add(
+                Issue(
+                    Severity.INFO,
+                    "STAIR_WALL",
+                    f"Stair '{s.id}' floats free of any wall — place it along an "
+                    "exterior or partition wall.",
+                    room=s.id,
+                    hint="Move it so a long side runs against a wall; for a tall climb "
+                    "an L-shaped run with a mid landing keeps the footprint compact.",
+                )
+            )
+
+    # 8i. Door position: a swing door centred on a wall with usable wall on *both*
+    #     flanks wastes the room — backing it to a corner leaves an unbroken run to
+    #     line with furniture. Only swing leaves the author left to default (no
+    #     explicit offset); cased/sliding and deliberately-placed doors are exempt.
+    for d in plan.interior_doors:
+        if d.kind != "swing" or d.offset is not None:
+            continue
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None:
+            continue
+        if not (a.type in HABITABLE_TYPES or b.type in HABITABLE_TYPES):
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        margin = (edge.length - d.width) / 2.0
+        if margin > DOOR_CORNER_MARGIN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "DOOR_CENTERED",
+                    f"Door '{a.id}'-'{b.id}' is centred on a {_f(edge.length)} ft wall, "
+                    f"floating {_f(margin)} ft from each corner.",
+                    room=a.id,
+                    hint=f"Back it toward a corner — e.g. `door {a.id} - {b.id} ... "
+                    "offset 0.5` (~6 in off the wall for trim) — so one side keeps a "
+                    "full wall run for furniture.",
+                    **_door_loc(d),
+                )
+            )
+
+    # 8k. Door swings shouldn't overlap: two leaves sweeping into the same space
+    #     foul each other. Build each swing's swept quarter-disc (matching the
+    #     renderer) and test for overlap.
+    swings = []
+    for d in plan.interior_doors:
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None or a.level != b.level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        region = _interior_swing_region(plan, d, a, b, edge)
+        if region is not None:
+            swings.append((f"'{d.room_a}'-'{d.room_b}'", region, d.line, d.col, d.end_col))
+    for d in plan.exterior_doors:
+        r = by_id.get(d.room)
+        if r is None:
+            continue
+        swings.append((f"the entry to '{d.room}'", _exterior_swing_region(plan, r, d),
+                       d.line, d.col, d.end_col))
+    for i in range(len(swings)):
+        for j in range(i + 1, len(swings)):
+            if _convex_overlap(swings[i][1], swings[j][1]):
+                lbl_i, _, line, col, end_col = swings[i]
+                lbl_j = swings[j][0]
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "DOOR_SWING_CLASH",
+                        f"The swings of {lbl_i} and {lbl_j} overlap — the leaves "
+                        "would foul each other.",
+                        line=line, col=col, end_col=end_col,
+                        hint="Move one door along its wall, narrow it, swing it the "
+                        "other way (`into <room>` / `hinge near|far`), or make one a "
+                        "pocket/sliding door so the leaves don't collide.",
+                    )
+                )
+
+    # 8l. Material efficiency: exterior dimensions that land on a build module cut
+    #     less sheet/board waste. Flag envelope and wing measurements off the module.
+    off = []
+    for label, value in (
+        ("envelope width", plan.envelope_width),
+        ("envelope length", plan.envelope_length),
+    ):
+        if _off_module(value):
+            off.append(f"{label} {_f(value)}")
+    for i, wing in enumerate(plan.wings):
+        for label, value in (("width", wing.width), ("length", wing.length)):
+            if _off_module(value):
+                off.append(f"wing {i + 1} {label} {_f(value)}")
+    if off:
+        add(
+            Issue(
+                Severity.INFO,
+                "ENVELOPE_MODULE",
+                f"Exterior dimensions off the {_f(BUILD_MODULE)} ft build module: "
+                f"{', '.join(off)}.",
+                hint=f"Round exterior measurements to a multiple of {_f(BUILD_MODULE)} ft "
+                "so sheet goods and framing cut with less waste.",
+            )
+        )
+
+    # 8j. Windows shouldn't butt an interior partition where it meets the exterior
+    #     wall — there's no room for framing/trim and it reads as off-balance. (A
+    #     window flush to a true *building* corner is fine.)
+    for w in plan.windows:
+        r = by_id.get(w.room)
+        if r is None or w.wall not in exterior_walls(plan, r):
+            continue
+        wall_len = _wall_length(r, w.wall)
+        near, far = w.offset, w.offset + w.width
+        hit_start = near < WINDOW_WALL_CLEAR and not _building_corner(plan, r, w.wall, False)
+        hit_end = (wall_len - far) < WINDOW_WALL_CLEAR and not _building_corner(
+            plan, r, w.wall, True
+        )
+        if hit_start or hit_end:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "WINDOW_PARTITION",
+                    f"Window on the {w.wall.value} wall of '{w.room}' sits against an "
+                    "interior partition — it'll collide with the wall framing/trim.",
+                    room=w.room,
+                    hint="Pull it toward the wall's centre (or a building corner) so it "
+                    "has clear wall on both sides; space multiple windows evenly.",
+                    **_door_loc(w),
+                )
+            )
 
     # 8. Proportion: a habitable room shaped like a bowling alley is hard to
     #    furnish. Hallways/closets are *meant* to be skinny — they're not habitable,
@@ -1112,6 +1953,79 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 )
             )
 
+    # 11. A hallway exists to *distribute* circulation. One that opens onto a
+    #     single room (or none) is just overhead. Exempt a hall that carries an
+    #     exterior entry — a foyer/vestibule is legitimately a one-room hall.
+    hall_entries = {d.room for d in plan.exterior_doors}
+    for room in plan.rooms:
+        if room.type is not RoomType.HALLWAY:
+            continue
+        served = len(graph.get(room.id, ()))
+        if served <= 1:
+            # A 1-room hall isn't a distributing spine: flag it as overhead (unless
+            # it's a foyer carrying the entry), and never stub-check it.
+            if room.id not in hall_entries:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "HALL_DEADEND",
+                        f"Hallway '{room.id}' opens onto {served} room(s); a hall that "
+                        "serves one room isn't earning its footprint.",
+                        room=room.id,
+                        hint="Open that room off a larger space and drop the hall, or "
+                        "extend the hall so it distributes to more rooms.",
+                    )
+                )
+            continue
+        # A hall that *does* distribute can still waste a stub: it runs on past its
+        # last doorway into a blank wall, so you walk into a dead end and back out.
+        long_x = room.width >= room.length
+        axis_lo, axis_hi = (room.x, room.x2) if long_x else (room.y, room.y2)
+        if axis_hi - axis_lo <= room.min_dimension + 1e-6:
+            continue  # roughly square (a foyer/landing), not a corridor
+        # Measure from each *doorway*, not the room's whole abutting wall: a hall
+        # running past its last door reads as a dead end even if a room's wall
+        # lines the rest of it. So the served span is between the first and last
+        # doorway along the hall.
+        marks: list[tuple[float, float]] = []
+        for d in plan.interior_doors:
+            if room.id not in (d.room_a, d.room_b):
+                continue
+            other = d.room_b if d.room_a == room.id else d.room_a
+            nb = by_id.get(other)
+            edge = shared_edge(room, nb) if nb else None
+            if edge is None:
+                continue
+            lo, hi = _door_interval(edge, d)
+            along_axis = (edge.orientation == "h") if long_x else (edge.orientation == "v")
+            marks.append((lo, hi) if along_axis else (edge.pos, edge.pos))
+        for d in plan.exterior_doors:
+            if d.room != room.id:
+                continue
+            x1, y1, x2, y2 = opening_endpoints(room, d.wall, d.offset, d.width)
+            ns = d.wall in (Direction.NORTH, Direction.SOUTH)
+            if long_x:
+                marks.append((min(x1, x2), max(x1, x2)) if ns else (x1, x1))
+            else:
+                marks.append((min(y1, y2), max(y1, y2)) if not ns else (y1, y1))
+        if not marks:
+            continue
+        served_lo = min(m[0] for m in marks)
+        served_hi = max(m[1] for m in marks)
+        stub = max(served_lo - axis_lo, axis_hi - served_hi)
+        if stub >= MIN_HALL_STUB:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "HALL_DEADEND",
+                    f"Hallway '{room.id}' runs {_f(stub)} ft past its last doorway "
+                    "into a blank wall — a dead-end stub of circulation.",
+                    room=room.id,
+                    hint="Put the end room's door at the hall end (extend that room to "
+                    "cap the hall), or trim the hall back to its last doorway.",
+                )
+            )
+
 
 def _validate_program(plan: Barndominium, add) -> None:
     """Check the rooms placed against a declared ``program`` (if any).
@@ -1132,6 +2046,26 @@ def _validate_program(plan: Barndominium, add) -> None:
         mismatches.append(f"{spec.beds} bedroom(s) declared but {actual_beds} placed")
     if spec.baths is not None and spec.baths != actual_baths:
         mismatches.append(f"{spec.baths} bath(s) declared but {actual_baths} placed")
+    # Required room types are an *at-least* check: a declared room that's missing
+    # (or short) is flagged, but a surplus never is.
+    type_counts: dict[RoomType, int] = {}
+    for r in plan.rooms:
+        type_counts[r.type] = type_counts.get(r.type, 0) + 1
+    for rtype, need in spec.required.items():
+        have = type_counts.get(rtype, 0)
+        if have < need:
+            if need == 1:
+                mismatches.append(f"no {rtype.value} placed")
+            else:
+                mismatches.append(
+                    f"{need} {rtype.value}(s) declared but {have} placed"
+                )
+    if spec.min_area is not None:
+        interior = m["interior_sqft"]
+        if math.isfinite(interior) and interior + 1e-6 < spec.min_area:
+            mismatches.append(
+                f"{_f(spec.min_area)} sq ft declared but {interior:.0f} placed"
+            )
     if not mismatches:
         return
     loc = {}
@@ -1143,7 +2077,7 @@ def _validate_program(plan: Barndominium, add) -> None:
             "PROGRAM_MISMATCH",
             "Plan doesn't match its declared program: " + "; ".join(mismatches) + ".",
             hint="Add or remove rooms to match, or update the `program` line to the "
-            "counts you intend.",
+            "intent you mean (counts, required rooms, or `area`).",
             **loc,
         )
     )
@@ -1167,11 +2101,9 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
         walls = exterior_walls(plan, room)
         if room.type is RoomType.BEDROOM:
             # Only an opening on an exterior wall counts as an escape route.
-            has_window = any(w.wall in walls for w in plan.windows_for(room.id))
-            has_ext_door = any(
-                d.wall in walls for d in plan.exterior_doors_for(room.id)
-            )
-            if not (has_window or has_ext_door):
+            ext_windows = [w for w in plan.windows_for(room.id) if w.wall in walls]
+            ext_doors = [d for d in plan.exterior_doors_for(room.id) if d.wall in walls]
+            if not ext_windows and not ext_doors:
                 if walls:
                     hint = (
                         f"Add an egress window on an exterior wall, e.g. "
@@ -1189,6 +2121,68 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                         "Bedroom has no emergency escape opening.",
                         room=room.id,
                         hint=hint,
+                    )
+                )
+            else:
+                # An escape opening exists — does it meet the R310 clear-opening
+                # minimums? A full-height door qualifies on width alone; a window
+                # must clear the area and both dimensions and sit low enough.
+                min_area = MIN_EGRESS_AREA_GRADE if room.level == 0 else MIN_EGRESS_AREA
+
+                def _win_ok(w) -> bool:
+                    h = max(0.0, w.head_height - w.sill_height)
+                    return (
+                        w.width + 1e-6 >= MIN_EGRESS_OPENING_WIDTH
+                        and h + 1e-6 >= MIN_EGRESS_OPENING_HEIGHT
+                        and w.width * h + 1e-6 >= min_area
+                        and w.sill_height <= MAX_EGRESS_SILL + 1e-6
+                    )
+
+                door_ok = any(
+                    d.width + 1e-6 >= MIN_EGRESS_OPENING_WIDTH for d in ext_doors
+                )
+                if not (door_ok or any(_win_ok(w) for w in ext_windows)):
+                    if ext_windows:
+                        best = max(ext_windows, key=lambda w: w.glazed_area)
+                        h = max(0.0, best.head_height - best.sill_height)
+                        detail = (
+                            f"its largest is {_f(best.width)} ft wide × {_f(h)} ft "
+                            f"({_f(best.width * h)} sq ft, sill {best.sill_height * 12:.0f} in)"
+                        )
+                    else:
+                        detail = "its only exterior opening is a too-narrow door"
+                    add(
+                        Issue(
+                            Severity.WARNING,
+                            "EGRESS_SIZE",
+                            f"Bedroom '{room.id}' has an escape opening but it's below "
+                            f"the IRC R310 minimum ({_f(min_area)} sq ft clear, "
+                            f"{MIN_EGRESS_OPENING_WIDTH * 12:.0f} in wide × "
+                            f"{MIN_EGRESS_OPENING_HEIGHT * 12:.0f} in tall, sill "
+                            f"<= {MAX_EGRESS_SILL * 12:.0f} in); {detail}.",
+                            room=room.id,
+                            hint=f"Widen/enlarge the egress window so its clear opening "
+                            f"is >= {_f(min_area)} sq ft, e.g. "
+                            f"`window {room.id} {(walls[0].value if walls else 'south')} "
+                            f"width 4 offset 2`.",
+                        )
+                    )
+
+        if room.type in BATH_TYPES:
+            # A bathroom needs light+ventilation: a window on an exterior wall, or
+            # else mechanical exhaust. The DSL doesn't model fans, so a windowless
+            # bath gets an info nudge to confirm one (IRC R303.3).
+            has_window = any(w.wall in walls for w in plan.windows_for(room.id))
+            if not has_window:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BATH_VENT",
+                        f"Bathroom '{room.id}' has no exterior window; it needs "
+                        "mechanical ventilation (IRC R303.3).",
+                        room=room.id,
+                        hint="Add an exterior window, or confirm an exhaust fan vented "
+                        "outside — the DSL can't see fans, so this is just a reminder.",
                     )
                 )
 

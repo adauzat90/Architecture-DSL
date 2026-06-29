@@ -168,26 +168,46 @@ class Room:
         return 0.0
 
 
+#: The interior-door kinds. ``swing`` is a hinged leaf (the default); ``cased``
+#: is an open walk-through (no leaf — the old ``open``); ``pocket``/``sliding``
+#: are sliding leaves (no swing arc). All four join the two rooms in the
+#: circulation graph; they differ in how they render and which checks apply.
+DOOR_KINDS = ("swing", "cased", "pocket", "sliding")
+
+
 @dataclass
 class InteriorDoor:
     """A connection between two adjacent rooms.
 
-    ``leaf`` distinguishes a swinging door (``True``, the default) from a
-    *cased opening* / walk-through (``False``) — an open passage with no door
-    leaf, the canonical open-concept link between e.g. a kitchen and a living
-    area. Both kinds join the two rooms in the circulation graph; they differ
-    only in how they render and which width checks apply.
+    ``kind`` is one of :data:`DOOR_KINDS`. ``leaf`` (a derived property) is True
+    for every kind except ``cased`` — a cased opening is the doorless
+    walk-through (open-concept link) between e.g. a kitchen and a living area.
     """
 
     room_a: str
     room_b: str
     width: float = inches(32)
-    leaf: bool = True
+    kind: str = "swing"
+    #: Distance (ft) from the **south/west end** of the shared wall to the near
+    #: edge of the door. ``None`` centres it on the shared wall (the default).
+    offset: float | None = None
+    #: The room the leaf swings *into* (must be ``room_a`` or ``room_b``).
+    #: ``None`` lets the renderer pick a side; a value also enables the
+    #: swing-clearance check.
+    swing_into: str | None = None
+    #: Which end of the opening the hinge is on: ``"near"`` (the south/west end,
+    #: default) or ``"far"``. ``None`` means near.
+    hinge: str | None = None
     #: Source location of the statement that created this door (textual DSL
     #: front-end only); lets diagnostics point at the `door` line, not a room.
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
+
+    @property
+    def leaf(self) -> bool:
+        """True for any door with a leaf (everything but a cased opening)."""
+        return self.kind != "cased"
 
 
 @dataclass
@@ -327,10 +347,17 @@ class ProgramSpec:
     guard for "the code compiles clean but I dropped a bedroom". ``baths`` counts
     every bathroom *and* half-bath room, matching the compile recap; ``None``
     means that count wasn't declared and isn't checked.
+
+    ``beds``/``baths`` are checked as **exact** counts. ``required`` maps a room
+    type to a minimum count (an **at-least** check — a declared `1 laundry` warns
+    only if none is placed; an extra never warns). ``min_area`` is the minimum
+    conditioned interior floor area in square feet.
     """
 
     beds: int
     baths: int | None = None
+    required: dict[RoomType, int] = field(default_factory=dict)
+    min_area: float | None = None
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
@@ -415,19 +442,40 @@ class Barndominium:
         self.notes = (self.notes + "\n" + text).strip() if self.notes else text
         return self
 
-    def program(self, beds: int, baths: int | None = None) -> "Barndominium":
-        """Declare the intended program (bedroom / bathroom counts).
+    def program(
+        self,
+        beds: int,
+        baths: int | None = None,
+        *,
+        requires: dict[RoomType | str, int] | None = None,
+        min_area: float | None = None,
+    ) -> "Barndominium":
+        """Declare the intended program (bedroom / bathroom counts and more).
 
         Optional. When set, :func:`~barndsl.validation.validate` warns
         (``PROGRAM_MISMATCH``) if the rooms actually placed don't match — a
         mechanical check that you built what you set out to. ``baths`` counts
         every bathroom and half-bath; omit it to check only bedrooms.
+
+        ``requires`` adds an **at-least** check per room type (e.g.
+        ``requires={RoomType.LAUNDRY: 1}`` warns only if no laundry is placed),
+        and ``min_area`` sets a minimum conditioned interior floor area (sq ft).
         """
         b = int(beds)
         ba = None if baths is None else int(baths)
         if b < 0 or (ba is not None and ba < 0):
             raise ValueError("program counts must be non-negative whole numbers.")
-        self.program_spec = ProgramSpec(b, ba)
+        req: dict[RoomType, int] = {}
+        for t, n in (requires or {}).items():
+            n = int(n)
+            if n < 0:
+                raise ValueError("program counts must be non-negative whole numbers.")
+            if n > 0:
+                req[RoomType(t)] = n
+        ma = None if min_area is None else float(min_area)
+        if ma is not None and ma < 0:
+            raise ValueError("program area must be non-negative.")
+        self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma)
         return self
 
     def add_room(
@@ -634,26 +682,52 @@ class Barndominium:
         *,
         width: float = inches(32),
         leaf: bool = True,
+        kind: str | None = None,
+        offset: float | None = None,
+        swing_into: str | None = None,
+        hinge: str | None = None,
     ) -> "Barndominium":
         """Add an interior doorway between two adjacent rooms.
 
-        Set ``leaf=False`` for an open cased passage (walk-through) with no
-        door leaf — see :meth:`opening`.
+        ``kind`` is one of :data:`DOOR_KINDS` (``swing`` default, ``cased`` =
+        walk-through, ``pocket``/``sliding``); the legacy ``leaf=False`` is a
+        shorthand for ``kind="cased"``. ``offset`` (ft from the south/west end of
+        the shared wall) positions the door along that wall; omit it to centre.
+        ``swing_into`` names the room the leaf opens into (``room_a``/``room_b``)
+        and ``hinge`` is ``"near"`` or ``"far"``.
         """
+        resolved = kind if kind is not None else ("swing" if leaf else "cased")
+        if resolved not in DOOR_KINDS:
+            raise ValueError(f"door kind must be one of {DOOR_KINDS}, got {resolved!r}.")
+        if hinge is not None and hinge not in ("near", "far"):
+            raise ValueError(f"hinge must be 'near' or 'far', got {hinge!r}.")
         self.interior_doors.append(
-            InteriorDoor(room_a, room_b, float(width), leaf=bool(leaf))
+            InteriorDoor(
+                room_a,
+                room_b,
+                float(width),
+                kind=resolved,
+                offset=None if offset is None else float(offset),
+                swing_into=swing_into,
+                hinge=hinge,
+            )
         )
         return self
 
     def opening(
-        self, room_a: str, room_b: str, *, width: float = DEFAULT_OPENING_WIDTH
+        self,
+        room_a: str,
+        room_b: str,
+        *,
+        width: float = DEFAULT_OPENING_WIDTH,
+        offset: float | None = None,
     ) -> "Barndominium":
         """Add an open cased passage (walk-through) between two adjacent rooms.
 
         Like :meth:`connect`, but with no door leaf — the open-concept link
         between e.g. a kitchen and a living area. Defaults to a wide opening.
         """
-        return self.connect(room_a, room_b, width=width, leaf=False)
+        return self.connect(room_a, room_b, width=width, leaf=False, offset=offset)
 
     def entrance(
         self,

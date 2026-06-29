@@ -114,9 +114,29 @@ placed don't match a declared `program` line).
 
 **Infos — design nudges:** `KITCHEN_FLOW`, `BED_PRIVACY`, `BATH_DISTANCE`,
 `WET_GROUP` (cluster bath/kitchen/laundry on a shared plumbing wall), `NO_CLOSET`
-(a bedroom with no adjacent closet), `ROOM_PROPORTION` (a habitable room more
-elongated than ~3:1), `GARAGE_NO_ENTRY` (a garage with no interior people-door
-into the house), `AREA_UNUSED`. Heed when you can; they don't block.
+(a bedroom with no closet reached *by a door* — an abutting one with no door
+doesn't count), `MASTER_ENSUITE` (2+ full baths but no bedroom has a
+private ensuite), `BATH_OVERSIZE` (an ensuite bigger than its bedroom),
+`BED_SOUND` (two bedrooms share a wall — stack their closets
+back-to-back on it to buffer sound), `CLOSET_SHAPE` (a closet big enough for a
+walk-in but shaped as a long skinny strip), `ROOM_TIGHT` (kitchen < ~70, full
+bath < ~48 / under 6 ft, half bath < ~30 / under 5 ft), `BATH_VENT`
+(a windowless bath — confirm a fan), `HALL_TIGHT` (a hall under 4 ft — legal but
+tight), `HALL_DEADEND` (a hall serving ≤ 1 room, **or** running past its last
+door into a blank wall), `NO_BACK_DOOR` (only one exterior door — add a back/side
+door), `DOOR_CENTERED` (a swing door floating mid-wall — back it to a corner with
+`offset`), `WINDOW_PARTITION` (a window butting an interior partition — pull it off
+the corner and space windows evenly), `ROOM_PROPORTION` (a habitable room more
+elongated than ~3:1), `DOOR_SIZE` (a swing door that isn't a stock leaf width —
+interior 30/32/36 in, exterior 36), `DOOR_SWING_CLASH` (two leaves sweep into the
+same space — move/narrow one or make it pocket/sliding), `STAIR_WALL` (a stair
+marooned mid-room), `ENVELOPE_MODULE` (an exterior dim off the 3 ft build module),
+`GARAGE_NO_ENTRY`, `AREA_UNUSED`. **Warnings** also include `STAIR_BLOCKS_DOOR` (a
+stair footprint on a doorway's clear floor). Heed when you can; they don't block.
+Use `open` (not a wide `door`) for cased openings. For a hall, put the end rooms'
+doors *at* the hall ends so the corridor terminates at doorways, not blank walls
+(`HALL_DEADEND` is measured from the last doorway). `barndsl explain <CODE>`
+prints the rationale for any code.
 
 > Checks are approximate, loosely IRC-based — not a substitute for a licensed
 > designer or the AHJ.
@@ -135,37 +155,57 @@ into the house), `AREA_UNUSED`. Heed when you can; they don't block.
 
 ## A complete plan that compiles 0 / 0 / 0
 
-Note the closets (clears `NO_CLOSET`) and the bath on the kitchen's wet wall
-(clears `WET_GROUP`):
+Note the closets (clears `NO_CLOSET`), the bath on the kitchen's wet wall (clears
+`WET_GROUP`), the `open` core (a cased opening, not a 96 in "door"), hall doors
+backed to a corner with `offset` (clears `DOOR_CENTERED`), and a second exterior
+door (clears `NO_BACK_DOOR`):
 
 ```barn
 plan "Maple Two-Bed"
-envelope 50 x 30
+envelope 51 x 30
 ceiling 10
 
 room living:  living   at 0,0            size 20 x 30
 room kitchen: kitchen  east-of living    size 22 x 14
-room bath:    bathroom east-of kitchen   size 8 x 14
-room hall:    hallway  north-of kitchen  size 30 x 4
+room bath:    bathroom east-of kitchen   size 9 x 14
+room hall:    hallway  north-of kitchen  size 31 x 4
 room bed1:    bedroom  north-of hall     size 11 x 12
-room c1:      closet   east-of bed1      size 3 x 12
+room c1:      closet   east-of bed1      size 4 x 12
 room bed2:    bedroom  east-of c1        size 11 x 12
 room c2:      closet   east-of bed2      size 5 x 12
 
-door living - kitchen width 8
+open living - kitchen width 8
 door living - hall width 3
-door hall - bath width 2.7
-door hall - bed1 width 2.7
-door hall - bed2 width 2.7
-door bed1 - c1 width 2.5
-door bed2 - c2 width 2.5
+door hall - bath width 2.67 offset 5.83
+door hall - bed1 width 2.67 offset 0.5
+door hall - bed2 width 2.67 offset 0.5
+door bed1 - c1 width 2.5 offset 0.5
+door bed2 - c2 width 2.5 offset 0.5
 entry living south width 3 offset 8
+entry living west width 3 offset 24
 
 window living west width 14 offset 8
 window kitchen south width 8 offset 6
 window bath east width 4 offset 5
 window bed1 north width 4 offset 3
 window bed2 north width 4 offset 3
+```
+
+## Worked-example gallery — copy and adapt
+
+`examples/gallery/` holds four **verified 0 / 0 / 0** plans (pinned by
+`tests/test_gallery.py` so they can't rot). Few-shot from the closest one rather
+than writing from scratch:
+
+| File | Shape | Shows |
+|------|-------|-------|
+| `cottage.barn` | 1 bed / 1 bath | relative anchors, `open` core, hall-buffered bedroom |
+| `hall_spine.barn` | 3 bed / 2 bath | hall spine capped by doorways, ensuite + wet-wall baths, back-to-back walk-in closets buffering the beds |
+| `lshape.barn` | 2 bed / 2 bath, `wing` | L-footprint, interior seam walls, a primary suite with its own ensuite + walk-in |
+| `two_story.barn` | 1 bed + loft | `level`, `loft`, a `stair` along the wall whose run fits the storey |
+
+```bash
+barndsl compile examples/gallery/hall_spine.barn   # read it, then adapt
 ```
 
 ## Python builder (same core, same rules)

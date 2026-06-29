@@ -8,6 +8,7 @@ areas and a rough material takeoff.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
@@ -276,12 +277,21 @@ class _Renderer:
             if edge is None:
                 continue
             w = min(door.width, edge.length)
-            start = edge.mid - w / 2
-            draw = self._door_symbol if getattr(door, "leaf", True) else self._opening_symbol
-            if edge.orientation == "v":
-                draw(edge.pos, start, "v", w)
-            else:
-                draw(start, edge.pos, "h", w)
+            offset = getattr(door, "offset", None)
+            if offset is None:
+                start = edge.mid - w / 2  # centre on the shared wall
+            else:  # measured from the south/west end, clamped onto the wall
+                start = edge.lo + max(0.0, min(offset, edge.length - w))
+            kind = getattr(door, "kind", "swing" if getattr(door, "leaf", True) else "cased")
+            ox, oy = (edge.pos, start) if edge.orientation == "v" else (start, edge.pos)
+            if kind == "swing":
+                sgn = self._swing_sgn(door, a, b, edge)
+                hinge_far = getattr(door, "hinge", None) == "far"
+                self._door_symbol(ox, oy, edge.orientation, w, sgn, hinge_far)
+            elif kind in ("pocket", "sliding"):
+                self._slide_symbol(ox, oy, edge.orientation, w)
+            else:  # cased opening
+                self._opening_symbol(ox, oy, edge.orientation, w)
 
         for door in self.plan.exterior_doors:
             room = self.plan.room(door.room)
@@ -295,18 +305,46 @@ class _Renderer:
             else:
                 self._door_symbol(x1, min(y1, y2), "v", door.width)
 
-    def _door_symbol(self, ox: float, oy: float, orientation: str, w: float):
-        """Draw a door at plan-space origin (ox, oy) as gap + leaf + swing arc."""
+    @staticmethod
+    def _swing_sgn(door, a, b, edge) -> float | None:
+        """+1/-1 for the side the leaf swings into, or None to let the symbol
+        fall back to its keep-inside-the-envelope heuristic."""
+        into = getattr(door, "swing_into", None)
+        room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
+        if room is None:
+            return None
+        cx, cy = room.center
+        return (1.0 if cx > edge.pos else -1.0) if edge.orientation == "v" else (
+            1.0 if cy > edge.pos else -1.0
+        )
+
+    def _door_symbol(
+        self,
+        ox: float,
+        oy: float,
+        orientation: str,
+        w: float,
+        sgn: float | None = None,
+        hinge_far: bool = False,
+    ):
+        """Draw a door at plan-space origin (ox, oy) as gap + leaf + swing arc.
+
+        ``sgn`` picks the swing side (None → keep the leaf inside the envelope);
+        ``hinge_far`` hinges at the far (high-coordinate) end of the opening
+        instead of the near end.
+        """
         if orientation == "v":  # wall runs in +y; swing into +x or -x
-            sgn = 1.0 if (ox + w) <= self.max_x else -1.0
-            hinge = (ox, oy)
-            latch = (ox, oy + w)
-            tip = (ox + sgn * w, oy)
+            if sgn is None:
+                sgn = 1.0 if (ox + w) <= self.max_x else -1.0
+            hinge = (ox, oy + w) if hinge_far else (ox, oy)
+            latch = (ox, oy) if hinge_far else (ox, oy + w)
+            tip = (ox + sgn * w, hinge[1])
         else:  # wall runs in +x; swing into +y or -y
-            sgn = 1.0 if (oy + w) <= self.max_y else -1.0
-            hinge = (ox, oy)
-            latch = (ox + w, oy)
-            tip = (ox, oy + sgn * w)
+            if sgn is None:
+                sgn = 1.0 if (oy + w) <= self.max_y else -1.0
+            hinge = (ox + w, oy) if hinge_far else (ox, oy)
+            latch = (ox, oy) if hinge_far else (ox + w, oy)
+            tip = (hinge[0], oy + sgn * w)
 
         hx, hy = self.sx(hinge[0]), self.sy(hinge[1])
         lx, ly = self.sx(latch[0]), self.sy(latch[1])
@@ -316,7 +354,30 @@ class _Renderer:
         self._line(hx, hy, lx, ly, "#ffffff", 4.0)
         self._line(hx, hy, tx, ty, WALL, 1.2)
         r = w * self.c.scale
-        self._path(f"M {tx:.1f} {ty:.1f} A {r:.1f} {r:.1f} 0 0 1 {lx:.1f} {ly:.1f}", "#999999", 0.8)
+        # Pick the sweep flag that centres the arc on the hinge, so the swing
+        # always bulges *away* from it (convex). A fixed flag is right for only
+        # half the orientation/hinge/side combinations — the rest read concave.
+        sweep = self._arc_sweep((hx, hy), (tx, ty), (lx, ly), r)
+        self._path(
+            f"M {tx:.1f} {ty:.1f} A {r:.1f} {r:.1f} 0 0 {sweep} {lx:.1f} {ly:.1f}",
+            "#999999", 0.8,
+        )
+
+    @staticmethod
+    def _arc_sweep(hinge, tip, latch, r) -> int:
+        """SVG sweep flag whose minor arc (large-arc 0) from ``tip`` to ``latch``
+        is centred on ``hinge`` — the door pivots about the hinge, so its swing
+        arc must be the one centred there. All points are in screen space."""
+        (x1, y1), (x2, y2) = tip, latch
+        dx, dy = (x1 - x2) / 2.0, (y1 - y2) / 2.0
+        denom = dx * dx + dy * dy
+        if denom < 1e-9:
+            return 1
+        coef = math.sqrt(max(0.0, (r * r) / denom - 1.0))
+        # Centre SVG uses with sweep-flag 1 (large-arc 0 ⇒ sign = +1):
+        cx = coef * dy + (x1 + x2) / 2.0
+        cy = -coef * dx + (y1 + y2) / 2.0
+        return 1 if abs(cx - hinge[0]) + abs(cy - hinge[1]) < 1e-6 else 0
 
     def _opening_symbol(self, ox: float, oy: float, orientation: str, w: float):
         """Draw a cased opening (walk-through) as a plain gap with jamb ticks.
@@ -340,6 +401,19 @@ class _Renderer:
                 self._line(sx0 - t, sy0, sx0 + t, sy0, WALL, 1.2)
             else:
                 self._line(sx0, sy0 - t, sx0, sy0 + t, WALL, 1.2)
+
+    def _slide_symbol(self, ox: float, oy: float, orientation: str, w: float):
+        """Draw a pocket/sliding door: the gap plus a slab line parallel to the
+        wall, set just inside one room (no swing arc)."""
+        d = 0.35  # how far the panel sits off the wall, ft
+        if orientation == "v":  # wall runs in +y at x=ox
+            s = d if (ox + d) <= self.max_x else -d
+            self._line(self.sx(ox), self.sy(oy), self.sx(ox), self.sy(oy + w), "#ffffff", 4.0)
+            self._line(self.sx(ox + s), self.sy(oy), self.sx(ox + s), self.sy(oy + w), WALL, 1.6)
+        else:  # wall runs in +x at y=oy
+            s = d if (oy + d) <= self.max_y else -d
+            self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
+            self._line(self.sx(ox), self.sy(oy + s), self.sx(ox + w), self.sy(oy + s), WALL, 1.6)
 
     def _draw_stairs(self, level: int):
         for s in self.plan.stairs:

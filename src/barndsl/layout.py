@@ -346,6 +346,20 @@ def _add_openings(
         wall = max(walls, key=lambda d: _wall_len(room, d))
         _add_opening(plan, room, wall, min(feet(4), _wall_len(room, wall) * 0.8))
 
+    # 2b. A small window on any bath that sits on an exterior wall — light plus
+    #     ventilation, and it clears BATH_VENT. An interior bath stays windowless
+    #     (the validator's BATH_VENT info then correctly asks for a fan).
+    for room in plan.rooms:
+        if room.type not in (RoomType.BATHROOM, RoomType.HALF_BATH):
+            continue
+        if plan.windows_for(room.id):
+            continue
+        walls = exterior_walls(plan, room)
+        if not walls:
+            continue
+        wall = max(walls, key=lambda d: _wall_len(room, d))
+        _add_opening(plan, room, wall, min(feet(2.5), _wall_len(room, wall) * 0.5))
+
     # 3. Daylight: top up habitable rooms to the 8% glazing ratio.
     for room in plan.rooms:
         if room.type not in HABITABLE_TYPES:
@@ -426,8 +440,8 @@ def _glaze_to_ratio(
             if wall_len * 0.8 < _MIN_WINDOW_WIDTH:
                 continue  # wall too short for even a minimal window
             width = _MIN_WINDOW_WIDTH
-        _add_opening(plan, room, wall, width)
-        need -= width * _GLASS_PER_FT
+        placed = _add_opening(plan, room, wall, width)
+        need -= placed * _GLASS_PER_FT
     if need > 1e-6:
         notes.append(
             f"Room '{room.id}' may still fall short of 8% daylight; its exterior "
@@ -437,26 +451,43 @@ def _glaze_to_ratio(
 
 def _add_opening(
     plan: Barndominium, room: Room, wall: Direction, width: float, *, is_entry: bool = False
-) -> None:
-    """Place a centred opening on ``wall``, clamped to fit, away from any existing one."""
+) -> float:
+    """Place an opening on ``wall`` in the largest free gap, so it never overlaps
+    an existing opening on the same wall (which would be an ``OPENING_CLASH``).
+
+    The width is shrunk to fit the gap if necessary. Returns the width actually
+    placed (0.0 if the wall is fully occupied), so a caller topping up glazing
+    can account for what really went on the wall rather than what it asked for.
+    """
     wall_len = _wall_len(room, wall)
     width = min(width, wall_len)
-    offset = max(0.0, (wall_len - width) / 2.0)
-    # Nudge off any opening already on this wall so they don't coincide.
-    taken = [
-        (o.offset, o.width)
+    # Intervals already taken by an opening on this wall, clamped to the wall.
+    taken = sorted(
+        (max(0.0, o.offset), min(wall_len, o.offset + o.width))
         for o in plan.exterior_doors_for(room.id) + plan.windows_for(room.id)
         if o.wall == wall
-    ]
-    for o_off, o_w in sorted(taken):
-        if offset < o_off + o_w and offset + width > o_off:
-            offset = o_off + o_w + 0.5
-    if offset + width > wall_len:
-        offset = max(0.0, wall_len - width)
+    )
+    # The free gaps between them.
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for lo, hi in taken:
+        if lo - cursor > 1e-6:
+            gaps.append((cursor, lo))
+        cursor = max(cursor, hi)
+    if wall_len - cursor > 1e-6:
+        gaps.append((cursor, wall_len))
+    if not gaps:
+        return 0.0  # wall is full — nothing we can place
+    g_lo, g_hi = max(gaps, key=lambda g: g[1] - g[0])
+    placed = min(width, g_hi - g_lo)
+    if placed <= 1e-6:
+        return 0.0
+    offset = g_lo + (g_hi - g_lo - placed) / 2.0  # centre within the gap
     if is_entry:
-        plan.entrance(room.id, wall, width=width, offset=offset)
+        plan.entrance(room.id, wall, width=placed, offset=offset)
     else:
-        plan.add_window(room.id, wall, width=width, offset=offset)
+        plan.add_window(room.id, wall, width=placed, offset=offset)
+    return placed
 
 
 def _wall_len(room: Room, wall: Direction) -> float:

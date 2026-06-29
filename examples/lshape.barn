@@ -26,7 +26,7 @@ door kitchen - master   width 2.67
 door master - mbath     width 2.67
 door master - mcloset   width 2.5
 
-entry living south width 3 offset 10
+entry living south width 3 offset 1
 window living  south width 14 offset 6
 window kitchen south width 10 offset 4
 window bed1    north width 7  offset 7

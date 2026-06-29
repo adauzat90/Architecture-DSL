@@ -139,3 +139,92 @@ def test_bed_only_program_emits_without_baths():
     plan = barndominium("B").envelope(width=20, length=20).ceiling(9).program(4)
     assert "program 4 bed\n" in emit_dsl(plan)
     assert "bath" not in emit_dsl(plan)
+
+
+# --- extended program: required rooms + minimum area ------------------------
+# `program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`. bed/bath are exact
+# counts; other room types are at-least requirements; `area` is a minimum on the
+# conditioned interior floor area.
+
+
+def _msg(result) -> str:
+    return next(d.message for d in result.warnings if d.code == "PROGRAM_MISMATCH")
+
+
+def _counts_plan(*room_types, requires=None, min_area=None):
+    """A clean-ish plan with one room per given type, plus a declared program of
+    exactly 1 bed / 1 bath. Only PROGRAM_MISMATCH is asserted on, so other
+    advisory diagnostics don't matter."""
+    plan = barndominium("Counts").envelope(width=80, length=12).ceiling(9)
+    x = 0.0
+    for i, rt in enumerate(room_types):
+        plan.add_room(f"r{i}", rt, x=x, y=0, width=10, length=10)
+        x += 10
+    plan.program(1, 1, requires=requires, min_area=min_area)
+    return validate(plan)
+
+
+def test_required_room_missing_warns():
+    r = compile_source(_plan("program 2 bed 1 bath 1 laundry"))
+    assert "PROGRAM_MISMATCH" in _codes(r, "warning")
+    assert "no laundry placed" in _msg(r)
+
+
+def test_required_room_present_is_silent():
+    r = _counts_plan(T.BEDROOM, T.BATHROOM, T.LAUNDRY, requires={T.LAUNDRY: 1})
+    assert "PROGRAM_MISMATCH" not in {d.code for d in r.warnings}
+
+
+def test_required_room_surplus_does_not_warn():
+    # At-least semantics: declaring `1 office` but building two is fine.
+    r = _counts_plan(
+        T.BEDROOM, T.BATHROOM, T.OFFICE, T.OFFICE, requires={T.OFFICE: 1}
+    )
+    assert "PROGRAM_MISMATCH" not in {d.code for d in r.warnings}
+
+
+def test_required_room_count_shortfall_warns():
+    r = _counts_plan(T.BEDROOM, T.BATHROOM, T.OFFICE, requires={T.OFFICE: 2})
+    assert "office" in _msg(r)
+    assert "2 office(s) declared but 1 placed" in _msg(r)
+
+
+def test_min_area_shortfall_warns():
+    # ~1 bed + 1 bath + nothing else is well under 1500 sq ft of interior.
+    r = _counts_plan(T.BEDROOM, T.BATHROOM, min_area=1500)
+    assert "1500 sq ft declared but" in _msg(r)
+
+
+def test_min_area_met_is_silent():
+    big = barndominium("Big").envelope(width=50, length=40).ceiling(9)
+    big.add_room("living", T.LIVING, x=0, y=0, width=50, length=40)  # 2000 sq ft
+    big.program(0, min_area=1500)
+    assert "PROGRAM_MISMATCH" not in {d.code for d in validate(big).warnings}
+
+
+def test_area_and_required_clauses_parse_and_round_trip():
+    src = _plan("program 2 bed 1 bath 1 office area 1200")
+    r = compile_source(src)
+    spec = r.plan.program_spec
+    assert spec.required == {T.OFFICE: 1}
+    assert spec.min_area == 1200
+    line = next(l for l in emit_dsl(r.plan).splitlines() if l.startswith("program"))
+    assert line == "program 2 bed 1 bath 1 office area 1200"
+
+
+def test_unknown_program_noun_is_a_parse_error():
+    r = compile_source(_plan("program 2 bed 1 bath 1 sauna"))
+    assert r.plan is None
+    assert any(d.code == "BAD_TYPE" for d in r.errors)
+
+
+def test_builder_requires_and_min_area():
+    plan = (
+        barndominium("B")
+        .envelope(width=30, length=20)
+        .ceiling(9)
+        .program(2, 1, requires={"laundry": 1, T.OFFICE: 2}, min_area=900)
+    )
+    spec = plan.program_spec
+    assert spec.required == {T.LAUNDRY: 1, T.OFFICE: 2}
+    assert spec.min_area == 900.0

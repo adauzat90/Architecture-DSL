@@ -62,13 +62,14 @@ envelope <W> x <L>                 # primary footprint block (at the origin)
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>                        # >= 7; 9–12 is typical
 note "free text"                   # optional; repeatable
-program <n> bed [<m> bath]         # optional; intended counts, checked vs the rooms
+program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
-door <id_a> - <id_b> [width <w>]                  # interior; rooms MUST share a wall
-open <id_a> - <id_b> [width <w>]                  # cased opening / walk-through, no leaf
-entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door
-window <id> <wall> [width <w>] [offset <o>]
+door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+open <id_a> - <id_b> [width <w>] [offset <o>]     # shorthand for `door <a> - <b> cased ...`
+entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
+window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
 ```
@@ -272,6 +273,11 @@ envelope edge if it needs a real window.
 - `GARAGE_BEDROOM` — a `garage` opening directly into a **bedroom**. A garage
   must not open into a sleeping room (IRC R302.5.1) — buffer it with a mudroom or
   hall.
+- `STAIR_BLOCKS_DOOR` — a `stair` footprint intrudes on the clear floor in front
+  of a door, so you'd step off the flight straight into a swinging door. Place the
+  stair along a wall, clear of door approaches.
+- `STAIR_GEOMETRY` / `STAIR_OOB` / `STAIR_LEVELS` (errors), `STAIR_RUN` /
+  `STAIR_FLOAT` — a stair with bad geometry, too short a run, or landing in no room.
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
   `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
   — it's a contract check, not a code error — so it's a warning.
@@ -283,9 +289,33 @@ envelope edge if it needs a real window.
 - `BATH_DISTANCE` — keep a bath within a door or two of the bedrooms.
 - `WET_GROUP` — cluster wet rooms (bath/kitchen/laundry/utility) onto a shared
   plumbing wall; 3+ that share no walls means longer, costlier runs.
-- `NO_CLOSET` — a bedroom with no adjacent closet (per bedroom).
+- `NO_CLOSET` — a bedroom with no closet reached *by a door* from it.
 - `ROOM_PROPORTION` — a habitable room more elongated than ~3:1 is hard to
   furnish.
+- `ROOM_TIGHT` — a room below the floor its use needs: kitchen ~70, full bath ~48
+  (≥ 6 ft short side), half bath ~30 (≥ 5 ft) sq ft.
+- `HALL_TIGHT` — a hallway at the 3 ft code minimum; 4 ft is comfortable.
+- `HALL_DEADEND` — a hall that serves ≤ 1 room, **or** runs well past its last
+  **doorway** into a blank wall (a dead-end stub). Put the end room's door *at*
+  the hall end (extend that room to cap the hall), or trim the hall back.
+- `DOOR_SWING_CLASH` — two door leaves sweep into the same space and foul each
+  other; move one along its wall, swing it the other way, or make it pocket/sliding.
+- `ENVELOPE_MODULE` — an exterior (envelope/wing) dimension isn't a multiple of
+  the 3 ft build module; rounding to it cuts sheet goods and framing with less waste.
+- `NO_BACK_DOOR` — a home with a single exterior door; add a back/side door (off
+  the kitchen, mudroom or laundry) for daily flow and a second way out.
+- `DOOR_CENTERED` — a swing door floating mid-wall; back it to a corner (`offset`)
+  so one side keeps an unbroken wall to furnish.
+- `DOOR_SIZE` — a swing door off the stock leaf sizes; use `open` for a wide
+  cased passage instead of a 96 in "door".
+- `WINDOW_PARTITION` — a window butting an interior partition where it meets the
+  exterior wall; pull it toward the centre or a building corner, and space windows
+  evenly.
+- `BED_SOUND` — two bedrooms share a wall; stack their closets on it to buffer
+  sound. `CLOSET_SHAPE` — a walk-in-sized closet shaped as a skinny strip.
+- `MASTER_ENSUITE` — 2+ full baths but none is a private ensuite.
+- `BATH_OVERSIZE` — an ensuite larger than the bedroom it serves.
+- `STAIR_WALL` — a stair marooned mid-room rather than run along a wall.
 - `GARAGE_NO_ENTRY` — a `garage` that abuts the house but has no interior
   people-door into it (you'd have to go outside to get in).
 - `AREA_UNUSED` — a lot of footprint is unallocated.
@@ -313,28 +343,29 @@ closet and the bath sits on the kitchen's wet wall, which is what clears the
 
 ```barn
 plan "Maple Two-Bed"
-envelope 50 x 30
+envelope 51 x 30                              # exterior dims on the 3 ft module
 ceiling 10
 note "2 bed / 1 bath, open living-kitchen, bedrooms + closets off a hall."
 
 room living:  living   at 0,0            size 20 x 30
 room kitchen: kitchen  east-of living    size 22 x 14
-room bath:    bathroom east-of kitchen   size 8 x 14
-room hall:    hallway  north-of kitchen  size 30 x 4
+room bath:    bathroom east-of kitchen   size 9 x 14
+room hall:    hallway  north-of kitchen  size 31 x 4
 room bed1:    bedroom  north-of hall     size 11 x 12
-room c1:      closet   east-of bed1      size 3 x 12
+room c1:      closet   east-of bed1      size 4 x 12
 room bed2:    bedroom  east-of c1        size 11 x 12
 room c2:      closet   east-of bed2      size 5 x 12
 
-door living - kitchen width 8
+open living - kitchen width 8                # cased opening, not a 96 in door
 door living - hall width 3
-door hall - bath width 2.7
-door hall - bed1 width 2.7
-door hall - bed2 width 2.7
-door bed1 - c1 width 2.5
-door bed2 - c2 width 2.5
+door hall - bath width 2.67 offset 5.83      # at the hall's far end (caps the run)
+door hall - bed1 width 2.67 offset 0.5       # backed to a corner, not centred
+door hall - bed2 width 2.67 offset 0.5
+door bed1 - c1 width 2.5 offset 0.5
+door bed2 - c2 width 2.5 offset 0.5
 
 entry living south width 3 offset 8
+entry living west width 3 offset 24          # a back/side door — front + back
 
 window living west width 14 offset 8
 window kitchen south width 8 offset 6

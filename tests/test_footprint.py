@@ -29,7 +29,7 @@ door living - hall width 3
 door hall - bed1 width 2.67
 door hall - bed2 width 2.67
 door kitchen - master width 2.67
-entry living south width 3 offset 8
+entry living south width 3 offset 1
 window bed1 north width 6 offset 6
 window bed2 north width 6 offset 6
 window master east width 8 offset 6

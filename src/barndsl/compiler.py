@@ -15,10 +15,10 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     ceiling <H>
     note "free text"
     room <id>: <type> <placement> size <W> x <L> [level <n>]
-    door <id_a> - <id_b> [width <w>]
-    open <id_a> - <id_b> [width <w>]    # cased opening / walk-through (no leaf)
+    door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]
+    open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no leaf)
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
-    window <id> <wall> [width <w>] [offset <o>]
+    window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 
@@ -46,6 +46,30 @@ _KEYWORDS = (
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
 
+_DOOR_KINDS = frozenset({"swing", "cased", "pocket", "sliding"})
+_BED_WORDS = frozenset({"bed", "beds", "bedroom", "bedrooms"})
+#: 'bath' is an aggregate (bathroom + half_bath), matching the compile recap.
+_BATH_WORDS = frozenset({"bath", "baths", "bathroom", "bathrooms"})
+
+
+def _program_noun(text: str) -> "str | RoomType | None":
+    """Resolve a `program` noun to 'bed', 'bath', a :class:`RoomType`, or None.
+
+    'bed'/'bath' are exact-count categories; any other room type (singular, or
+    with a trailing plural 's') becomes an at-least requirement.
+    """
+    t = text.lower()
+    if t in _BED_WORDS:
+        return "bed"
+    if t in _BATH_WORDS:
+        return "bath"
+    for cand in (t, t[:-1] if t.endswith("s") else t):
+        try:
+            return RoomType(cand)
+        except ValueError:
+            continue
+    return None
+
 #: Human/LLM-facing language reference, reused in the agent's system prompt so
 #: the grammar has a single source of truth.
 DSL_REFERENCE = """\
@@ -61,12 +85,17 @@ Statements:
   wing <W> x <L> at <x>,<y>       # optional; add blocks for an L/T/U footprint
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   note "free text"                # optional design note
-  program <n> bed [<m> bath]      # optional; intended counts, checked vs the rooms
+  program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
+                                  #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
   room <id>: <type> <placement> size <W> x <L> [level <n>]
-  door <id_a> - <id_b> [width <w>]            # interior door (rooms must share a wall)
-  open <id_a> - <id_b> [width <w>]            # cased opening / walk-through, no door leaf
-  entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
-  window <id> <wall> [width <w>] [offset <o>]              # window, on an exterior wall
+  door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+        # interior door between two rooms. swing (default) hinges; cased = an open
+        # walk-through (no leaf); pocket/sliding slide. offset = ft from the wall's
+        # S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
+  door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
+  open <id_a> - <id_b> [width <w>] [offset <o>]            # shorthand for `door <a> - <b> cased ...`
+  entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
+  window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]  # window; sill/head are ft above the floor
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
@@ -348,11 +377,20 @@ class _Cursor:
     def expect_end(self) -> None:
         t = self.peek()
         if t is not None:
+            # A common slip: `align`/`offset` (the slide-along-the-wall modifiers)
+            # belong on the relative anchor, *before* `size` — not at the end.
+            if t.text.lower() in ("align", "offset", "near", "far", "center"):
+                hint = (
+                    "`align`/`offset` go on the relative anchor, before `size` "
+                    "(e.g. `room x: bedroom east-of y align far size 12 x 11`)."
+                )
+            else:
+                hint = "Remove the extra token(s)."
             raise _ParseError(
                 "EXTRA_TOKENS",
                 f"Unexpected '{t.text}' at end of statement.",
                 t.col,
-                hint="Remove the extra token(s).",
+                hint=hint,
                 end_col=t.end_col,
             )
 
@@ -480,30 +518,46 @@ def _parse_statement(
         plan.note(c.take("a quoted note").text)
         c.expect_end()
     elif key == "program":
+        # `program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`.
+        # The first clause (bed) is mandatory; the rest are any order. bed/bath
+        # are exact-count categories; other room types are at-least requirements.
         beds = c.count("the bedroom count")
         unit = c.take("'bed'")
-        if unit.text.lower() not in ("bed", "beds", "bedroom", "bedrooms"):
+        if _program_noun(unit.text) != "bed":
             raise _ParseError(
                 "SYNTAX",
                 f"Expected 'bed', got '{unit.text}'.",
                 unit.col,
                 end_col=unit.end_col,
-                hint="Write the program as `program 3 bed 2 bath`.",
+                hint="The program starts with a bedroom count, e.g. `program 3 bed`.",
             )
         baths = None
-        if c.peek() is not None:
-            baths = c.count("the bathroom count")
-            unit2 = c.take("'bath'")
-            if unit2.text.lower() not in ("bath", "baths", "bathroom", "bathrooms"):
+        requires: dict[RoomType, int] = {}
+        min_area = None
+        while c.peek() is not None:
+            if c.peek().text.lower() == "area":
+                c.take("area")
+                min_area = c.number("the minimum area")
+                continue
+            n = c.count("a room count")
+            noun = c.take("a room type")
+            cat = _program_noun(noun.text)
+            if cat is None:
                 raise _ParseError(
-                    "SYNTAX",
-                    f"Expected 'bath', got '{unit2.text}'.",
-                    unit2.col,
-                    end_col=unit2.end_col,
-                    hint="Write the program as `program 3 bed 2 bath`.",
+                    "BAD_TYPE",
+                    f"Unknown program room type '{noun.text}'.",
+                    noun.col,
+                    end_col=noun.end_col,
+                    hint=f"Use 'bed', 'bath', 'area', or a room type: {_TYPES}.",
                 )
+            if cat == "bed":
+                beds = n
+            elif cat == "bath":
+                baths = n
+            else:
+                requires[cat] = requires.get(cat, 0) + n
         c.expect_end()
-        plan.program(beds, baths)
+        plan.program(beds, baths, requires=requires, min_area=min_area)
         plan.program_spec.line = lineno
         plan.program_spec.col = kw.col
         plan.program_spec.end_col = kw.end_col
@@ -536,26 +590,80 @@ def _parse_statement(
         smap.room_line[rid] = lineno
         smap.room_col[rid] = (rid_tok.col, rid_tok.end_col)
     elif key == "door":
-        a_tok = c.ident("the first room id")
+        # Unified door statement. Two forms, told apart by what follows the id:
+        #   interior:  door <a> - <b> [swing|cased|pocket|sliding] [opts]
+        #   exterior:  door <id> <wall> exterior [opts]
+        a_tok = c.ident("a room id")
         a = a_tok.text
-        sep = c.take("'-' or 'to'")
-        if sep.text.lower() not in ("-", "to"):
-            raise _ParseError(
-                "SYNTAX",
-                f"Expected '-' or 'to', got '{sep.text}'.",
-                sep.col,
-                end_col=sep.end_col,
-            )
-        b = c.ident("the second room id").text
-        width = 32 / 12
         nxt = c.peek()
-        if nxt is not None:
-            c.keyword("width")
-            width = c.number("door width")
-        c.expect_end()
-        plan.connect(a, b, width=width)
-        door = plan.interior_doors[-1]
-        door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
+        if nxt is not None and nxt.text.lower() in ("-", "to"):
+            c.take("'-'")  # consume the separator
+            b = c.ident("the second room id").text
+            kind = "swing"
+            if c.peek() is not None and c.peek().text.lower() in _DOOR_KINDS:
+                kind = c.take("a door kind").text.lower()
+            width = 6.0 if kind == "cased" else 32 / 12  # cased opens wide
+            offset, swing_into, hinge = None, None, None
+            while c.peek() is not None:
+                opt = c.take("an option").text.lower()
+                if opt == "width":
+                    width = c.number("door width")
+                elif opt == "offset":
+                    offset = c.number("door offset")
+                elif opt == "into":
+                    swing_into = c.ident("the room the door swings into").text
+                elif opt == "hinge":
+                    h = c.take("'near' or 'far'")
+                    if h.text.lower() not in ("near", "far"):
+                        raise _ParseError(
+                            "BAD_OPTION",
+                            f"Hinge must be 'near' or 'far', got '{h.text}'.",
+                            h.col,
+                            hint="Use `hinge near` or `hinge far`.",
+                            end_col=h.end_col,
+                        )
+                    hinge = h.text.lower()
+                else:
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"Unknown door option '{opt}'.",
+                        c.toks[c.i - 1].col,
+                        hint="Options: a kind (swing/cased/pocket/sliding), width <n>, "
+                        "offset <n>, into <room>, hinge near|far.",
+                        end_col=c.toks[c.i - 1].end_col,
+                    )
+            c.expect_end()
+            plan.connect(
+                a, b, width=width, kind=kind, offset=offset,
+                swing_into=swing_into, hinge=hinge,
+            )
+            d = plan.interior_doors[-1]
+            d.line, d.col, d.end_col = lineno, a_tok.col, a_tok.end_col
+        else:
+            # Exterior form: door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]
+            wall = c.wall()
+            c.keyword("exterior")
+            width, offset, egress = 3.0, 1.0, True
+            while c.peek() is not None:
+                opt = c.take("an option").text.lower()
+                if opt == "width":
+                    width = c.number("door width")
+                elif opt == "offset":
+                    offset = c.number("offset")
+                elif opt in ("no-egress", "nonegress"):
+                    egress = False
+                else:
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"Unknown exterior-door option '{opt}'.",
+                        c.toks[c.i - 1].col,
+                        hint="Options: width <n>, offset <n>, no-egress.",
+                        end_col=c.toks[c.i - 1].end_col,
+                    )
+            c.expect_end()
+            plan.entrance(a, wall, width=width, offset=offset, egress=egress)
+            ed = plan.exterior_doors[-1]
+            ed.line, ed.col, ed.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "open":
         a_tok = c.ident("the first room id")
         a = a_tok.text
@@ -568,13 +676,23 @@ def _parse_statement(
                 end_col=sep.end_col,
             )
         b = c.ident("the second room id").text
-        width = 6.0  # wide cased opening by default; matches DEFAULT_OPENING_WIDTH
-        nxt = c.peek()
-        if nxt is not None:
-            c.keyword("width")
-            width = c.number("opening width")
+        width, offset = 6.0, None  # wide cased opening by default (DEFAULT_OPENING_WIDTH)
+        while c.peek() is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "width":
+                width = c.number("opening width")
+            elif opt == "offset":
+                offset = c.number("opening offset")
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown open option '{opt}'.",
+                    c.toks[c.i - 1].col,
+                    hint="Options: width <n>, offset <n>.",
+                    end_col=c.toks[c.i - 1].end_col,
+                )
         c.expect_end()
-        plan.opening(a, b, width=width)
+        plan.opening(a, b, width=width, offset=offset)
         door = plan.interior_doors[-1]
         door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "entry":
@@ -606,21 +724,26 @@ def _parse_statement(
         rid = rid_tok.text
         wall = c.wall()
         width, offset = 4.0, 2.0
+        sill, head = 3.0, 6.67  # ft above the floor; matches Window's defaults
         while c.peek() is not None:
             opt = c.take("an option").text.lower()
             if opt == "width":
                 width = c.number("window width")
             elif opt == "offset":
                 offset = c.number("offset")
+            elif opt == "sill":
+                sill = c.number("sill height")
+            elif opt == "head":
+                head = c.number("head height")
             else:
                 raise _ParseError(
                     "BAD_OPTION",
                     f"Unknown window option '{opt}'.",
                     c.toks[c.i - 1].col,
-                    hint="Options: width <n>, offset <n>.",
+                    hint="Options: width <n>, offset <n>, sill <n>, head <n>.",
                     end_col=c.toks[c.i - 1].end_col,
                 )
-        plan.add_window(rid, wall, width=width, offset=offset)
+        plan.add_window(rid, wall, width=width, offset=offset, sill_height=sill, head_height=head)
         win = plan.windows[-1]
         win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
     elif key == "porch":
@@ -726,6 +849,37 @@ class CompileResult:
         for d in sorted(self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)):
             lines.extend(_format_diagnostic(d, filename, src_lines))
         return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        """A machine-readable view of the compile, for the agent loop / tooling.
+
+        The same diagnostics as :meth:`report`, but as stable JSON-able data
+        (code/severity/line/col/room/message/hint) rather than formatted text —
+        so a consumer parses fields instead of scraping the human output.
+        """
+        return {
+            "ok": self.ok,
+            "counts": {
+                "error": len(self.errors),
+                "warning": len(self.warnings),
+                "info": len(self.infos),
+            },
+            "diagnostics": [
+                {
+                    "code": d.code,
+                    "severity": d.severity.value,
+                    "line": d.line,
+                    "col": d.col,
+                    "end_col": d.end_col,
+                    "room": d.room,
+                    "message": d.message,
+                    "hint": d.hint,
+                }
+                for d in sorted(
+                    self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)
+                )
+            ],
+        }
 
 
 def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[str]:

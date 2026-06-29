@@ -1,0 +1,48 @@
+# L-shaped plan exercising `wing` — a 36x30 main block with an 18x18 primary
+# suite projecting east. The footprint union (not a rectangle) drives which
+# walls are exterior; the seam between block and wing is interior. The primary
+# suite has its own ensuite + walk-in; the laundry doubles as a mudroom with a
+# back door; bed1 caps the west end of the hall (its door at that end). All
+# exterior dims are on the 3 ft build module.
+plan "Maple Bend"
+envelope 36 x 30
+wing 18 x 18 at 36,0
+ceiling 10
+program 2 bed 2 bath
+
+# --- main block public band (south) ---
+room living:  living  at 0,0   size 20 x 14
+room kitchen: kitchen at 20,0  size 16 x 14
+
+# --- spine: 4 ft ---
+room hall: hallway at 0,14 size 36 x 4
+
+# --- main block private band (north) ---
+room bed1:    bedroom  at 0,18   size 16 x 12
+room closet1: closet   at 16,18  size 4 x 12
+room bath:    bathroom at 20,18  size 8 x 12
+room laundry: laundry  at 28,18  size 8 x 12
+
+# --- east wing: primary suite with a private ensuite + walk-in ---
+room master:  bedroom  at 36,0  size 12 x 18
+room mbath:   bathroom at 48,0  size 6 x 9
+room mcloset: closet   at 48,9  size 6 x 9
+
+open living - kitchen width 10
+open living - hall width 4
+door hall - bed1 width 3 offset 0.5
+door hall - bath width 2.67
+door hall - laundry width 2.5
+door hall - master width 3
+door bed1 - closet1 width 2.5 offset 0.5
+door master - mbath width 2.67 offset 0.5
+door master - mcloset width 2.5 offset 0.5
+
+entry living south width 3 offset 14
+entry laundry north width 3 offset 2
+window living south width 8 offset 2
+window kitchen south width 6 offset 6
+window bed1 north width 6 offset 5
+window bath north width 3 offset 2
+window master south width 5 offset 4
+window mbath east width 2 offset 3

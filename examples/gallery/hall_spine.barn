@@ -1,0 +1,58 @@
+# 3-bed / 2-bath with a hallway spine — the classic barndo split: open
+# living/kitchen/dining up front, a 4 ft hall feeding the bedrooms. bed1 and bed2
+# sit either side of a stacked pair of square walk-in closets, so the closets
+# buffer sound between the sleeping rooms (no shared bedroom wall). The primary
+# suite has a private ensuite (back-to-back with the hall bath on a wet wall) and
+# a walk-in; its door is at the east end of the hall and bed1's at the west end,
+# so the corridor terminates at doorways, not blank walls. Exterior dims are on
+# the 3 ft build module.
+plan "Birch Hollow"
+envelope 69 x 33
+ceiling 10
+program 3 bed 2 bath
+
+# --- public band (south, y 0..15) ---
+room living:  living  at 0,0   size 27 x 15
+room kitchen: kitchen at 27,0  size 20 x 15
+room dining:  dining  at 47,0  size 22 x 15
+
+# --- the spine: 4 ft, ending at the master door ---
+room hall: hallway at 0,15 size 63 x 4
+
+# --- west: bed1 + bed2 flanking a stacked pair of square walk-in closets ---
+room bed1:    bedroom at 0,19   size 13 x 14
+room closet1: closet  at 13,19  size 6 x 7
+room closet2: closet  at 13,26  size 6 x 7
+room bed2:    bedroom at 19,19  size 13 x 14
+
+# --- centre: shared hall bath ---
+room bath1: bathroom at 32,19 size 9 x 14
+
+# --- east: primary suite (ensuite backs onto the hall bath; walk-in caps the
+#     NE corner so the hall needn't run past the master door) ---
+room mbath:   bathroom at 41,19 size 6 x 14
+room master:  bedroom  at 47,19 size 16 x 14
+room mcloset: closet   at 63,15 size 6 x 18
+
+open living - kitchen width 10
+open kitchen - dining width 10
+open living - hall width 4
+door hall - bed1 width 3 offset 0.5
+door hall - bed2 width 3 offset 0.5
+door hall - bath1 width 2.67 offset 3
+door hall - master width 3 offset 12.5
+door bed1 - closet1 width 2.5 offset 0.5
+door bed2 - closet2 width 2.5 offset 0.5
+door master - mbath width 2.67 offset 0.5
+door master - mcloset width 2.5 offset 10.5
+
+entry living south width 3 offset 20
+entry dining east width 3 offset 6
+window living south width 10 offset 2
+window kitchen south width 8 offset 6
+window dining south width 8 offset 6
+window bed1 north width 5 offset 4
+window bed2 north width 5 offset 4
+window master north width 6 offset 6
+window bath1 north width 3 offset 2
+window mbath north width 3 offset 1
