@@ -59,6 +59,7 @@ from .layout2 import (
     solve_layout2,
 )
 from .render import RenderConfig, render_svg, save_svg
+from .revit import RevitModel, to_revit_json, to_revit_model
 from .structure import place_frame
 from .validation import Issue, Severity, ValidationReport, validate
 
@@ -106,6 +107,10 @@ __all__ = [
     "render_svg",
     "save_svg",
     "RenderConfig",
+    # Revit exchange (lowering to a Revit-shaped model + JSON)
+    "to_revit_model",
+    "to_revit_json",
+    "RevitModel",
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 

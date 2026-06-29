@@ -19,6 +19,11 @@
     barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
         Run the Claude agent: brief → DSL → compile → critique → refine.
         Requires `pip install 'barndsl[agent]'` and ANTHROPIC_API_KEY.
+
+    barndsl revit FILE.barn [--out FILE.json] [--frame]
+        Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
+        (levels, deduplicated walls, hosted doors/windows, room seeds, structural
+        members) for the pyRevit extension to build inside Revit.
 """
 
 from __future__ import annotations
@@ -218,6 +223,33 @@ def _cmd_design(args: argparse.Namespace) -> int:
     return 0 if result.result.ok else 1
 
 
+def _cmd_revit(args: argparse.Namespace) -> int:
+    result = compile_file(args.file)
+    if result.plan is not None and getattr(args, "frame", False) and result.plan.frame_spec is None:
+        from .emit import emit_dsl
+
+        result.plan.frame()
+        result = compile_source(emit_dsl(result.plan), name=result.plan.name)
+    print(result.report(os.path.basename(args.file)))
+    if result.plan is None:
+        return 1
+    from .revit import to_revit_model
+
+    model = to_revit_model(result.plan)
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write(model.to_json())
+    n_ext = sum(1 for w in model.walls if w.exterior)
+    print(
+        f"\nRevit exchange: {len(model.levels)} level(s), {len(model.walls)} wall(s) "
+        f"({n_ext} exterior), {len(model.openings)} opening(s), "
+        f"{len(model.rooms)} room(s), {len(model.columns)} column(s)"
+    )
+    print(f"Wrote {args.out}")
+    # The exchange is emitted even when the plan has warnings/infos; only a hard
+    # compile error (no plan) blocks it, so a clean exchange tracks `result.ok`.
+    return 0 if result.ok else 1
+
+
 def _cmd_explain(args: argparse.Namespace) -> int:
     from .diagnostics import REGISTRY, explain
 
@@ -321,6 +353,18 @@ def main(argv: list[str] | None = None) -> int:
     p_design.add_argument("--model", default="claude-opus-4-8", help="Claude model id")
     p_design.add_argument("--no-critique", action="store_true", help="skip the design critic")
     p_design.set_defaults(func=_cmd_design)
+
+    p_revit = sub.add_parser(
+        "revit", help="lower a plan to the Revit exchange JSON for the pyRevit add-in"
+    )
+    p_revit.add_argument("file", help="path to a .barn DSL file")
+    p_revit.add_argument("--out", default="plan.json", help="output JSON path")
+    p_revit.add_argument(
+        "--frame",
+        action="store_true",
+        help="auto-place a default post-and-beam frame if the source has none",
+    )
+    p_revit.set_defaults(func=_cmd_revit)
 
     p_explain = sub.add_parser(
         "explain", help="explain a diagnostic code (or list them all)"

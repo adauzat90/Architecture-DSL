@@ -21,6 +21,25 @@ Possible follow-ups: feed `beam_linear_ft` into the roadmap's cost estimator;
 engineered member-sizing tables (span vs. section); lateral-bracing / shear-wall
 hints; honour an explicit interior bearing wall as a post line.
 
+## Revit plug-in — foundation DONE
+Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the
+`barndsl.revit/1` exchange) and a `barndsl revit FILE --out plan.json` command.
+Lowers the rectangle IR into a Revit-shaped model — per-level `RevitLevel`s,
+**deduplicated** wall centrelines (room edges decomposed to atomic segments,
+classified interior/exterior against the footprint, then merged into runs),
+openings hosted onto wall ids (interior doors / cased openings / exterior doors /
+windows, with width/height/sill), room seed points, and structural columns/framing
+from a placed `frame`; porches/stairs come across as reference areas. Pure Python,
+no Revit/.NET/API key; `tests/test_revit.py` pins the invariants (exterior walls
+trace the envelope perimeter, every opening lands on a real wall at its line,
+interior↔interior / exterior↔exterior hosting, room seeds inside their rectangles,
+multi-level walls, JSON round-trip). Coordinates pass straight through (barndsl
+feet/x-east/y-north == Revit's foot-based world XY).
+
+Next: a **pyRevit extension** (chosen integration path) — a ribbon button that
+imports this core, compiles a `.barn`, and instantiates walls/doors/windows/rooms/
+framing in the active Revit document from the exchange.
+
 ## Agent aids
 
 ### ~~Worked-example gallery (highest-leverage non-check aid)~~ — DONE
