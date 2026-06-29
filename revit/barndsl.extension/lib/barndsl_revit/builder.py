@@ -37,6 +37,10 @@ from . import report as _report
 #: Code-minimum flight width (ft), used only as a fallback run width.
 MIN_STAIR_WIDTH = 3.0
 
+#: Stamped into each created element's Comments so a re-build can find and
+#: replace exactly what a previous barndsl build made (and nothing the user drew).
+MANAGED_MARK = "barndsl-managed"
+
 try:
     from pyrevit import script as _script
 
@@ -89,6 +93,62 @@ def _rid(elem):
         return _id_val(elem.Id)
     except Exception:
         return None
+
+
+def _comments_param(elem):
+    try:
+        p = elem.get_Parameter(DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+    except Exception:
+        p = None
+    if p is None:
+        try:
+            p = elem.LookupParameter("Comments")
+        except Exception:
+            p = None
+    return p
+
+
+def _mark(elem):
+    """Stamp an element as barndsl-managed (via its Comments), best effort."""
+    p = _comments_param(elem)
+    if p is not None and not p.IsReadOnly:
+        try:
+            p.Set(MANAGED_MARK)
+        except Exception:
+            pass
+    return elem
+
+
+def _made(report, kind, source, elem, message=""):
+    """Mark a freshly-created element and record it as created."""
+    _mark(elem)
+    return report.created(kind, source, revit_id=_rid(elem), message=message)
+
+
+def _purge_managed(doc, report):
+    """Delete elements a previous barndsl build created, so a re-build replaces
+    rather than duplicates. Identifies them by the managed mark in Comments;
+    never touches anything the user drew. Runs inside the build transaction."""
+    try:
+        elems = DB.FilteredElementCollector(doc).WhereElementIsNotElementType().ToElements()
+    except Exception:
+        return 0
+    removed = 0
+    for e in list(elems):
+        p = _comments_param(e)
+        try:
+            val = p.AsString() if p is not None else None
+        except Exception:
+            val = None
+        if val == MANAGED_MARK:
+            try:
+                doc.Delete(e.Id)
+                removed += 1
+            except Exception:
+                pass
+    if removed:
+        report.note("replaced %d element(s) from a previous barndsl build" % removed)
+    return removed
 
 
 def _name(elem):
@@ -336,7 +396,7 @@ def _build_walls(doc, data, levels, res, report):
                 doc, curve, wtype.Id, level.Id, float(w["height"]), 0.0, False, False
             )
             made[w["id"]] = wall
-            report.created("wall", w["id"], revit_id=_rid(wall))
+            _made(report, "wall", w["id"], wall)
         except Exception as exc:
             _logger.warning("wall %s: %s", w["id"], exc)
             report.failed("wall", w["id"], str(exc))
@@ -411,7 +471,7 @@ def _build_openings(doc, data, levels, walls, res, options, report):
                     p.Set(float(o.get("sill", 0.0)))
             except Exception:
                 pass
-        report.created(kind, o["id"], revit_id=_rid(inst))
+        _made(report, kind, o["id"], inst)
 
 
 def _build_rooms(doc, data, levels, report):
@@ -435,7 +495,7 @@ def _build_rooms(doc, data, levels, report):
                 p.Set(r.get("name", r["id"]))
         except Exception:
             pass
-        report.created("room", r["id"], revit_id=_rid(room))
+        _made(report, "room", r["id"], room)
 
 
 def _build_structure(doc, data, levels, res, report):
@@ -460,7 +520,7 @@ def _build_structure(doc, data, levels, res, report):
             inst = doc.Create.NewFamilyInstance(
                 _xyz(c["point"], level.Elevation), col_sym, level, DB.Structure.StructuralType.Column
             )
-            report.created("column", src, revit_id=_rid(inst))
+            _made(report, "column", src, inst)
         except Exception as exc:
             report.failed("column", src, str(exc))
 
@@ -477,7 +537,7 @@ def _build_structure(doc, data, levels, res, report):
             inst = doc.Create.NewFamilyInstance(
                 curve, beam_sym, level, DB.Structure.StructuralType.Beam
             )
-            report.created("framing", src, revit_id=_rid(inst))
+            _made(report, "framing", src, inst)
         except Exception as exc:
             report.failed("framing", src, str(exc))
 
@@ -505,7 +565,7 @@ def _build_porches(doc, data, levels, res, report):
             loops = List[DB.CurveLoop]()
             loops.Add(loop)
             floor = DB.Floor.Create(doc, loops, res.floor.Id, level0.Id)
-            report.created("porch", p.get("id"), revit_id=_rid(floor))
+            _made(report, "porch", p.get("id"), floor)
         except Exception as exc:
             report.failed("porch", p.get("id"), str(exc))
 
@@ -550,7 +610,7 @@ def _build_slabs(doc, data, levels, res, report):
             loops = List[DB.CurveLoop]()
             loops.Add(loop)
             floor = DB.Floor.Create(doc, loops, res.floor.Id, level.Id)
-            report.created("slab", src, revit_id=_rid(floor))
+            _made(report, "slab", src, floor)
         except Exception as exc:
             report.failed("slab", src, str(exc))
 
@@ -571,7 +631,7 @@ def _build_grids(doc, data, report):
                 grid.Name = label
             except Exception:
                 pass
-            report.created("grid", label, revit_id=_rid(grid))
+            _made(report, "grid", label, grid)
         except Exception as exc:
             report.failed("grid", label, str(exc))
 
@@ -606,10 +666,8 @@ def _build_roof(doc, data, levels, res, report):
             )
         result = doc.Create.NewFootPrintRoof(arr, level, res.roof_type)
         roof_el = result[0] if isinstance(result, tuple) else result
-        report.created(
-            "roof", "roof", revit_id=_rid(roof_el),
-            message="footprint roof; gable pitch is a manual refinement",
-        )
+        _made(report, "roof", "roof", roof_el,
+              message="footprint roof; gable pitch is a manual refinement")
     except Exception as exc:
         _logger.warning("roof: %s", exc)
         report.failed("roof", "roof", "experimental: %s" % exc)
@@ -967,6 +1025,8 @@ def build(doc, data, options=None):
     t = DB.Transaction(doc, label)
     t.Start()
     try:
+        if options.replace:
+            _purge_managed(doc, report)
         levels = _ensure_levels(doc, data, report)
         walls = _build_walls(doc, data, levels, res, report)
         _build_openings(doc, data, levels, walls, res, options, report)

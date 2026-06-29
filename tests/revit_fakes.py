@@ -61,6 +61,9 @@ class FakeElement:
         self.Id = _Id()
         self._name = name
         self._params = {}
+        # Every Revit element carries instance Comments — the managed marker lives here.
+        self._params[BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS] = FakeParam("", "String")
+        self._params["Comments"] = self._params[BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS]
         if doc is not None:
             doc._register(self)
 
@@ -90,6 +93,7 @@ class BuiltInParameter:
     FAMILY_HEIGHT_PARAM = "FAMILY_HEIGHT_PARAM"
     INSTANCE_SILL_HEIGHT_PARAM = "INSTANCE_SILL_HEIGHT_PARAM"
     ROOM_NAME = "ROOM_NAME"
+    ALL_MODEL_INSTANCE_COMMENTS = "ALL_MODEL_INSTANCE_COMMENTS"
 
 
 class BuiltInCategory:
@@ -453,6 +457,9 @@ class FakeDocument:
     def GetElement(self, eid):
         return self._by_id.get(eid.Value)
 
+    def Delete(self, eid):
+        self._by_id.pop(eid.Value, None)
+
     def Regenerate(self):
         pass
 
@@ -510,6 +517,9 @@ class FakeDocument:
 
     # the collector query
     def query(self, cls, cat, notype):
+        if cls is None and cat is None and notype:
+            # The "all instances" sweep the managed-element purge uses.
+            return list(self._by_id.values())
         if cls is Level:
             return list(self.levels)
         if cls is WallType:

@@ -82,10 +82,14 @@ eaves/interior-post lines from a placed frame), and a **footprint roof** (`roof_
 gable slope a manual refinement). All three have pure tested cores
 (`tests/test_revit_model_extras.py`) and harness-tested builder passes.
 
+Idempotent re-build — DONE: every created element is stamped barndsl-managed (in
+Comments); a re-build purges the prior managed set first (default; `replace`
+flag), so iterating replaces instead of duplicating and never touches hand-drawn
+elements. Levels are reused, stairs aren't purged. Harness-tested
+(`test_revit_builder.py`: marking, idempotence, no-replace duplicates, leaves
+unmanaged alone).
+
 Next — deliverables & workflow (Tier 2):
-- **Idempotent re-build / sync** — track created elements and update/delete on
-  re-run instead of stacking duplicates (the diff is unit-testable; the apply
-  side needs a live Revit).
 - Room/door/window **tags** + dimension strings.
 - Floor-plan **views** + a **sheet** per level.
 - Native **schedules** (door/window/room/area) surfacing the takeoff.

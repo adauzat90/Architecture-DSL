@@ -35,7 +35,7 @@ _OVERRIDE_KEYS = (
 )
 _FLAG_KEYS = (
     "structure", "size_families", "porches", "stairs", "slabs", "grids", "roof",
-    "dry_run", "verbose",
+    "replace", "dry_run", "verbose",
 )
 
 
@@ -53,6 +53,7 @@ class BuildOptions(object):
         slabs=True,
         grids=True,
         roof=True,
+        replace=True,
         dry_run=False,
         verbose=False,
         exterior_wall_type=None,
@@ -70,6 +71,7 @@ class BuildOptions(object):
         self.slabs = bool(slabs)
         self.grids = bool(grids)
         self.roof = bool(roof)
+        self.replace = bool(replace)
         self.dry_run = bool(dry_run)
         self.verbose = bool(verbose)
         self.exterior_wall_type = exterior_wall_type

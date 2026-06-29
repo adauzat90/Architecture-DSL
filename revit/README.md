@@ -111,11 +111,19 @@ model. Use it to shake a plan out against a project template before committing.
 | `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
 | `areas` (stairs) | The flights the core planned for the footprint — a single **straight** run, or a **switchback** (two flights + an automatic landing) when the straight run won't fit — built via the Stairs component API. An overrun (neither fits) is built straight and flagged. Experimental: falls back to a note if the Stairs API rejects the geometry. |
 
-Walls, openings, rooms, structure and porches run in **one transaction**, so
-Revit's undo rolls them back in a single step; stairs build afterward in their
-own edit scopes (the Stairs API manages its own transactions). Every element is
-created defensively: if one fails (e.g. a missing family), it's recorded in the
-report and the rest still build.
+Walls, openings, rooms, structure, slabs, porches, grids and the roof run in
+**one transaction**, so Revit's undo rolls them back in a single step; stairs
+build afterward in their own edit scopes (the Stairs API manages its own
+transactions). Every element is created defensively: if one fails (e.g. a missing
+family), it's recorded in the report and the rest still build.
+
+**Re-building is idempotent.** Every element a build creates is stamped
+barndsl-managed (in its Comments). By default a re-build first **removes the
+previous barndsl build** and lays down the current one — so iterating on the
+`.barn` and rebuilding *replaces* the model instead of stacking duplicates, and
+never touches anything you drew by hand. It's all one undo step. Set
+`"replace": false` in the config to append instead (levels are always reused, and
+stairs aren't purged).
 
 ## Debugging a run
 
@@ -157,6 +165,10 @@ folder). Unknown keys are ignored, so you can leave comments.
   "structure": true,
   "porches": true,
   "stairs": true,
+  "slabs": true,
+  "grids": true,
+  "roof": true,
+  "replace": true,
   "verbose": false
 }
 ```

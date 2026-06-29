@@ -391,6 +391,56 @@ def test_stairs_disabled():
     assert rep.count(kind="stair") == 0
 
 
+# --- idempotent re-build -----------------------------------------------------
+
+
+def _managed_count(doc):
+    n = 0
+    for e in doc._by_id.values():
+        p = e.get_Parameter(revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+        if p is not None and p.AsString() == builder.MANAGED_MARK:
+            n += 1
+    return n
+
+
+def test_created_elements_are_marked_managed():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    assert _managed_count(doc) > 0
+    # Levels are reused, not marked (so a re-build won't delete them).
+    for lv in doc.levels:
+        p = lv.get_Parameter(revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+        assert p.AsString() != builder.MANAGED_MARK
+
+
+def test_replace_rebuild_is_idempotent():
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    after_one = _managed_count(doc)
+    rep = builder.build(doc, data, report.BuildOptions(replace=True))
+    after_two = _managed_count(doc)
+    assert after_two == after_one  # replaced, not doubled
+    assert any("replaced" in n for n in rep.notes)
+
+
+def test_without_replace_rebuild_duplicates():
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data, report.BuildOptions(replace=False))
+    one = _managed_count(doc)
+    builder.build(doc, data, report.BuildOptions(replace=False))
+    assert _managed_count(doc) == 2 * one
+
+
+def test_replace_leaves_unmanaged_elements_alone():
+    doc = _ready_doc()
+    # A user-drawn wall (no managed mark).
+    user_wall = revit_fakes.Wall("user", doc)
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(replace=True))
+    assert user_wall.Id.Value in doc._by_id  # survived the purge
+
+
 # --- diagnostics -------------------------------------------------------------
 
 

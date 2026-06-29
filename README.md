@@ -328,8 +328,10 @@ get two buttons:
   and it creates the levels, walls, correctly-**sized** doors and windows, rooms,
   floor slabs, a footprint roof, structural members and grids, porch slabs and
   multi-flight stairs in the active document, in **one transaction** (one undo
-  step). Offers a **Preview** (a real build that's rolled back) and writes a
-  `*.buildlog.json` report. Primary target: **Revit 2025**.
+  step). **Re-building is idempotent** — it replaces the previous barndsl build
+  instead of stacking duplicates (and never touches what you drew). Offers a
+  **Preview** (a real build that's rolled back) and writes a `*.buildlog.json`
+  report. Primary target: **Revit 2025**.
 * **Export Exchange** — pick a `.barn` and write its exchange `.json` next to it
   without touching the model.
 * **Diagnostics** — report the environment and which wall/floor/family types the
@@ -456,10 +458,10 @@ tests/             # no API key required
   (straight or a switchback when the footprint is short). The exchange
   round-trips: `exchange_to_plan` / `barndsl revit-import` reconstruct DSL from a
   `barndsl.revit/1` document, and a *Model to DSL* button reads a live Revit model
-  back. The builder is unit-tested against a fake Revit API. Next (deliverables &
-  workflow): an idempotent re-build/sync (so re-running updates instead of
-  duplicating), room/door/window tags + dimensions, floor-plan views and a sheet
-  per level, and native door/window/room schedules.
+  back, and re-building is idempotent (replaces the prior build). The builder is
+  unit-tested against a fake Revit API. Next (deliverables & workflow):
+  room/door/window tags + dimensions, floor-plan views and a sheet per level, and
+  native door/window/room schedules.
 - Cost estimation from the material takeoff
 - More residential building types beyond barndominiums
 
