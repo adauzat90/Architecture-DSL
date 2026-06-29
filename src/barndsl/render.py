@@ -99,7 +99,7 @@ def save_render(
             + ", ".join(RASTER_FORMATS)
         )
     try:
-        import cairosvg  # type: ignore
+        import cairosvg
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise ImportError(
             f"{fmt.upper()} output needs cairosvg — install it with "
@@ -378,17 +378,17 @@ class _Renderer:
             else:  # cased opening
                 self._opening_symbol(ox, oy, edge.orientation, w)
 
-        for door in self.plan.exterior_doors:
-            room = self.plan.room(door.room)
+        for xdoor in self.plan.exterior_doors:
+            room = self.plan.room(xdoor.room)
             if not room:
                 continue
             if level is not None and room.level != level:
                 continue
-            x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
-            if door.wall in (Direction.NORTH, Direction.SOUTH):
-                self._door_symbol(min(x1, x2), y1, "h", door.width)
+            x1, y1, x2, y2 = opening_endpoints(room, xdoor.wall, xdoor.offset, xdoor.width)
+            if xdoor.wall in (Direction.NORTH, Direction.SOUTH):
+                self._door_symbol(min(x1, x2), y1, "h", xdoor.width)
             else:
-                self._door_symbol(x1, min(y1, y2), "v", door.width)
+                self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
 
     @staticmethod
     def _swing_sgn(door, a, b, edge) -> float | None:

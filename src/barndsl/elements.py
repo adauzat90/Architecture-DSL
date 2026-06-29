@@ -596,7 +596,7 @@ class Barndominium:
         width: float,
         length: float,
         label: str | None = None,
-        level: int = 0,
+        level: int | float = 0,
         east_of: str | None = None,
         west_of: str | None = None,
         north_of: str | None = None,
@@ -734,8 +734,12 @@ class Barndominium:
         # Fill the unconstrained axis (single-anchor case) via align/offset
         # along the anchor's shared wall — preserves prior single-anchor behaviour.
         if nx is None:
+            # nx unset means no horizontal anchor, so a vertical one must exist.
+            assert vref is not None
             nx = self._align_along(vref.x, vref.width, width, align) + offset
         if ny is None:
+            # ny unset means no vertical anchor, so a horizontal one must exist.
+            assert href is not None
             ny = self._align_along(href.y, href.length, length, align) + offset
         return nx, ny
 

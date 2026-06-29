@@ -71,15 +71,15 @@ def door_rows(plan: Barndominium) -> list[dict]:
                 "width": d.width,
             }
         )
-    for d in plan.exterior_doors:
+    for xd in plan.exterior_doors:
         n += 1
         rows.append(
             {
                 "mark": f"D{n}",
-                "kind": "exterior" + ("" if d.egress else " (no-egress)"),
-                "from": d.room,
-                "to": f"exterior ({d.wall.value})",
-                "width": d.width,
+                "kind": "exterior" + ("" if xd.egress else " (no-egress)"),
+                "from": xd.room,
+                "to": f"exterior ({xd.wall.value})",
+                "width": xd.width,
             }
         )
     return rows

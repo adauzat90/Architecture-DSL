@@ -436,7 +436,7 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
     # east/west, one of north/south) — that pins a room into a corner/pocket.
     kwargs: dict = {}
     first_ref: _Token | None = None
-    while c.peek() is not None and c.peek().text.lower() in _PLACEMENT:
+    while (tok := c.peek()) is not None and tok.text.lower() in _PLACEMENT:
         dir_tok = c.take("a placement")
         rel = _PLACEMENT[dir_tok.text.lower()]
         nxt = c.peek()
@@ -475,7 +475,7 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
         )
 
     # Optional slide along the shared wall: `align near|far|center` and `offset <n>`.
-    while c.peek() is not None and c.peek().text.lower() in ("align", "offset"):
+    while (tok := c.peek()) is not None and tok.text.lower() in ("align", "offset"):
         opt = c.take("an option").text.lower()
         if opt == "align":
             a = c.take("near, far, or center")
@@ -539,10 +539,10 @@ def _parse_statement(
                 hint="The program starts with a bedroom count, e.g. `program 3 bed`.",
             )
         baths = None
-        requires: dict[RoomType, int] = {}
+        requires: dict[RoomType | str, int] = {}
         min_area = None
-        while c.peek() is not None:
-            if c.peek().text.lower() == "area":
+        while (tok := c.peek()) is not None:
+            if tok.text.lower() == "area":
                 c.take("area")
                 min_area = c.number("the minimum area")
                 continue
@@ -565,6 +565,7 @@ def _parse_statement(
                 requires[cat] = requires.get(cat, 0) + n
         c.expect_end()
         plan.program(beds, baths, requires=requires, min_area=min_area)
+        assert plan.program_spec is not None  # just set by plan.program(...)
         plan.program_spec.line = lineno
         plan.program_spec.col = kw.col
         plan.program_spec.end_col = kw.end_col
@@ -578,7 +579,7 @@ def _parse_statement(
         c.keyword("x")
         length = c.number("length")
         level = 0
-        if c.peek() is not None and c.peek().text.lower() == "level":
+        if (tok := c.peek()) is not None and tok.text.lower() == "level":
             c.keyword("level")
             level = c.level_value()
         c.expect_end()
@@ -607,7 +608,7 @@ def _parse_statement(
             c.take("'-'")  # consume the separator
             b = c.ident("the second room id").text
             kind = "swing"
-            if c.peek() is not None and c.peek().text.lower() in _DOOR_KINDS:
+            if (tok := c.peek()) is not None and tok.text.lower() in _DOOR_KINDS:
                 kind = c.take("a door kind").text.lower()
             width = 6.0 if kind == "cased" else 32 / 12  # cased opens wide
             offset, swing_into, hinge = None, None, None
@@ -787,7 +788,7 @@ def _parse_statement(
         c.keyword("x")
         length = c.number("length")
         lo, hi = 0, 1
-        while c.peek() is not None and c.peek().text.lower() in ("from", "to"):
+        while (tok := c.peek()) is not None and tok.text.lower() in ("from", "to"):
             opt = c.take("an option").text.lower()
             if opt == "from":
                 lo = c.level_value()

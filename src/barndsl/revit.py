@@ -726,8 +726,8 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             )
         )
 
-    for d in plan.exterior_doors:
-        geom = _opening_geometry(plan, d, "exterior")
+    for xd in plan.exterior_doors:
+        geom = _opening_geometry(plan, xd, "exterior")
         if geom is None:
             continue
         orientation, pos, lo, hi, lvl = geom
@@ -743,8 +743,8 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                 height=DEFAULT_DOOR_HEIGHT,
                 sill=0.0,
                 exterior=True,
-                egress=bool(d.egress),
-                rooms=[d.room],
+                egress=bool(xd.egress),
+                rooms=[xd.room],
                 host_wall=host,
             )
         )

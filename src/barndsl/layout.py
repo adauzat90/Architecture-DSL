@@ -223,7 +223,7 @@ def _place_one(
     w, l = spec.width, spec.length
 
     def make(x: float, y: float) -> Room:
-        return Room(spec.id, spec.type, x, y, w, l, spec.label, spec.level)
+        return Room(spec.id, RoomType(spec.type), x, y, w, l, spec.label, spec.level)
 
     if not anchors:
         # No placed neighbour to abut. Seed at the origin, or start a new strip
@@ -332,10 +332,11 @@ def _add_openings(
     # 1. Front entry on a public/mudroom room with an exterior wall.
     entry_room = _pick_entry_room(plan, brief)
     if entry_room is not None:
-        room = plan.room(entry_room)
-        walls = exterior_walls(plan, room)
+        eroom = plan.room(entry_room)
+        assert eroom is not None  # _pick_entry_room only returns an existing room id
+        walls = exterior_walls(plan, eroom)
         wall = Direction.SOUTH if Direction.SOUTH in walls else walls[0]
-        _add_opening(plan, room, wall, feet(3), is_entry=True)
+        _add_opening(plan, eroom, wall, feet(3), is_entry=True)
     else:
         notes.append("No room sits on an exterior wall for a front entry.")
 
