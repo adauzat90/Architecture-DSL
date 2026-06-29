@@ -932,3 +932,74 @@ entry living south width 3 offset 4
     r = compile_source(src)
     hint = next(d.hint for d in r.errors if d.code == "OVERLAP")
     assert "west_of kitchen" in hint and "re-anchor" in hint
+
+
+# --- BED_SOUND: acoustic buffer between adjacent bedrooms --------------------
+
+
+def test_adjacent_bedrooms_flag_a_sound_buffer():
+    src = """\
+plan "Adjacent"
+envelope 40 x 22
+ceiling 9
+room living: living  at 0,0  size 40 x 8
+room hall:   hallway at 0,8  size 40 x 3
+room bed1:   bedroom at 0,11  size 20 x 11
+room bed2:   bedroom at 20,11 size 20 x 11
+door living - hall width 4
+door hall - bed1 width 3
+door hall - bed2 width 3
+entry living south width 3 offset 10
+window living south width 12 offset 4
+window bed1 north width 5 offset 4
+window bed2 north width 5 offset 4
+"""
+    assert "BED_SOUND" in _codes(compile_source(src), "info")
+
+
+def test_closet_buffered_bedrooms_have_no_sound_flag():
+    src = """\
+plan "Buffered"
+envelope 44 x 22
+ceiling 9
+room living: living  at 0,0  size 44 x 8
+room hall:   hallway at 0,8  size 44 x 3
+room bed1:   bedroom at 0,11  size 18 x 11
+room c1:     closet  at 18,11 size 4 x 11
+room c2:     closet  at 22,11 size 4 x 11
+room bed2:   bedroom at 26,11 size 18 x 11
+door living - hall width 4
+door hall - bed1 width 3
+door hall - bed2 width 3
+door bed1 - c1 width 2.5
+door bed2 - c2 width 2.5
+entry living south width 3 offset 10
+window living south width 12 offset 4
+window bed1 north width 5 offset 4
+window bed2 north width 5 offset 4
+"""
+    assert "BED_SOUND" not in _codes(compile_source(src), "info")
+
+
+def test_bedrooms_across_a_hall_do_not_flag():
+    src = """\
+plan "Across"
+envelope 24 x 40
+ceiling 9
+room bed1: bedroom at 0,0  size 24 x 14
+room hall: hallway at 0,14 size 24 x 4
+room bed2: bedroom at 0,18 size 24 x 14
+room living: living at 0,32 size 24 x 8
+door bed1 - hall width 3
+door hall - bed2 width 3
+door hall - living width 4
+entry living north width 3 offset 10
+window bed1 south width 6 offset 4
+window bed2 west width 6 offset 4
+window living north width 6 offset 4
+"""
+    assert "BED_SOUND" not in _codes(compile_source(src), "info")
+
+
+def test_bed_sound_is_registered():
+    assert "BED_SOUND" in REGISTRY

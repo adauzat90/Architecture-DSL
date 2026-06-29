@@ -48,6 +48,7 @@ DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
 NATURAL_LIGHT_RATIO = 0.08  # glazing >= 8% of floor area
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
+MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
 
 # Emergency-escape opening minimums (IRC R310). The area is the net *clear*
 # opening; we approximate it from the modelled width × (head − sill), which is
@@ -1374,6 +1375,27 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
                 f"`door {master.id} - <bath>` with that bath connected to nothing else.",
             )
         )
+
+    # 8b. Acoustic buffer: two bedrooms that share a wall pass sound straight
+    #     between them. The idiom is to stack each bedroom's closet on that wall
+    #     (back-to-back), so the closets buffer the sleeping rooms — once buffered
+    #     the bedrooms no longer share a wall and this clears.
+    beds = [r for r in plan.rooms if r.type is RoomType.BEDROOM]
+    for i, ba in enumerate(beds):
+        for bb in beds[i + 1 :]:
+            edge = shared_edge(ba, bb)
+            if edge is not None and edge.length + 1e-6 >= MIN_SOUND_BUFFER_WALL:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BED_SOUND",
+                        f"Bedrooms '{ba.id}' and '{bb.id}' share a {_f(edge.length)} ft "
+                        "wall — sound carries straight between the sleeping rooms.",
+                        room=ba.id,
+                        hint="Buffer them: stack a closet on each side of the shared "
+                        "wall (back-to-back), or put a hall/closet between the bedrooms.",
+                    )
+                )
 
     # 8. Proportion: a habitable room shaped like a bowling alley is hard to
     #    furnish. Hallways/closets are *meant* to be skinny — they're not habitable,
