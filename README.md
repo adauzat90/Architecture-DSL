@@ -394,9 +394,18 @@ print(emit_dsl(plan))   # → DSL source
 ## CLI
 
 ```bash
+barndsl new "Cedar Ridge" --out cedar.barn         # scaffold a clean starter plan
 barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
+barndsl compile examples/cedar_ridge.barn --strict # warnings also fail (CI gate)
+barndsl fmt -w examples/cedar_ridge.barn           # canonically reformat in place
 barndsl build   examples/cedar_ridge.barn --out plan.svg
+barndsl build   examples/cedar_ridge.barn --format png  # PNG/PDF (needs [raster])
+barndsl build   examples/cedar_ridge.barn --json   # diagnostics + metrics as JSON
+barndsl watch   examples/cedar_ridge.barn --out plan.svg  # recompile/render on save
+barndsl schedule examples/cedar_ridge.barn         # room/door/window schedules (MD)
+barndsl schedule examples/cedar_ridge.barn --format csv --out sched.csv
+barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
@@ -405,6 +414,13 @@ barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
 ```
 
+**Outputs without Revit.** `barndsl schedule` emits room/door/window schedules
+(Markdown or CSV) straight from the compiler — the same data the Revit *Document*
+pass schedules, but for users who don't open Revit. `barndsl dxf` exports the
+plan to DXF (a minimal, dependency-free DXF R12 writer) for any CAD tool;
+coordinates pass straight through (feet, x-east/y-north). `barndsl build
+--format png|pdf` rasterises the SVG (optional `cairosvg`).
+
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
 
 ## Install
@@ -412,6 +428,7 @@ barndsl explain BEDROOM_EGRESS                     # what a diagnostic code mean
 ```bash
 pip install -e .            # compiler + renderer (no API key)
 pip install -e '.[agent]'   # + the Claude agent
+pip install -e '.[raster]'  # + PNG/PDF render output (cairosvg)
 ```
 
 ## Project layout
@@ -428,7 +445,10 @@ src/barndsl/
   layout2.py     # auto-layout 2.0: space-filling `fill` engine (bands + slice + rectangular dual)
   structure.py   # auto post-and-beam frame placement (the `frame` directive)
   revit.py       # lower the plan IR → Revit-shaped exchange JSON (barndsl.revit/1)
-  render.py      # annotated 2D SVG renderer
+  schedule.py    # room/door/window schedules → Markdown or CSV (no Revit needed)
+  dxf.py         # export the plan → DXF R12 (CAD interchange), dependency-free
+  scaffold.py    # the starter plan `barndsl new` writes
+  render.py      # annotated 2D SVG renderer (+ PNG/PDF via optional cairosvg)
   agent.py       # Claude write → compile → critique → revise loop
   cli.py         # `barndsl` command
 examples/

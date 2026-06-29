@@ -7,6 +7,13 @@ with round-trip, and a Claude design loop. The findings below are deliberately
 *not* "build a bigger engine" — they are the cheap wins that close the gap
 between that engine and what a user actually touches.
 
+## Status (update)
+
+Everything below **except #1 (`cost`)** has since been implemented: `schedule`
+(#2), `fmt` (#3), `watch` (#4), `new` (#5), `--strict` (#6), `build --json`
+(#7), PNG/PDF (#8), DXF (#9), and dimensioned SVG (#10). Cost estimation is
+deliberately held for later. The notes below are kept as the original review.
+
 ## Headline finding
 
 The **validation** and **Revit** layers are deep; the **authoring loop and the
