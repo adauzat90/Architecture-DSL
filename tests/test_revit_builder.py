@@ -267,6 +267,91 @@ def test_structure_skipped_without_families():
     assert any("structural-column family" in n for n in rep.notes)
 
 
+def _instances_of(doc, structural_type):
+    """Created family instances whose 4th NewFamilyInstance arg is this type."""
+    out = []
+    for e in doc.created:
+        if e[0] == "instance" and len(e) >= 3 and len(e[2]) >= 4 and e[2][3] == structural_type:
+            out.append((e[1], e[2]))
+    return out
+
+
+def test_bents_are_placed_at_plate_height_not_the_floor():
+    # Regression: framing was drawn at the floor (z=0); a bent belongs at the
+    # plate (top of the posts = ceiling height above the floor).
+    data = _framed_exchange()
+    doc = _ready_doc(columns=True, framing=True)
+    builder.build(doc, data)
+    from revit_fakes import Structure
+
+    beams = _instances_of(doc, Structure.StructuralType.Beam)
+    assert beams, "no beams created"
+    # cedar_ridge ceiling is 12; every bent/ridge sits at or above the plate.
+    for _inst, args in beams:
+        curve = args[0]
+        assert curve.p1.Z >= 12.0 - 1e-6
+        assert abs(curve.p1.Z - curve.p2.Z) < 1e-6  # level member
+
+
+def test_posts_get_a_top_at_the_plate():
+    data = _framed_exchange()
+    doc = _ready_doc(columns=True, framing=True)
+    builder.build(doc, data)
+    from revit_fakes import BuiltInParameter as BIP
+    from revit_fakes import Structure
+
+    cols = _instances_of(doc, Structure.StructuralType.Column)
+    assert cols, "no columns created"
+    inst, _args = cols[0]
+    # A single-storey post keeps its base level as the top level and offsets the
+    # top up to the plate (ceiling height = 12).
+    top_off = inst.get_Parameter(BIP.FAMILY_TOP_LEVEL_OFFSET_PARAM).AsDouble()
+    assert abs(top_off - 12.0) < 1e-6
+    assert inst.get_Parameter(BIP.FAMILY_TOP_LEVEL_PARAM).AsElementId() is not None
+
+
+def test_wall_top_constrains_to_the_level_above_on_a_two_storey_plan():
+    doc = _ready_doc(two_levels=True, level_gap=9.0)  # Level 2 at the plate
+    data = _exchange(
+        'plan "T"\nenvelope 30 x 24\nceiling 9\n'
+        "room living: living at 0,0 size 30 x 24\n"
+        "room loft: loft at 0,0 size 30 x 24 level 1\n"
+        "entry living south width 3 offset 10\n"
+        "window living west width 8 offset 8\n"
+        "window loft west width 8 offset 8\n"
+        "stair s at 0,0 size 4 x 12 from 0 to 1\n"
+    )
+    rep = builder.build(doc, data)
+    from revit_fakes import BuiltInParameter as BIP
+
+    ground = [w for k, w in ((e[0], e[1]) for e in doc.created)
+              if k == "wall" and getattr(w, "level_id", None) is not None
+              and w.get_Parameter(BIP.WALL_HEIGHT_TYPE).AsElementId() is not None]
+    assert ground, "no ground-storey wall was constrained to the level above"
+    assert any("constrained" in n for n in rep.notes)
+
+
+def test_wall_location_line_defaults_to_centreline_untouched():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    from revit_fakes import BuiltInParameter as BIP
+
+    walls = [w for k, w in ((e[0], e[1]) for e in doc.created) if k == "wall"]
+    # Default: location line left at centreline (0), no geometry shift.
+    assert all(w.get_Parameter(BIP.WALL_KEY_REF_PARAM).AsDouble() == 0 for w in walls)
+
+
+def test_wall_location_line_finish_face_exterior_is_applied_when_configured():
+    doc = _ready_doc()
+    opts = report.BuildOptions(location_line="finish_face_exterior")
+    builder.build(doc, _exchange(CEDAR), opts)
+    from revit_fakes import BuiltInParameter as BIP
+
+    walls = [w for k, w in ((e[0], e[1]) for e in doc.created) if k == "wall"]
+    # Exterior walls get FinishFaceExterior (2); interior walls stay centreline.
+    assert any(w.get_Parameter(BIP.WALL_KEY_REF_PARAM).AsDouble() == 2 for w in walls)
+
+
 def test_porch_builds_as_floor():
     doc = _ready_doc()
     rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))

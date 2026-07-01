@@ -256,6 +256,116 @@ def _set_double_param(elem, bips, names, value):
     return False
 
 
+def _set_id_param(elem, bips, value):
+    """Set the first writable ElementId parameter found by built-in id."""
+    for bip in bips:
+        try:
+            p = elem.get_Parameter(bip)
+        except Exception:
+            p = None
+        if p is not None and not p.IsReadOnly:
+            try:
+                p.Set(value)
+                return True
+            except Exception:
+                pass
+    return False
+
+
+def _level_at(levels, elevation, tol=1e-3):
+    """A level element whose elevation matches ``elevation`` (or None)."""
+    for lv in levels.values():
+        try:
+            if abs(lv.Elevation - float(elevation)) <= tol:
+                return lv
+        except Exception:
+            pass
+    return None
+
+
+def _raise_column(doc, inst, base_level, col, levels, report):
+    """Give a structural column a top at the plate elevation.
+
+    Prefer an existing level at the plate (``col["top"]``); otherwise pin the top
+    to the base level and offset it up by the storey height. Best-effort — a
+    family without these parameters keeps its default height (noted once)."""
+    top_elev = float(col.get("top", 0.0))
+    base_elev = float(col.get("base", base_level.Elevation))
+    if top_elev <= base_elev + 1e-6:
+        return
+    top_level = _level_at(levels, top_elev)
+    set_top = False
+    if top_level is not None:
+        set_top = _set_id_param(
+            inst, [DB.BuiltInParameter.FAMILY_TOP_LEVEL_PARAM], top_level.Id
+        )
+        if set_top:
+            _set_double_param(
+                inst, [DB.BuiltInParameter.FAMILY_TOP_LEVEL_OFFSET_PARAM], [], 0.0
+            )
+    if not set_top:
+        # No level at the plate (a single-storey post rising to the eave): keep the
+        # base level as the top level and offset the top up to the plate.
+        _set_id_param(inst, [DB.BuiltInParameter.FAMILY_TOP_LEVEL_PARAM], base_level.Id)
+        set_top = _set_double_param(
+            inst,
+            [DB.BuiltInParameter.FAMILY_TOP_LEVEL_OFFSET_PARAM],
+            ["Top Offset"],
+            top_elev - base_elev,
+        )
+    if not set_top:
+        report.note("column height: family has no settable top level/offset; default kept")
+
+
+def _level_above(levels, base_level, tol=1e-3):
+    """The nearest level strictly above ``base_level`` (or None)."""
+    best = None
+    for lv in levels.values():
+        try:
+            if lv.Elevation > base_level.Elevation + tol and (
+                best is None or lv.Elevation < best.Elevation
+            ):
+                best = lv
+        except Exception:
+            pass
+    return best
+
+
+def _constrain_wall_top(wall, base_level, height, levels, report):
+    """Constrain a wall's top to the level above so it stays parametric.
+
+    A wall built with an explicit height won't follow a level edit. When a storey
+    exists above, pin the wall's Top Constraint to that level and carry the
+    difference as a top **offset** — the level above sits a floor-assembly depth
+    above the wall's plate, so the offset (usually a small negative) keeps the
+    built top exactly at the plate while remaining level-driven. With no level
+    above (top storey), the explicit height stands. Best-effort."""
+    top_level = _level_above(levels, base_level)
+    if top_level is None:
+        return False
+    if _set_id_param(wall, [DB.BuiltInParameter.WALL_HEIGHT_TYPE], top_level.Id):
+        offset = (base_level.Elevation + float(height)) - top_level.Elevation
+        _set_double_param(wall, [DB.BuiltInParameter.WALL_TOP_OFFSET], [], offset)
+        return True
+    return False
+
+
+#: Location-line options the config may name → the Revit ``WallLocationLine`` value.
+#: The default keeps barndsl's centreline placement (rooms tile on centrelines);
+#: "finish_face_exterior" lands the outside finish on the footprint line so the
+#: building's overall dimension is exact (at the cost of shifting interior faces).
+def _wall_location_line_value(name):
+    table = {
+        "centerline": 0,          # WallCenterline
+        "core_centerline": 1,     # CoreCenterline
+        "finish_face_exterior": 2,  # FinishFaceExterior
+        "finish_face_interior": 3,  # FinishFaceInterior
+        "core_exterior": 4,       # CoreExterior
+        "core_interior": 5,       # CoreInterior
+    }
+    return table.get((name or "").strip().lower())
+
+
 def _rect_loop(x, y, w, l, z):
     pts = [
         DB.XYZ(x, y, z),
@@ -432,8 +542,10 @@ def _is_gable(w):
     )
 
 
-def _build_walls(doc, data, levels, res, report):
+def _build_walls(doc, data, levels, res, options, report):
     made = {}
+    loc_line = _wall_location_line_value(getattr(options, "location_line", None))
+    constrained = 0
     for w in data["walls"]:
         level = levels.get(w["level"])
         if level is None:
@@ -447,7 +559,8 @@ def _build_walls(doc, data, levels, res, report):
             continue
         wtype = res.ext_wall if w.get("exterior") else res.int_wall
         wall = None
-        if _is_gable(w):
+        gable = _is_gable(w)
+        if gable:
             try:
                 wall = _gable_wall(doc, w, wtype, level)
                 _made(report, "wall", w["id"], wall, message="gable-end profile")
@@ -467,7 +580,18 @@ def _build_walls(doc, data, levels, res, report):
                 _logger.warning("wall %s: %s", w["id"], exc)
                 report.failed("wall", w["id"], str(exc))
                 continue
+            # A flat wall built to an explicit height isn't parametric; pin its top
+            # to the level above when there is one so it follows level edits. (A
+            # gable wall's top is its ridge profile, so leave it be.)
+            if not gable and _constrain_wall_top(wall, level, w["height"], levels, report):
+                constrained += 1
+        # Optional: land the exterior finish face on the footprint line so the
+        # building's overall dimension is exact. Off by default (centreline).
+        if loc_line is not None and (loc_line == 0 or w.get("exterior")):
+            _set_id_param(wall, [DB.BuiltInParameter.WALL_KEY_REF_PARAM], loc_line)
         made[w["id"]] = wall
+    if constrained:
+        report.note("constrained %d wall top(s) to the level above" % constrained)
     return made
 
 
@@ -588,6 +712,11 @@ def _build_structure(doc, data, levels, res, report):
             inst = doc.Create.NewFamilyInstance(
                 _xyz(c["point"], level.Elevation), col_sym, level, DB.Structure.StructuralType.Column
             )
+            # Give the post a real height: rise from the floor to the plate (the
+            # beam it carries) rather than the family's default stub. Prefer an
+            # existing level at the plate elevation; otherwise offset the top above
+            # this level.
+            _raise_column(doc, inst, level, c, levels, report)
             _made(report, "column", src, inst)
         except Exception as exc:
             report.failed("column", src, str(exc))
@@ -598,7 +727,10 @@ def _build_structure(doc, data, levels, res, report):
         if beam_sym is None:
             break
         level = levels.get(f["level"])
-        z = level.Elevation if level else 0.0
+        # The bent/ridge sits at the plate (top of the posts), carried on the
+        # exchange as ``z`` — not down at the floor level. Fall back to the level
+        # elevation only for an old exchange without ``z``.
+        z = float(f.get("z", level.Elevation if level else 0.0))
         src = "%s %d" % (f.get("role", "beam"), i)
         try:
             curve = DB.Line.CreateBound(_xyz(f["start"], z), _xyz(f["end"], z))
@@ -1217,7 +1349,7 @@ def build(doc, data, options=None):
         if options.replace:
             _purge_managed(doc, report)
         levels = _ensure_levels(doc, data, report)
-        walls = _build_walls(doc, data, levels, res, report)
+        walls = _build_walls(doc, data, levels, res, options, report)
         _build_openings(doc, data, levels, walls, res, options, report)
         _build_rooms(doc, data, levels, report)
         if options.structure:

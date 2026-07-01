@@ -199,22 +199,36 @@ class RevitRoom:
 
 @dataclass
 class RevitColumn:
-    """A structural post (column) at a point on a level."""
+    """A structural post (column) at a point on a level.
+
+    ``base``/``top`` are the world elevations (feet) of the post's bottom and top:
+    the floor level and the **plate** (level + ceiling), so the consumer can give
+    the column a real height that rises to the beam it carries rather than a
+    default stub.
+    """
 
     point: tuple[float, float]
     size: float
     role: str
     level: int
+    base: float = 0.0
+    top: float = 0.0
 
 
 @dataclass
 class RevitFraming:
-    """A structural beam centreline (bent or ridge) on a level."""
+    """A structural beam centreline (bent or ridge) on a level.
+
+    ``z`` is the world elevation (feet) the member sits at — the **plate** for a
+    bent, or the plate plus the roof rise for the ridge — so the beam is drawn up
+    at the top of the posts, not down on the floor.
+    """
 
     start: tuple[float, float]
     end: tuple[float, float]
     role: str
     level: int
+    z: float = 0.0
 
 
 @dataclass
@@ -354,6 +368,8 @@ class RevitModel:
                         "size": c.size,
                         "role": c.role,
                         "level": c.level,
+                        "base": c.base,
+                        "top": c.top,
                     }
                     for c in self.columns
                 ],
@@ -363,6 +379,7 @@ class RevitModel:
                         "end": list(f.end),
                         "role": f.role,
                         "level": f.level,
+                        "z": f.z,
                     }
                     for f in self.framing
                 ],
@@ -966,12 +983,23 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             )
         )
 
+    # Structure sits at the top of the storey, not on the floor: posts rise from
+    # the level to the plate (level + ceiling), bents span at the plate, and the
+    # ridge rides a roof-rise above it. Precompute the roof rise so the ridge lands
+    # at the true apex.
+    roof_rise = roof_plan(plan, max(level_indexes))["rise"] if plan.rooms else 0.0
+
+    def _plate_z(lvl: int) -> float:
+        return float(plan.level_elevation(lvl)) + float(height)
+
     columns = [
         RevitColumn(
             point=(float(p.x), float(p.y)),
             size=float(p.size),
             role=p.role,
             level=getattr(p, "level", 0),
+            base=float(plan.level_elevation(getattr(p, "level", 0))),
+            top=_plate_z(getattr(p, "level", 0)),
         )
         for p in plan.posts
     ]
@@ -981,6 +1009,8 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             end=(float(b.x2), float(b.y2)),
             role=b.role,
             level=getattr(b, "level", 0),
+            z=_plate_z(getattr(b, "level", 0))
+            + (float(roof_rise) if b.role == "ridge" else 0.0),
         )
         for b in plan.beams
     ]

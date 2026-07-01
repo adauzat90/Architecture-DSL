@@ -105,7 +105,7 @@ model. Use it to shake a plan out against a project template before committing.
 | `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). A **gable-end** wall (flagged `profile: gable`) builds from a vertical pentagon profile so its top rises to the ridge; a profile failure falls back to a flat wall with a note. |
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
-| `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
+| `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. Posts rise from the floor to the **plate** (a real top level/offset, not a default stub) and bents/ridge are drawn up **at the plate**, not down on the floor. |
 | `fixtures` | A family instance at each fixture/appliance seed — a plumbing family for wet fixtures (toilet/lavatory/tub/shower/sink), a specialty-equipment family for appliances (refrigerator/range). Seeds for the designer to swap/adjust; **only if** the family is loaded, skipped with a note otherwise. |
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
 | `foundation` | A **pad footing** (structural-foundation family) under each post of a placed frame; **only if** such a family is loaded, skipped with a note otherwise. The thickened perimeter edge (turndown / grade beam) and the rough concrete takeoff are reported for detailing. |
@@ -184,6 +184,7 @@ folder). Unknown keys are ignored, so you can leave comments.
   "plumbing_family": "Toilet-Domestic-3D",
   "appliance_family": "Refrigerator",
   "foundation_family": "Footing-Rectangular",
+  "location_line": "centerline",
   "size_families": true,
   "structure": true,
   "fixtures": true,
@@ -232,9 +233,16 @@ back to the auto-pick with a note in the report.
   exchange now carries each room's `clear_width`/`clear_length`/`clear_area` (the
   figure Revit computes for a placed room), and the core's `ROOM_CLEAR` check
   flags any room that meets a code minimum nominally but not once built — so the
-  DSL and the Revit room schedule tell the same story. For exact *nominal*
-  interior dimensions instead, set the wall **Location Line** to a finish face, or
-  model with thin types.
+  DSL and the Revit room schedule tell the same story. To make the building's
+  **overall dimension** land exactly on the barndsl footprint instead, set
+  `"location_line": "finish_face_exterior"` in the config — the exterior walls'
+  outside finish then sits on the footprint line (Revit uses each wall type's real
+  thickness). The default is `"centerline"` (unchanged), because moving the
+  exterior finish out also shifts the interior face inward by a full wall.
+- **Walls stay parametric.** On a multi-storey plan, each lower wall's **Top
+  Constraint** is pinned to the level above (with a top offset for the
+  floor-assembly depth), so editing a level moves the walls with it rather than
+  leaving them at a baked-in height. The top storey keeps an explicit height.
 - Rooms only place where walls actually enclose the seed point. A plan whose
   rooms don't fully tile the footprint may leave some seeds unplaced (reported).
 

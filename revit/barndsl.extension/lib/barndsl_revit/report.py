@@ -37,6 +37,10 @@ _OVERRIDE_KEYS = (
     "plumbing_family",
     "appliance_family",
     "foundation_family",
+    #: How walls sit on the barndsl edge: "centerline" (default — rooms tile on
+    #: centrelines) or "finish_face_exterior" (lands the outside finish on the
+    #: footprint line so the building's overall dimension is exact).
+    "location_line",
 )
 _FLAG_KEYS = (
     "structure", "size_families", "porches", "stairs", "slabs", "grids", "roof",
@@ -80,6 +84,7 @@ class BuildOptions(object):
         plumbing_family=None,
         appliance_family=None,
         foundation_family=None,
+        location_line=None,
     ):
         self.structure = bool(structure)
         self.size_families = bool(size_families)
@@ -107,6 +112,7 @@ class BuildOptions(object):
         self.plumbing_family = plumbing_family
         self.appliance_family = appliance_family
         self.foundation_family = foundation_family
+        self.location_line = location_line
 
     @classmethod
     def from_dict(cls, data):

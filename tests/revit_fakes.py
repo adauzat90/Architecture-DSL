@@ -55,6 +55,9 @@ class FakeParam:
     def AsString(self):
         return self._v
 
+    def AsElementId(self):
+        return self._v
+
 
 class FakeElement:
     def __init__(self, name="", doc=None):
@@ -94,6 +97,15 @@ class BuiltInParameter:
     INSTANCE_SILL_HEIGHT_PARAM = "INSTANCE_SILL_HEIGHT_PARAM"
     ROOM_NAME = "ROOM_NAME"
     ALL_MODEL_INSTANCE_COMMENTS = "ALL_MODEL_INSTANCE_COMMENTS"
+    # wall top constraint / location line
+    WALL_HEIGHT_TYPE = "WALL_HEIGHT_TYPE"
+    WALL_TOP_OFFSET = "WALL_TOP_OFFSET"
+    WALL_KEY_REF_PARAM = "WALL_KEY_REF_PARAM"
+    # structural-column base/top
+    FAMILY_TOP_LEVEL_PARAM = "FAMILY_TOP_LEVEL_PARAM"
+    FAMILY_TOP_LEVEL_OFFSET_PARAM = "FAMILY_TOP_LEVEL_OFFSET_PARAM"
+    FAMILY_BASE_LEVEL_PARAM = "FAMILY_BASE_LEVEL_PARAM"
+    FAMILY_BASE_LEVEL_OFFSET_PARAM = "FAMILY_BASE_LEVEL_OFFSET_PARAM"
 
 
 class BuiltInCategory:
@@ -355,6 +367,11 @@ class Wall(FakeElement):
             w.profile = None
             w.curve = first
             w.wtype_id, w.level_id, w.height = rest[0], rest[1], rest[2]
+        # Top constraint / location line params a real wall carries, so the
+        # builder can constrain the top and (optionally) set the location line.
+        w.set_param(BuiltInParameter.WALL_HEIGHT_TYPE, None, "ElementId")
+        w.set_param(BuiltInParameter.WALL_TOP_OFFSET, 0.0, "Double")
+        w.set_param(BuiltInParameter.WALL_KEY_REF_PARAM, 0, "Integer")
         doc.created.append(("wall", w))
         return w
 
@@ -498,6 +515,12 @@ class _Creator:
             raise Exception("forced NewFamilyInstance failure")
         inst = FamilyInstance("instance", self.doc)
         inst.set_param(BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM, 0.0)
+        # Structural-column base/top params (present on a real column instance),
+        # so the builder can raise a post to the plate and a test can read it.
+        inst.set_param(BuiltInParameter.FAMILY_TOP_LEVEL_PARAM, None, "ElementId")
+        inst.set_param(BuiltInParameter.FAMILY_TOP_LEVEL_OFFSET_PARAM, 0.0, "Double")
+        inst.set_param(BuiltInParameter.FAMILY_BASE_LEVEL_PARAM, None, "ElementId")
+        inst.set_param(BuiltInParameter.FAMILY_BASE_LEVEL_OFFSET_PARAM, 0.0, "Double")
         # A placed instance is queryable by its symbol's category and carries a
         # location point — as a real Revit instance would, so tags can find it.
         sym = args[1] if len(args) >= 2 else None
