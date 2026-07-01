@@ -647,6 +647,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_stairs(plan, add)
     _validate_guards(plan, add)
     _validate_life_safety(plan, add)
+    _validate_load_path(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
@@ -2732,6 +2733,79 @@ def _validate_structure(plan: Barndominium, add) -> None:
                     )
                 )
                 break  # one note per opening
+
+
+def _partition_supported_below(plan: Barndominium, lower_level: int, edge) -> bool:
+    """Is an upper partition on ``edge`` carried by a wall or beam on the level
+    below? A lower-level room edge on the same grid line (overlapping the span) is
+    a wall; a beam on that line counts too. The footprint boundary is a wall."""
+    lo, hi = edge.lo, edge.lo + edge.length
+    pos, vertical = edge.pos, (edge.orientation == "v")
+
+    def overlaps(a_lo, a_hi) -> bool:
+        return min(hi, a_hi) - max(lo, a_lo) > EPSILON
+
+    for r in plan.rooms:
+        if getattr(r, "level", 0) != lower_level:
+            continue
+        if vertical:
+            if (abs(r.x - pos) <= EPSILON or abs(r.x2 - pos) <= EPSILON) and overlaps(r.y, r.y2):
+                return True
+        else:
+            if (abs(r.y - pos) <= EPSILON or abs(r.y2 - pos) <= EPSILON) and overlaps(r.x, r.x2):
+                return True
+    # A beam (bent/ridge) running under the partition line supports it too.
+    for b in plan.beams:
+        if getattr(b, "level", 0) != lower_level:
+            continue
+        if vertical and b.orientation == "v" and abs(b.x1 - pos) <= EPSILON:
+            if overlaps(min(b.y1, b.y2), max(b.y1, b.y2)):
+                return True
+        if not vertical and b.orientation == "h" and abs(b.y1 - pos) <= EPSILON:
+            if overlaps(min(b.x1, b.x2), max(b.x1, b.x2)):
+                return True
+    return False
+
+
+def _validate_load_path(plan: Barndominium, add) -> None:
+    """Flag an upper-floor partition with no wall or beam beneath it (IRC R502).
+
+    An interior wall on an upper level that lands over the open middle of a room
+    below has no direct load path — the floor framing must carry it. That's fine
+    for a light partition on adequately sized joists, but a bearing wall wants a
+    wall, beam, or post below. INFO, so it nudges rather than blocks; only runs on
+    multi-storey plans.
+    """
+    if len(plan.levels()) < 2:
+        return
+    seen: set[frozenset] = set()
+    for i, a in enumerate(plan.rooms):
+        lvl = getattr(a, "level", 0)
+        if lvl < 1:
+            continue
+        for b in plan.rooms[i + 1:]:
+            if getattr(b, "level", 0) != lvl:
+                continue
+            edge = shared_edge(a, b)
+            if edge is None or edge.length < MIN_SOUND_BUFFER_WALL:
+                continue  # ignore very short partitions
+            key = frozenset((a.id, b.id))
+            if key in seen:
+                continue
+            seen.add(key)
+            if not _partition_supported_below(plan, lvl - 1, edge):
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "LOAD_PATH",
+                        f"The partition between '{a.id}' and '{b.id}' (level {lvl}) has "
+                        "no wall or beam directly beneath it — the floor framing must "
+                        "carry it (IRC R502).",
+                        room=a.id,
+                        hint="Align a wall, beam, or post on the level below with this "
+                        "partition, or size the floor framing to carry a bearing wall.",
+                    )
+                )
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:

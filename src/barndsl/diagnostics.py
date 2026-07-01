@@ -363,6 +363,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "opening along its wall into a clear bay (between posts), or change the "
            "`frame bay` spacing so no post lands on it. A post at the opening's "
            "jamb is fine (that's how it's framed); only a post inside it flags."),
+        _c("LOAD_PATH", I, "Upper partition unsupported below",
+           "An interior wall on an upper level lands over the open floor of a room "
+           "below, with no wall, beam, or post beneath it — the floor framing must "
+           "carry it (IRC R502). Fine for a light partition on adequate joists; a "
+           "bearing wall wants direct support below."),
         _c("BAY_WIDE", I, "Wide frame bay spacing",
            "The frame's bay spacing is wider than typical residential post-frame "
            "(~12 ft on centre). Legal with adequately sized members, but it asks "

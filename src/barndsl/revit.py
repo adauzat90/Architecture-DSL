@@ -299,6 +299,9 @@ class RevitModel:
     roof: dict | None
     fixtures: list[RevitFixture] = field(default_factory=list)
     foundation: dict | None = None
+    orientation: float = 0.0
+    siding: str | None = None
+    roofing: str | None = None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -313,6 +316,9 @@ class RevitModel:
                 "envelope_width": self.envelope_width,
                 "envelope_length": self.envelope_length,
                 "wings": [list(w) for w in self.wings],
+                "orientation": self.orientation,
+                "siding": self.siding,
+                "roofing": self.roofing,
             },
             "levels": [asdict(l) for l in self.levels],
             "walls": [
@@ -1141,6 +1147,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         areas=areas,
         fixtures=fixtures,
         foundation=foundation,
+        orientation=float(getattr(plan, "orientation", 0.0)),
+        siding=getattr(plan, "siding", None),
+        roofing=getattr(plan, "roofing", None),
     )
 
 
@@ -1218,6 +1227,10 @@ def exchange_to_plan(data: dict) -> Barndominium:
     plan.ceiling(float(pinfo.get("ceiling_height", feet(9))))
     if pinfo.get("floor_depth") is not None:
         plan.floors(float(pinfo["floor_depth"]))
+    if pinfo.get("orientation"):
+        plan.orient(float(pinfo["orientation"]))
+    if pinfo.get("siding") or pinfo.get("roofing"):
+        plan.finish(siding=pinfo.get("siding"), roof=pinfo.get("roofing"))
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))

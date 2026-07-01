@@ -51,6 +51,8 @@ note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
 roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
+orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
+finish [siding "<name>"] [roof "<name>"]  # optional; exterior material hints (metal siding, standing-seam)
 door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
 open <id_a> - <id_b> [width <w>] [offset <o>]   # shorthand for `door <a> - <b> cased ...`

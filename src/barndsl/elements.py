@@ -498,6 +498,17 @@ class Barndominium:
     #: Optional declared program (intent). When set, validation checks the actual
     #: room counts against it. See :class:`ProgramSpec`.
     program_spec: ProgramSpec | None = None
+    #: True-north orientation: the compass azimuth (degrees, clockwise from north)
+    #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
+    #: true north. Used for solar/setback reasoning and to set Project North when
+    #: the plan is lowered to Revit.
+    orientation: float = 0.0
+    #: Exterior wall finish hint (e.g. metal siding). ``None`` leaves the consumer
+    #: to choose; carried into the Revit exchange so a metal-shell wall type can be
+    #: matched. A barndominium is typically metal or board-and-batten.
+    siding: str | None = None
+    #: Roof finish hint (e.g. standing-seam metal). ``None`` leaves it open.
+    roofing: str | None = None
     #: Roof form over the building: ``"gable"`` (default, ridge down the long
     #: axis), ``"shed"`` (a single slope), or ``"monitor"`` (a raised centre aisle
     #: — the classic barn/​barndominium clerestory form). Set via the ``roof``
@@ -603,6 +614,24 @@ class Barndominium:
             if pitch <= 0:
                 raise ValueError("roof pitch must be positive.")
             self.roof_pitch = pitch
+        return self
+
+    def orient(self, degrees: float) -> "Barndominium":
+        """Set the true-north azimuth (degrees) that plan-north (``+y``) points."""
+        d = float(degrees)
+        if not math.isfinite(d):
+            raise ValueError("orientation must be a finite number of degrees.")
+        self.orientation = d % 360.0
+        return self
+
+    def finish(
+        self, *, siding: str | None = None, roof: str | None = None
+    ) -> "Barndominium":
+        """Set the exterior wall (``siding``) and/or ``roof`` finish hints."""
+        if siding is not None:
+            self.siding = str(siding)
+        if roof is not None:
+            self.roofing = str(roof)
         return self
 
     def note(self, text: str) -> "Barndominium":

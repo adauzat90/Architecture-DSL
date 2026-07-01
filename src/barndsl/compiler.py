@@ -44,7 +44,7 @@ from .validation import Issue, Severity, ValidationReport, validate
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "room",
     "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
-    "accessible"
+    "orientation", "finish", "accessible"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -117,6 +117,8 @@ Statements:
         # the roof form over the building: gable (default, ridge down the long
         # axis), shed (a single slope), or monitor (a raised centre clerestory
         # aisle). pitch is rise:run (e.g. 0.333 for 4:12).
+  orientation <degrees>            # compass azimuth that plan-north (+y) points (0 = true north)
+  finish [siding "<name>"] [roof "<name>"]  # exterior material hints (e.g. metal siding, standing-seam)
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -537,6 +539,29 @@ def _parse_statement(
     elif key == "accessible":
         plan.mark_accessible()
         c.expect_end()
+    elif key == "orientation":
+        # `orientation <degrees>` — azimuth (clockwise from N) that plan-north points.
+        plan.orient(c.number("the orientation in degrees"))
+        c.expect_end()
+    elif key == "finish":
+        # `finish [siding "<name>"] [roof "<name>"]` — exterior material hints.
+        siding = roofing = None
+        while (tok := c.peek()) is not None:
+            opt = c.take("'siding' or 'roof'").text.lower()
+            if opt == "siding":
+                siding = c.take("a siding material (quoted)").text
+            elif opt == "roof":
+                roofing = c.take("a roof material (quoted)").text
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown finish option '{opt}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint='Use `finish siding "..." roof "..."`.',
+                )
+        c.expect_end()
+        plan.finish(siding=siding, roof=roofing)
     elif key == "roof":
         # `roof <style> [pitch <p>]` — style in gable|shed|monitor.
         style_tok = c.take("a roof style (gable|shed|monitor)")
