@@ -20,7 +20,15 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .constants import DEFAULT_ROOF_PITCH, FLOOR_ASSEMBLY_DEPTH
+from .constants import (
+    DEFAULT_ROOF_PITCH,
+    FLOOR_ASSEMBLY_DEPTH,
+    FOOTING_DEPTH,
+    FOOTING_SIZE,
+    SLAB_THICKNESS,
+    TURNDOWN_DEPTH,
+    TURNDOWN_WIDTH,
+)
 
 # --- Units ------------------------------------------------------------------
 
@@ -971,6 +979,17 @@ class Barndominium:
         # factor follows the actual pitch instead of a fixed guess.
         slope_factor = math.hypot(1.0, DEFAULT_ROOF_PITCH)  # sec(atan(pitch))
         roof_area = self.footprint_area * slope_factor
+        # Monolithic slab-on-grade concrete: the slab, its thickened perimeter
+        # edge (turndown), and a pad footing under each post. Rough takeoff (yd³).
+        from .geometry import footprint_boundary
+
+        boundary = footprint_boundary(self.footprint_sections())
+        turndown_len = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
+        concrete_ft3 = (
+            self.footprint_area * SLAB_THICKNESS
+            + turndown_len * TURNDOWN_WIDTH * TURNDOWN_DEPTH
+            + len(self.posts) * FOOTING_SIZE * FOOTING_SIZE * FOOTING_DEPTH
+        )
         return {
             "footprint_sqft": self.footprint_area,
             "interior_sqft": self.interior_area,
@@ -980,6 +999,7 @@ class Barndominium:
             "exterior_perimeter_ft": perimeter,
             "exterior_wall_area_sqft": exterior_wall_area,
             "roof_area_sqft": roof_area,
+            "foundation_concrete_yd3": concrete_ft3 / 27.0,
             "bedroom_count": float(
                 sum(1 for r in self.rooms if r.type is RoomType.BEDROOM)
             ),

@@ -108,6 +108,7 @@ model. Use it to shake a plan out against a project template before committing.
 | `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
 | `fixtures` | A family instance at each fixture/appliance seed — a plumbing family for wet fixtures (toilet/lavatory/tub/shower/sink), a specialty-equipment family for appliances (refrigerator/range). Seeds for the designer to swap/adjust; **only if** the family is loaded, skipped with a note otherwise. |
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
+| `foundation` | A **pad footing** (structural-foundation family) under each post of a placed frame; **only if** such a family is loaded, skipped with a note otherwise. The thickened perimeter edge (turndown / grade beam) and the rough concrete takeoff are reported for detailing. |
 | `grids` | Structural grid lines (`Grid.Create`) from a placed `frame`: numbered (`1, 2, …`) along the bents, lettered (`A, B, …`) across the eaves and any interior post line. None without a frame. |
 | `roof` | A footprint roof (`NewFootPrintRoof`) over the building outline, with its **eave edges made slope-defining** at the plan's pitch so it comes out as a gable (the gable ends stay vertical). Falls back to a flat roof if the slope can't be applied (**experimental** — the slope call needs live-Revit validation). |
 | `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
@@ -182,9 +183,11 @@ folder). Unknown keys are ignored, so you can leave comments.
   "beam_family": "W-Wide Flange",
   "plumbing_family": "Toilet-Domestic-3D",
   "appliance_family": "Refrigerator",
+  "foundation_family": "Footing-Rectangular",
   "size_families": true,
   "structure": true,
   "fixtures": true,
+  "foundation": true,
   "porches": true,
   "stairs": true,
   "slabs": true,

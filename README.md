@@ -309,6 +309,11 @@ is tested anywhere; only the final element creation needs Revit. What it does:
 * **Structure carries through.** A placed `frame` lowers to columns (posts) and
   framing centrelines (bents/ridge); porches and stairs come across as reference
   outlines.
+* **A slab-on-grade foundation.** The footprint lowers to a monolithic
+  slab-on-grade: the slab outline, a **thickened perimeter edge** (turndown /
+  grade beam) with a width and depth, and a **pad footing** under each post of a
+  placed frame — plus a rough concrete takeoff (cu yd) for estimating. The builder
+  places the pad footings and reports the turndown run for detailing.
 
 The JSON is the stable `barndsl.revit/1` schema. From Python it's
 `to_revit_model(plan)` (a typed `RevitModel`) or `to_revit_json(plan)`:

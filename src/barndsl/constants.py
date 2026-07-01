@@ -53,3 +53,17 @@ DEFAULT_ROOF_PITCH = 4.0 / 12.0
 #: room schedule reports), so both agree on one number.
 EXTERIOR_WALL_THICKNESS = 6.5 / 12.0
 INTERIOR_WALL_THICKNESS = 4.5 / 12.0
+
+# --- foundation (monolithic slab-on-grade) -----------------------------------
+#: The barndominium foundation is typically a monolithic slab-on-grade: a 4 in
+#: slab with a thickened perimeter edge (turndown / grade beam) carried below the
+#: frost line, plus a pad footing under each post of a post-frame building. These
+#: are conservative defaults (feet); the real depths follow the frost line and
+#: the soil report — an engineer's call, so the check is a takeoff, not a design.
+SLAB_THICKNESS = 4.0 / 12.0
+#: Width and depth (below the slab underside) of the thickened perimeter edge.
+TURNDOWN_WIDTH = 12.0 / 12.0
+TURNDOWN_DEPTH = 12.0 / 12.0
+#: Plan size and depth of a square pad footing under a post.
+FOOTING_SIZE = 2.0
+FOOTING_DEPTH = 12.0 / 12.0

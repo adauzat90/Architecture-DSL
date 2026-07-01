@@ -106,6 +106,7 @@ class BuiltInCategory:
     OST_TitleBlocks = "OST_TitleBlocks"
     OST_PlumbingFixtures = "OST_PlumbingFixtures"
     OST_SpecialityEquipment = "OST_SpecialityEquipment"
+    OST_StructuralFoundation = "OST_StructuralFoundation"
 
 
 class ViewFamily:
@@ -164,6 +165,7 @@ class _StructuralType:
     NonStructural = "NonStructural"
     Column = "Column"
     Beam = "Beam"
+    Footing = "Footing"
 
 
 class Structure:

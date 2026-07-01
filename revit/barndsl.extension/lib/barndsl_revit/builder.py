@@ -284,6 +284,7 @@ class _Resources(object):
         self.roof_type = None
         self.plumbing = None
         self.appliance = None
+        self.footing = None
 
 
 def _resolve_resources(doc, options, report):
@@ -350,6 +351,12 @@ def _resolve_resources(doc, options, report):
         lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_SpecialityEquipment, n),
         (_symbols(doc, DB.BuiltInCategory.OST_SpecialityEquipment) or [None])[0],
         "appliance family",
+    )
+    res.footing = named_or(
+        options.foundation_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_StructuralFoundation, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_StructuralFoundation) or [None])[0],
+        "structural-foundation family",
     )
 
     report.resources["exterior_wall"] = _name(res.ext_wall) if res.ext_wall else "(none)"
@@ -709,6 +716,54 @@ def _build_slabs(doc, data, levels, res, report):
             _made(report, "slab", src, floor)
         except Exception as exc:
             report.failed("slab", src, str(exc))
+
+
+def _build_foundation(doc, data, levels, res, report):
+    """Build the slab-on-grade foundation: a **pad footing** under each post, plus
+    a note carrying the thickened-edge (turndown) run for manual detailing.
+
+    Pad footings place a structural-foundation family at each post point on the
+    ground level; skipped with a note if no foundation family is loaded. The
+    turndown/grade beam has no one-call API, so its geometry is reported for the
+    detailer (like the roof gable). The slab itself is the ground-level floor slab.
+    """
+    foundation = data.get("foundation")
+    if not foundation:
+        return
+    level0 = levels.get(0)
+    if level0 is None:
+        report.skipped("foundation", "footings", "no ground level")
+        return
+
+    footings = foundation.get("footings", [])
+    if footings:
+        sym = _activate(res.footing, doc)
+        if sym is None:
+            report.note("pad footings skipped: no structural-foundation family loaded")
+            for i, f in enumerate(footings):
+                report.skipped("footing", "post %d" % i, "no foundation family")
+        else:
+            for i, f in enumerate(footings):
+                try:
+                    inst = doc.Create.NewFamilyInstance(
+                        _xyz(f["point"], level0.Elevation), sym, level0,
+                        DB.Structure.StructuralType.Footing,
+                    )
+                    _made(report, "footing", "post %d" % i, inst)
+                except Exception as exc:
+                    report.failed("footing", "post %d" % i, str(exc))
+
+    edge = foundation.get("edge") or {}
+    segs = edge.get("segments") or []
+    if segs:
+        report.note(
+            "thickened slab edge (turndown): %d perimeter run(s), %.0f in wide x "
+            "%.0f in deep — detail as a grade beam"
+            % (len(segs), edge.get("width", 0) * 12, edge.get("depth", 0) * 12)
+        )
+    yd3 = foundation.get("concrete_yd3")
+    if yd3:
+        report.note("foundation concrete (rough): %.1f cu yd" % yd3)
 
 
 def _build_grids(doc, data, report):
@@ -1171,6 +1226,8 @@ def build(doc, data, options=None):
             _build_fixtures(doc, data, levels, res, report)
         if options.slabs:
             _build_slabs(doc, data, levels, res, report)
+        if options.foundation:
+            _build_foundation(doc, data, levels, res, report)
         if options.porches:
             _build_porches(doc, data, levels, res, report)
         if options.grids:

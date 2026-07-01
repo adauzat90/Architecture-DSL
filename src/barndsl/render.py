@@ -588,6 +588,7 @@ class _Renderer:
             ("Ext. perimeter", f"{m['exterior_perimeter_ft']:.0f} ft"),
             ("Ext. wall area", f"{m['exterior_wall_area_sqft']:.0f} sq ft"),
             ("Roof area (≈)", f"{m['roof_area_sqft']:.0f} sq ft"),
+            ("Foundation (≈)", f"{m['foundation_concrete_yd3']:.1f} cu yd"),
         ]
         if self.plan.frame_spec is not None or self.plan.posts:
             fs = self.plan.frame_spec

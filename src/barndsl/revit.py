@@ -36,11 +36,16 @@ from dataclasses import asdict, dataclass, field
 from .constants import (
     DEFAULT_ROOF_PITCH,
     EXTERIOR_WALL_THICKNESS,
+    FOOTING_DEPTH,
+    FOOTING_SIZE,
     INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
     NICE_STAIR_WIDTH,
+    SLAB_THICKNESS,
+    TURNDOWN_DEPTH,
+    TURNDOWN_WIDTH,
 )
 from .elements import (
     Barndominium,
@@ -49,7 +54,14 @@ from .elements import (
     feet,
 )
 from .fixtures import plan_room_fixtures
-from .geometry import TOL, opening_endpoints, point_in_footprint, shared_edge
+from .geometry import (
+    TOL,
+    footprint_area,
+    footprint_boundary,
+    opening_endpoints,
+    point_in_footprint,
+    shared_edge,
+)
 from .validation import clear_dimensions
 
 # --- defaults the rectangle IR doesn't carry ---------------------------------
@@ -268,6 +280,7 @@ class RevitModel:
     grids: list[dict]
     roof: dict | None
     fixtures: list[RevitFixture] = field(default_factory=list)
+    foundation: dict | None = None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -358,6 +371,7 @@ class RevitModel:
             "slabs": [asdict(s) for s in self.slabs],
             "grids": list(self.grids),
             "roof": self.roof,
+            "foundation": self.foundation,
             "fixtures": [
                 {
                     "id": fx.id,
@@ -704,6 +718,54 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
     }
 
 
+def foundation_plan(plan: Barndominium) -> dict:
+    """A monolithic slab-on-grade foundation for the footprint (pure, no Revit).
+
+    Derives the slab outline (the footprint sections at grade), a **thickened
+    perimeter edge** (turndown / grade beam) traced around the footprint boundary
+    with a width and a depth below the slab, and a **pad footing** under each post
+    of a placed frame. Also totals the rough concrete volume for a takeoff.
+    Returns ``{top, slab_thickness, sections, edge, footings, concrete_yd3}`` with
+    ``[x, y]`` / ``[x, y, w, l]`` coordinates in feet; ``top`` is the slab top at
+    the ground finished floor (elevation 0).
+
+    The depths are conservative defaults, not an engineered design — the frost
+    line and soil report set the real ones.
+    """
+    sections = plan.footprint_sections()
+    boundary = footprint_boundary(sections)
+    edge = {
+        "width": TURNDOWN_WIDTH,
+        "depth": TURNDOWN_DEPTH,
+        "segments": [[list(a), list(b)] for a, b in boundary],
+    }
+    footings = [
+        {
+            "point": [float(p.x), float(p.y)],
+            "size": FOOTING_SIZE,
+            "depth": FOOTING_DEPTH,
+            "role": p.role,
+        }
+        for p in plan.posts
+    ]
+
+    slab_area = footprint_area(sections)
+    perimeter = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
+    slab_vol = slab_area * SLAB_THICKNESS
+    turndown_vol = perimeter * TURNDOWN_WIDTH * TURNDOWN_DEPTH
+    footing_vol = sum(FOOTING_SIZE * FOOTING_SIZE * FOOTING_DEPTH for _ in footings)
+    concrete_yd3 = (slab_vol + turndown_vol + footing_vol) / 27.0
+
+    return {
+        "top": 0.0,
+        "slab_thickness": SLAB_THICKNESS,
+        "sections": [[float(x), float(y), float(w), float(length)] for x, y, w, length in sections],
+        "edge": edge,
+        "footings": footings,
+        "concrete_yd3": concrete_yd3,
+    }
+
+
 def structural_grids(plan: Barndominium) -> list[dict]:
     """Structural grid lines derived from a placed ``frame`` (pure, no Revit).
 
@@ -981,6 +1043,8 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
     if roof is not None:
         _mark_gable_walls(walls_by_level.get(top_level, []), roof, height)
 
+    foundation = foundation_plan(plan) if plan.rooms else None
+
     fixtures: list[RevitFixture] = []
     for r in plan.rooms:
         for fx in plan_room_fixtures(plan, r):
@@ -1017,6 +1081,7 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         framing=framing,
         areas=areas,
         fixtures=fixtures,
+        foundation=foundation,
     )
 
 

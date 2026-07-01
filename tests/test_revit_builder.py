@@ -69,6 +69,8 @@ def _ready_doc(**kw):
         doc.add_family(BIC.OST_PlumbingFixtures, "Toilet-Domestic")
     if kw.get("appliances", True):
         doc.add_family(BIC.OST_SpecialityEquipment, "Refrigerator")
+    if kw.get("foundation", True):
+        doc.add_family(BIC.OST_StructuralFoundation, "Footing-Rectangular")
     return doc
 
 
@@ -311,6 +313,32 @@ def test_grids_build_from_a_frame():
     # Grid names are set from the labels.
     grid_names = [g.Name for k, g in ((e[0], e[1]) for e in doc.created) if k == "grid"]
     assert "1" in grid_names and "A" in grid_names
+
+
+def test_foundation_footings_land_under_posts():
+    data = _framed_exchange()
+    doc = _ready_doc()
+    rep = builder.build(doc, data)
+    n_posts = len(data["foundation"]["footings"])
+    assert n_posts > 0
+    assert rep.count(status="created", kind="footing") == n_posts
+    # The thickened-edge turndown is reported for detailing.
+    assert any("turndown" in n for n in rep.notes)
+
+
+def test_foundation_footings_skipped_without_family():
+    data = _framed_exchange()
+    doc = _ready_doc(foundation=False)
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="footing") == 0
+    assert rep.count(status="skipped", kind="footing") == len(data["foundation"]["footings"])
+
+
+def test_foundation_pass_can_be_disabled():
+    data = _framed_exchange()
+    doc = _ready_doc()
+    rep = builder.build(doc, data, report.BuildOptions(foundation=False))
+    assert rep.count(kind="footing") == 0
 
 
 def test_no_grids_without_a_frame():

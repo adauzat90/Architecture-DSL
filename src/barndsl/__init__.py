@@ -72,6 +72,7 @@ from .revit import (
     RevitModel,
     exchange_to_dsl,
     exchange_to_plan,
+    foundation_plan,
     plan_stair_runs,
     roof_plan,
     structural_grids,
@@ -153,6 +154,7 @@ __all__ = [
     "plan_stair_runs",
     "roof_plan",
     "structural_grids",
+    "foundation_plan",
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 
