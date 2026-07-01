@@ -42,7 +42,7 @@ from .validation import Issue, Severity, ValidationReport, validate
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "room",
-    "door", "open", "entry", "window", "porch", "stair", "frame"
+    "door", "open", "entry", "window", "porch", "stair", "frame", "accessible"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -86,6 +86,7 @@ Statements:
   wing <W> x <L> at <x>,<y>       # optional; add blocks for an L/T/U footprint
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   floor <D>                       # inter-floor assembly depth (ft); floor-to-floor = ceiling + this
+  accessible                      # opt-in: run accessibility / aging-in-place nudges
   note "free text"                # optional design note
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
@@ -524,6 +525,9 @@ def _parse_statement(
         c.expect_end()
     elif key == "floor":
         plan.floors(c.number("floor assembly depth"))
+        c.expect_end()
+    elif key == "accessible":
+        plan.mark_accessible()
         c.expect_end()
     elif key == "note":
         plan.note(c.take("a quoted note").text)

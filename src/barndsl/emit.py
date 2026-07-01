@@ -31,6 +31,8 @@ def emit_dsl(plan: Barndominium) -> str:
     out.append(f"ceiling {_n(plan.ceiling_height)}")
     if abs(plan.floor_depth - FLOOR_ASSEMBLY_DEPTH) > 1e-9:
         out.append(f"floor {_n(plan.floor_depth)}")
+    if plan.accessible:
+        out.append("accessible")
     if plan.program_spec is not None:
         spec = plan.program_spec
         line = f"program {spec.beds} bed"

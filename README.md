@@ -46,6 +46,7 @@ envelope <W> x <L>
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>
 floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D
+accessible                         # optional; opt in to accessibility / aging-in-place nudges
 note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
 room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -142,9 +143,11 @@ clearances** (a bath that can't hold a toilet/lav/tub with IRC R307 clearances, 
 kitchen too tight for its appliances), bathroom ventilation, dead-end hallways,
 **garage/dwelling fire separation** (a garage *or shop* common wall or the ceiling
 under habitable space above it, and the self-closing rated door between them — IRC
-R302.6 / R302.5.1), and **clear-dimension** shortfalls (a room that meets a code
-minimum on its
-centreline rectangle but not once the walls are built) — so "is it good?" travels
+R302.6 / R302.5.1), **clear-dimension** shortfalls (a room that meets a code
+minimum on its centreline rectangle but not once the walls are built), and — when
+a plan opts in with `accessible` — **accessibility / aging-in-place** nudges
+(accessible door clear widths, a wheelchair turning space in the bath,
+single-floor living, a no-step entry, per ANSI A117.1) — so "is it good?" travels
 the same diagnostic
 stream as "is it valid?" and never blocks a compile. The agent's architectural
 critique is folded into this same `info` channel.

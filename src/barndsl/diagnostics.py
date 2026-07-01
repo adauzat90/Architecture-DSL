@@ -137,6 +137,22 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A kitchen's clear interior is too small to hold a sink, range and "
            "refrigerator along the counters with a comfortable ~40 in working aisle. "
            "Enlarge it or lengthen the counter run."),
+        _c("ACCESS_ENTRY", I, "No-step entrance (accessible target)",
+           "An accessible plan needs at least one no-step entrance (threshold ≤ ½ in) "
+           "with a level landing (ANSI A117.1). Thresholds aren't in the geometry, so "
+           "this is a reminder. Only emitted when the plan opts in via `accessible`."),
+        _c("ACCESS_DOOR", I, "Door too narrow for an accessible route",
+           "A door/opening on the living route is below the ~32 in clear width an "
+           "accessible route needs (a ~34 in leaf; a 36 in exterior door) — ANSI "
+           "A117.1 §404. Only emitted when the plan opts in via `accessible`."),
+        _c("ACCESS_BATH", I, "Bath lacks a wheelchair turning space",
+           "A ground-floor bath's clear short side is under the 60 in wheelchair "
+           "turning circle (ANSI A117.1 §304); plan a roll-in shower and grab-bar "
+           "blocking too. Only emitted when the plan opts in via `accessible`."),
+        _c("ACCESS_SINGLE_FLOOR", I, "No single-floor living",
+           "Accessible / aging-in-place living wants a bedroom and a full bath on the "
+           "one no-stair entry level; the entry level is missing one. Only emitted "
+           "when the plan opts in via `accessible`."),
         _c("ROOM_CLEAR", I, "Clear dimension falls short once walls are built",
            "A room meets a code minimum on its nominal (centreline) rectangle but "
            "falls below it once the bounding walls' thickness is subtracted. IRC "

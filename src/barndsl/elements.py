@@ -468,6 +468,11 @@ class Barndominium:
     #: is ``ceiling_height + floor_depth`` (see :attr:`floor_to_floor`), so an
     #: upper level stacks on the level below's *structure*, not its ceiling plane.
     floor_depth: float = FLOOR_ASSEMBLY_DEPTH
+    #: Opt-in accessibility / aging-in-place target. When set, validation runs an
+    #: extra set of ANSI A117.1-flavoured nudges (accessible door widths, a
+    #: wheelchair turning space in the bath, single-floor living, a no-step entry).
+    #: Off by default so ordinary plans aren't held to an accessible standard.
+    accessible: bool = False
     rooms: list[Room] = field(default_factory=list)
     interior_doors: list[InteriorDoor] = field(default_factory=list)
     exterior_doors: list[ExteriorDoor] = field(default_factory=list)
@@ -566,6 +571,17 @@ class Barndominium:
 
     def note(self, text: str) -> "Barndominium":
         self.notes = (self.notes + "\n" + text).strip() if self.notes else text
+        return self
+
+    def mark_accessible(self, value: bool = True) -> "Barndominium":
+        """Declare an accessibility / aging-in-place target for the plan.
+
+        Turns on an extra set of advisory checks (accessible door widths, a
+        wheelchair turning space in the bath, single-floor living, a no-step
+        entry). Off by default, so a plan is only held to this standard when it
+        opts in — via this method or the `accessible` DSL directive.
+        """
+        self.accessible = bool(value)
         return self
 
     def program(

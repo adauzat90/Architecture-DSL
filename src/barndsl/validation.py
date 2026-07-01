@@ -87,6 +87,11 @@ MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
 STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
 STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
 DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
+# --- accessibility / aging-in-place (opt-in; ANSI A117.1) --------------------
+ACCESSIBLE_CLEAR_DOOR = 32 / 12  # 32 in clear opening (A117.1 §404)
+ACCESSIBLE_LEAF_MIN = 34 / 12  # a ~34 in leaf yields the 32 in clear
+ACCESSIBLE_EXTERIOR_MIN = 36 / 12  # 36 in door on the accessible entrance
+ACCESSIBLE_TURN = 5.0  # 60 in wheelchair turning circle (A117.1 §304)
 # NATURAL_LIGHT_RATIO and the stair constants below live in constants.py (the
 # single source of truth) and are imported above; re-stated here in prose only.
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
@@ -625,6 +630,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
+    _validate_accessibility(plan, add)
     _validate_program(plan, add)
     _validate_structure(plan, add)
 
@@ -793,6 +799,104 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                     hint="Enlarge rooms or add spaces to fill the footprint.",
                 )
             )
+
+
+def _validate_accessibility(plan: Barndominium, add) -> None:
+    """Opt-in accessibility / aging-in-place nudges (ANSI A117.1-flavoured).
+
+    Only runs when the plan declares an ``accessible`` target (the ``accessible``
+    directive / :meth:`Barndominium.mark_accessible`), so ordinary plans aren't
+    held to an accessible standard. All INFO — guidance, never blocking. Covers a
+    no-step entry, accessible door clear widths, a wheelchair turning space in a
+    ground-floor bath, and single-floor living.
+    """
+    if not plan.accessible:
+        return
+    by_id = {r.id: r for r in plan.rooms}
+
+    # 1. A no-step entrance — thresholds aren't in the geometry, so a reminder.
+    add(
+        Issue(
+            Severity.INFO,
+            "ACCESS_ENTRY",
+            "Accessible target: provide at least one no-step entrance (threshold "
+            "≤ ½ in) with a level 5 ft × 5 ft landing (ANSI A117.1).",
+            hint="Make the main entry no-step — a slab-on-grade helps; avoid a "
+            "stoop step.",
+        )
+    )
+
+    # 2. Accessible clear widths on the living route (not the garage/shop door).
+    for d in plan.interior_doors:
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None or a.type in GARAGE_TYPES or b.type in GARAGE_TYPES:
+            continue
+        need = ACCESSIBLE_LEAF_MIN if d.leaf else ACCESSIBLE_CLEAR_DOOR
+        if d.width + EPSILON < need:
+            kind, need_in = ("door", "34 in leaf") if d.leaf else ("opening", "32 in")
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ACCESS_DOOR",
+                    f"The {kind} between '{d.room_a}' and '{d.room_b}' is "
+                    f"{_f(d.width * 12)} in wide; an accessible route needs a {need_in} "
+                    "(32 in clear, ANSI A117.1 §404).",
+                    hint=f"Widen it to ≥ {need_in.split()[0]} in.",
+                )
+            )
+    for xd in plan.exterior_doors:
+        room = by_id.get(xd.room)
+        if room is not None and room.type in GARAGE_TYPES:
+            continue
+        if xd.width + EPSILON < ACCESSIBLE_EXTERIOR_MIN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ACCESS_DOOR",
+                    f"The exterior door on '{xd.room}' is {_f(xd.width * 12)} in wide; "
+                    "an accessible entrance wants a 36 in door.",
+                    room=xd.room,
+                    hint="Use a 36 in exterior door on the accessible entrance.",
+                )
+            )
+
+    # 3. A wheelchair turning space in a ground-level full bath.
+    for room in plan.rooms:
+        if room.type is not RoomType.BATHROOM or room.level != 0:
+            continue
+        cw, cl = clear_dimensions(plan, room)
+        if min(cw, cl) + EPSILON < ACCESSIBLE_TURN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ACCESS_BATH",
+                    f"Bathroom '{room.id}' has ~{_f(min(cw, cl))} ft clear on its "
+                    f"short side; a wheelchair turning space needs {_f(ACCESSIBLE_TURN)} "
+                    "ft (60 in) — plan a roll-in shower and grab-bar blocking too "
+                    "(ANSI A117.1).",
+                    room=room.id,
+                    hint=f"Widen the bath so the clear short side is ≥ "
+                    f"{_f(ACCESSIBLE_TURN)} ft.",
+                )
+            )
+
+    # 4. Single-floor living: a bedroom AND a full bath on the entry level.
+    ground = [r for r in plan.rooms if r.level == 0]
+    has_bed = any(r.type is RoomType.BEDROOM for r in ground)
+    has_bath = any(r.type is RoomType.BATHROOM for r in ground)
+    if not (has_bed and has_bath):
+        missing = " and ".join(
+            w for w, ok in (("a bedroom", has_bed), ("a full bath", has_bath)) if not ok
+        )
+        add(
+            Issue(
+                Severity.INFO,
+                "ACCESS_SINGLE_FLOOR",
+                f"The entry level has no {missing}; accessible / aging-in-place living "
+                "wants a bedroom and a full bath on one no-stair floor.",
+                hint="Place a primary bedroom and a full bath on the ground level.",
+            )
+        )
 
 
 def _validate_fixtures(plan: Barndominium, add) -> None:
