@@ -35,6 +35,8 @@ from dataclasses import asdict, dataclass, field
 
 from .constants import (
     DEFAULT_ROOF_PITCH,
+    EXTERIOR_WALL_THICKNESS,
+    INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
@@ -45,20 +47,20 @@ from .elements import (
     Direction,
     Room,
     feet,
-    inches,
 )
 from .geometry import TOL, opening_endpoints, point_in_footprint, shared_edge
+from .validation import clear_dimensions
 
 # --- defaults the rectangle IR doesn't carry ---------------------------------
 #: Head height of a standard door leaf (interior or exterior): 6'-8".
 DEFAULT_DOOR_HEIGHT = feet(6.667)
 #: Height of a doorless cased opening (walk-through); taller than a leaf door.
 DEFAULT_CASED_HEIGHT = feet(7.0)
-#: Nominal wall thicknesses, as a hint for picking a Revit wall type. The
-#: exchange is centreline-based, so these don't move geometry — they let the
-#: consumer map "exterior" → a 2x6 shell and "interior" → a 2x4 partition.
-EXTERIOR_WALL_THICKNESS = inches(6.5)
-INTERIOR_WALL_THICKNESS = inches(4.5)
+# Nominal wall thicknesses (EXTERIOR_WALL_THICKNESS / INTERIOR_WALL_THICKNESS)
+# are defined once in constants.py and imported above — the exchange is
+# centreline-based, so they don't move geometry; they hint the wall-type pick
+# ("exterior" → a 2x6 shell, "interior" → a 2x4 partition) and derive the clear
+# dimensions the validator and Revit's room schedule both report.
 
 #: A short distance used to probe just past a wall to decide if its far side is
 #: outside the footprint (and the wall therefore exterior).
@@ -174,6 +176,12 @@ class RevitRoom:
     y: float
     width: float
     length: float
+    #: Built **clear** (finish-face) interior — the nominal rectangle minus half of
+    #: each bounding wall. This is what Revit computes for a placed room's area, so
+    #: carrying it lets the exchange and the Revit room schedule report one number.
+    clear_width: float = 0.0
+    clear_length: float = 0.0
+    clear_area: float = 0.0
 
 
 @dataclass
@@ -301,6 +309,9 @@ class RevitModel:
                     "y": r.y,
                     "width": r.width,
                     "length": r.length,
+                    "clear_width": r.clear_width,
+                    "clear_length": r.clear_length,
+                    "clear_area": r.clear_area,
                 }
                 for r in self.rooms
             ],
@@ -838,21 +849,26 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             )
         )
 
-    rooms = [
-        RevitRoom(
-            id=r.id,
-            name=r.display_name,
-            type=r.type.value,
-            level=getattr(r, "level", 0),
-            point=(float(r.center[0]), float(r.center[1])),
-            area=float(r.area),
-            x=float(r.x),
-            y=float(r.y),
-            width=float(r.width),
-            length=float(r.length),
+    rooms = []
+    for r in plan.rooms:
+        clear_w, clear_l = clear_dimensions(plan, r)
+        rooms.append(
+            RevitRoom(
+                id=r.id,
+                name=r.display_name,
+                type=r.type.value,
+                level=getattr(r, "level", 0),
+                point=(float(r.center[0]), float(r.center[1])),
+                area=float(r.area),
+                x=float(r.x),
+                y=float(r.y),
+                width=float(r.width),
+                length=float(r.length),
+                clear_width=float(clear_w),
+                clear_length=float(clear_l),
+                clear_area=float(clear_w * clear_l),
+            )
         )
-        for r in plan.rooms
-    ]
 
     columns = [
         RevitColumn(

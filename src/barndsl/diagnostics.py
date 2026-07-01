@@ -127,6 +127,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "(kitchen ~70, full bath ~48, half bath ~30 sq ft) or by shortest side "
            "(full bath >= 6 ft, half bath >= 5 ft, so the fixtures fit across it). "
            "Bedrooms are covered by BEDROOM_AREA."),
+        _c("ROOM_CLEAR", I, "Clear dimension falls short once walls are built",
+           "A room meets a code minimum on its nominal (centreline) rectangle but "
+           "falls below it once the bounding walls' thickness is subtracted. IRC "
+           "habitability minimums (R304 area/width, R311.6 hall width) are measured "
+           "between finished surfaces, and Revit's room schedule reports that same "
+           "clear area — so a plan can compile clean yet build short. Grow the room "
+           "by roughly a wall thickness so the clear dimension still meets the "
+           "minimum."),
         # --- doors ----------------------------------------------------------
         _c("SELF_DOOR", E, "Door to self",
            "An interior door connects a room to itself."),

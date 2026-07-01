@@ -138,7 +138,9 @@ the diagnostics as machine-readable JSON for the agent loop or other tooling.
 problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
 bedroom privacy, bath proximity, plumbing economy (cluster wet rooms on a shared
 wall), bedroom closets, room proportion, workable room sizes, bathroom
-ventilation, and dead-end hallways — so "is it good?" travels the same diagnostic
+ventilation, dead-end hallways, and **clear-dimension** shortfalls (a room that
+meets a code minimum on its centreline rectangle but not once the walls are
+built) — so "is it good?" travels the same diagnostic
 stream as "is it valid?" and never blocks a compile. The agent's architectural
 critique is folded into this same `info` channel.
 
@@ -290,7 +292,8 @@ is tested anywhere; only the final element creation needs Revit. What it does:
   and window is matched to the wall id whose line carries it, with a centre
   point, width, height, and (for windows) sill — ready to place as a family.
 * **Rooms become seed points.** A point inside each rectangle, with name/type/
-  area, for Revit to place a Room once the walls enclose it.
+  area — plus the **clear** (finish-face) width/length/area, the figure Revit
+  computes for a placed room — for Revit to place a Room once the walls enclose it.
 * **Structure carries through.** A placed `frame` lowers to columns (posts) and
   framing centrelines (bents/ridge); porches and stairs come across as reference
   outlines.

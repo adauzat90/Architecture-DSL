@@ -42,3 +42,14 @@ FLOOR_ASSEMBLY_DEPTH = 12.0 / 12.0
 
 #: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
 DEFAULT_ROOF_PITCH = 4.0 / 12.0
+
+# --- wall thicknesses (nominal) ----------------------------------------------
+#: Nominal built thickness (feet) of an exterior shell wall (~2x6 + sheathing +
+#: cladding) and an interior partition (~2x4 + gypsum both sides). barndsl rooms
+#: tile on wall *centrelines*, so a room's built clear interior is its nominal
+#: rectangle minus half of each bounding wall — an exterior edge costs more than
+#: an interior one. Used to pick a Revit wall type *and* to derive clear
+#: dimensions (the dimension IRC minimums are measured to, and the one Revit's
+#: room schedule reports), so both agree on one number.
+EXTERIOR_WALL_THICKNESS = 6.5 / 12.0
+INTERIOR_WALL_THICKNESS = 4.5 / 12.0

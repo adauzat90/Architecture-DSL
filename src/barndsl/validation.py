@@ -20,6 +20,8 @@ from typing import Protocol
 
 from .constants import (
     EPSILON,
+    EXTERIOR_WALL_THICKNESS,
+    INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
@@ -200,6 +202,27 @@ def exterior_walls(plan: Barndominium, room: Room, tol: float = EPSILON) -> list
         for w in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST)
         if wall_faces_outside(sections, room, w)
     ]
+
+
+def clear_dimensions(plan: Barndominium, room: Room) -> tuple[float, float]:
+    """The room's built **clear** (finish-face) ``(width, length)`` in feet.
+
+    barndsl rooms tile on wall *centrelines*, so the interior you can actually
+    use is the nominal rectangle minus half of each bounding wall's thickness —
+    an exterior (shell) edge costs more than an interior partition. This is the
+    dimension IRC habitability minimums are measured to (finished surfaces) and
+    the one Revit computes for its room schedule, so reporting/checking it keeps
+    barndsl and the built model telling the same story.
+    """
+    ext = set(exterior_walls(plan, room))
+
+    def half(side: Direction) -> float:
+        thk = EXTERIOR_WALL_THICKNESS if side in ext else INTERIOR_WALL_THICKNESS
+        return thk / 2.0
+
+    clear_w = room.width - half(Direction.WEST) - half(Direction.EAST)
+    clear_l = room.length - half(Direction.SOUTH) - half(Direction.NORTH)
+    return max(0.0, clear_w), max(0.0, clear_l)
 
 
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
@@ -830,6 +853,69 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
                     hint=f"Widen the short side to >= {short_floor:.0f} ft.",
                 )
             )
+        _check_clear_dimension(plan, room, add)
+
+
+def _clear_targets(room: Room):
+    """The *hard-code* minimums the IRC measures between finished surfaces, keyed
+    by room type → ``(kind, minimum)`` where ``kind`` is ``"area"`` or ``"short"``.
+
+    Deliberately only the legal minimums — bedroom habitable area/width (R304) and
+    hallway width (R311.6) — not the softer ``ROOM_TIGHT`` comfort floors: a plan
+    that passes one of *these* nominally but fails it once wall thickness is
+    applied is genuinely non-compliant when built, which is exactly what
+    ``ROOM_CLEAR`` is for. (A conventionally-fine 6 ft bath shouldn't be nagged
+    for losing a wall thickness.)
+    """
+    if room.type is RoomType.BEDROOM:
+        return [("area", MIN_BEDROOM_AREA), ("short", MIN_BEDROOM_DIMENSION)]
+    if room.type is RoomType.HALLWAY:
+        return [("short", MIN_HALLWAY_WIDTH)]
+    return []
+
+
+def _check_clear_dimension(plan: Barndominium, room: Room, add) -> None:
+    """Flag a room that meets a clear-measured minimum on its nominal rectangle
+    but falls below it once the bounding walls' thickness is subtracted.
+
+    Only fires when the room is *nominally compliant* on every one of its
+    hard-code targets — if it already fails one on paper, that error owns the
+    problem and a clear nudge would just be noise.
+    """
+    targets = _clear_targets(room)
+    if not targets:
+        return
+
+    def nominal_of(kind: str) -> float:
+        return room.area if kind == "area" else room.min_dimension
+
+    if any(nominal_of(kind) + EPSILON < minimum for kind, minimum in targets):
+        return  # a nominal failure is already reported at higher severity
+
+    clear_w, clear_l = clear_dimensions(plan, room)
+    clear_area = clear_w * clear_l
+    clear_short = min(clear_w, clear_l)
+    for kind, minimum in targets:
+        clear = clear_area if kind == "area" else clear_short
+        if minimum > clear + 1e-3:
+            nominal = nominal_of(kind)
+            unit = "sq ft" if kind == "area" else "ft"
+            where = "usable area" if kind == "area" else "short side"
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ROOM_CLEAR",
+                    f"{room.type.value.replace('_', ' ').capitalize()} '{room.id}' "
+                    f"measures {_f(nominal)} {unit} nominal but only ~{_f(clear)} {unit} "
+                    f"clear (finish-face); the {minimum:.0f} {unit} minimum is measured "
+                    "between finished surfaces, so the built room falls short.",
+                    room=room.id,
+                    hint=f"Add wall thickness to the {where}: grow it ~"
+                    f"{_f(minimum - clear)} {unit} so the clear dimension still meets "
+                    f"{minimum:.0f} {unit}.",
+                )
+            )
+            return  # one nudge per room is enough
 
 
 def _door_loc(door) -> dict:

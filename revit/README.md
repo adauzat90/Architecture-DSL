@@ -220,8 +220,14 @@ back to the auto-pick with a note in the report.
   `Wall.Create`; if that overload rejects the geometry the wall falls back to a
   flat plate-height rectangle with a note. Needs live-Revit confirmation.
 - Wall centrelines sit on the barndsl room-rectangle edges; Revit applies each
-  wall type's thickness about that centreline. For exact interior dimensions,
-  set the wall **Location Line** to a finish face, or model with thin types.
+  wall type's thickness about that centreline, so a room's built **clear**
+  interior is smaller than its nominal rectangle by half a wall on each side. The
+  exchange now carries each room's `clear_width`/`clear_length`/`clear_area` (the
+  figure Revit computes for a placed room), and the core's `ROOM_CLEAR` check
+  flags any room that meets a code minimum nominally but not once built — so the
+  DSL and the Revit room schedule tell the same story. For exact *nominal*
+  interior dimensions instead, set the wall **Location Line** to a finish face, or
+  model with thin types.
 - Rooms only place where walls actually enclose the seed point. A plan whose
   rooms don't fully tile the footprint may leave some seeds unplaced (reported).
 
