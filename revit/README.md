@@ -139,8 +139,17 @@ after a build and it creates, in one transaction:
 
 - a floor-plan **view** per level,
 - room / door / window **tags** in those views (only barndsl-managed elements),
+- overall **dimension** strings on the ground plan, referencing the structural
+  grids (needs a `frame`; noted and skipped when there are no grids),
+- four exterior **elevations** (N/E/S/W) from one marker, and one transverse
+  building **section** (both need their view types loaded; the section's
+  orientation is experimental and noted if it can't be placed),
 - native door / window / room **schedules**,
-- a **sheet** per level with the plan placed in a viewport.
+- a **sheet** per level with the plan placed in a viewport, plus a dedicated
+  **Schedules** sheet with the schedules placed on it.
+
+Each sub-pass can be turned off with the `dimensions`, `elevations`, `sections`,
+`views`, `tags`, `schedules`, `sheets` config flags.
 
 Views, sheets and schedules are named with a `barndsl - ` prefix and the pass is
 **idempotent** — re-documenting replaces the ones a previous run made (set

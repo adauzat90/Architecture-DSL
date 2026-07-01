@@ -56,6 +56,11 @@ def _doc(**kw):
     doc.add_family(BIC.OST_Windows, "Fixed")
     if kw.get("view_type", True):
         doc.add_view_family_type("Floor Plan")
+    if kw.get("elev_section_types", True):
+        from revit_fakes import ViewFamily
+
+        doc.add_view_family_type("Elevation", ViewFamily.Elevation)
+        doc.add_view_family_type("Building Section", ViewFamily.Section)
     if kw.get("title_block", True):
         doc.add_title_block("A1 Title Block")
     return doc
@@ -81,7 +86,50 @@ def test_document_creates_view_schedules_sheet():
     rep = builder.document(doc)
     assert rep.count(status="created", kind="view") == 1  # one level
     assert rep.count(status="created", kind="schedule") == 3  # doors, windows, rooms
-    assert rep.count(status="created", kind="sheet") == 1
+    # One plan sheet per level plus a dedicated schedule sheet.
+    assert rep.count(status="created", kind="sheet") == 2
+
+
+FRAMED = CEDAR + "frame bay 12 span 40 post 6\n"
+
+
+def test_document_makes_exterior_elevations_and_a_section():
+    doc = _built()
+    rep = builder.document(doc)
+    # Four exterior elevations (N/E/S/W) + one building section.
+    assert rep.count(status="created", kind="elevation") == 4
+    assert rep.count(status="created", kind="section") == 1
+
+
+def test_elevations_and_section_skipped_without_their_view_types():
+    doc = _built(elev_section_types=False)
+    rep = builder.document(doc)
+    assert rep.count(kind="elevation") == 0
+    assert rep.count(kind="section") == 0
+    assert any("elevation" in n for n in rep.notes)
+    assert any("section" in n for n in rep.notes)
+
+
+def test_framed_plan_gets_grid_dimensions():
+    doc = _built(exchange=_exchange(FRAMED))
+    rep = builder.document(doc)
+    # Grid lines run both ways → two overall dimension strings.
+    assert rep.count(status="created", kind="dimension") >= 1
+
+
+def test_unframed_plan_notes_no_dimensions():
+    doc = _built()  # CEDAR has no frame → no grids
+    rep = builder.document(doc)
+    assert rep.count(kind="dimension") == 0
+    assert any("dimension" in n for n in rep.notes)
+
+
+def test_schedules_are_placed_on_a_schedule_sheet():
+    doc = _built()
+    builder.document(doc)
+    # A ScheduleSheetInstance per schedule (doors/windows/rooms) landed on a sheet.
+    assert sum(1 for e in doc.created if e[0] == "schedule_instance") == 3
+    assert any(s.Name == "barndsl - Schedules" for s in doc.sheets)
 
 
 def test_document_tags_managed_rooms_and_openings():
@@ -95,7 +143,8 @@ def test_two_levels_get_a_view_and_sheet_each():
     doc = _built(two_levels=True, exchange=_example_exchange("gallery/two_story.barn"))
     rep = builder.document(doc)
     assert rep.count(status="created", kind="view") == 2
-    assert rep.count(status="created", kind="sheet") == 2
+    # Two plan sheets plus the schedule sheet.
+    assert rep.count(status="created", kind="sheet") == 3
 
 
 def test_redocument_is_idempotent():

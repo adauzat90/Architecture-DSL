@@ -1601,9 +1601,10 @@ def _managed_in_category(doc, bic):
 
 
 def _purge_documents(doc, report):
-    """Delete barndsl-named sheets, schedules and views from a prior run."""
+    """Delete barndsl-named sheets, schedules and views (plans, elevations,
+    sections) plus managed dimensions/markers from a prior run."""
     removed = 0
-    for cls in (DB.ViewSheet, DB.ViewSchedule, DB.ViewPlan):
+    for cls in (DB.ViewSheet, DB.ViewSchedule, DB.ViewPlan, DB.ViewSection):
         try:
             views = _collect(doc, cls)
         except Exception:
@@ -1615,8 +1616,21 @@ def _purge_documents(doc, report):
                     removed += 1
             except Exception:
                 pass
+    # Managed dimensions and elevation markers aren't name-prefixed.
+    for cls in (DB.Dimension, DB.ElevationMarker):
+        try:
+            elems = _collect(doc, cls)
+        except Exception:
+            elems = []
+        for e in list(elems):
+            if _is_managed(e):
+                try:
+                    doc.Delete(e.Id)
+                    removed += 1
+                except Exception:
+                    pass
     if removed:
-        report.note("replaced %d view/sheet/schedule(s) from a previous run" % removed)
+        report.note("replaced %d view/sheet/schedule/dimension(s) from a previous run" % removed)
     return removed
 
 
@@ -1683,6 +1697,7 @@ def _make_schedules(doc, report):
         (DB.BuiltInCategory.OST_Windows, "Windows"),
         (DB.BuiltInCategory.OST_Rooms, "Rooms"),
     ]
+    made = []
     for bic, label in specs:
         try:
             sched = DB.ViewSchedule.CreateSchedule(doc, DB.ElementId(bic))
@@ -1690,12 +1705,185 @@ def _make_schedules(doc, report):
                 sched.Name = DOC_PREFIX + label
             except Exception:
                 pass
+            made.append(sched)
             report.created("schedule", label, revit_id=_rid(sched))
         except Exception as exc:
             report.failed("schedule", label, str(exc))
+    return made
 
 
-def _make_sheets(doc, levels, views, title_block, report):
+def _wall_endpoints(w):
+    """The two plan endpoints of a wall — from a real ``Location.Curve`` or the
+    fake's stored line — as ``((x1, y1), (x2, y2))``, or None."""
+    loc = getattr(w, "Location", None)
+    curve = getattr(loc, "Curve", None) if loc is not None else getattr(w, "curve", None)
+    if curve is None:
+        return None
+    try:
+        a, b = curve.GetEndPoint(0), curve.GetEndPoint(1)
+    except Exception:
+        a, b = getattr(curve, "p1", None), getattr(curve, "p2", None)
+    if a is None or b is None:
+        return None
+    return ((a.X, a.Y), (b.X, b.Y))
+
+
+def _model_bounds(doc):
+    """Plan bounds ``(minx, miny, maxx, maxy)`` of the barndsl-built walls, for
+    placing elevation markers and a section. None if there are no managed walls."""
+    xs, ys = [], []
+    for w in _collect(doc, DB.Wall):
+        if not _is_managed(w):
+            continue
+        ends = _wall_endpoints(w)
+        if ends is None:
+            continue
+        (x1, y1), (x2, y2) = ends
+        xs.extend([x1, x2])
+        ys.extend([y1, y2])
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _dimension_ground_plan(doc, view, report):
+    """Overall grid-to-grid dimension strings on the ground plan.
+
+    Dimensions reference the structural grids a frame produced (Revit needs
+    referenceable geometry; grids are the clean choice). One string per grid
+    direction, on a dimension line just outside the building. Skipped with a note
+    when there are no grids to dimension."""
+    grids = [g for g in _collect(doc, DB.Grid) if _is_managed(g)]
+    if not grids:
+        report.note("plan dimensions skipped: no grids to dimension (place a frame)")
+        return
+    bounds = _model_bounds(doc)
+    if bounds is None:
+        return
+    minx, miny, maxx, maxy = bounds
+    vert, horiz = [], []  # grids running N-S (constant x) vs E-W (constant y)
+    for g in grids:
+        curve = getattr(g, "Curve", None) or getattr(g, "line", None)
+        if curve is None:
+            continue
+        try:
+            a, b = curve.GetEndPoint(0), curve.GetEndPoint(1)
+        except Exception:
+            a, b = getattr(curve, "p1", None), getattr(curve, "p2", None)
+        if a is None or b is None:
+            continue
+        (vert if abs(a.X - b.X) <= abs(a.Y - b.Y) else horiz).append((g, a, b))
+
+    made = 0
+    for group, along_x in ((vert, True), (horiz, False)):
+        if len(group) < 2:
+            continue
+        refs = DB.ReferenceArray()
+        for g, _a, _b in group:
+            try:
+                refs.Append(DB.Reference(g))
+            except Exception:
+                pass
+        try:
+            if along_x:  # vertical grids → a horizontal dimension line below the plan
+                p1 = DB.XYZ(minx, miny - 5.0, 0.0)
+                p2 = DB.XYZ(maxx, miny - 5.0, 0.0)
+            else:  # horizontal grids → a vertical dimension line left of the plan
+                p1 = DB.XYZ(minx - 5.0, miny, 0.0)
+                p2 = DB.XYZ(minx - 5.0, maxy, 0.0)
+            line = DB.Line.CreateBound(p1, p2)
+            dim = DB.Dimension.Create(doc, view, line, refs)
+            _mark(dim)
+            report.created("dimension", "grid line", revit_id=_rid(dim))
+            made += 1
+        except Exception as exc:
+            report.failed("dimension", "grid line", str(exc))
+    if not made:
+        report.note("plan dimensions: no dimension string could be placed")
+
+
+def _make_elevations(doc, plan_view, report):
+    """Four exterior elevations (North/South/East/West) from one marker centred on
+    the building — a residential set's exterior elevations. Needs an elevation
+    view type and a plan view to host them."""
+    vft = _view_family_type(doc, DB.ViewFamily.Elevation)
+    if vft is None:
+        report.note("elevations skipped: no elevation view type in project")
+        return
+    if plan_view is None:
+        report.note("elevations skipped: no plan view to host them")
+        return
+    bounds = _model_bounds(doc)
+    if bounds is None:
+        report.note("elevations skipped: no built walls to bound the building")
+        return
+    minx, miny, maxx, maxy = bounds
+    cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+    try:
+        if not vft.IsActive:
+            vft.Activate()
+            doc.Regenerate()
+    except Exception:
+        pass
+    try:
+        marker = DB.ElevationMarker.CreateElevationMarker(
+            doc, vft.Id, DB.XYZ(cx, cy, 0.0), 96
+        )
+    except Exception as exc:
+        report.failed("elevation", "marker", str(exc))
+        return
+    _mark(marker)
+    for i, name in enumerate(("North", "East", "South", "West")):
+        try:
+            elev = marker.CreateElevation(doc, plan_view.Id, i)
+            try:
+                elev.Name = DOC_PREFIX + name + " Elevation"
+            except Exception:
+                pass
+            report.created("elevation", name, revit_id=_rid(elev))
+        except Exception as exc:
+            report.failed("elevation", name, str(exc))
+
+
+def _make_section(doc, levels, report):
+    """One transverse building section cutting across the plan — the section a
+    residential set needs to show wall/roof heights. Experimental: the section's
+    orientation transform needs live-Revit confirmation, so a failure is noted."""
+    vft = _view_family_type(doc, DB.ViewFamily.Section)
+    if vft is None:
+        report.note("section skipped: no section view type in project")
+        return
+    bounds = _model_bounds(doc)
+    if bounds is None:
+        report.note("section skipped: no built walls to bound the building")
+        return
+    minx, miny, maxx, maxy = bounds
+    top = max((lv.Elevation for lv in levels), default=0.0) + 12.0
+    try:
+        bbox = DB.BoundingBoxXYZ()
+        # Look north across the middle of the building: the section box's local
+        # X spans east-west, Y spans elevation, Z is the view depth (northward).
+        cy = (miny + maxy) / 2.0
+        t = DB.Transform.Identity
+        t.Origin = DB.XYZ((minx + maxx) / 2.0, cy, 0.0)
+        t.BasisX = DB.XYZ(1.0, 0.0, 0.0)
+        t.BasisY = DB.XYZ(0.0, 0.0, 1.0)
+        t.BasisZ = DB.XYZ(0.0, -1.0, 0.0)
+        bbox.Transform = t
+        half_w = (maxx - minx) / 2.0 + 2.0
+        bbox.Min = DB.XYZ(-half_w, -2.0, -(maxy - miny) / 2.0 - 2.0)
+        bbox.Max = DB.XYZ(half_w, top, (maxy - miny) / 2.0 + 2.0)
+        section = DB.ViewSection.CreateSection(doc, vft.Id, bbox)
+        try:
+            section.Name = DOC_PREFIX + "Building Section"
+        except Exception:
+            pass
+        report.created("section", "building", revit_id=_rid(section))
+    except Exception as exc:
+        report.failed("section", "building", "experimental: %s" % exc)
+
+
+def _make_sheets(doc, levels, views, title_block, report, schedules=None):
     if title_block is None:
         report.note("sheets skipped: no title block loaded")
         return
@@ -1719,6 +1907,27 @@ def _make_sheets(doc, levels, views, title_block, report):
             report.created("sheet", _name(lv), revit_id=_rid(sheet))
         except Exception as exc:
             report.failed("sheet", _name(lv), str(exc))
+    # A dedicated schedule sheet so the door/window/room schedules land on a
+    # drawing rather than only living in the browser.
+    if schedules:
+        try:
+            sheet = DB.ViewSheet.Create(doc, title_block.Id)
+            try:
+                sheet.Name = DOC_PREFIX + "Schedules"
+            except Exception:
+                pass
+            y = 1.0
+            for sched in schedules:
+                try:
+                    DB.ScheduleSheetInstance.Create(
+                        doc, sheet.Id, sched.Id, DB.XYZ(0.5, y, 0.0)
+                    )
+                    y -= 0.5
+                except Exception as exc:
+                    report.failed("sheet", "schedule placement", str(exc))
+            report.created("sheet", "Schedules", revit_id=_rid(sheet))
+        except Exception as exc:
+            report.failed("sheet", "Schedules", str(exc))
 
 
 def document(doc, options=None):
@@ -1747,10 +1956,17 @@ def document(doc, options=None):
         if options.tags:
             for view in views.values():
                 _tag_in_view(doc, view, report)
-        if options.schedules:
-            _make_schedules(doc, report)
+        # The ground plan hosts dimensions and the elevation marker.
+        ground = views.get(_id_val(levels[0].Id)) if (views and levels) else None
+        if getattr(options, "dimensions", True) and ground is not None:
+            _dimension_ground_plan(doc, ground, report)
+        if getattr(options, "elevations", True):
+            _make_elevations(doc, ground, report)
+        if getattr(options, "sections", True):
+            _make_section(doc, levels, report)
+        schedules = _make_schedules(doc, report) if options.schedules else []
         if options.sheets:
-            _make_sheets(doc, levels, views, title_block, report)
+            _make_sheets(doc, levels, views, title_block, report, schedules)
         t.Commit()
     except Exception:
         if t.HasStarted() and not t.HasEnded():

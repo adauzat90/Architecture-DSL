@@ -138,6 +138,8 @@ class BuiltInCategory:
 
 class ViewFamily:
     FloorPlan = "FloorPlan"
+    Elevation = "Elevation"
+    Section = "Section"
 
 
 class TagMode:
@@ -318,6 +320,9 @@ class Line(Curve):
             raise Exception("degenerate curve")
         return Line(p1, p2)
 
+    def GetEndPoint(self, i):
+        return self.p1 if i == 0 else self.p2
+
 
 class CurveLoop:
     def __init__(self):
@@ -423,6 +428,7 @@ class Grid(FakeElement):
     def Create(doc, line):
         g = Grid("grid", doc)
         g.line = line
+        g.Curve = line
         doc.created.append(("grid", g))
         return g
 
@@ -568,6 +574,85 @@ class IndependentTag(FakeElement):
         t = IndependentTag("tag", doc)
         doc.created.append(("tag", t))
         return t
+
+
+class ReferenceArray:
+    def __init__(self):
+        self.refs = []
+
+    def Append(self, r):
+        self.refs.append(r)
+
+    @property
+    def Size(self):
+        return len(self.refs)
+
+
+class Dimension(FakeElement):
+    @staticmethod
+    def Create(doc, view, line, refs):
+        if getattr(refs, "Size", 0) < 2:
+            raise Exception("a dimension needs at least two references")
+        d = Dimension("dimension", doc)
+        d.line = line
+        d.refs = refs
+        doc.created.append(("dimension", d))
+        return d
+
+
+class _Transform:
+    def __init__(self):
+        self.Origin = XYZ(0, 0, 0)
+        self.BasisX = XYZ(1, 0, 0)
+        self.BasisY = XYZ(0, 1, 0)
+        self.BasisZ = XYZ(0, 0, 1)
+
+
+# ``DB.Transform.Identity`` yields a fresh identity transform each access, like Revit.
+class _TransformMeta(type):
+    @property
+    def Identity(cls):
+        return _Transform()
+
+
+class Transform(metaclass=_TransformMeta):
+    pass
+
+
+class BoundingBoxXYZ:
+    def __init__(self):
+        self.Min = XYZ(0, 0, 0)
+        self.Max = XYZ(0, 0, 0)
+        self.Transform = _Transform()
+
+
+class ViewSection(FakeElement):
+    @staticmethod
+    def CreateSection(doc, vft_id, bbox):
+        v = ViewSection("section", doc)
+        doc.created.append(("section", v))
+        return v
+
+
+class ElevationMarker(FakeElement):
+    @staticmethod
+    def CreateElevationMarker(doc, vft_id, point, scale):
+        m = ElevationMarker("elevation-marker", doc)
+        doc.created.append(("elevation_marker", m))
+        return m
+
+    def CreateElevation(self, doc, plan_view_id, index):
+        v = ViewSection("elevation", doc)
+        doc.created.append(("elevation", v))
+        return v
+
+
+class ScheduleSheetInstance(FakeElement):
+    @staticmethod
+    def Create(doc, sheet_id, schedule_id, point):
+        s = ScheduleSheetInstance("schedule-on-sheet", doc)
+        doc.created.append(("schedule_instance", s))
+        return s
 
 
 # --- collector / transaction / creator ---------------------------------------
@@ -869,6 +954,8 @@ class FakeDocument:
             return list(self.schedules)
         if cls is ViewSheet:
             return list(self.sheets)
+        if cls in (Wall, Grid, ViewSection, Dimension, ElevationMarker):
+            return [e for e in self._by_id.values() if isinstance(e, cls)]
         if cls is FamilySymbol:
             return list(self.symbols.get(cat, []))
         if cat == BuiltInCategory.OST_Rooms:
@@ -891,7 +978,8 @@ def _make_db_module():
         Family, FamilySymbol, Wall, Floor, FamilyInstance, FilteredElementCollector,
         Transaction, ViewFamily, ViewFamilyType, ViewPlan, ViewSchedule, ViewSheet,
         Viewport, IndependentTag, TagMode, TagOrientation, ElementId, Reference,
-        LinkElementId,
+        LinkElementId, ReferenceArray, Dimension, Transform, BoundingBoxXYZ,
+        ViewSection, ElevationMarker, ScheduleSheetInstance,
     ):
         setattr(db, obj.__name__, obj)
     db.ExtensibleStorage = ExtensibleStorage
