@@ -21,11 +21,14 @@ from typing import Protocol
 from .constants import (
     EPSILON,
     EXTERIOR_WALL_THICKNESS,
+    GUARD_DROP_TRIGGER,
+    GUARD_HEIGHT,
     INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
+    STAIR_HEADROOM,
 )
 from .elements import (
     GARAGE_TYPES,
@@ -627,6 +630,8 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_stairs(plan, add)
+    _validate_guards(plan, add)
+    _validate_life_safety(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
@@ -1528,6 +1533,25 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                     room=s.id,
                     hint=f"Lengthen its footprint to >= {_f(run_needed)} ft, or make it "
                     f">= {_f(2 * MIN_STAIR_WIDTH)} ft wide to fit a switchback."))
+            else:
+                # Headroom (R311.7.2): a person descending under the upper floor
+                # needs 6'-8" clear until they pass the stairwell opening's edge.
+                # The opening must run at least the horizontal distance over which
+                # the treads drop that 6'-8" below the floor above. Approximate the
+                # opening by the run's long footprint dimension — if even the whole
+                # footprint is shorter than that, no cut can develop headroom.
+                riser_h = rise / risers
+                open_needed = STAIR_HEADROOM * (MIN_TREAD_DEPTH / max(riser_h, EPSILON))
+                if long_dim + EPSILON < open_needed:
+                    add(Issue(
+                        Severity.WARNING, "STAIR_HEADROOM",
+                        f"Stair '{s.id}' is {_f(long_dim)} ft long — too short for a "
+                        f"floor opening that keeps {_f(STAIR_HEADROOM)} ft (6'-8\") "
+                        f"headroom under the upper floor (IRC R311.7.2): the opening "
+                        f"needs about {_f(open_needed)} ft of run to clear.",
+                        room=s.id,
+                        hint=f"Lengthen the run/stairwell opening to >= {_f(open_needed)} "
+                        "ft, or lower the floor-to-floor so fewer risers are needed."))
         lower = _stair_rooms(plan, s, s.from_level)
         upper = _stair_rooms(plan, s, s.to_level)
         if not lower or not upper:
@@ -1540,6 +1564,79 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                       f"Stair '{s.id}' doesn't land in a room on {', '.join(missing)}.",
                       room=s.id,
                       hint="Position it so its footprint overlaps a room on each level."))
+
+
+def _validate_guards(plan: Barndominium, add) -> None:
+    """Flag an open loft/balcony edge that overlooks a double-height space and
+    needs a guard (IRC R312).
+
+    An upper-level room that only *partially* covers a room below leaves the
+    uncovered part of that lower room open to the floor above — a double-height
+    void. The upper room's edge along that void is a walking surface more than a
+    storey up, so it needs a 36 in guard. (An upper room that fully covers the one
+    below has a solid floor to its edge — no void — so it isn't flagged; that's
+    why a loft sized to its great room below doesn't nag.)
+    """
+    if len(plan.levels()) < 2:
+        return
+    by_level: dict[int, list[Room]] = {}
+    for r in plan.rooms:
+        by_level.setdefault(r.level, []).append(r)
+
+    flagged: set[str] = set()
+    for upper in plan.rooms:
+        if upper.level < 1 or upper.id in flagged:
+            continue
+        drop = plan.level_elevation(upper.level) - plan.level_elevation(upper.level - 1)
+        if drop <= GUARD_DROP_TRIGGER + EPSILON:
+            continue
+        for lower in by_level.get(upper.level - 1, []):
+            cov = upper.overlaps(lower)
+            if cov <= 0.5:
+                continue  # not above this room at all
+            # Partially above it → the rest of `lower` is open to `upper`'s floor.
+            if cov + 0.5 < lower.area:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "LOFT_GUARD",
+                        f"'{upper.id}' (level {upper.level}) overlooks the "
+                        f"double-height space of '{lower.id}' below; its open edge is "
+                        f"~{_f(drop)} ft up and needs a {GUARD_HEIGHT * 12:.0f} in guard "
+                        "(IRC R312).",
+                        room=upper.id,
+                        hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard/railing along the "
+                        "open edge (with balusters spaced so a 4 in sphere can't pass).",
+                    )
+                )
+                flagged.add(upper.id)
+                break
+
+
+def _validate_life_safety(plan: Barndominium, add) -> None:
+    """Smoke/CO-alarm reminders the geometry can't place but code requires.
+
+    Kept conditional so it doesn't nag every plan: a carbon-monoxide alarm (IRC
+    R315) is required where a fuel-fired appliance or an **attached garage** is
+    present — a barndominium's attached garage/shop is the classic trigger — and
+    the same reminder carries the smoke-alarm placement (R314). Fires once when the
+    plan has an attached garage/shop.
+    """
+    garage = next((r for r in plan.rooms if r.type in GARAGE_TYPES), None)
+    if garage is None:
+        return
+    add(
+        Issue(
+            Severity.INFO,
+            "ALARM_CO",
+            f"The plan has an attached garage/shop ('{garage.id}'), so a "
+            "carbon-monoxide alarm is required outside each sleeping area (IRC "
+            "R315), along with smoke alarms in each bedroom, outside each sleeping "
+            "area, and on every level (IRC R314).",
+            hint="Provide interconnected smoke/CO alarms — the DSL can't place them, "
+            "so confirm them on the electrical plan.",
+        )
+    )
 
 
 def _validate_access(plan: Barndominium, add) -> None:

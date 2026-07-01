@@ -27,6 +27,17 @@ MIN_TREAD_DEPTH = 10.0 / 12.0
 MIN_STAIR_WIDTH = 3.0
 #: A comfortable flight width when the footprint allows more than the minimum.
 NICE_STAIR_WIDTH = 3.5
+#: Minimum stair headroom, measured vertically from the tread nosing line to any
+#: construction above: 6 ft 8 in (IRC R311.7.2). Drives the stairwell-opening
+#: feasibility check — a run needs a floor opening long enough to develop this.
+STAIR_HEADROOM = 6.0 + 8.0 / 12.0
+
+# --- guards & fall protection (IRC R312) ------------------------------------
+#: A walking surface (loft edge, landing, balcony) more than this above the floor
+#: below needs a guard: 30 in.
+GUARD_DROP_TRIGGER = 30.0 / 12.0
+#: Minimum guard height at an open edge: 36 in.
+GUARD_HEIGHT = 36.0 / 12.0
 
 # --- daylight (IRC R303) -----------------------------------------------------
 #: Glazing must total at least 8% of a habitable room's floor area.
