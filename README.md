@@ -45,6 +45,8 @@ plan "Name"
 envelope <W> x <L>
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>
+floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D
+accessible                         # optional; opt in to accessibility / aging-in-place nudges
 note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
 room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -136,8 +138,17 @@ the diagnostics as machine-readable JSON for the agent loop or other tooling.
 **Three severities, one channel.** `error`s must be fixed; `warning`s flag likely
 problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
 bedroom privacy, bath proximity, plumbing economy (cluster wet rooms on a shared
-wall), bedroom closets, room proportion, workable room sizes, bathroom
-ventilation, and dead-end hallways — so "is it good?" travels the same diagnostic
+wall), bedroom closets, room proportion, workable room sizes, **fixture
+clearances** (a bath that can't hold a toilet/lav/tub with IRC R307 clearances, a
+kitchen too tight for its appliances), bathroom ventilation, dead-end hallways,
+**garage/dwelling fire separation** (a garage *or shop* common wall or the ceiling
+under habitable space above it, and the self-closing rated door between them — IRC
+R302.6 / R302.5.1), **clear-dimension** shortfalls (a room that meets a code
+minimum on its centreline rectangle but not once the walls are built), and — when
+a plan opts in with `accessible` — **accessibility / aging-in-place** nudges
+(accessible door clear widths, a wheelchair turning space in the bath,
+single-floor living, a no-step entry, per ANSI A117.1) — so "is it good?" travels
+the same diagnostic
 stream as "is it valid?" and never blocks a compile. The agent's architectural
 critique is folded into this same `info` channel.
 
@@ -270,6 +281,15 @@ is tested anywhere; only the final element creation needs Revit. What it does:
 * **Coordinates pass through unchanged.** barndsl's convention (`x` east, `y`
   north, feet) is exactly Revit's world XY plane, and Revit's internal unit is
   the decimal foot. `z` comes from the floor level.
+* **Levels stack by floor-to-floor, not ceiling height.** An upper level sits at
+  `ceiling + floor` (the inter-floor assembly depth, `floor` directive; default
+  12") above the one below, so a second storey rests on the first floor's
+  structure rather than dropping onto its ceiling plane.
+* **The roof is a gable, not a flat cap.** The exchange carries the ridge, pitch
+  and per-edge slope, and the pyRevit builder makes the eave edges slope-defining
+  so a footprint roof comes out as a gable. The **gable-end walls** are flagged
+  with their ridge apex and build from a vertical pentagon profile, so their tops
+  rise to the roof instead of stopping flat at the plate.
 * **Walls are deduplicated.** Every room edge is decomposed along its grid line
   into atomic segments, each classified *interior* (a room on both sides) or
   *exterior* (open footprint beyond), then contiguous like segments merge back
@@ -280,10 +300,23 @@ is tested anywhere; only the final element creation needs Revit. What it does:
   and window is matched to the wall id whose line carries it, with a centre
   point, width, height, and (for windows) sill — ready to place as a family.
 * **Rooms become seed points.** A point inside each rectangle, with name/type/
-  area, for Revit to place a Room once the walls enclose it.
+  area — plus the **clear** (finish-face) width/length/area, the figure Revit
+  computes for a placed room — for Revit to place a Room once the walls enclose it.
+* **Wet rooms and kitchens get fixtures.** Each bathroom, half-bath and kitchen
+  carries deterministic **fixture seeds** (toilet/lavatory/tub·shower;
+  refrigerator/range/sink) — footprints placed against the walls with IRC R307
+  clearances in mind — and the pyRevit builder drops a plumbing/appliance family
+  at each. The compiler also checks the room can actually *hold* them
+  (`BATH_CLEARANCE`, `KITCHEN_FIT`), so an empty box that's too small to be a real
+  bath is flagged before you build.
 * **Structure carries through.** A placed `frame` lowers to columns (posts) and
   framing centrelines (bents/ridge); porches and stairs come across as reference
   outlines.
+* **A slab-on-grade foundation.** The footprint lowers to a monolithic
+  slab-on-grade: the slab outline, a **thickened perimeter edge** (turndown /
+  grade beam) with a width and depth, and a **pad footing** under each post of a
+  placed frame — plus a rough concrete takeoff (cu yd) for estimating. The builder
+  places the pad footings and reports the turndown run for detailing.
 
 The JSON is the stable `barndsl.revit/1` schema. From Python it's
 `to_revit_model(plan)` (a typed `RevitModel`) or `to_revit_json(plan)`:

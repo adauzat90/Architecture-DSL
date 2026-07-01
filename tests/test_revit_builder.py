@@ -65,6 +65,12 @@ def _ready_doc(**kw):
         doc.add_family(BIC.OST_StructuralColumns, "HSS-Column")
     if kw.get("framing"):
         doc.add_family(BIC.OST_StructuralFraming, "W-Wide Flange")
+    if kw.get("plumbing", True):
+        doc.add_family(BIC.OST_PlumbingFixtures, "Toilet-Domestic")
+    if kw.get("appliances", True):
+        doc.add_family(BIC.OST_SpecialityEquipment, "Refrigerator")
+    if kw.get("foundation", True):
+        doc.add_family(BIC.OST_StructuralFoundation, "Footing-Rectangular")
     return doc
 
 
@@ -108,8 +114,11 @@ def test_exterior_openings_host_on_exterior_walls():
     for entry in doc.created:
         if entry[0] == "instance":
             args = entry[2]
-            host = args[2]  # NewFamilyInstance(point, sym, host, level, st)
-            host_types.append(host.wtype_id.Value)
+            host = args[2]  # openings: NewFamilyInstance(point, sym, host, level, st)
+            # Fixtures place a family the same way but hosted on a level, not a
+            # wall — skip those (they carry no wtype_id).
+            if hasattr(host, "wtype_id"):
+                host_types.append(host.wtype_id.Value)
     # Every window/entry in CEDAR is exterior, so at least one exterior host used.
     assert ext_id in host_types
     # And the interior doors used the interior type.
@@ -306,6 +315,32 @@ def test_grids_build_from_a_frame():
     assert "1" in grid_names and "A" in grid_names
 
 
+def test_foundation_footings_land_under_posts():
+    data = _framed_exchange()
+    doc = _ready_doc()
+    rep = builder.build(doc, data)
+    n_posts = len(data["foundation"]["footings"])
+    assert n_posts > 0
+    assert rep.count(status="created", kind="footing") == n_posts
+    # The thickened-edge turndown is reported for detailing.
+    assert any("turndown" in n for n in rep.notes)
+
+
+def test_foundation_footings_skipped_without_family():
+    data = _framed_exchange()
+    doc = _ready_doc(foundation=False)
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="footing") == 0
+    assert rep.count(status="skipped", kind="footing") == len(data["foundation"]["footings"])
+
+
+def test_foundation_pass_can_be_disabled():
+    data = _framed_exchange()
+    doc = _ready_doc()
+    rep = builder.build(doc, data, report.BuildOptions(foundation=False))
+    assert rep.count(kind="footing") == 0
+
+
 def test_no_grids_without_a_frame():
     doc = _ready_doc()
     rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
@@ -324,6 +359,57 @@ def test_roof_skipped_without_roof_type():
     rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
     assert rep.count(status="created", kind="roof") == 0
     assert any(r.kind == "roof" and r.status == "skipped" for r in rep.records)
+
+
+def test_fixtures_placed_when_families_loaded():
+    doc = _ready_doc()
+    data = _example_exchange("cedar_ridge.barn")
+    rep = builder.build(doc, data)
+    assert data["fixtures"], "example should carry fixture seeds"
+    # Every seed becomes a placed family instance.
+    assert rep.count(status="created", kind="fixture") == len(data["fixtures"])
+
+
+def test_fixtures_skipped_without_families():
+    doc = _ready_doc(plumbing=False, appliances=False)
+    data = _example_exchange("cedar_ridge.barn")
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="fixture") == 0
+    assert rep.count(status="skipped", kind="fixture") == len(data["fixtures"])
+
+
+def test_fixtures_pass_can_be_disabled():
+    doc = _ready_doc()
+    rep = builder.build(doc, _example_exchange("cedar_ridge.barn"), report.BuildOptions(fixtures=False))
+    assert rep.count(kind="fixture") == 0
+
+
+def test_roof_slopes_its_eave_edges():
+    doc = _ready_doc()
+    data = _example_exchange("cedar_ridge.barn")
+    builder.build(doc, data)
+    roofs = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "roof"]
+    assert len(roofs) == 1
+    # Two eaves were made slope-defining, at the plan's pitch; gable ends aren't.
+    expected = sum(1 for s in data["roof"]["outline_slopes"] if s)
+    assert len(roofs[0].slopes) == expected == 2
+    angle = data["roof"]["slope_angle"]
+    assert all(a == pytest.approx(angle) for a in roofs[0].slopes.values())
+
+
+def test_gable_walls_build_from_a_profile():
+    doc = _ready_doc()
+    data = _example_exchange("cedar_ridge.barn")
+    rep = builder.build(doc, data)
+    walls = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "wall"]
+    gables = [w for w in walls if getattr(w, "profile", None)]
+    n_gable = sum(1 for w in data["walls"] if w.get("profile") == "gable")
+    assert n_gable > 0
+    # Every gable-end wall used the vertical-profile overload (a 5-edge pentagon);
+    # eave/interior walls used the flat line overload.
+    assert len(gables) == n_gable
+    assert all(len(w.profile) == 5 for w in gables)
+    assert rep.count(status="created", kind="wall") == len(data["walls"])
 
 
 def test_slabs_grids_roof_can_be_disabled():

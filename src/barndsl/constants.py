@@ -31,3 +31,39 @@ NICE_STAIR_WIDTH = 3.5
 # --- daylight (IRC R303) -----------------------------------------------------
 #: Glazing must total at least 8% of a habitable room's floor area.
 NATURAL_LIGHT_RATIO = 0.08
+
+# --- vertical assembly -------------------------------------------------------
+#: Depth (feet) of the inter-floor assembly between two stacked levels — the
+#: joists/trusses + subfloor + ceiling finish that a *ceiling height* alone
+#: ignores. Floor-to-floor = ceiling height + this, so an upper level sits on
+#: top of the level below's structure rather than directly on its ceiling plane.
+#: A modest 12 in default for a residential engineered-joist floor.
+FLOOR_ASSEMBLY_DEPTH = 12.0 / 12.0
+
+#: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
+DEFAULT_ROOF_PITCH = 4.0 / 12.0
+
+# --- wall thicknesses (nominal) ----------------------------------------------
+#: Nominal built thickness (feet) of an exterior shell wall (~2x6 + sheathing +
+#: cladding) and an interior partition (~2x4 + gypsum both sides). barndsl rooms
+#: tile on wall *centrelines*, so a room's built clear interior is its nominal
+#: rectangle minus half of each bounding wall — an exterior edge costs more than
+#: an interior one. Used to pick a Revit wall type *and* to derive clear
+#: dimensions (the dimension IRC minimums are measured to, and the one Revit's
+#: room schedule reports), so both agree on one number.
+EXTERIOR_WALL_THICKNESS = 6.5 / 12.0
+INTERIOR_WALL_THICKNESS = 4.5 / 12.0
+
+# --- foundation (monolithic slab-on-grade) -----------------------------------
+#: The barndominium foundation is typically a monolithic slab-on-grade: a 4 in
+#: slab with a thickened perimeter edge (turndown / grade beam) carried below the
+#: frost line, plus a pad footing under each post of a post-frame building. These
+#: are conservative defaults (feet); the real depths follow the frost line and
+#: the soil report — an engineer's call, so the check is a takeoff, not a design.
+SLAB_THICKNESS = 4.0 / 12.0
+#: Width and depth (below the slab underside) of the thickened perimeter edge.
+TURNDOWN_WIDTH = 12.0 / 12.0
+TURNDOWN_DEPTH = 12.0 / 12.0
+#: Plan size and depth of a square pad footing under a post.
+FOOTING_SIZE = 2.0
+FOOTING_DEPTH = 12.0 / 12.0

@@ -20,6 +20,16 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .constants import (
+    DEFAULT_ROOF_PITCH,
+    FLOOR_ASSEMBLY_DEPTH,
+    FOOTING_DEPTH,
+    FOOTING_SIZE,
+    SLAB_THICKNESS,
+    TURNDOWN_DEPTH,
+    TURNDOWN_WIDTH,
+)
+
 # --- Units ------------------------------------------------------------------
 
 #: Internal unit is the foot. These helpers keep DSL authoring readable.
@@ -99,6 +109,11 @@ HABITABLE_TYPES: frozenset[RoomType] = frozenset(
 INTERIOR_TYPES: frozenset[RoomType] = frozenset(
     set(RoomType) - {RoomType.PORCH, RoomType.GARAGE, RoomType.SHOP}
 )
+
+#: Garage-like spaces for the IRC R302.6/R302.5.1 separation checks. A
+#: barndominium's shop bay is functionally a garage — an overhead door, vehicles,
+#: equipment and fuel — so it carries the same dwelling-separation requirements.
+GARAGE_TYPES: frozenset[RoomType] = frozenset({RoomType.GARAGE, RoomType.SHOP})
 
 
 class Direction(str, Enum):
@@ -448,6 +463,16 @@ class Barndominium:
     envelope_width: float = 0.0
     envelope_length: float = 0.0
     ceiling_height: float = feet(9)
+    #: Depth (feet) of the inter-floor assembly between two stacked levels — the
+    #: joists/subfloor/ceiling that a clear ceiling height ignores. Floor-to-floor
+    #: is ``ceiling_height + floor_depth`` (see :attr:`floor_to_floor`), so an
+    #: upper level stacks on the level below's *structure*, not its ceiling plane.
+    floor_depth: float = FLOOR_ASSEMBLY_DEPTH
+    #: Opt-in accessibility / aging-in-place target. When set, validation runs an
+    #: extra set of ANSI A117.1-flavoured nudges (accessible door widths, a
+    #: wheelchair turning space in the bath, single-floor living, a no-step entry).
+    #: Off by default so ordinary plans aren't held to an accessible standard.
+    accessible: bool = False
     rooms: list[Room] = field(default_factory=list)
     interior_doors: list[InteriorDoor] = field(default_factory=list)
     exterior_doors: list[ExteriorDoor] = field(default_factory=list)
@@ -518,8 +543,45 @@ class Barndominium:
         self.ceiling_height = float(height)
         return self
 
+    def floors(self, depth: float) -> "Barndominium":
+        """Set the inter-floor assembly depth (feet) between stacked levels.
+
+        This is the joist/subfloor/ceiling thickness a clear ceiling height
+        leaves out; it makes :attr:`floor_to_floor` (and every upper-level
+        elevation) reflect a real floor system instead of stacking levels
+        directly on the ceiling plane below. Defaults to
+        :data:`~barndsl.constants.FLOOR_ASSEMBLY_DEPTH`.
+        """
+        depth = float(depth)
+        if depth < 0:
+            raise ValueError("floor assembly depth must be non-negative.")
+        self.floor_depth = depth
+        return self
+
+    @property
+    def floor_to_floor(self) -> float:
+        """Vertical distance between one finished floor and the next: the clear
+        ceiling height plus the inter-floor assembly depth."""
+        return self.ceiling_height + self.floor_depth
+
+    def level_elevation(self, level: int) -> float:
+        """Finished-floor elevation (feet) of ``level`` above grade — the sum of
+        the floor-to-floor heights of every level beneath it."""
+        return float(level) * self.floor_to_floor
+
     def note(self, text: str) -> "Barndominium":
         self.notes = (self.notes + "\n" + text).strip() if self.notes else text
+        return self
+
+    def mark_accessible(self, value: bool = True) -> "Barndominium":
+        """Declare an accessibility / aging-in-place target for the plan.
+
+        Turns on an extra set of advisory checks (accessible door widths, a
+        wheelchair turning space in the bath, single-floor living, a no-step
+        entry). Off by default, so a plan is only held to this standard when it
+        opts in — via this method or the `accessible` DSL directive.
+        """
+        self.accessible = bool(value)
         return self
 
     def program(
@@ -933,8 +995,22 @@ class Barndominium:
         """Rough material / area takeoff for summaries and estimating."""
         perimeter = 2.0 * (self.envelope_width + self.envelope_length)
         exterior_wall_area = perimeter * self.ceiling_height
-        # Gable roof over a rectangular footprint; ~1.15 factor for a modest pitch.
-        roof_area = self.footprint_area * 1.15
+        # Gable roof over the footprint: the sloped area is the plan area divided
+        # by the cosine of the roof slope (both planes share the pitch), so the
+        # factor follows the actual pitch instead of a fixed guess.
+        slope_factor = math.hypot(1.0, DEFAULT_ROOF_PITCH)  # sec(atan(pitch))
+        roof_area = self.footprint_area * slope_factor
+        # Monolithic slab-on-grade concrete: the slab, its thickened perimeter
+        # edge (turndown), and a pad footing under each post. Rough takeoff (yd³).
+        from .geometry import footprint_boundary
+
+        boundary = footprint_boundary(self.footprint_sections())
+        turndown_len = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
+        concrete_ft3 = (
+            self.footprint_area * SLAB_THICKNESS
+            + turndown_len * TURNDOWN_WIDTH * TURNDOWN_DEPTH
+            + len(self.posts) * FOOTING_SIZE * FOOTING_SIZE * FOOTING_DEPTH
+        )
         return {
             "footprint_sqft": self.footprint_area,
             "interior_sqft": self.interior_area,
@@ -944,6 +1020,7 @@ class Barndominium:
             "exterior_perimeter_ft": perimeter,
             "exterior_wall_area_sqft": exterior_wall_area,
             "roof_area_sqft": roof_area,
+            "foundation_concrete_yd3": concrete_ft3 / 27.0,
             "bedroom_count": float(
                 sum(1 for r in self.rooms if r.type is RoomType.BEDROOM)
             ),

@@ -20,13 +20,17 @@ from typing import Protocol
 
 from .constants import (
     EPSILON,
+    EXTERIOR_WALL_THICKNESS,
+    INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
 )
 from .elements import (
+    GARAGE_TYPES,
     HABITABLE_TYPES,
+    INTERIOR_TYPES,
     Barndominium,
     Direction,
     Room,
@@ -83,6 +87,11 @@ MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
 STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
 STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
 DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
+# --- accessibility / aging-in-place (opt-in; ANSI A117.1) --------------------
+ACCESSIBLE_CLEAR_DOOR = 32 / 12  # 32 in clear opening (A117.1 §404)
+ACCESSIBLE_LEAF_MIN = 34 / 12  # a ~34 in leaf yields the 32 in clear
+ACCESSIBLE_EXTERIOR_MIN = 36 / 12  # 36 in door on the accessible entrance
+ACCESSIBLE_TURN = 5.0  # 60 in wheelchair turning circle (A117.1 §304)
 # NATURAL_LIGHT_RATIO and the stair constants below live in constants.py (the
 # single source of truth) and are imported above; re-stated here in prose only.
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
@@ -200,6 +209,42 @@ def exterior_walls(plan: Barndominium, room: Room, tol: float = EPSILON) -> list
         for w in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST)
         if wall_faces_outside(sections, room, w)
     ]
+
+
+def clear_dimensions(plan: Barndominium, room: Room) -> tuple[float, float]:
+    """The room's built **clear** (finish-face) ``(width, length)`` in feet.
+
+    barndsl rooms tile on wall *centrelines*, so the interior you can actually
+    use is the nominal rectangle minus half of each bounding wall's thickness —
+    an exterior (shell) edge costs more than an interior partition. This is the
+    dimension IRC habitability minimums are measured to (finished surfaces) and
+    the one Revit computes for its room schedule, so reporting/checking it keeps
+    barndsl and the built model telling the same story.
+    """
+    ext = set(exterior_walls(plan, room))
+
+    def half(side: Direction) -> float:
+        thk = EXTERIOR_WALL_THICKNESS if side in ext else INTERIOR_WALL_THICKNESS
+        return thk / 2.0
+
+    clear_w = room.width - half(Direction.WEST) - half(Direction.EAST)
+    clear_l = room.length - half(Direction.SOUTH) - half(Direction.NORTH)
+    return max(0.0, clear_w), max(0.0, clear_l)
+
+
+def clear_box(plan: Barndominium, room: Room) -> tuple[float, float, float, float]:
+    """The room's clear interior as a world-coordinate rectangle
+    ``(x0, y0, width, length)`` — the finish-face box inside the wall centrelines.
+    Its south-west corner is inset from the room rectangle by half the west/south
+    wall. Used to place fixtures inside the usable floor."""
+    ext = set(exterior_walls(plan, room))
+
+    def half(side: Direction) -> float:
+        thk = EXTERIOR_WALL_THICKNESS if side in ext else INTERIOR_WALL_THICKNESS
+        return thk / 2.0
+
+    clear_w, clear_l = clear_dimensions(plan, room)
+    return (room.x + half(Direction.WEST), room.y + half(Direction.SOUTH), clear_w, clear_l)
 
 
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
@@ -578,12 +623,14 @@ def validate(plan: Barndominium) -> ValidationReport:
 
     _validate_geometry(plan, add)
     _validate_room_programs(plan, add)
+    _validate_fixtures(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_stairs(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
+    _validate_accessibility(plan, add)
     _validate_program(plan, add)
     _validate_structure(plan, add)
 
@@ -754,6 +801,149 @@ def _validate_geometry(plan: Barndominium, add) -> None:
             )
 
 
+def _validate_accessibility(plan: Barndominium, add) -> None:
+    """Opt-in accessibility / aging-in-place nudges (ANSI A117.1-flavoured).
+
+    Only runs when the plan declares an ``accessible`` target (the ``accessible``
+    directive / :meth:`Barndominium.mark_accessible`), so ordinary plans aren't
+    held to an accessible standard. All INFO — guidance, never blocking. Covers a
+    no-step entry, accessible door clear widths, a wheelchair turning space in a
+    ground-floor bath, and single-floor living.
+    """
+    if not plan.accessible:
+        return
+    by_id = {r.id: r for r in plan.rooms}
+
+    # 1. A no-step entrance — thresholds aren't in the geometry, so a reminder.
+    add(
+        Issue(
+            Severity.INFO,
+            "ACCESS_ENTRY",
+            "Accessible target: provide at least one no-step entrance (threshold "
+            "≤ ½ in) with a level 5 ft × 5 ft landing (ANSI A117.1).",
+            hint="Make the main entry no-step — a slab-on-grade helps; avoid a "
+            "stoop step.",
+        )
+    )
+
+    # 2. Accessible clear widths on the living route (not the garage/shop door).
+    for d in plan.interior_doors:
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None or a.type in GARAGE_TYPES or b.type in GARAGE_TYPES:
+            continue
+        need = ACCESSIBLE_LEAF_MIN if d.leaf else ACCESSIBLE_CLEAR_DOOR
+        if d.width + EPSILON < need:
+            kind, need_in = ("door", "34 in leaf") if d.leaf else ("opening", "32 in")
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ACCESS_DOOR",
+                    f"The {kind} between '{d.room_a}' and '{d.room_b}' is "
+                    f"{_f(d.width * 12)} in wide; an accessible route needs a {need_in} "
+                    "(32 in clear, ANSI A117.1 §404).",
+                    hint=f"Widen it to ≥ {need_in.split()[0]} in.",
+                )
+            )
+    for xd in plan.exterior_doors:
+        room = by_id.get(xd.room)
+        if room is not None and room.type in GARAGE_TYPES:
+            continue
+        if xd.width + EPSILON < ACCESSIBLE_EXTERIOR_MIN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ACCESS_DOOR",
+                    f"The exterior door on '{xd.room}' is {_f(xd.width * 12)} in wide; "
+                    "an accessible entrance wants a 36 in door.",
+                    room=xd.room,
+                    hint="Use a 36 in exterior door on the accessible entrance.",
+                )
+            )
+
+    # 3. A wheelchair turning space in a ground-level full bath.
+    for room in plan.rooms:
+        if room.type is not RoomType.BATHROOM or room.level != 0:
+            continue
+        cw, cl = clear_dimensions(plan, room)
+        if min(cw, cl) + EPSILON < ACCESSIBLE_TURN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ACCESS_BATH",
+                    f"Bathroom '{room.id}' has ~{_f(min(cw, cl))} ft clear on its "
+                    f"short side; a wheelchair turning space needs {_f(ACCESSIBLE_TURN)} "
+                    "ft (60 in) — plan a roll-in shower and grab-bar blocking too "
+                    "(ANSI A117.1).",
+                    room=room.id,
+                    hint=f"Widen the bath so the clear short side is ≥ "
+                    f"{_f(ACCESSIBLE_TURN)} ft.",
+                )
+            )
+
+    # 4. Single-floor living: a bedroom AND a full bath on the entry level.
+    ground = [r for r in plan.rooms if r.level == 0]
+    has_bed = any(r.type is RoomType.BEDROOM for r in ground)
+    has_bath = any(r.type is RoomType.BATHROOM for r in ground)
+    if not (has_bed and has_bath):
+        missing = " and ".join(
+            w for w, ok in (("a bedroom", has_bed), ("a full bath", has_bath)) if not ok
+        )
+        add(
+            Issue(
+                Severity.INFO,
+                "ACCESS_SINGLE_FLOOR",
+                f"The entry level has no {missing}; accessible / aging-in-place living "
+                "wants a bedroom and a full bath on one no-stair floor.",
+                hint="Place a primary bedroom and a full bath on the ground level.",
+            )
+        )
+
+
+def _validate_fixtures(plan: Barndominium, add) -> None:
+    """Check that wet rooms and kitchens can actually hold their fixtures with
+    code clearances (IRC R307 for the bath; a working aisle for the kitchen).
+
+    Uses the clear (finish-face) interior, so the check reflects the built room,
+    not the nominal rectangle. A bath that can't fit toilet/lav/tub with
+    clearances is a ``BATH_CLEARANCE`` warning; a cramped kitchen is a
+    ``KITCHEN_FIT`` info.
+    """
+    from .fixtures import fixtures_fit  # lazy: fixtures imports back from here
+
+    for room in plan.rooms:
+        if room.type not in (RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN):
+            continue
+        clear_w, clear_l = clear_dimensions(plan, room)
+        ok, reason = fixtures_fit(room.type, clear_w, clear_l)
+        if ok:
+            continue
+        if room.type is RoomType.KITCHEN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "KITCHEN_FIT",
+                    f"Kitchen '{room.id}' is tight for its appliances: {reason}.",
+                    room=room.id,
+                    hint="Enlarge it so a sink, range and refrigerator fit with a "
+                    "working aisle.",
+                )
+            )
+        else:
+            label = room.type.value.replace("_", " ")
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "BATH_CLEARANCE",
+                    f"{label.capitalize()} '{room.id}' can't fit its fixtures with "
+                    f"clearances: {reason} (IRC R307).",
+                    room=room.id,
+                    hint="Enlarge the room so the toilet/lavatory"
+                    + ("/tub" if room.type is RoomType.BATHROOM else "")
+                    + " fit with clear floor in front.",
+                )
+            )
+
+
 def _validate_room_programs(plan: Barndominium, add) -> None:
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
@@ -830,6 +1020,69 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
                     hint=f"Widen the short side to >= {short_floor:.0f} ft.",
                 )
             )
+        _check_clear_dimension(plan, room, add)
+
+
+def _clear_targets(room: Room):
+    """The *hard-code* minimums the IRC measures between finished surfaces, keyed
+    by room type → ``(kind, minimum)`` where ``kind`` is ``"area"`` or ``"short"``.
+
+    Deliberately only the legal minimums — bedroom habitable area/width (R304) and
+    hallway width (R311.6) — not the softer ``ROOM_TIGHT`` comfort floors: a plan
+    that passes one of *these* nominally but fails it once wall thickness is
+    applied is genuinely non-compliant when built, which is exactly what
+    ``ROOM_CLEAR`` is for. (A conventionally-fine 6 ft bath shouldn't be nagged
+    for losing a wall thickness.)
+    """
+    if room.type is RoomType.BEDROOM:
+        return [("area", MIN_BEDROOM_AREA), ("short", MIN_BEDROOM_DIMENSION)]
+    if room.type is RoomType.HALLWAY:
+        return [("short", MIN_HALLWAY_WIDTH)]
+    return []
+
+
+def _check_clear_dimension(plan: Barndominium, room: Room, add) -> None:
+    """Flag a room that meets a clear-measured minimum on its nominal rectangle
+    but falls below it once the bounding walls' thickness is subtracted.
+
+    Only fires when the room is *nominally compliant* on every one of its
+    hard-code targets — if it already fails one on paper, that error owns the
+    problem and a clear nudge would just be noise.
+    """
+    targets = _clear_targets(room)
+    if not targets:
+        return
+
+    def nominal_of(kind: str) -> float:
+        return room.area if kind == "area" else room.min_dimension
+
+    if any(nominal_of(kind) + EPSILON < minimum for kind, minimum in targets):
+        return  # a nominal failure is already reported at higher severity
+
+    clear_w, clear_l = clear_dimensions(plan, room)
+    clear_area = clear_w * clear_l
+    clear_short = min(clear_w, clear_l)
+    for kind, minimum in targets:
+        clear = clear_area if kind == "area" else clear_short
+        if minimum > clear + 1e-3:
+            nominal = nominal_of(kind)
+            unit = "sq ft" if kind == "area" else "ft"
+            where = "usable area" if kind == "area" else "short side"
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ROOM_CLEAR",
+                    f"{room.type.value.replace('_', ' ').capitalize()} '{room.id}' "
+                    f"measures {_f(nominal)} {unit} nominal but only ~{_f(clear)} {unit} "
+                    f"clear (finish-face); the {minimum:.0f} {unit} minimum is measured "
+                    "between finished surfaces, so the built room falls short.",
+                    room=room.id,
+                    hint=f"Add wall thickness to the {where}: grow it ~"
+                    f"{_f(minimum - clear)} {unit} so the clear dimension still meets "
+                    f"{minimum:.0f} {unit}.",
+                )
+            )
+            return  # one nudge per room is enough
 
 
 def _door_loc(door) -> dict:
@@ -1964,20 +2217,22 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
 
 
 def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
-    # 9. Garage → sleeping room. IRC R302.5.1: a garage opening shall not open
+    # 9. Garage/shop → sleeping room. IRC R302.5.1: the opening shall not open
     #    into a room used for sleeping. This is code-grounded, so it's a WARNING.
-    garages = [r for r in plan.rooms if r.type is RoomType.GARAGE]
+    garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
+        label = g.type.value
         for n in graph.get(g.id, ()):
             if n in by_id and by_id[n].type is RoomType.BEDROOM:
                 add(
                     Issue(
                         Severity.WARNING,
                         "GARAGE_BEDROOM",
-                        f"Garage '{g.id}' opens directly into the bedroom '{n}'; a "
-                        "garage must not open into a sleeping room (IRC R302.5.1).",
+                        f"{label.capitalize()} '{g.id}' opens directly into the "
+                        f"bedroom '{n}'; a {label} must not open into a sleeping "
+                        "room (IRC R302.5.1).",
                         room=n,
-                        hint=f"Buffer it with a mudroom or hall — connect the garage "
+                        hint=f"Buffer it with a mudroom or hall — connect the {label} "
                         f"there instead, e.g. `door {g.id} - <mudroom_or_hall>`.",
                     )
                 )
@@ -1987,11 +2242,10 @@ def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
     # 10. Garage with no interior people-door into the house. A vehicle `entry`
     #     satisfies reachability (NO_ACCESS), so this gap slips through: you'd have
     #     to go outside to get in. Only nudge when it actually abuts the house.
-    house_types = {
-        t for t in RoomType if t not in (RoomType.GARAGE, RoomType.PORCH)
-    }
-    garages = [r for r in plan.rooms if r.type is RoomType.GARAGE]
+    house_types = {t for t in RoomType if t not in GARAGE_TYPES and t is not RoomType.PORCH}
+    garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
+        label = g.type.value
         connected_inside = any(
             n in by_id and by_id[n].type in house_types for n in graph.get(g.id, ())
         )
@@ -2006,13 +2260,89 @@ def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
                 Issue(
                     Severity.INFO,
                     "GARAGE_NO_ENTRY",
-                    f"Garage '{g.id}' has no interior door into the house — you'd "
-                    "have to go outside to get in.",
+                    f"{label.capitalize()} '{g.id}' has no interior door into the "
+                    "house — you'd have to go outside to get in.",
                     room=g.id,
-                    hint="Add a people-door from the garage into a mudroom, hall or "
+                    hint=f"Add a people-door from the {label} into a mudroom, hall or "
                     f"living space, e.g. `door {g.id} - <adjacent_room>`.",
                 )
             )
+
+
+def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
+    # 10b. IRC R302.6: the wall between a private garage and the dwelling — and any
+    #      ceiling under habitable space above the garage — must be a fire
+    #      separation (≥ ½ in gypsum; ⅝ in Type X where habitable space is above).
+    #      The DSL can't model gypsum layers, so this is a reminder (INFO) fired by
+    #      the geometry that triggers the requirement, like BATH_VENT.
+    for g in plan.rooms:
+        if g.type not in GARAGE_TYPES:
+            continue
+        label = g.type.value
+        shares = sorted(
+            n
+            for n in geometric_neighbors(plan, g.id)
+            if n in by_id and by_id[n].type in INTERIOR_TYPES
+        )
+        above = sorted(
+            r.id
+            for r in plan.rooms
+            if r.level > g.level and r.type in HABITABLE_TYPES and g.overlaps(r) > 0
+        )
+        if not (shares or above):
+            continue
+        if above:
+            msg = (
+                f"{label.capitalize()} '{g.id}' has habitable space above it "
+                f"({', '.join(above)}); the {label} ceiling needs ⅝ in Type X gypsum "
+                "and the common wall a fire separation (IRC R302.6)."
+            )
+        else:
+            msg = (
+                f"{label.capitalize()} '{g.id}' shares a wall with conditioned space "
+                f"({', '.join(shares)}); that common wall needs a gypsum fire "
+                "separation (IRC R302.6)."
+            )
+        add(
+            Issue(
+                Severity.INFO,
+                "GARAGE_SEPARATION",
+                msg,
+                room=g.id,
+                hint="Detail the common wall/ceiling as a fire separation "
+                "(≥ ½ in gypsum; ⅝ in Type X under habitable space).",
+            )
+        )
+
+
+def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
+    # 10c. IRC R302.5.1: a door between a private garage and the dwelling must be
+    #      self-closing and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood
+    #      door). A door into a sleeping room is barred outright (GARAGE_BEDROOM),
+    #      so this reminder covers the other garage-to-dwelling doors.
+    seen: set[tuple[str, str]] = set()
+    for d in plan.interior_doors:
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None or (a.type in GARAGE_TYPES) == (b.type in GARAGE_TYPES):
+            continue  # need exactly one side to be a garage/shop
+        gar, other = (a, b) if a.type in GARAGE_TYPES else (b, a)
+        if other.type in GARAGE_TYPES or other.type in (RoomType.PORCH, RoomType.BEDROOM):
+            continue  # bedroom is the worse GARAGE_BEDROOM warning's job
+        if (gar.id, other.id) in seen:
+            continue
+        seen.add((gar.id, other.id))
+        add(
+            Issue(
+                Severity.INFO,
+                "GARAGE_DOOR",
+                f"The door from {gar.type.value} '{gar.id}' into '{other.id}' must be "
+                "a self-closing, 20-minute fire-rated (or 1⅜ in solid-core / "
+                "solid-wood) door (IRC R302.5.1).",
+                room=gar.id,
+                hint="Spec a self-closing 20-min / solid-core door on the "
+                "garage-to-dwelling opening.",
+            )
+        )
 
 
 def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
@@ -2116,6 +2446,8 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_room_proportion,
     _dq_garage_bedroom,
     _dq_garage_no_entry,
+    _dq_garage_separation,
+    _dq_garage_door,
     _dq_hall_deadend,
 )
 

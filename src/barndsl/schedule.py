@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .elements import Barndominium
-from .validation import exterior_walls
+from .validation import clear_dimensions, exterior_walls
 
 
 @dataclass
@@ -41,6 +41,7 @@ def room_rows(plan: Barndominium) -> list[dict]:
     rows: list[dict] = []
     for r in plan.rooms:
         walls = ", ".join(w.value for w in exterior_walls(plan, r)) or "—"
+        clear_w, clear_l = clear_dimensions(plan, r)
         rows.append(
             {
                 "mark": r.id,
@@ -50,6 +51,9 @@ def room_rows(plan: Barndominium) -> list[dict]:
                 "width": r.width,
                 "length": r.length,
                 "area": r.area,
+                "clear_width": clear_w,
+                "clear_length": clear_l,
+                "clear_area": clear_w * clear_l,
                 "exterior": walls,
             }
         )
@@ -110,6 +114,9 @@ _ROOM_COLS = [
     Column("Level", lambda r: str(r["level"])),
     Column("Size", lambda r: f"{r['width']:g}′ × {r['length']:g}′"),
     Column("Area", lambda r: f"{r['area']:.0f} sq ft"),
+    # Clear (finish-face) area — what Revit's room schedule reports and what IRC
+    # habitability minimums are measured to; smaller than nominal by the walls.
+    Column("Clear area", lambda r: f"{r['clear_area']:.0f} sq ft"),
     Column("Exterior walls", lambda r: r["exterior"]),
 ]
 _DOOR_COLS = [

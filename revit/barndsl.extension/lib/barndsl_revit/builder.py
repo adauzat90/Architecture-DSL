@@ -282,6 +282,9 @@ class _Resources(object):
         self.column = None
         self.beam = None
         self.roof_type = None
+        self.plumbing = None
+        self.appliance = None
+        self.footing = None
 
 
 def _resolve_resources(doc, options, report):
@@ -337,6 +340,24 @@ def _resolve_resources(doc, options, report):
         (_symbols(doc, DB.BuiltInCategory.OST_StructuralFraming) or [None])[0],
         "structural-framing family",
     )
+    res.plumbing = named_or(
+        options.plumbing_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_PlumbingFixtures, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_PlumbingFixtures) or [None])[0],
+        "plumbing-fixture family",
+    )
+    res.appliance = named_or(
+        options.appliance_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_SpecialityEquipment, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_SpecialityEquipment) or [None])[0],
+        "appliance family",
+    )
+    res.footing = named_or(
+        options.foundation_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_StructuralFoundation, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_StructuralFoundation) or [None])[0],
+        "structural-foundation family",
+    )
 
     report.resources["exterior_wall"] = _name(res.ext_wall) if res.ext_wall else "(none)"
     report.resources["interior_wall"] = _name(res.int_wall) if res.int_wall else "(none)"
@@ -377,6 +398,40 @@ def _ensure_levels(doc, data, report):
     return out
 
 
+def _gable_wall(doc, w, wtype, level):
+    """A gable-end wall built from a vertical pentagon profile: two base corners,
+    two plate corners, and the apex at the ridge. Uses the profile overload of
+    ``Wall.Create`` (an ``IList<Curve>`` loop) so the wall top follows the roof
+    instead of stopping flat at the plate."""
+    from System.Collections.Generic import List
+
+    z = level.Elevation
+    plate = float(w["height"])
+    apex_h = float(w.get("apex_height", plate))
+    (sx, sy), (ex, ey) = w["start"], w["end"]
+    ax, ay = w["apex"]
+    pts = [
+        DB.XYZ(float(sx), float(sy), z),
+        DB.XYZ(float(ex), float(ey), z),
+        DB.XYZ(float(ex), float(ey), z + plate),
+        DB.XYZ(float(ax), float(ay), z + apex_h),
+        DB.XYZ(float(sx), float(sy), z + plate),
+    ]
+    profile = List[DB.Curve]()
+    n = len(pts)
+    for i in range(n):
+        profile.Add(DB.Line.CreateBound(pts[i], pts[(i + 1) % n]))
+    return DB.Wall.Create(doc, profile, wtype.Id, level.Id, False)
+
+
+def _is_gable(w):
+    return (
+        w.get("profile") == "gable"
+        and w.get("apex") is not None
+        and float(w.get("apex_height", 0.0)) > float(w.get("height", 0.0)) + 1e-6
+    )
+
+
 def _build_walls(doc, data, levels, res, report):
     made = {}
     for w in data["walls"]:
@@ -391,15 +446,28 @@ def _build_walls(doc, data, levels, res, report):
             report.skipped("wall", w["id"], "degenerate segment")
             continue
         wtype = res.ext_wall if w.get("exterior") else res.int_wall
-        try:
-            wall = DB.Wall.Create(
-                doc, curve, wtype.Id, level.Id, float(w["height"]), 0.0, False, False
-            )
-            made[w["id"]] = wall
-            _made(report, "wall", w["id"], wall)
-        except Exception as exc:
-            _logger.warning("wall %s: %s", w["id"], exc)
-            report.failed("wall", w["id"], str(exc))
+        wall = None
+        if _is_gable(w):
+            try:
+                wall = _gable_wall(doc, w, wtype, level)
+                _made(report, "wall", w["id"], wall, message="gable-end profile")
+            except Exception as exc:
+                report.note(
+                    "gable wall %s: profile build failed (%s); flat fallback"
+                    % (w["id"], exc)
+                )
+                wall = None
+        if wall is None:
+            try:
+                wall = DB.Wall.Create(
+                    doc, curve, wtype.Id, level.Id, float(w["height"]), 0.0, False, False
+                )
+                _made(report, "wall", w["id"], wall)
+            except Exception as exc:
+                _logger.warning("wall %s: %s", w["id"], exc)
+                report.failed("wall", w["id"], str(exc))
+                continue
+        made[w["id"]] = wall
     return made
 
 
@@ -542,6 +610,41 @@ def _build_structure(doc, data, levels, res, report):
             report.failed("framing", src, str(exc))
 
 
+#: Fixture kinds hosted from a plumbing family vs. an appliance (specialty) family.
+_WET_FIXTURES = ("toilet", "lavatory", "tub", "shower", "sink")
+
+
+def _build_fixtures(doc, data, levels, res, report):
+    """Place a family instance at each fixture/appliance seed — a plumbing family
+    for wet fixtures, a specialty-equipment family for appliances. These are
+    seeds: the family stands in at the right spot for the designer to swap/adjust.
+    Skips a fixture (with a note) when its family isn't loaded."""
+    fixtures = data.get("fixtures", [])
+    if not fixtures:
+        return
+    plumb = _activate(res.plumbing, doc)
+    appl = _activate(res.appliance, doc)
+    if plumb is None:
+        report.note("plumbing fixtures skipped: no plumbing-fixture family loaded")
+    if appl is None:
+        report.note("appliances skipped: no specialty-equipment family loaded")
+    st = DB.Structure.StructuralType.NonStructural
+    for fx in fixtures:
+        wet = fx.get("kind") in _WET_FIXTURES
+        sym = plumb if wet else appl
+        if sym is None:
+            report.skipped("fixture", fx.get("id"), "no %s family" % ("plumbing" if wet else "appliance"))
+            continue
+        level = levels.get(fx.get("level", 0))
+        z = level.Elevation if level else 0.0
+        try:
+            inst = doc.Create.NewFamilyInstance(_xyz(fx["point"], z), sym, level, st)
+            _made(report, "fixture", fx.get("id"), inst, message=fx.get("kind", ""))
+        except Exception as exc:
+            _logger.warning("fixture %s: %s", fx.get("id"), exc)
+            report.failed("fixture", fx.get("id"), str(exc))
+
+
 def _build_porches(doc, data, levels, res, report):
     porches = [a for a in data.get("areas", []) if a.get("kind") == "porch"]
     if not porches:
@@ -615,6 +718,54 @@ def _build_slabs(doc, data, levels, res, report):
             report.failed("slab", src, str(exc))
 
 
+def _build_foundation(doc, data, levels, res, report):
+    """Build the slab-on-grade foundation: a **pad footing** under each post, plus
+    a note carrying the thickened-edge (turndown) run for manual detailing.
+
+    Pad footings place a structural-foundation family at each post point on the
+    ground level; skipped with a note if no foundation family is loaded. The
+    turndown/grade beam has no one-call API, so its geometry is reported for the
+    detailer (like the roof gable). The slab itself is the ground-level floor slab.
+    """
+    foundation = data.get("foundation")
+    if not foundation:
+        return
+    level0 = levels.get(0)
+    if level0 is None:
+        report.skipped("foundation", "footings", "no ground level")
+        return
+
+    footings = foundation.get("footings", [])
+    if footings:
+        sym = _activate(res.footing, doc)
+        if sym is None:
+            report.note("pad footings skipped: no structural-foundation family loaded")
+            for i, f in enumerate(footings):
+                report.skipped("footing", "post %d" % i, "no foundation family")
+        else:
+            for i, f in enumerate(footings):
+                try:
+                    inst = doc.Create.NewFamilyInstance(
+                        _xyz(f["point"], level0.Elevation), sym, level0,
+                        DB.Structure.StructuralType.Footing,
+                    )
+                    _made(report, "footing", "post %d" % i, inst)
+                except Exception as exc:
+                    report.failed("footing", "post %d" % i, str(exc))
+
+    edge = foundation.get("edge") or {}
+    segs = edge.get("segments") or []
+    if segs:
+        report.note(
+            "thickened slab edge (turndown): %d perimeter run(s), %.0f in wide x "
+            "%.0f in deep — detail as a grade beam"
+            % (len(segs), edge.get("width", 0) * 12, edge.get("depth", 0) * 12)
+        )
+    yd3 = foundation.get("concrete_yd3")
+    if yd3:
+        report.note("foundation concrete (rough): %.1f cu yd" % yd3)
+
+
 def _build_grids(doc, data, report):
     grids = data.get("grids", [])
     if not grids:
@@ -636,12 +787,46 @@ def _build_grids(doc, data, report):
             report.failed("grid", label, str(exc))
 
 
-def _build_roof(doc, data, levels, res, report):
-    """A footprint roof over the building (experimental).
+def _iter_mapping(mapping):
+    """The model curves ``NewFootPrintRoof`` returns, in footprint-edge order.
 
-    Builds a flat footprint roof from the roof outline; the gable pitch the
-    exchange carries is left as a manual refinement (sloping the eave edges needs
-    the model-curve mapping a live Revit returns).
+    Revit hands back a ``ModelCurveArray`` (``Size`` / ``get_Item``); fall back to
+    plain iteration for anything already list-like."""
+    try:
+        return [mapping.get_Item(i) for i in range(mapping.Size)]
+    except Exception:
+        try:
+            return list(mapping)
+        except Exception:
+            return []
+
+
+def _slope_eaves(roof_el, mapping, roof, report):
+    """Make the eave edges slope-defining at the roof pitch, leaving the gable
+    ends vertical. ``outline_slopes`` flags which footprint edges are eaves."""
+    slopes = roof.get("outline_slopes") or []
+    angle = float(roof.get("slope_angle", 0.0))
+    if angle <= 0.0 or not slopes:
+        return 0
+    curves = _iter_mapping(mapping)
+    made = 0
+    for i, mc in enumerate(curves):
+        if i < len(slopes) and slopes[i]:
+            try:
+                roof_el.set_DefinesSlope(mc, True)
+                roof_el.set_SlopeAngle(mc, angle)
+                made += 1
+            except Exception as exc:
+                report.note("roof slope not applied to edge %d: %s" % (i, exc))
+    return made
+
+
+def _build_roof(doc, data, levels, res, report):
+    """A gable footprint roof over the building (experimental).
+
+    Builds the footprint roof and makes its **eave edges slope-defining** at the
+    plan's pitch (the gable ends stay vertical), so the roof comes out as a gable
+    rather than flat. Falls back to a flat roof if the slope can't be applied.
     """
     roof = data.get("roof")
     if not roof:
@@ -666,8 +851,12 @@ def _build_roof(doc, data, levels, res, report):
             )
         result = doc.Create.NewFootPrintRoof(arr, level, res.roof_type)
         roof_el = result[0] if isinstance(result, tuple) else result
-        _made(report, "roof", "roof", roof_el,
-              message="footprint roof; gable pitch is a manual refinement")
+        mapping = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+        sloped = _slope_eaves(roof_el, mapping, roof, report) if mapping is not None else 0
+        msg = "gable roof; %d eave edge(s) sloped" % sloped if sloped else (
+            "flat footprint roof; gable pitch is a manual refinement"
+        )
+        _made(report, "roof", "roof", roof_el, message=msg)
     except Exception as exc:
         _logger.warning("roof: %s", exc)
         report.failed("roof", "roof", "experimental: %s" % exc)
@@ -1033,8 +1222,12 @@ def build(doc, data, options=None):
         _build_rooms(doc, data, levels, report)
         if options.structure:
             _build_structure(doc, data, levels, res, report)
+        if options.fixtures:
+            _build_fixtures(doc, data, levels, res, report)
         if options.slabs:
             _build_slabs(doc, data, levels, res, report)
+        if options.foundation:
+            _build_foundation(doc, data, levels, res, report)
         if options.porches:
             _build_porches(doc, data, levels, res, report)
         if options.grids:

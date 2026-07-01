@@ -46,7 +46,8 @@ def _doc(**kw):
     doc = FakeDocument()
     doc.add_level(0.0, "Level 1")
     if kw.get("two_levels"):
-        doc.add_level(9.0, "Level 2")
+        # Floor-to-floor for the two_story example (ceiling 9 + 1 ft assembly).
+        doc.add_level(10.0, "Level 2")
     doc.add_wall_type("Ext", function=WallFunction.Exterior)
     doc.add_wall_type("Int", function=WallFunction.Interior)
     doc.add_floor_type("Generic 12")

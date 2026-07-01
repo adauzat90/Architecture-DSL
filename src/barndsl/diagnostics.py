@@ -127,6 +127,40 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "(kitchen ~70, full bath ~48, half bath ~30 sq ft) or by shortest side "
            "(full bath >= 6 ft, half bath >= 5 ft, so the fixtures fit across it). "
            "Bedrooms are covered by BEDROOM_AREA."),
+        _c("BATH_CLEARANCE", W, "Bathroom can't fit its fixtures",
+           "A bathroom's clear (finish-face) interior can't hold its fixtures with "
+           "code clearances — a water closet needs 15 in from its centreline to any "
+           "wall/fixture and 21 in of clear floor in front (IRC R307.1), and a full "
+           "bath needs a 5 ft wall for the tub. Enlarge the room so toilet, lavatory "
+           "and tub/shower fit."),
+        _c("KITCHEN_FIT", I, "Kitchen tight for its appliances",
+           "A kitchen's clear interior is too small to hold a sink, range and "
+           "refrigerator along the counters with a comfortable ~40 in working aisle. "
+           "Enlarge it or lengthen the counter run."),
+        _c("ACCESS_ENTRY", I, "No-step entrance (accessible target)",
+           "An accessible plan needs at least one no-step entrance (threshold ≤ ½ in) "
+           "with a level landing (ANSI A117.1). Thresholds aren't in the geometry, so "
+           "this is a reminder. Only emitted when the plan opts in via `accessible`."),
+        _c("ACCESS_DOOR", I, "Door too narrow for an accessible route",
+           "A door/opening on the living route is below the ~32 in clear width an "
+           "accessible route needs (a ~34 in leaf; a 36 in exterior door) — ANSI "
+           "A117.1 §404. Only emitted when the plan opts in via `accessible`."),
+        _c("ACCESS_BATH", I, "Bath lacks a wheelchair turning space",
+           "A ground-floor bath's clear short side is under the 60 in wheelchair "
+           "turning circle (ANSI A117.1 §304); plan a roll-in shower and grab-bar "
+           "blocking too. Only emitted when the plan opts in via `accessible`."),
+        _c("ACCESS_SINGLE_FLOOR", I, "No single-floor living",
+           "Accessible / aging-in-place living wants a bedroom and a full bath on the "
+           "one no-stair entry level; the entry level is missing one. Only emitted "
+           "when the plan opts in via `accessible`."),
+        _c("ROOM_CLEAR", I, "Clear dimension falls short once walls are built",
+           "A room meets a code minimum on its nominal (centreline) rectangle but "
+           "falls below it once the bounding walls' thickness is subtracted. IRC "
+           "habitability minimums (R304 area/width, R311.6 hall width) are measured "
+           "between finished surfaces, and Revit's room schedule reports that same "
+           "clear area — so a plan can compile clean yet build short. Grow the room "
+           "by roughly a wall thickness so the clear dimension still meets the "
+           "minimum."),
         # --- doors ----------------------------------------------------------
         _c("SELF_DOOR", E, "Door to self",
            "An interior door connects a room to itself."),
@@ -282,10 +316,22 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "its own."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
-        _c("GARAGE_BEDROOM", W, "Garage opens into a bedroom",
-           "A garage must not open directly into a sleeping room (IRC R302.5.1)."),
-        _c("GARAGE_NO_ENTRY", I, "Garage has no people-door",
-           "A garage abuts the house but has no interior door into it."),
+        _c("GARAGE_BEDROOM", W, "Garage/shop opens into a bedroom",
+           "A garage or shop must not open directly into a sleeping room (IRC "
+           "R302.5.1). A barndominium shop bay is treated as a garage."),
+        _c("GARAGE_NO_ENTRY", I, "Garage/shop has no people-door",
+           "A garage or shop abuts the house but has no interior door into it."),
+        _c("GARAGE_SEPARATION", I, "Garage/dwelling fire separation required",
+           "A garage or shop shares a wall with conditioned space, or has habitable "
+           "space above it. IRC R302.6 requires the common wall to be a fire "
+           "separation (min ½ in gypsum) and, where a habitable room is above, the "
+           "ceiling to be ⅝ in Type X gypsum. A barndominium shop bay is treated as "
+           "a garage. The DSL can't model the assembly, so this is a reminder."),
+        _c("GARAGE_DOOR", I, "Garage/dwelling door must be self-closing & rated",
+           "A door between a garage or shop and the dwelling must be self-closing "
+           "and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood door) per "
+           "IRC R302.5.1. A door into a sleeping room is barred outright "
+           "(GARAGE_BEDROOM)."),
         _c("PROGRAM_MISMATCH", W, "Plan doesn't match its program",
            "The rooms placed don't match the declared `program`: exact bed/bath "
            "counts, an at-least requirement for another room type (e.g. "

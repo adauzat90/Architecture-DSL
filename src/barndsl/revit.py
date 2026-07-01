@@ -34,30 +34,46 @@ import math
 from dataclasses import asdict, dataclass, field
 
 from .constants import (
+    DEFAULT_ROOF_PITCH,
+    EXTERIOR_WALL_THICKNESS,
+    FOOTING_DEPTH,
+    FOOTING_SIZE,
+    INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
     NICE_STAIR_WIDTH,
+    SLAB_THICKNESS,
+    TURNDOWN_DEPTH,
+    TURNDOWN_WIDTH,
 )
 from .elements import (
     Barndominium,
     Direction,
     Room,
     feet,
-    inches,
 )
-from .geometry import TOL, opening_endpoints, point_in_footprint, shared_edge
+from .fixtures import plan_room_fixtures
+from .geometry import (
+    TOL,
+    footprint_area,
+    footprint_boundary,
+    opening_endpoints,
+    point_in_footprint,
+    shared_edge,
+)
+from .validation import clear_dimensions
 
 # --- defaults the rectangle IR doesn't carry ---------------------------------
 #: Head height of a standard door leaf (interior or exterior): 6'-8".
 DEFAULT_DOOR_HEIGHT = feet(6.667)
 #: Height of a doorless cased opening (walk-through); taller than a leaf door.
 DEFAULT_CASED_HEIGHT = feet(7.0)
-#: Nominal wall thicknesses, as a hint for picking a Revit wall type. The
-#: exchange is centreline-based, so these don't move geometry — they let the
-#: consumer map "exterior" → a 2x6 shell and "interior" → a 2x4 partition.
-EXTERIOR_WALL_THICKNESS = inches(6.5)
-INTERIOR_WALL_THICKNESS = inches(4.5)
+# Nominal wall thicknesses (EXTERIOR_WALL_THICKNESS / INTERIOR_WALL_THICKNESS)
+# are defined once in constants.py and imported above — the exchange is
+# centreline-based, so they don't move geometry; they hint the wall-type pick
+# ("exterior" → a 2x6 shell, "interior" → a 2x4 partition) and derive the clear
+# dimensions the validator and Revit's room schedule both report.
 
 #: A short distance used to probe just past a wall to decide if its far side is
 #: outside the footprint (and the wall therefore exterior).
@@ -69,8 +85,8 @@ EXCHANGE_SCHEMA = "barndsl.revit/1"
 # constants.py (imported at the top of this module) and re-exported here, so
 # ``barndsl.revit.MIN_STAIR_WIDTH`` etc. keep resolving for callers and tests.
 
-#: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
-DEFAULT_ROOF_PITCH = 4.0 / 12.0
+# DEFAULT_ROOF_PITCH is defined once in constants.py and imported above, so the
+# roof planner and the validator agree on the gable pitch.
 
 
 # --- exchange dataclasses ----------------------------------------------------
@@ -102,6 +118,13 @@ class RevitWall:
     height: float
     exterior: bool
     thickness: float
+    #: Top profile: ``"flat"`` (a plate-height rectangle, the default) or
+    #: ``"gable"`` for a gable-end wall whose top rises to the roof ridge. A gable
+    #: wall carries :attr:`apex` (the ridge point in plan) and :attr:`apex_height`
+    #: (feet above the wall base), so the consumer can build the pentagon profile.
+    profile: str = "flat"
+    apex: tuple[float, float] | None = None
+    apex_height: float = 0.0
 
     @property
     def orientation(self) -> str:
@@ -166,6 +189,12 @@ class RevitRoom:
     y: float
     width: float
     length: float
+    #: Built **clear** (finish-face) interior — the nominal rectangle minus half of
+    #: each bounding wall. This is what Revit computes for a placed room's area, so
+    #: carrying it lets the exchange and the Revit room schedule report one number.
+    clear_width: float = 0.0
+    clear_length: float = 0.0
+    clear_area: float = 0.0
 
 
 @dataclass
@@ -214,11 +243,29 @@ class RevitArea:
 
 
 @dataclass
+class RevitFixture:
+    """A fixture/appliance seed: a footprint rectangle + the room and wall it
+    serves, for the consumer to host a loadable family at its centre."""
+
+    id: str
+    kind: str  # toilet | lavatory | tub | shower | sink | range | refrigerator
+    room: str
+    level: int
+    x: float
+    y: float
+    width: float
+    length: float
+    wall: str
+    point: tuple[float, float]
+
+
+@dataclass
 class RevitModel:
     """The full Revit-shaped exchange for one plan."""
 
     name: str
     ceiling_height: float
+    floor_depth: float
     envelope_width: float
     envelope_length: float
     wings: list[tuple[float, float, float, float]]
@@ -232,6 +279,8 @@ class RevitModel:
     slabs: list[RevitSlab]
     grids: list[dict]
     roof: dict | None
+    fixtures: list[RevitFixture] = field(default_factory=list)
+    foundation: dict | None = None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -241,6 +290,8 @@ class RevitModel:
             "plan": {
                 "name": self.name,
                 "ceiling_height": self.ceiling_height,
+                "floor_depth": self.floor_depth,
+                "floor_to_floor": self.ceiling_height + self.floor_depth,
                 "envelope_width": self.envelope_width,
                 "envelope_length": self.envelope_length,
                 "wings": [list(w) for w in self.wings],
@@ -255,6 +306,9 @@ class RevitModel:
                     "height": w.height,
                     "exterior": w.exterior,
                     "thickness": w.thickness,
+                    "profile": w.profile,
+                    "apex": list(w.apex) if w.apex is not None else None,
+                    "apex_height": w.apex_height,
                 }
                 for w in self.walls
             ],
@@ -287,6 +341,9 @@ class RevitModel:
                     "y": r.y,
                     "width": r.width,
                     "length": r.length,
+                    "clear_width": r.clear_width,
+                    "clear_length": r.clear_length,
+                    "clear_area": r.clear_area,
                 }
                 for r in self.rooms
             ],
@@ -314,6 +371,22 @@ class RevitModel:
             "slabs": [asdict(s) for s in self.slabs],
             "grids": list(self.grids),
             "roof": self.roof,
+            "foundation": self.foundation,
+            "fixtures": [
+                {
+                    "id": fx.id,
+                    "kind": fx.kind,
+                    "room": fx.room,
+                    "level": fx.level,
+                    "x": fx.x,
+                    "y": fx.y,
+                    "width": fx.width,
+                    "length": fx.length,
+                    "wall": fx.wall,
+                    "point": list(fx.point),
+                }
+                for fx in self.fixtures
+            ],
         }
 
     def to_json(self, indent: int | None = 2) -> str:
@@ -590,14 +663,18 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
     edges. ``rise`` is the ridge height above the eaves for the given ``pitch``
     (rise:run) over half the short span. The outline is the bounding rectangle —
     a simplification for L/T/U footprints (a gable over the bounds), which the
-    builder can refine. Returns ``{top_level, pitch, rise, ridge, eaves,
-    outline, gable_axis}``; coordinates are ``[x, y]`` in feet.
+    builder can refine. ``slope_angle`` is the eave-edge slope in **radians**, and
+    ``outline_slopes`` is a bool per outline segment flagging the eave edges (the
+    ones the builder makes slope-defining). Returns ``{top_level, pitch, rise,
+    slope_angle, ridge, eaves, outline, outline_slopes, gable_axis}``; coordinates
+    are ``[x, y]`` in feet.
     """
     minx, miny, maxx, maxy = plan.bounds()
     w, l = maxx - minx, maxy - miny
     long_is_y = l >= w
     span = min(w, l)
     rise = (span / 2.0) * pitch
+    slope_angle = math.atan(pitch)
     if long_is_y:
         mid = (minx + maxx) / 2.0
         ridge = {"start": [mid, miny], "end": [mid, maxy]}
@@ -620,14 +697,72 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
         [[maxx, maxy], [minx, maxy]],
         [[minx, maxy], [minx, miny]],
     ]
+    # An outline edge is an *eave* (slope-defining) when it runs parallel to the
+    # ridge (the long axis); the gable ends run perpendicular and stay vertical.
+    def _is_eave(seg):
+        (sx, sy), (ex, ey) = seg
+        horizontal = abs(ey - sy) <= TOL
+        return horizontal if gable_axis == "x" else not horizontal
+
+    outline_slopes = [_is_eave(seg) for seg in outline]
     return {
         "top_level": top_level,
         "pitch": pitch,
         "rise": rise,
+        "slope_angle": slope_angle,
         "ridge": ridge,
         "eaves": eaves,
         "outline": outline,
+        "outline_slopes": outline_slopes,
         "gable_axis": gable_axis,
+    }
+
+
+def foundation_plan(plan: Barndominium) -> dict:
+    """A monolithic slab-on-grade foundation for the footprint (pure, no Revit).
+
+    Derives the slab outline (the footprint sections at grade), a **thickened
+    perimeter edge** (turndown / grade beam) traced around the footprint boundary
+    with a width and a depth below the slab, and a **pad footing** under each post
+    of a placed frame. Also totals the rough concrete volume for a takeoff.
+    Returns ``{top, slab_thickness, sections, edge, footings, concrete_yd3}`` with
+    ``[x, y]`` / ``[x, y, w, l]`` coordinates in feet; ``top`` is the slab top at
+    the ground finished floor (elevation 0).
+
+    The depths are conservative defaults, not an engineered design — the frost
+    line and soil report set the real ones.
+    """
+    sections = plan.footprint_sections()
+    boundary = footprint_boundary(sections)
+    edge = {
+        "width": TURNDOWN_WIDTH,
+        "depth": TURNDOWN_DEPTH,
+        "segments": [[list(a), list(b)] for a, b in boundary],
+    }
+    footings = [
+        {
+            "point": [float(p.x), float(p.y)],
+            "size": FOOTING_SIZE,
+            "depth": FOOTING_DEPTH,
+            "role": p.role,
+        }
+        for p in plan.posts
+    ]
+
+    slab_area = footprint_area(sections)
+    perimeter = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
+    slab_vol = slab_area * SLAB_THICKNESS
+    turndown_vol = perimeter * TURNDOWN_WIDTH * TURNDOWN_DEPTH
+    footing_vol = sum(FOOTING_SIZE * FOOTING_SIZE * FOOTING_DEPTH for _ in footings)
+    concrete_yd3 = (slab_vol + turndown_vol + footing_vol) / 27.0
+
+    return {
+        "top": 0.0,
+        "slab_thickness": SLAB_THICKNESS,
+        "sections": [[float(x), float(y), float(w), float(length)] for x, y, w, length in sections],
+        "edge": edge,
+        "footings": footings,
+        "concrete_yd3": concrete_yd3,
     }
 
 
@@ -666,6 +801,42 @@ def structural_grids(plan: Barndominium) -> list[dict]:
     return grids
 
 
+def _mark_gable_walls(walls: list[RevitWall], roof: dict, plate_height: float) -> None:
+    """Tag the top-level exterior walls on the gable ends with a gable profile.
+
+    A gable-end wall runs perpendicular to the ridge at either end of it; its top
+    rises from the eave plate to the ridge. We mark each such wall ``profile =
+    "gable"`` and carry the apex (the ridge point in plan) and its height above
+    the wall base, so the consumer can build the pentagon-profiled wall instead of
+    a flat rectangle capped at the plate. Eave and interior walls stay flat.
+    """
+    gable_axis = roof["gable_axis"]
+    apex_h = float(plate_height) + float(roof["rise"])
+    ridge = roof["ridge"]
+    if gable_axis == "y":
+        # Ridge runs north-south; gable ends are the east-west ("h") walls.
+        ridge_x = ridge["start"][0]
+        ends = {round(ridge["start"][1], 6), round(ridge["end"][1], 6)}
+        want, apex_from = "h", lambda w, a: (a, w.const_coord)
+        ridge_c = ridge_x
+    else:
+        # Ridge runs east-west; gable ends are the north-south ("v") walls.
+        ridge_y = ridge["start"][1]
+        ends = {round(ridge["start"][0], 6), round(ridge["end"][0], 6)}
+        want, apex_from = "v", lambda w, a: (w.const_coord, a)
+        ridge_c = ridge_y
+    for w in walls:
+        if not w.exterior or w.orientation != want:
+            continue
+        if round(w.const_coord, 6) not in ends:
+            continue
+        lo, hi = w.span
+        apex_along = min(max(ridge_c, lo), hi)  # clamp the apex into the wall run
+        w.profile = "gable"
+        w.apex = (float(apex_from(w, apex_along)[0]), float(apex_from(w, apex_along)[1]))
+        w.apex_height = apex_h
+
+
 # --- the public entry points -------------------------------------------------
 
 
@@ -677,7 +848,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         RevitLevel(
             index=i,
             name=f"Level {i + 1}",
-            elevation=float(i * height),
+            # Stack by floor-to-floor (ceiling + inter-floor assembly), so an
+            # upper level sits on the structure below it, not on its ceiling plane.
+            elevation=float(plan.level_elevation(i)),
             height=float(height),
         )
         for i in level_indexes
@@ -772,21 +945,26 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             )
         )
 
-    rooms = [
-        RevitRoom(
-            id=r.id,
-            name=r.display_name,
-            type=r.type.value,
-            level=getattr(r, "level", 0),
-            point=(float(r.center[0]), float(r.center[1])),
-            area=float(r.area),
-            x=float(r.x),
-            y=float(r.y),
-            width=float(r.width),
-            length=float(r.length),
+    rooms = []
+    for r in plan.rooms:
+        clear_w, clear_l = clear_dimensions(plan, r)
+        rooms.append(
+            RevitRoom(
+                id=r.id,
+                name=r.display_name,
+                type=r.type.value,
+                level=getattr(r, "level", 0),
+                point=(float(r.center[0]), float(r.center[1])),
+                area=float(r.area),
+                x=float(r.x),
+                y=float(r.y),
+                width=float(r.width),
+                length=float(r.length),
+                clear_width=float(clear_w),
+                clear_length=float(clear_l),
+                clear_area=float(clear_w * clear_l),
+            )
         )
-        for r in plan.rooms
-    ]
 
     columns = [
         RevitColumn(
@@ -860,11 +1038,35 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         )
 
     grids = structural_grids(plan)
-    roof = roof_plan(plan, max(level_indexes)) if plan.rooms else None
+    top_level = max(level_indexes)
+    roof = roof_plan(plan, top_level) if plan.rooms else None
+    if roof is not None:
+        _mark_gable_walls(walls_by_level.get(top_level, []), roof, height)
+
+    foundation = foundation_plan(plan) if plan.rooms else None
+
+    fixtures: list[RevitFixture] = []
+    for r in plan.rooms:
+        for fx in plan_room_fixtures(plan, r):
+            fixtures.append(
+                RevitFixture(
+                    id=f"{r.id}_{fx.kind}",
+                    kind=fx.kind,
+                    room=r.id,
+                    level=getattr(r, "level", 0),
+                    x=float(fx.x),
+                    y=float(fx.y),
+                    width=float(fx.width),
+                    length=float(fx.length),
+                    wall=fx.wall,
+                    point=(float(fx.center[0]), float(fx.center[1])),
+                )
+            )
 
     return RevitModel(
         name=plan.name,
         ceiling_height=float(height),
+        floor_depth=float(plan.floor_depth),
         envelope_width=float(plan.envelope_width),
         envelope_length=float(plan.envelope_length),
         wings=[(float(w.x), float(w.y), float(w.width), float(w.length)) for w in plan.wings],
@@ -878,6 +1080,8 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         columns=columns,
         framing=framing,
         areas=areas,
+        fixtures=fixtures,
+        foundation=foundation,
     )
 
 
@@ -953,6 +1157,8 @@ def exchange_to_plan(data: dict) -> Barndominium:
         float(pinfo.get("envelope_length", 0.0)),
     )
     plan.ceiling(float(pinfo.get("ceiling_height", feet(9))))
+    if pinfo.get("floor_depth") is not None:
+        plan.floors(float(pinfo["floor_depth"]))
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))
