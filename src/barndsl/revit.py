@@ -48,6 +48,7 @@ from .elements import (
     Room,
     feet,
 )
+from .fixtures import plan_room_fixtures
 from .geometry import TOL, opening_endpoints, point_in_footprint, shared_edge
 from .validation import clear_dimensions
 
@@ -230,6 +231,23 @@ class RevitArea:
 
 
 @dataclass
+class RevitFixture:
+    """A fixture/appliance seed: a footprint rectangle + the room and wall it
+    serves, for the consumer to host a loadable family at its centre."""
+
+    id: str
+    kind: str  # toilet | lavatory | tub | shower | sink | range | refrigerator
+    room: str
+    level: int
+    x: float
+    y: float
+    width: float
+    length: float
+    wall: str
+    point: tuple[float, float]
+
+
+@dataclass
 class RevitModel:
     """The full Revit-shaped exchange for one plan."""
 
@@ -249,6 +267,7 @@ class RevitModel:
     slabs: list[RevitSlab]
     grids: list[dict]
     roof: dict | None
+    fixtures: list[RevitFixture] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -339,6 +358,21 @@ class RevitModel:
             "slabs": [asdict(s) for s in self.slabs],
             "grids": list(self.grids),
             "roof": self.roof,
+            "fixtures": [
+                {
+                    "id": fx.id,
+                    "kind": fx.kind,
+                    "room": fx.room,
+                    "level": fx.level,
+                    "x": fx.x,
+                    "y": fx.y,
+                    "width": fx.width,
+                    "length": fx.length,
+                    "wall": fx.wall,
+                    "point": list(fx.point),
+                }
+                for fx in self.fixtures
+            ],
         }
 
     def to_json(self, indent: int | None = 2) -> str:
@@ -947,6 +981,24 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
     if roof is not None:
         _mark_gable_walls(walls_by_level.get(top_level, []), roof, height)
 
+    fixtures: list[RevitFixture] = []
+    for r in plan.rooms:
+        for fx in plan_room_fixtures(plan, r):
+            fixtures.append(
+                RevitFixture(
+                    id=f"{r.id}_{fx.kind}",
+                    kind=fx.kind,
+                    room=r.id,
+                    level=getattr(r, "level", 0),
+                    x=float(fx.x),
+                    y=float(fx.y),
+                    width=float(fx.width),
+                    length=float(fx.length),
+                    wall=fx.wall,
+                    point=(float(fx.center[0]), float(fx.center[1])),
+                )
+            )
+
     return RevitModel(
         name=plan.name,
         ceiling_height=float(height),
@@ -964,6 +1016,7 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         columns=columns,
         framing=framing,
         areas=areas,
+        fixtures=fixtures,
     )
 
 

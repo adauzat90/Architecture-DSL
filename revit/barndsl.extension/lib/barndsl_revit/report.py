@@ -34,9 +34,12 @@ _OVERRIDE_KEYS = (
     "floor_type",
     "column_family",
     "beam_family",
+    "plumbing_family",
+    "appliance_family",
 )
 _FLAG_KEYS = (
     "structure", "size_families", "porches", "stairs", "slabs", "grids", "roof",
+    "fixtures",
     "replace", "dry_run", "verbose",
     # document() pass
     "views", "tags", "schedules", "sheets",
@@ -57,6 +60,7 @@ class BuildOptions(object):
         slabs=True,
         grids=True,
         roof=True,
+        fixtures=True,
         replace=True,
         dry_run=False,
         verbose=False,
@@ -71,6 +75,8 @@ class BuildOptions(object):
         floor_type=None,
         column_family=None,
         beam_family=None,
+        plumbing_family=None,
+        appliance_family=None,
     ):
         self.structure = bool(structure)
         self.size_families = bool(size_families)
@@ -79,6 +85,7 @@ class BuildOptions(object):
         self.slabs = bool(slabs)
         self.grids = bool(grids)
         self.roof = bool(roof)
+        self.fixtures = bool(fixtures)
         self.replace = bool(replace)
         self.dry_run = bool(dry_run)
         self.verbose = bool(verbose)
@@ -93,6 +100,8 @@ class BuildOptions(object):
         self.floor_type = floor_type
         self.column_family = column_family
         self.beam_family = beam_family
+        self.plumbing_family = plumbing_family
+        self.appliance_family = appliance_family
 
     @classmethod
     def from_dict(cls, data):

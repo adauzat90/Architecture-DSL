@@ -78,8 +78,9 @@ from .revit import (
     to_revit_json,
     to_revit_model,
 )
+from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
 from .structure import place_frame
-from .validation import Issue, Severity, ValidationReport, validate
+from .validation import Issue, Severity, ValidationReport, clear_dimensions, validate
 
 __all__ = [
     "barndominium",
@@ -121,6 +122,12 @@ __all__ = [
     "ValidationReport",
     "Issue",
     "Severity",
+    "clear_dimensions",
+    # fixtures / appliances (seeds + clearance)
+    "Fixture",
+    "fixtures_for",
+    "fixtures_fit",
+    "plan_room_fixtures",
     # rendering
     "render_svg",
     "save_svg",

@@ -225,6 +225,21 @@ def clear_dimensions(plan: Barndominium, room: Room) -> tuple[float, float]:
     return max(0.0, clear_w), max(0.0, clear_l)
 
 
+def clear_box(plan: Barndominium, room: Room) -> tuple[float, float, float, float]:
+    """The room's clear interior as a world-coordinate rectangle
+    ``(x0, y0, width, length)`` — the finish-face box inside the wall centrelines.
+    Its south-west corner is inset from the room rectangle by half the west/south
+    wall. Used to place fixtures inside the usable floor."""
+    ext = set(exterior_walls(plan, room))
+
+    def half(side: Direction) -> float:
+        thk = EXTERIOR_WALL_THICKNESS if side in ext else INTERIOR_WALL_THICKNESS
+        return thk / 2.0
+
+    clear_w, clear_l = clear_dimensions(plan, room)
+    return (room.x + half(Direction.WEST), room.y + half(Direction.SOUTH), clear_w, clear_l)
+
+
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
     """Ids of rooms that share a wall segment with ``room_id``."""
     r = plan.room(room_id)
@@ -601,6 +616,7 @@ def validate(plan: Barndominium) -> ValidationReport:
 
     _validate_geometry(plan, add)
     _validate_room_programs(plan, add)
+    _validate_fixtures(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_stairs(plan, add)
@@ -773,6 +789,51 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                     f"Only {frac * 100:.0f}% of the footprint is assigned to rooms; "
                     f"{_f(plan.footprint_area - used)} sq ft unallocated.",
                     hint="Enlarge rooms or add spaces to fill the footprint.",
+                )
+            )
+
+
+def _validate_fixtures(plan: Barndominium, add) -> None:
+    """Check that wet rooms and kitchens can actually hold their fixtures with
+    code clearances (IRC R307 for the bath; a working aisle for the kitchen).
+
+    Uses the clear (finish-face) interior, so the check reflects the built room,
+    not the nominal rectangle. A bath that can't fit toilet/lav/tub with
+    clearances is a ``BATH_CLEARANCE`` warning; a cramped kitchen is a
+    ``KITCHEN_FIT`` info.
+    """
+    from .fixtures import fixtures_fit  # lazy: fixtures imports back from here
+
+    for room in plan.rooms:
+        if room.type not in (RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN):
+            continue
+        clear_w, clear_l = clear_dimensions(plan, room)
+        ok, reason = fixtures_fit(room.type, clear_w, clear_l)
+        if ok:
+            continue
+        if room.type is RoomType.KITCHEN:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "KITCHEN_FIT",
+                    f"Kitchen '{room.id}' is tight for its appliances: {reason}.",
+                    room=room.id,
+                    hint="Enlarge it so a sink, range and refrigerator fit with a "
+                    "working aisle.",
+                )
+            )
+        else:
+            label = room.type.value.replace("_", " ")
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "BATH_CLEARANCE",
+                    f"{label.capitalize()} '{room.id}' can't fit its fixtures with "
+                    f"clearances: {reason} (IRC R307).",
+                    room=room.id,
+                    hint="Enlarge the room so the toilet/lavatory"
+                    + ("/tub" if room.type is RoomType.BATHROOM else "")
+                    + " fit with clear floor in front.",
                 )
             )
 

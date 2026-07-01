@@ -137,10 +137,12 @@ the diagnostics as machine-readable JSON for the agent loop or other tooling.
 **Three severities, one channel.** `error`s must be fixed; `warning`s flag likely
 problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
 bedroom privacy, bath proximity, plumbing economy (cluster wet rooms on a shared
-wall), bedroom closets, room proportion, workable room sizes, bathroom
-ventilation, dead-end hallways, and **clear-dimension** shortfalls (a room that
-meets a code minimum on its centreline rectangle but not once the walls are
-built) — so "is it good?" travels the same diagnostic
+wall), bedroom closets, room proportion, workable room sizes, **fixture
+clearances** (a bath that can't hold a toilet/lav/tub with IRC R307 clearances, a
+kitchen too tight for its appliances), bathroom ventilation, dead-end hallways,
+and **clear-dimension** shortfalls (a room that meets a code minimum on its
+centreline rectangle but not once the walls are built) — so "is it good?" travels
+the same diagnostic
 stream as "is it valid?" and never blocks a compile. The agent's architectural
 critique is folded into this same `info` channel.
 
@@ -294,6 +296,13 @@ is tested anywhere; only the final element creation needs Revit. What it does:
 * **Rooms become seed points.** A point inside each rectangle, with name/type/
   area — plus the **clear** (finish-face) width/length/area, the figure Revit
   computes for a placed room — for Revit to place a Room once the walls enclose it.
+* **Wet rooms and kitchens get fixtures.** Each bathroom, half-bath and kitchen
+  carries deterministic **fixture seeds** (toilet/lavatory/tub·shower;
+  refrigerator/range/sink) — footprints placed against the walls with IRC R307
+  clearances in mind — and the pyRevit builder drops a plumbing/appliance family
+  at each. The compiler also checks the room can actually *hold* them
+  (`BATH_CLEARANCE`, `KITCHEN_FIT`), so an empty box that's too small to be a real
+  bath is flagged before you build.
 * **Structure carries through.** A placed `frame` lowers to columns (posts) and
   framing centrelines (bents/ridge); porches and stairs come across as reference
   outlines.

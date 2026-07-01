@@ -106,6 +106,7 @@ model. Use it to shake a plan out against a project template before committing.
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
 | `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
+| `fixtures` | A family instance at each fixture/appliance seed — a plumbing family for wet fixtures (toilet/lavatory/tub/shower/sink), a specialty-equipment family for appliances (refrigerator/range). Seeds for the designer to swap/adjust; **only if** the family is loaded, skipped with a note otherwise. |
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
 | `grids` | Structural grid lines (`Grid.Create`) from a placed `frame`: numbered (`1, 2, …`) along the bents, lettered (`A, B, …`) across the eaves and any interior post line. None without a frame. |
 | `roof` | A footprint roof (`NewFootPrintRoof`) over the building outline, with its **eave edges made slope-defining** at the plan's pitch so it comes out as a gable (the gable ends stay vertical). Falls back to a flat roof if the slope can't be applied (**experimental** — the slope call needs live-Revit validation). |
@@ -179,8 +180,11 @@ folder). Unknown keys are ignored, so you can leave comments.
   "floor_type": "Generic 12\"",
   "column_family": "HSS-Hollow Structural Section-Column",
   "beam_family": "W-Wide Flange",
+  "plumbing_family": "Toilet-Domestic-3D",
+  "appliance_family": "Refrigerator",
   "size_families": true,
   "structure": true,
+  "fixtures": true,
   "porches": true,
   "stairs": true,
   "slabs": true,

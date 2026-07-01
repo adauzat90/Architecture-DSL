@@ -127,6 +127,16 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "(kitchen ~70, full bath ~48, half bath ~30 sq ft) or by shortest side "
            "(full bath >= 6 ft, half bath >= 5 ft, so the fixtures fit across it). "
            "Bedrooms are covered by BEDROOM_AREA."),
+        _c("BATH_CLEARANCE", W, "Bathroom can't fit its fixtures",
+           "A bathroom's clear (finish-face) interior can't hold its fixtures with "
+           "code clearances — a water closet needs 15 in from its centreline to any "
+           "wall/fixture and 21 in of clear floor in front (IRC R307.1), and a full "
+           "bath needs a 5 ft wall for the tub. Enlarge the room so toilet, lavatory "
+           "and tub/shower fit."),
+        _c("KITCHEN_FIT", I, "Kitchen tight for its appliances",
+           "A kitchen's clear interior is too small to hold a sink, range and "
+           "refrigerator along the counters with a comfortable ~40 in working aisle. "
+           "Enlarge it or lengthen the counter run."),
         _c("ROOM_CLEAR", I, "Clear dimension falls short once walls are built",
            "A room meets a code minimum on its nominal (centreline) rectangle but "
            "falls below it once the bounding walls' thickness is subtracted. IRC "

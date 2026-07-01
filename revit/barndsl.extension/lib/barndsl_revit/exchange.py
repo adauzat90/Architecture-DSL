@@ -67,6 +67,7 @@ def load(data):
     data["structure"].setdefault("columns", [])
     data["structure"].setdefault("framing", [])
     data.setdefault("areas", [])
+    data.setdefault("fixtures", [])
     return data
 
 

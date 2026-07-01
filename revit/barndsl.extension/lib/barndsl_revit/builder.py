@@ -282,6 +282,8 @@ class _Resources(object):
         self.column = None
         self.beam = None
         self.roof_type = None
+        self.plumbing = None
+        self.appliance = None
 
 
 def _resolve_resources(doc, options, report):
@@ -336,6 +338,18 @@ def _resolve_resources(doc, options, report):
         lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_StructuralFraming, n),
         (_symbols(doc, DB.BuiltInCategory.OST_StructuralFraming) or [None])[0],
         "structural-framing family",
+    )
+    res.plumbing = named_or(
+        options.plumbing_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_PlumbingFixtures, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_PlumbingFixtures) or [None])[0],
+        "plumbing-fixture family",
+    )
+    res.appliance = named_or(
+        options.appliance_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_SpecialityEquipment, n),
+        (_symbols(doc, DB.BuiltInCategory.OST_SpecialityEquipment) or [None])[0],
+        "appliance family",
     )
 
     report.resources["exterior_wall"] = _name(res.ext_wall) if res.ext_wall else "(none)"
@@ -587,6 +601,41 @@ def _build_structure(doc, data, levels, res, report):
             _made(report, "framing", src, inst)
         except Exception as exc:
             report.failed("framing", src, str(exc))
+
+
+#: Fixture kinds hosted from a plumbing family vs. an appliance (specialty) family.
+_WET_FIXTURES = ("toilet", "lavatory", "tub", "shower", "sink")
+
+
+def _build_fixtures(doc, data, levels, res, report):
+    """Place a family instance at each fixture/appliance seed — a plumbing family
+    for wet fixtures, a specialty-equipment family for appliances. These are
+    seeds: the family stands in at the right spot for the designer to swap/adjust.
+    Skips a fixture (with a note) when its family isn't loaded."""
+    fixtures = data.get("fixtures", [])
+    if not fixtures:
+        return
+    plumb = _activate(res.plumbing, doc)
+    appl = _activate(res.appliance, doc)
+    if plumb is None:
+        report.note("plumbing fixtures skipped: no plumbing-fixture family loaded")
+    if appl is None:
+        report.note("appliances skipped: no specialty-equipment family loaded")
+    st = DB.Structure.StructuralType.NonStructural
+    for fx in fixtures:
+        wet = fx.get("kind") in _WET_FIXTURES
+        sym = plumb if wet else appl
+        if sym is None:
+            report.skipped("fixture", fx.get("id"), "no %s family" % ("plumbing" if wet else "appliance"))
+            continue
+        level = levels.get(fx.get("level", 0))
+        z = level.Elevation if level else 0.0
+        try:
+            inst = doc.Create.NewFamilyInstance(_xyz(fx["point"], z), sym, level, st)
+            _made(report, "fixture", fx.get("id"), inst, message=fx.get("kind", ""))
+        except Exception as exc:
+            _logger.warning("fixture %s: %s", fx.get("id"), exc)
+            report.failed("fixture", fx.get("id"), str(exc))
 
 
 def _build_porches(doc, data, levels, res, report):
@@ -1118,6 +1167,8 @@ def build(doc, data, options=None):
         _build_rooms(doc, data, levels, report)
         if options.structure:
             _build_structure(doc, data, levels, res, report)
+        if options.fixtures:
+            _build_fixtures(doc, data, levels, res, report)
         if options.slabs:
             _build_slabs(doc, data, levels, res, report)
         if options.porches:

@@ -104,6 +104,8 @@ class BuiltInCategory:
     OST_Rooms = "OST_Rooms"
     OST_RoomTags = "OST_RoomTags"
     OST_TitleBlocks = "OST_TitleBlocks"
+    OST_PlumbingFixtures = "OST_PlumbingFixtures"
+    OST_SpecialityEquipment = "OST_SpecialityEquipment"
 
 
 class ViewFamily:
