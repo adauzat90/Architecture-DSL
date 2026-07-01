@@ -28,6 +28,7 @@ from .constants import (
     NATURAL_LIGHT_RATIO,
 )
 from .elements import (
+    GARAGE_TYPES,
     HABITABLE_TYPES,
     INTERIOR_TYPES,
     Barndominium,
@@ -2112,20 +2113,22 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
 
 
 def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
-    # 9. Garage → sleeping room. IRC R302.5.1: a garage opening shall not open
+    # 9. Garage/shop → sleeping room. IRC R302.5.1: the opening shall not open
     #    into a room used for sleeping. This is code-grounded, so it's a WARNING.
-    garages = [r for r in plan.rooms if r.type is RoomType.GARAGE]
+    garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
+        label = g.type.value
         for n in graph.get(g.id, ()):
             if n in by_id and by_id[n].type is RoomType.BEDROOM:
                 add(
                     Issue(
                         Severity.WARNING,
                         "GARAGE_BEDROOM",
-                        f"Garage '{g.id}' opens directly into the bedroom '{n}'; a "
-                        "garage must not open into a sleeping room (IRC R302.5.1).",
+                        f"{label.capitalize()} '{g.id}' opens directly into the "
+                        f"bedroom '{n}'; a {label} must not open into a sleeping "
+                        "room (IRC R302.5.1).",
                         room=n,
-                        hint=f"Buffer it with a mudroom or hall — connect the garage "
+                        hint=f"Buffer it with a mudroom or hall — connect the {label} "
                         f"there instead, e.g. `door {g.id} - <mudroom_or_hall>`.",
                     )
                 )
@@ -2135,11 +2138,10 @@ def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
     # 10. Garage with no interior people-door into the house. A vehicle `entry`
     #     satisfies reachability (NO_ACCESS), so this gap slips through: you'd have
     #     to go outside to get in. Only nudge when it actually abuts the house.
-    house_types = {
-        t for t in RoomType if t not in (RoomType.GARAGE, RoomType.PORCH)
-    }
-    garages = [r for r in plan.rooms if r.type is RoomType.GARAGE]
+    house_types = {t for t in RoomType if t not in GARAGE_TYPES and t is not RoomType.PORCH}
+    garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
+        label = g.type.value
         connected_inside = any(
             n in by_id and by_id[n].type in house_types for n in graph.get(g.id, ())
         )
@@ -2154,10 +2156,10 @@ def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
                 Issue(
                     Severity.INFO,
                     "GARAGE_NO_ENTRY",
-                    f"Garage '{g.id}' has no interior door into the house — you'd "
-                    "have to go outside to get in.",
+                    f"{label.capitalize()} '{g.id}' has no interior door into the "
+                    "house — you'd have to go outside to get in.",
                     room=g.id,
-                    hint="Add a people-door from the garage into a mudroom, hall or "
+                    hint=f"Add a people-door from the {label} into a mudroom, hall or "
                     f"living space, e.g. `door {g.id} - <adjacent_room>`.",
                 )
             )
@@ -2170,8 +2172,9 @@ def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
     #      The DSL can't model gypsum layers, so this is a reminder (INFO) fired by
     #      the geometry that triggers the requirement, like BATH_VENT.
     for g in plan.rooms:
-        if g.type is not RoomType.GARAGE:
+        if g.type not in GARAGE_TYPES:
             continue
+        label = g.type.value
         shares = sorted(
             n
             for n in geometric_neighbors(plan, g.id)
@@ -2186,13 +2189,13 @@ def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
             continue
         if above:
             msg = (
-                f"Garage '{g.id}' has habitable space above it ({', '.join(above)}); "
-                "the garage ceiling needs ⅝ in Type X gypsum and the common wall a "
-                "fire separation (IRC R302.6)."
+                f"{label.capitalize()} '{g.id}' has habitable space above it "
+                f"({', '.join(above)}); the {label} ceiling needs ⅝ in Type X gypsum "
+                "and the common wall a fire separation (IRC R302.6)."
             )
         else:
             msg = (
-                f"Garage '{g.id}' shares a wall with conditioned space "
+                f"{label.capitalize()} '{g.id}' shares a wall with conditioned space "
                 f"({', '.join(shares)}); that common wall needs a gypsum fire "
                 "separation (IRC R302.6)."
             )
@@ -2216,10 +2219,10 @@ def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
     seen: set[tuple[str, str]] = set()
     for d in plan.interior_doors:
         a, b = by_id.get(d.room_a), by_id.get(d.room_b)
-        if a is None or b is None or (a.type is RoomType.GARAGE) == (b.type is RoomType.GARAGE):
-            continue  # need exactly one side to be a garage
-        gar, other = (a, b) if a.type is RoomType.GARAGE else (b, a)
-        if other.type in (RoomType.GARAGE, RoomType.PORCH, RoomType.BEDROOM):
+        if a is None or b is None or (a.type in GARAGE_TYPES) == (b.type in GARAGE_TYPES):
+            continue  # need exactly one side to be a garage/shop
+        gar, other = (a, b) if a.type in GARAGE_TYPES else (b, a)
+        if other.type in GARAGE_TYPES or other.type in (RoomType.PORCH, RoomType.BEDROOM):
             continue  # bedroom is the worse GARAGE_BEDROOM warning's job
         if (gar.id, other.id) in seen:
             continue
@@ -2228,8 +2231,8 @@ def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
             Issue(
                 Severity.INFO,
                 "GARAGE_DOOR",
-                f"The door from garage '{gar.id}' into '{other.id}' must be a "
-                "self-closing, 20-minute fire-rated (or 1⅜ in solid-core / "
+                f"The door from {gar.type.value} '{gar.id}' into '{other.id}' must be "
+                "a self-closing, 20-minute fire-rated (or 1⅜ in solid-core / "
                 "solid-wood) door (IRC R302.5.1).",
                 room=gar.id,
                 hint="Spec a self-closing 20-min / solid-core door on the "

@@ -300,18 +300,19 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "its own."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
-        _c("GARAGE_BEDROOM", W, "Garage opens into a bedroom",
-           "A garage must not open directly into a sleeping room (IRC R302.5.1)."),
-        _c("GARAGE_NO_ENTRY", I, "Garage has no people-door",
-           "A garage abuts the house but has no interior door into it."),
+        _c("GARAGE_BEDROOM", W, "Garage/shop opens into a bedroom",
+           "A garage or shop must not open directly into a sleeping room (IRC "
+           "R302.5.1). A barndominium shop bay is treated as a garage."),
+        _c("GARAGE_NO_ENTRY", I, "Garage/shop has no people-door",
+           "A garage or shop abuts the house but has no interior door into it."),
         _c("GARAGE_SEPARATION", I, "Garage/dwelling fire separation required",
-           "A private garage shares a wall with conditioned space, or has habitable "
+           "A garage or shop shares a wall with conditioned space, or has habitable "
            "space above it. IRC R302.6 requires the common wall to be a fire "
            "separation (min ½ in gypsum) and, where a habitable room is above, the "
-           "garage ceiling to be ⅝ in Type X gypsum. The DSL can't model the "
-           "assembly, so this is a reminder to detail it."),
+           "ceiling to be ⅝ in Type X gypsum. A barndominium shop bay is treated as "
+           "a garage. The DSL can't model the assembly, so this is a reminder."),
         _c("GARAGE_DOOR", I, "Garage/dwelling door must be self-closing & rated",
-           "A door between a private garage and the dwelling must be self-closing "
+           "A door between a garage or shop and the dwelling must be self-closing "
            "and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood door) per "
            "IRC R302.5.1. A door into a sleeping room is barred outright "
            "(GARAGE_BEDROOM)."),

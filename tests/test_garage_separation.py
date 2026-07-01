@@ -63,6 +63,24 @@ def test_habitable_space_above_asks_for_type_x_ceiling():
     assert "above" in sep.message and "Type X" in sep.message
 
 
+def test_shop_is_treated_like_a_garage():
+    # A barndominium shop bay is functionally a garage, so it carries the same
+    # separation and self-closing-door reminders.
+    plan = (
+        barndominium("x").envelope(40, 20).ceiling(9)
+        .add_room("shop", T.SHOP, x=0, y=0, width=20, length=20)
+        .add_room("mud", T.MUDROOM, x=20, y=0, width=8, length=20)
+        .add_room("living", T.LIVING, x=28, y=0, width=12, length=20)
+        .connect("shop", "mud", width=3)
+        .connect("mud", "living", width=6)
+    )
+    codes = _codes(plan)
+    assert "GARAGE_SEPARATION" in codes
+    assert "GARAGE_DOOR" in codes
+    # The wording names the shop, not "garage".
+    assert "Shop" in _issue(plan, "GARAGE_SEPARATION").message
+
+
 def test_door_into_bedroom_is_the_bedroom_warning_not_the_door_reminder():
     plan = (
         barndominium("x").envelope(30, 20).ceiling(9)

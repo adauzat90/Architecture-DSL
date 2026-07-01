@@ -110,6 +110,11 @@ INTERIOR_TYPES: frozenset[RoomType] = frozenset(
     set(RoomType) - {RoomType.PORCH, RoomType.GARAGE, RoomType.SHOP}
 )
 
+#: Garage-like spaces for the IRC R302.6/R302.5.1 separation checks. A
+#: barndominium's shop bay is functionally a garage — an overhead door, vehicles,
+#: equipment and fuel — so it carries the same dwelling-separation requirements.
+GARAGE_TYPES: frozenset[RoomType] = frozenset({RoomType.GARAGE, RoomType.SHOP})
+
 
 class Direction(str, Enum):
     """A cardinal wall of a rectangular room."""
