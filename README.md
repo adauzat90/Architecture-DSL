@@ -140,7 +140,10 @@ bedroom privacy, bath proximity, plumbing economy (cluster wet rooms on a shared
 wall), bedroom closets, room proportion, workable room sizes, **fixture
 clearances** (a bath that can't hold a toilet/lav/tub with IRC R307 clearances, a
 kitchen too tight for its appliances), bathroom ventilation, dead-end hallways,
-and **clear-dimension** shortfalls (a room that meets a code minimum on its
+**garage/dwelling fire separation** (a garage common wall or the ceiling under
+habitable space above it, and the self-closing rated door between them — IRC
+R302.6 / R302.5.1), and **clear-dimension** shortfalls (a room that meets a code
+minimum on its
 centreline rectangle but not once the walls are built) — so "is it good?" travels
 the same diagnostic
 stream as "is it valid?" and never blocks a compile. The agent's architectural

@@ -28,7 +28,7 @@ def test_registry_is_well_formed():
     names = [c.__name__ for c in _DESIGN_QUALITY_CHECKS]
     assert len(names) == len(set(names)), "duplicate check in registry"
     assert all(n.startswith("_dq_") for n in names)
-    assert len(_DESIGN_QUALITY_CHECKS) == 23
+    assert len(_DESIGN_QUALITY_CHECKS) == 25
 
 
 def test_single_check_runs_in_isolation():

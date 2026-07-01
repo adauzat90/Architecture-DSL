@@ -29,6 +29,7 @@ from .constants import (
 )
 from .elements import (
     HABITABLE_TYPES,
+    INTERIOR_TYPES,
     Barndominium,
     Direction,
     Room,
@@ -2162,6 +2163,81 @@ def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
+def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
+    # 10b. IRC R302.6: the wall between a private garage and the dwelling — and any
+    #      ceiling under habitable space above the garage — must be a fire
+    #      separation (≥ ½ in gypsum; ⅝ in Type X where habitable space is above).
+    #      The DSL can't model gypsum layers, so this is a reminder (INFO) fired by
+    #      the geometry that triggers the requirement, like BATH_VENT.
+    for g in plan.rooms:
+        if g.type is not RoomType.GARAGE:
+            continue
+        shares = sorted(
+            n
+            for n in geometric_neighbors(plan, g.id)
+            if n in by_id and by_id[n].type in INTERIOR_TYPES
+        )
+        above = sorted(
+            r.id
+            for r in plan.rooms
+            if r.level > g.level and r.type in HABITABLE_TYPES and g.overlaps(r) > 0
+        )
+        if not (shares or above):
+            continue
+        if above:
+            msg = (
+                f"Garage '{g.id}' has habitable space above it ({', '.join(above)}); "
+                "the garage ceiling needs ⅝ in Type X gypsum and the common wall a "
+                "fire separation (IRC R302.6)."
+            )
+        else:
+            msg = (
+                f"Garage '{g.id}' shares a wall with conditioned space "
+                f"({', '.join(shares)}); that common wall needs a gypsum fire "
+                "separation (IRC R302.6)."
+            )
+        add(
+            Issue(
+                Severity.INFO,
+                "GARAGE_SEPARATION",
+                msg,
+                room=g.id,
+                hint="Detail the common wall/ceiling as a fire separation "
+                "(≥ ½ in gypsum; ⅝ in Type X under habitable space).",
+            )
+        )
+
+
+def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
+    # 10c. IRC R302.5.1: a door between a private garage and the dwelling must be
+    #      self-closing and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood
+    #      door). A door into a sleeping room is barred outright (GARAGE_BEDROOM),
+    #      so this reminder covers the other garage-to-dwelling doors.
+    seen: set[tuple[str, str]] = set()
+    for d in plan.interior_doors:
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None or (a.type is RoomType.GARAGE) == (b.type is RoomType.GARAGE):
+            continue  # need exactly one side to be a garage
+        gar, other = (a, b) if a.type is RoomType.GARAGE else (b, a)
+        if other.type in (RoomType.GARAGE, RoomType.PORCH, RoomType.BEDROOM):
+            continue  # bedroom is the worse GARAGE_BEDROOM warning's job
+        if (gar.id, other.id) in seen:
+            continue
+        seen.add((gar.id, other.id))
+        add(
+            Issue(
+                Severity.INFO,
+                "GARAGE_DOOR",
+                f"The door from garage '{gar.id}' into '{other.id}' must be a "
+                "self-closing, 20-minute fire-rated (or 1⅜ in solid-core / "
+                "solid-wood) door (IRC R302.5.1).",
+                room=gar.id,
+                hint="Spec a self-closing 20-min / solid-core door on the "
+                "garage-to-dwelling opening.",
+            )
+        )
+
+
 def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
     # 11. A hallway exists to *distribute* circulation. One that opens onto a
     #     single room (or none) is just overhead. Exempt a hall that carries an
@@ -2263,6 +2339,8 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_room_proportion,
     _dq_garage_bedroom,
     _dq_garage_no_entry,
+    _dq_garage_separation,
+    _dq_garage_door,
     _dq_hall_deadend,
 )
 
