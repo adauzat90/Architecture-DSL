@@ -33,6 +33,11 @@ def emit_dsl(plan: Barndominium) -> str:
         out.append(f"floor {_n(plan.floor_depth)}")
     if plan.accessible:
         out.append("accessible")
+    if getattr(plan, "roof_style", "gable") != "gable" or getattr(plan, "roof_pitch", None):
+        line = f"roof {getattr(plan, 'roof_style', 'gable')}"
+        if getattr(plan, "roof_pitch", None):
+            line += f" pitch {_n(plan.roof_pitch)}"
+        out.append(line)
     if plan.program_spec is not None:
         spec = plan.program_spec
         line = f"program {spec.beds} bed"
@@ -63,6 +68,10 @@ def emit_dsl(plan: Barndominium) -> str:
             )
             if getattr(r, "level", 0):
                 line += f" level {r.level}"
+            if getattr(r, "ceiling_height", None) is not None:
+                line += f" ceiling {_n(r.ceiling_height)}"
+            if getattr(r, "vaulted", False):
+                line += " vaulted"
             out.append(line)
 
     if plan.interior_doors:

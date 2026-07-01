@@ -601,6 +601,21 @@ def validate(plan: Barndominium) -> ValidationReport:
                 hint=f"Set `ceiling {MIN_CEILING:.0f}` or greater (9–12 is typical).",
             )
         )
+    for room in plan.rooms:
+        rc = getattr(room, "ceiling_height", None)
+        if rc is not None and not getattr(room, "vaulted", False) and rc < MIN_CEILING:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "CEILING",
+                    f"Room '{room.id}' sets a {_f(rc)} ft ceiling, below the "
+                    f"{MIN_CEILING:.0f} ft minimum for habitable space.",
+                    room=room.id,
+                    hint=f"Raise its `ceiling` to >= {MIN_CEILING:.0f}, or drop the "
+                    "override to inherit the plan ceiling.",
+                )
+            )
+
     if not plan.rooms:
         add(
             Issue(

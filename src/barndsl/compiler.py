@@ -22,6 +22,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
     frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
+    roof gable|shed|monitor [pitch <rise:run>]            # optional roof form (default gable)
 
 ``<placement>`` is ``at <x>,<y>`` (absolute), ``east-of|west-of|north-of|
 south-of <room>`` (abut an already-defined room), or one of each to pin a corner.
@@ -42,7 +43,8 @@ from .validation import Issue, Severity, ValidationReport, validate
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "room",
-    "door", "open", "entry", "window", "porch", "stair", "frame", "accessible"
+    "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
+    "accessible"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -90,7 +92,9 @@ Statements:
   note "free text"                # optional design note
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
-  room <id>: <type> <placement> size <W> x <L> [level <n>]
+  room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
+        # `ceiling <h>` overrides the plan ceiling for this room (a tray or a
+        # taller great room); `vaulted` makes it open to the roof (no flat ceiling).
   door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
         # interior door between two rooms. swing (default) hinges; cased = an open
         # walk-through (no leaf); pocket/sliding slide. offset = ft from the wall's
@@ -109,6 +113,10 @@ Statements:
         # axis, interior support posts where that span exceeds <span> ft (default
         # 40), a ridge member over them (no-ridge omits it). post = nominal section
         # in inches (default 6). A layout aid, not an engineered design.
+  roof gable|shed|monitor [pitch <rise:run>]
+        # the roof form over the building: gable (default, ridge down the long
+        # axis), shed (a single slope), or monitor (a raised centre clerestory
+        # aisle). pitch is rise:run (e.g. 0.333 for 4:12).
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -529,6 +537,25 @@ def _parse_statement(
     elif key == "accessible":
         plan.mark_accessible()
         c.expect_end()
+    elif key == "roof":
+        # `roof <style> [pitch <p>]` — style in gable|shed|monitor.
+        style_tok = c.take("a roof style (gable|shed|monitor)")
+        pitch = None
+        if (tok := c.peek()) is not None and tok.text.lower() == "pitch":
+            c.keyword("pitch")
+            pitch = c.number("the roof pitch (rise:run)")
+        c.expect_end()
+        try:
+            plan.roof(style_tok.text.lower(), pitch=pitch)
+        except ValueError as exc:
+            raise _ParseError(
+                "BAD_OPTION",
+                str(exc),
+                style_tok.col,
+                end_col=style_tok.end_col,
+                hint="Use `roof gable`, `roof shed`, or `roof monitor` "
+                "(optionally `pitch <rise:run>`).",
+            )
     elif key == "note":
         plan.note(c.take("a quoted note").text)
         c.expect_end()
@@ -587,12 +614,28 @@ def _parse_statement(
         c.keyword("x")
         length = c.number("length")
         level = 0
-        if (tok := c.peek()) is not None and tok.text.lower() == "level":
-            c.keyword("level")
-            level = c.level_value()
+        ceiling_h = None
+        vaulted = False
+        # Optional room suffixes in any order: `level <n>`, `ceiling <h>`, `vaulted`.
+        while (tok := c.peek()) is not None:
+            opt = tok.text.lower()
+            if opt == "level":
+                c.keyword("level")
+                level = c.level_value()
+            elif opt == "ceiling":
+                c.keyword("ceiling")
+                ceiling_h = c.number("room ceiling height")
+            elif opt == "vaulted":
+                c.keyword("vaulted")
+                vaulted = True
+            else:
+                break
         c.expect_end()
         try:
-            plan.add_room(rid, rtype, width=w, length=length, level=level, **place_kwargs)
+            plan.add_room(
+                rid, rtype, width=w, length=length, level=level,
+                ceiling_height=ceiling_h, vaulted=vaulted, **place_kwargs
+            )
         except ValueError as exc:
             col = ref_tok.col if ref_tok else rid_tok.col
             end = ref_tok.end_col if ref_tok else rid_tok.end_col

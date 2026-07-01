@@ -46,6 +46,9 @@ def inches(value: float) -> float:
     return float(value) / 12.0
 
 
+#: The roof forms a plan can request (see :meth:`Barndominium.roof`).
+ROOF_STYLES = ("gable", "shed", "monitor")
+
 #: Default width for an open cased passage (walk-through) when none is given.
 #: Walk-throughs are wide by design, so this is generous next to a 32-in door.
 DEFAULT_OPENING_WIDTH = feet(6)
@@ -146,6 +149,13 @@ class Room:
     #: Floor level (0 = ground). A loft sits on level 1 *above* a ground room,
     #: so rooms on different levels may share a footprint without overlapping.
     level: int = 0
+    #: Optional per-room finished ceiling height (ft), overriding the plan default.
+    #: A tray/dropped soffit or a taller great room lives here; ``None`` inherits
+    #: the plan's ``ceiling``.
+    ceiling_height: float | None = None
+    #: A vaulted / cathedral room open to the roof — no flat ceiling plane. Its
+    #: usable height rises to the ridge, so a flat ceiling isn't built for it.
+    vaulted: bool = False
     #: How the room was placed, for diagnostics — e.g. "east_of kitchen" for a
     #: relative anchor, or None for an absolute position. Not serialised.
     placement: str | None = None
@@ -488,6 +498,13 @@ class Barndominium:
     #: Optional declared program (intent). When set, validation checks the actual
     #: room counts against it. See :class:`ProgramSpec`.
     program_spec: ProgramSpec | None = None
+    #: Roof form over the building: ``"gable"`` (default, ridge down the long
+    #: axis), ``"shed"`` (a single slope), or ``"monitor"`` (a raised centre aisle
+    #: — the classic barn/​barndominium clerestory form). Set via the ``roof``
+    #: directive or :meth:`roof`.
+    roof_style: str = "gable"
+    #: Optional roof pitch (rise:run) override; ``None`` uses the default pitch.
+    roof_pitch: float | None = None
     #: Optional structural-frame request. When set, :func:`barndsl.structure.place_frame`
     #: populates :attr:`posts` and :attr:`beams` from the footprint. See :class:`FrameSpec`.
     frame_spec: FrameSpec | None = None
@@ -568,6 +585,25 @@ class Barndominium:
         """Finished-floor elevation (feet) of ``level`` above grade — the sum of
         the floor-to-floor heights of every level beneath it."""
         return float(level) * self.floor_to_floor
+
+    def roof(self, style: str = "gable", *, pitch: float | None = None) -> "Barndominium":
+        """Set the roof form (``gable`` | ``shed`` | ``monitor``) and optional pitch.
+
+        A ``gable`` runs the ridge down the long axis (the default); a ``shed`` is a
+        single slope; a ``monitor`` raises a central clerestory aisle over the span
+        — the classic barn/​barndominium roof. ``pitch`` is rise:run (e.g. ``0.333``
+        for 4:12); omit it to use the default.
+        """
+        style = str(style).lower()
+        if style not in ROOF_STYLES:
+            raise ValueError(f"roof style must be one of {ROOF_STYLES}, got {style!r}.")
+        self.roof_style = style
+        if pitch is not None:
+            pitch = float(pitch)
+            if pitch <= 0:
+                raise ValueError("roof pitch must be positive.")
+            self.roof_pitch = pitch
+        return self
 
     def note(self, text: str) -> "Barndominium":
         self.notes = (self.notes + "\n" + text).strip() if self.notes else text
@@ -659,6 +695,8 @@ class Barndominium:
         length: float,
         label: str | None = None,
         level: int | float = 0,
+        ceiling_height: float | None = None,
+        vaulted: bool = False,
         east_of: str | None = None,
         west_of: str | None = None,
         north_of: str | None = None,
@@ -710,8 +748,14 @@ class Barndominium:
             if v is not None
         ]
         placement = " + ".join(used) if used else None
+        ch = None if ceiling_height is None else _finite(room_id, "ceiling_height", ceiling_height)
+        if ch is not None and ch <= 0:
+            raise ValueError(f"Room '{room_id}': ceiling height must be positive.")
         self.rooms.append(
-            Room(room_id, type, x, y, width, length, label, level, placement)
+            Room(
+                room_id, type, x, y, width, length, label, level,
+                ceiling_height=ch, vaulted=bool(vaulted), placement=placement,
+            )
         )
         return self
 

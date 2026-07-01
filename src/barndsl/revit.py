@@ -195,6 +195,10 @@ class RevitRoom:
     clear_width: float = 0.0
     clear_length: float = 0.0
     clear_area: float = 0.0
+    #: Finished ceiling height (ft) for this room — its own override or the plan
+    #: default — and whether it's vaulted (open to the roof, no flat ceiling).
+    ceiling_height: float = 0.0
+    vaulted: bool = False
 
 
 @dataclass
@@ -358,6 +362,8 @@ class RevitModel:
                     "clear_width": r.clear_width,
                     "clear_length": r.clear_length,
                     "clear_area": r.clear_area,
+                    "ceiling_height": r.ceiling_height,
+                    "vaulted": r.vaulted,
                 }
                 for r in self.rooms
             ],
@@ -686,11 +692,17 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
     slope_angle, ridge, eaves, outline, outline_slopes, gable_axis}``; coordinates
     are ``[x, y]`` in feet.
     """
+    style = getattr(plan, "roof_style", "gable")
+    override = getattr(plan, "roof_pitch", None)
+    if override:
+        pitch = float(override)
     minx, miny, maxx, maxy = plan.bounds()
     w, l = maxx - minx, maxy - miny
     long_is_y = l >= w
     span = min(w, l)
-    rise = (span / 2.0) * pitch
+    # A gable/monitor peaks at the centre over half the span; a shed rises across
+    # the full span to one high eave.
+    rise = (span * pitch) if style == "shed" else (span / 2.0) * pitch
     slope_angle = math.atan(pitch)
     if long_is_y:
         mid = (minx + maxx) / 2.0
@@ -722,8 +734,18 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
         return horizontal if gable_axis == "x" else not horizontal
 
     outline_slopes = [_is_eave(seg) for seg in outline]
+    if style == "shed":
+        # A shed slopes as one plane from a low eave up to a high eave; only the
+        # low eave is slope-defining (the other long edge is the high wall).
+        seen_eave = False
+        for i, is_eave in enumerate(outline_slopes):
+            if is_eave and not seen_eave:
+                seen_eave = True  # keep the first eave slope-defining
+            elif is_eave:
+                outline_slopes[i] = False
     return {
         "top_level": top_level,
+        "style": style,
         "pitch": pitch,
         "rise": rise,
         "slope_angle": slope_angle,
@@ -980,6 +1002,11 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                 clear_width=float(clear_w),
                 clear_length=float(clear_l),
                 clear_area=float(clear_w * clear_l),
+                ceiling_height=float(
+                    r.ceiling_height if getattr(r, "ceiling_height", None) is not None
+                    else height
+                ),
+                vaulted=bool(getattr(r, "vaulted", False)),
             )
         )
 
@@ -1070,7 +1097,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
     grids = structural_grids(plan)
     top_level = max(level_indexes)
     roof = roof_plan(plan, top_level) if plan.rooms else None
-    if roof is not None:
+    if roof is not None and roof.get("style") != "shed":
+        # A shed has no gable ends (both short walls stay at the plate/rake); a
+        # gable and a monitor peak, so their end walls rise to the ridge.
         _mark_gable_walls(walls_by_level.get(top_level, []), roof, height)
 
     foundation = foundation_plan(plan) if plan.rooms else None
@@ -1194,7 +1223,12 @@ def exchange_to_plan(data: dict) -> Barndominium:
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))
 
     # Rooms first — openings resolve against them.
+    plan_ceiling = float(pinfo.get("ceiling_height", feet(9)))
     for r in data.get("rooms", []):
+        # A per-room ceiling equal to the plan default isn't an override — only
+        # carry one that actually differs, so the round-trip stays a fixed point.
+        rc = r.get("ceiling_height")
+        override = None if rc is None or abs(float(rc) - plan_ceiling) <= 1e-9 else float(rc)
         plan.add_room(
             r["id"],
             r["type"],
@@ -1203,6 +1237,8 @@ def exchange_to_plan(data: dict) -> Barndominium:
             width=float(r["width"]),
             length=float(r["length"]),
             level=int(r.get("level", 0)),
+            ceiling_height=override,
+            vaulted=bool(r.get("vaulted", False)),
         )
 
     for o in data.get("openings", []):
