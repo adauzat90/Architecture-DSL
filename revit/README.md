@@ -104,7 +104,8 @@ model. Use it to shake a plan out against a project template before committing.
 | `levels` | Reused if one exists at the same elevation, else a new `Level`. |
 | `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). A **gable-end** wall (flagged `profile: gable`) builds from a vertical pentagon profile so its top rises to the ridge; a profile failure falls back to a flat wall with a note. |
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
-| `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
+| `rooms` | A `Room` placed at each seed point once walls enclose it, then named, **numbered** (101, 102, … per level) and given default **finishes** (floor/base/ceiling/wall) by room type — a residential room schedule filled in, ready to refine. |
+| `ceilings` | A flat `Ceiling` per room at its ceiling height above the level — a reflected-ceiling plane to host lighting. A **vaulted** room is skipped (open to the roof). Needs a ceiling type; skipped with a note otherwise. |
 | `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. Posts rise from the floor to the **plate** (a real top level/offset, not a default stub) and bents/ridge are drawn up **at the plate**, not down on the floor. |
 | `fixtures` | A family instance at each fixture/appliance seed — a plumbing family for wet fixtures (toilet/lavatory/tub/shower/sink), a specialty-equipment family for appliances (refrigerator/range). Seeds for the designer to swap/adjust; **only if** the family is loaded, skipped with a note otherwise. |
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
@@ -121,12 +122,15 @@ transactions). Every element is created defensively: if one fails (e.g. a missin
 family), it's recorded in the report and the rest still build.
 
 **Re-building is idempotent.** Every element a build creates is stamped
-barndsl-managed (in its Comments). By default a re-build first **removes the
-previous barndsl build** and lays down the current one — so iterating on the
-`.barn` and rebuilding *replaces* the model instead of stacking duplicates, and
-never touches anything you drew by hand. It's all one undo step. Set
-`"replace": false` in the config to append instead (levels are always reused, and
-stairs aren't purged).
+barndsl-managed in a private **Extensible Storage** schema — not the user-facing
+Comments field, so the mark never clobbers your annotations and you can't
+accidentally match it. (A legacy Comments mark from an older build is still
+*read*, so an old build is still recognised and replaced.) By default a re-build
+first **removes the previous barndsl build** and lays down the current one — so
+iterating on the `.barn` and rebuilding *replaces* the model instead of stacking
+duplicates, and never touches anything you drew by hand. It's all one undo step.
+Set `"replace": false` in the config to append instead (levels are always reused,
+and stairs aren't purged).
 
 ## Documentation (the Document button)
 

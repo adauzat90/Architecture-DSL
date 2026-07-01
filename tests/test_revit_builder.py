@@ -352,6 +352,43 @@ def test_wall_location_line_finish_face_exterior_is_applied_when_configured():
     assert any(w.get_Parameter(BIP.WALL_KEY_REF_PARAM).AsDouble() == 2 for w in walls)
 
 
+def test_rooms_get_numbers_and_finishes():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    from revit_fakes import BuiltInParameter as BIP
+
+    rooms = list(doc.placed_rooms)
+    assert rooms
+    numbers = [r.get_Parameter(BIP.ROOM_NUMBER).AsString() for r in rooms]
+    assert "101" in numbers  # ground-floor rooms number 101, 102, …
+    assert all(n for n in numbers)  # every room is numbered
+    # A bathroom gets a tile floor finish from the default schedule.
+    finishes = [r.get_Parameter(BIP.ROOM_FINISH_FLOOR).AsString() for r in rooms]
+    assert any(f == "Tile" for f in finishes)
+
+
+def test_ceilings_build_per_room():
+    doc = _ready_doc()
+    doc.add_ceiling_type("2x2 ACT")
+    rep = builder.build(doc, _exchange(CEDAR))
+    # cedar has 3 rooms → 3 ceilings, each at the ceiling height above the level.
+    assert rep.count(status="created", kind="ceiling") == 3
+    from revit_fakes import BuiltInParameter as BIP
+
+    ceils = [c for k, c in ((e[0], e[1]) for e in doc.created) if k == "ceiling"]
+    assert all(
+        abs(c.get_Parameter(BIP.CEILING_HEIGHTABOVELEVEL_PARAM).AsDouble() - 10.0) < 1e-6
+        for c in ceils
+    )
+
+
+def test_ceilings_skipped_without_a_ceiling_type():
+    doc = _ready_doc()  # no ceiling type added
+    rep = builder.build(doc, _exchange(CEDAR))
+    assert rep.count(kind="ceiling") == 0
+    assert any("ceiling" in n for n in rep.notes)
+
+
 def test_porch_builds_as_floor():
     doc = _ready_doc()
     rep = builder.build(doc, _example_exchange("cedar_ridge.barn"))
@@ -566,12 +603,9 @@ def test_stairs_disabled():
 
 
 def _managed_count(doc):
-    n = 0
-    for e in doc._by_id.values():
-        p = e.get_Parameter(revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
-        if p is not None and p.AsString() == builder.MANAGED_MARK:
-            n += 1
-    return n
+    # The marker now lives in Extensible Storage, not Comments — count via the
+    # builder's own predicate.
+    return sum(1 for e in doc._by_id.values() if builder._is_managed(e))
 
 
 def test_created_elements_are_marked_managed():
@@ -580,8 +614,28 @@ def test_created_elements_are_marked_managed():
     assert _managed_count(doc) > 0
     # Levels are reused, not marked (so a re-build won't delete them).
     for lv in doc.levels:
-        p = lv.get_Parameter(revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
-        assert p.AsString() != builder.MANAGED_MARK
+        assert not builder._is_managed(lv)
+
+
+def test_managed_mark_does_not_touch_the_comments_field():
+    # Regression: the marker used to squat on Comments, clobbering user
+    # annotations. It now lives in Extensible Storage; Comments stays empty.
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    for e in doc._by_id.values():
+        p = e.get_Parameter(revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
+        assert p is None or p.AsString() in ("", None)
+
+
+def test_legacy_comments_marker_is_still_recognised():
+    # An element marked the old way (Comments) is still treated as managed, so an
+    # old build is cleaned by a new one.
+    doc = _ready_doc()
+    legacy = revit_fakes.Wall("legacy", doc)
+    legacy.get_Parameter(
+        revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS
+    ).Set(builder.MANAGED_MARK)
+    assert builder._is_managed(legacy)
 
 
 def test_replace_rebuild_is_idempotent():

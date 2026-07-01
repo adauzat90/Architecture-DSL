@@ -37,9 +37,87 @@ from . import report as _report
 #: Code-minimum flight width (ft), used only as a fallback run width.
 MIN_STAIR_WIDTH = 3.0
 
-#: Stamped into each created element's Comments so a re-build can find and
-#: replace exactly what a previous barndsl build made (and nothing the user drew).
+#: Marker value stamped on every element a build creates, so a re-build can find
+#: and replace exactly what a previous barndsl build made (and nothing the user
+#: drew). Stored in **Extensible Storage** (a private schema) rather than the
+#: user-facing Comments field, so it doesn't clobber a designer's annotations and
+#: a user can't accidentally match it. A legacy Comments marker is still *read*
+#: (so an old build is still recognised), but new builds no longer *write* it.
 MANAGED_MARK = "barndsl-managed"
+
+#: A fixed GUID for the private Extensible-Storage schema that carries the marker.
+_MANAGED_SCHEMA_GUID = "b47d9a1e-6f3c-4c2a-9d18-2a1f0c7e5b64"
+_MANAGED_FIELD = "marker"
+
+
+def _es():
+    """The ExtensibleStorage namespace + the System bits, or ``None`` if the
+    running engine can't provide them (then the Comments fallback is used)."""
+    try:
+        from Autodesk.Revit.DB import ExtensibleStorage as ES
+        from System import Guid, String
+
+        return ES, Guid, String
+    except Exception:
+        return None
+
+
+def _managed_schema(create=False):
+    """Look up (or, when ``create``, build) the private managed-element schema."""
+    bits = _es()
+    if bits is None:
+        return None
+    ES, Guid, String = bits
+    try:
+        guid = Guid(_MANAGED_SCHEMA_GUID)
+        schema = ES.Schema.Lookup(guid)
+        if schema is not None or not create:
+            return schema
+        b = ES.SchemaBuilder(guid)
+        b.SetSchemaName("BarndslManaged")
+        b.SetReadAccessLevel(ES.AccessLevel.Public)
+        b.SetWriteAccessLevel(ES.AccessLevel.Public)
+        b.AddSimpleField(_MANAGED_FIELD, String)
+        return b.Finish()
+    except Exception:
+        return None
+
+
+def _es_mark(elem):
+    """Stamp the managed marker into Extensible Storage. Returns True on success."""
+    bits = _es()
+    if bits is None:
+        return False
+    _ES, _Guid, String = bits
+    schema = _managed_schema(create=True)
+    if schema is None:
+        return False
+    try:
+        from Autodesk.Revit.DB import ExtensibleStorage as ES
+
+        ent = ES.Entity(schema)
+        ent.Set[String](_MANAGED_FIELD, MANAGED_MARK)
+        elem.SetEntity(ent)
+        return True
+    except Exception:
+        return False
+
+
+def _es_is_managed(elem):
+    bits = _es()
+    if bits is None:
+        return False
+    _ES, _Guid, String = bits
+    schema = _managed_schema(create=False)
+    if schema is None:
+        return False
+    try:
+        ent = elem.GetEntity(schema)
+        if ent is None or not ent.IsValid():
+            return False
+        return ent.Get[String](_MANAGED_FIELD) == MANAGED_MARK
+    except Exception:
+        return False
 
 try:
     from pyrevit import script as _script
@@ -108,8 +186,25 @@ def _comments_param(elem):
     return p
 
 
+def _is_managed(elem):
+    """Is this element one a previous barndsl build created? Reads the Extensible
+    Storage marker, then falls back to the legacy Comments marker so an older
+    build is still recognised and cleaned."""
+    if _es_is_managed(elem):
+        return True
+    p = _comments_param(elem)
+    try:
+        return p is not None and p.AsString() == MANAGED_MARK
+    except Exception:
+        return False
+
+
 def _mark(elem):
-    """Stamp an element as barndsl-managed (via its Comments), best effort."""
+    """Stamp an element as barndsl-managed. Prefers Extensible Storage (private,
+    out of the way); only if that engine is unavailable does it fall back to the
+    Comments field."""
+    if _es_mark(elem):
+        return elem
     p = _comments_param(elem)
     if p is not None and not p.IsReadOnly:
         try:
@@ -135,12 +230,7 @@ def _purge_managed(doc, report):
         return 0
     removed = 0
     for e in list(elems):
-        p = _comments_param(e)
-        try:
-            val = p.AsString() if p is not None else None
-        except Exception:
-            val = None
-        if val == MANAGED_MARK:
+        if _is_managed(e):
             try:
                 doc.Delete(e.Id)
                 removed += 1
@@ -392,6 +482,7 @@ class _Resources(object):
         self.column = None
         self.beam = None
         self.roof_type = None
+        self.ceiling_type = None
         self.plumbing = None
         self.appliance = None
         self.footing = None
@@ -480,6 +571,11 @@ def _resolve_resources(doc, options, report):
     except Exception:
         res.roof_type = None
     report.resources["roof_type"] = _name(res.roof_type) if res.roof_type else "(none)"
+    try:
+        res.ceiling_type = (_collect(doc, DB.CeilingType) or [None])[0]
+    except Exception:
+        res.ceiling_type = None
+    report.resources["ceiling_type"] = _name(res.ceiling_type) if res.ceiling_type else "(none)"
     return res
 
 
@@ -666,7 +762,45 @@ def _build_openings(doc, data, levels, walls, res, options, report):
         _made(report, kind, o["id"], inst)
 
 
+#: Default finish schedule by room type — a starting point a residential room
+#: schedule expects (the designer refines it). Wet rooms get tile, living areas
+#: wood, service rooms sealed concrete; everything falls back to the generic set.
+_ROOM_FINISHES = {
+    "bathroom": ("Tile", "Tile", "Paint - Ceiling", "Tile"),
+    "half_bath": ("Tile", "Tile", "Paint - Ceiling", "Paint"),
+    "kitchen": ("Tile", "Wood Base", "Paint - Ceiling", "Paint"),
+    "laundry": ("Tile", "Tile", "Paint - Ceiling", "Paint"),
+    "utility": ("Sealed Concrete", "Rubber Base", "Exposed", "Paint"),
+    "mudroom": ("Tile", "Tile", "Paint - Ceiling", "Paint"),
+    "garage": ("Sealed Concrete", "None", "Exposed", "None"),
+    "shop": ("Sealed Concrete", "None", "Exposed", "None"),
+    "living": ("Wood", "Wood Base", "Paint - Ceiling", "Paint"),
+    "dining": ("Wood", "Wood Base", "Paint - Ceiling", "Paint"),
+    "bedroom": ("Carpet", "Wood Base", "Paint - Ceiling", "Paint"),
+    "office": ("Carpet", "Wood Base", "Paint - Ceiling", "Paint"),
+    "loft": ("Carpet", "Wood Base", "Paint - Ceiling", "Paint"),
+}
+_ROOM_FINISH_DEFAULT = ("Finish", "Base", "Paint - Ceiling", "Paint")
+
+
+def _set_string_param(elem, bip, value):
+    try:
+        p = elem.get_Parameter(bip)
+    except Exception:
+        p = None
+    if p is not None and not p.IsReadOnly:
+        try:
+            p.Set(str(value))
+            return True
+        except Exception:
+            pass
+    return False
+
+
 def _build_rooms(doc, data, levels, report):
+    # Number rooms sequentially per level: 101.., 201.. — the residential
+    # convention (floor number × 100 + running count).
+    counters = {}
     for r in data["rooms"]:
         level = levels.get(r["level"])
         if level is None:
@@ -681,13 +815,57 @@ def _build_rooms(doc, data, levels, report):
         if room is None:
             report.skipped("room", r["id"], "point not in an enclosed region")
             continue
-        try:
-            p = room.get_Parameter(DB.BuiltInParameter.ROOM_NAME)
-            if p is not None and not p.IsReadOnly:
-                p.Set(r.get("name", r["id"]))
-        except Exception:
-            pass
+        _set_string_param(room, DB.BuiltInParameter.ROOM_NAME, r.get("name", r["id"]))
+        lvl = r.get("level", 0)
+        counters[lvl] = counters.get(lvl, 0) + 1
+        _set_string_param(
+            room, DB.BuiltInParameter.ROOM_NUMBER, "%d%02d" % (lvl + 1, counters[lvl])
+        )
+        floor, base, ceil, wall = _ROOM_FINISHES.get(r.get("type", ""), _ROOM_FINISH_DEFAULT)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_FLOOR, floor)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_BASE, base)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_CEILING, ceil)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_WALL, wall)
         _made(report, "room", r["id"], room)
+
+
+def _build_ceilings(doc, data, levels, res, report):
+    """A flat ceiling per room, hosted at the room's ceiling height above its
+    level — so the model has a reflected-ceiling plane and somewhere to host
+    lighting. Uses each room's rectangle; skipped (with a note) when the project
+    has no ceiling type. A per-room ceiling height (vaulted rooms) is honoured."""
+    rooms = data.get("rooms", [])
+    if not rooms:
+        return
+    if res.ceiling_type is None:
+        report.note("ceilings skipped: no ceiling type in project")
+        return
+    plan_h = float(data.get("plan", {}).get("ceiling_height", 8.0))
+    from System.Collections.Generic import List
+
+    for r in rooms:
+        level = levels.get(r["level"])
+        if level is None:
+            continue
+        # A vaulted/cathedral room has no flat ceiling plane — skip it.
+        if r.get("vaulted"):
+            report.skipped("ceiling", r["id"], "vaulted — open to the roof")
+            continue
+        height = float(r.get("ceiling_height", plan_h))
+        try:
+            loop = _rect_loop(
+                float(r["x"]), float(r["y"]), float(r["width"]), float(r["length"]),
+                level.Elevation,
+            )
+            loops = List[DB.CurveLoop]()
+            loops.Add(loop)
+            ceil = DB.Ceiling.Create(doc, loops, res.ceiling_type.Id, level.Id)
+            _set_double_param(
+                ceil, [DB.BuiltInParameter.CEILING_HEIGHTABOVELEVEL_PARAM], [], height
+            )
+            _made(report, "ceiling", r["id"], ceil)
+        except Exception as exc:
+            report.failed("ceiling", r["id"], str(exc))
 
 
 def _build_structure(doc, data, levels, res, report):
@@ -1352,6 +1530,8 @@ def build(doc, data, options=None):
         walls = _build_walls(doc, data, levels, res, options, report)
         _build_openings(doc, data, levels, walls, res, options, report)
         _build_rooms(doc, data, levels, report)
+        if options.ceilings:
+            _build_ceilings(doc, data, levels, res, report)
         if options.structure:
             _build_structure(doc, data, levels, res, report)
         if options.fixtures:
@@ -1415,12 +1595,8 @@ def _managed_in_category(doc, bic):
     except Exception:
         return out
     for e in elems:
-        p = _comments_param(e)
-        try:
-            if p is not None and p.AsString() == MANAGED_MARK:
-                out.append(e)
-        except Exception:
-            pass
+        if _is_managed(e):
+            out.append(e)
     return out
 
 
