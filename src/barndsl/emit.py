@@ -6,6 +6,7 @@ the emitted text reproduces an equivalent plan.
 
 from __future__ import annotations
 
+from .constants import FLOOR_ASSEMBLY_DEPTH
 from .elements import Barndominium
 
 
@@ -28,6 +29,8 @@ def emit_dsl(plan: Barndominium) -> str:
             f"wing {_n(wing.width)} x {_n(wing.length)} at {_n(wing.x)},{_n(wing.y)}"
         )
     out.append(f"ceiling {_n(plan.ceiling_height)}")
+    if abs(plan.floor_depth - FLOOR_ASSEMBLY_DEPTH) > 1e-9:
+        out.append(f"floor {_n(plan.floor_depth)}")
     if plan.program_spec is not None:
         spec = plan.program_spec
         line = f"program {spec.beds} bed"

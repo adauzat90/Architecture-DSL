@@ -57,10 +57,12 @@ def test_levels_match_plan_levels():
     plan = _compile_example("gallery/two_story.barn")
     model = to_revit_model(plan)
     assert [l.index for l in model.levels] == plan.levels()
-    # Names are 1-based, elevations stack by the ceiling height.
+    # Names are 1-based; elevations stack by floor-to-floor (ceiling + the
+    # inter-floor assembly), not the bare ceiling height.
     assert model.levels[0].name == "Level 1"
     assert model.levels[0].elevation == 0.0
-    assert model.levels[1].elevation == pytest.approx(plan.ceiling_height)
+    assert model.levels[1].elevation == pytest.approx(plan.floor_to_floor)
+    assert plan.floor_to_floor > plan.ceiling_height
 
 
 # --- walls -------------------------------------------------------------------

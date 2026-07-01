@@ -45,6 +45,7 @@ plan "Name"
 envelope <W> x <L>
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>
+floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D
 note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
 room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -270,6 +271,15 @@ is tested anywhere; only the final element creation needs Revit. What it does:
 * **Coordinates pass through unchanged.** barndsl's convention (`x` east, `y`
   north, feet) is exactly Revit's world XY plane, and Revit's internal unit is
   the decimal foot. `z` comes from the floor level.
+* **Levels stack by floor-to-floor, not ceiling height.** An upper level sits at
+  `ceiling + floor` (the inter-floor assembly depth, `floor` directive; default
+  12") above the one below, so a second storey rests on the first floor's
+  structure rather than dropping onto its ceiling plane.
+* **The roof is a gable, not a flat cap.** The exchange carries the ridge, pitch
+  and per-edge slope, and the pyRevit builder makes the eave edges slope-defining
+  so a footprint roof comes out as a gable. The **gable-end walls** are flagged
+  with their ridge apex and build from a vertical pentagon profile, so their tops
+  rise to the roof instead of stopping flat at the plate.
 * **Walls are deduplicated.** Every room edge is decomposed along its grid line
   into atomic segments, each classified *interior* (a room on both sides) or
   *exterior* (open footprint beyond), then contiguous like segments merge back

@@ -31,3 +31,14 @@ NICE_STAIR_WIDTH = 3.5
 # --- daylight (IRC R303) -----------------------------------------------------
 #: Glazing must total at least 8% of a habitable room's floor area.
 NATURAL_LIGHT_RATIO = 0.08
+
+# --- vertical assembly -------------------------------------------------------
+#: Depth (feet) of the inter-floor assembly between two stacked levels — the
+#: joists/trusses + subfloor + ceiling finish that a *ceiling height* alone
+#: ignores. Floor-to-floor = ceiling height + this, so an upper level sits on
+#: top of the level below's structure rather than directly on its ceiling plane.
+#: A modest 12 in default for a residential engineered-joist floor.
+FLOOR_ASSEMBLY_DEPTH = 12.0 / 12.0
+
+#: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
+DEFAULT_ROOF_PITCH = 4.0 / 12.0

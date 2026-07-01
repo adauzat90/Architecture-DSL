@@ -61,6 +61,7 @@ plan "Name"
 envelope <W> x <L>                 # primary footprint block (at the origin)
 wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>                        # >= 7; 9–12 is typical
+floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D (default 1)
 note "free text"                   # optional; repeatable
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
 
@@ -446,6 +447,7 @@ Brief grammar (one statement per line, `#` comments):
 | `plan "Name"` | plan name |
 | `envelope <W> x <L>` | optional; omit to size the envelope to the packed bounding box |
 | `ceiling <H>` | ceiling height |
+| `floor <D>` | inter-floor assembly depth (ft); floor-to-floor = ceiling + D |
 | `note "…"` | free text |
 | `room <id>: <type> <W> x <L> [level <n>]` | a room to place (no coordinates) |
 | `adjacent <a> <b> [<c> …]` | connect `<a>` to **each** of the rest — a hub. `adjacent hall bed1 bed2 bath` is the "rooms off a spine" idiom |

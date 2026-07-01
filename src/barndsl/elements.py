@@ -20,6 +20,8 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .constants import DEFAULT_ROOF_PITCH, FLOOR_ASSEMBLY_DEPTH
+
 # --- Units ------------------------------------------------------------------
 
 #: Internal unit is the foot. These helpers keep DSL authoring readable.
@@ -448,6 +450,11 @@ class Barndominium:
     envelope_width: float = 0.0
     envelope_length: float = 0.0
     ceiling_height: float = feet(9)
+    #: Depth (feet) of the inter-floor assembly between two stacked levels — the
+    #: joists/subfloor/ceiling that a clear ceiling height ignores. Floor-to-floor
+    #: is ``ceiling_height + floor_depth`` (see :attr:`floor_to_floor`), so an
+    #: upper level stacks on the level below's *structure*, not its ceiling plane.
+    floor_depth: float = FLOOR_ASSEMBLY_DEPTH
     rooms: list[Room] = field(default_factory=list)
     interior_doors: list[InteriorDoor] = field(default_factory=list)
     exterior_doors: list[ExteriorDoor] = field(default_factory=list)
@@ -517,6 +524,32 @@ class Barndominium:
     def ceiling(self, height: float) -> "Barndominium":
         self.ceiling_height = float(height)
         return self
+
+    def floors(self, depth: float) -> "Barndominium":
+        """Set the inter-floor assembly depth (feet) between stacked levels.
+
+        This is the joist/subfloor/ceiling thickness a clear ceiling height
+        leaves out; it makes :attr:`floor_to_floor` (and every upper-level
+        elevation) reflect a real floor system instead of stacking levels
+        directly on the ceiling plane below. Defaults to
+        :data:`~barndsl.constants.FLOOR_ASSEMBLY_DEPTH`.
+        """
+        depth = float(depth)
+        if depth < 0:
+            raise ValueError("floor assembly depth must be non-negative.")
+        self.floor_depth = depth
+        return self
+
+    @property
+    def floor_to_floor(self) -> float:
+        """Vertical distance between one finished floor and the next: the clear
+        ceiling height plus the inter-floor assembly depth."""
+        return self.ceiling_height + self.floor_depth
+
+    def level_elevation(self, level: int) -> float:
+        """Finished-floor elevation (feet) of ``level`` above grade — the sum of
+        the floor-to-floor heights of every level beneath it."""
+        return float(level) * self.floor_to_floor
 
     def note(self, text: str) -> "Barndominium":
         self.notes = (self.notes + "\n" + text).strip() if self.notes else text
@@ -933,8 +966,11 @@ class Barndominium:
         """Rough material / area takeoff for summaries and estimating."""
         perimeter = 2.0 * (self.envelope_width + self.envelope_length)
         exterior_wall_area = perimeter * self.ceiling_height
-        # Gable roof over a rectangular footprint; ~1.15 factor for a modest pitch.
-        roof_area = self.footprint_area * 1.15
+        # Gable roof over the footprint: the sloped area is the plan area divided
+        # by the cosine of the roof slope (both planes share the pitch), so the
+        # factor follows the actual pitch instead of a fixed guess.
+        slope_factor = math.hypot(1.0, DEFAULT_ROOF_PITCH)  # sec(atan(pitch))
+        roof_area = self.footprint_area * slope_factor
         return {
             "footprint_sqft": self.footprint_area,
             "interior_sqft": self.interior_area,

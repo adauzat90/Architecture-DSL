@@ -102,13 +102,13 @@ model. Use it to shake a plan out against a project template before committing.
 | Exchange | Revit |
 |---|---|
 | `levels` | Reused if one exists at the same elevation, else a new `Level`. |
-| `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). |
+| `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). A **gable-end** wall (flagged `profile: gable`) builds from a vertical pentagon profile so its top rises to the ridge; a profile failure falls back to a flat wall with a note. |
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
 | `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
 | `grids` | Structural grid lines (`Grid.Create`) from a placed `frame`: numbered (`1, 2, …`) along the bents, lettered (`A, B, …`) across the eaves and any interior post line. None without a frame. |
-| `roof` | A footprint roof (`NewFootPrintRoof`) over the building outline (**experimental** — the gable pitch the exchange carries is a manual refinement). |
+| `roof` | A footprint roof (`NewFootPrintRoof`) over the building outline, with its **eave edges made slope-defining** at the plan's pitch so it comes out as a gable (the gable ends stay vertical). Falls back to a flat roof if the slope can't be applied (**experimental** — the slope call needs live-Revit validation). |
 | `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
 | `areas` (stairs) | The flights the core planned for the footprint — a single **straight** run, or a **switchback** (two flights + an automatic landing) when the straight run won't fit — built via the Stairs component API. An overrun (neither fits) is built straight and flagged. Experimental: falls back to a note if the Stairs API rejects the geometry. |
 
@@ -209,11 +209,16 @@ back to the auto-pick with a note in the report.
   and *that* is unit-tested; the Revit instantiation of those flights is what a
   real Revit is still needed to confirm. If the Stairs API rejects the geometry,
   the stair is left for you to model (the rest of the build is fine).
-- **The roof is a flat footprint roof.** Its outline/ridge/pitch are computed by
-  the core's `roof_plan` (tested), but the builder lays down a flat footprint roof
-  and leaves the gable pitch as a manual refinement — sloping the eave edges needs
-  the model-curve mapping only a live Revit returns. For an L/T/U footprint the
-  outline is the bounding rectangle.
+- **The roof slopes its eaves (experimental).** The outline/ridge/pitch/slope are
+  computed by the core's `roof_plan` (tested), and the builder now makes the eave
+  edges slope-defining via the model-curve mapping `NewFootPrintRoof` returns — so
+  the roof builds as a gable. The mapping and slope calls still need live-Revit
+  confirmation; a failure falls back to a flat roof with a note. For an L/T/U
+  footprint the outline is the bounding rectangle.
+- **Gable-end walls build from a profile (experimental).** They're flagged in the
+  exchange with a ridge apex and built via the vertical-profile overload of
+  `Wall.Create`; if that overload rejects the geometry the wall falls back to a
+  flat plate-height rectangle with a note. Needs live-Revit confirmation.
 - Wall centrelines sit on the barndsl room-rectangle edges; Revit applies each
   wall type's thickness about that centreline. For exact interior dimensions,
   set the wall **Location Line** to a finish face, or model with thin types.

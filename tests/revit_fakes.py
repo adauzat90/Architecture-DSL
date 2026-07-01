@@ -184,7 +184,12 @@ class UV:
         self.V = float(v)
 
 
-class Line:
+class Curve:
+    """Base curve type — only used as the generic parameter of ``List[DB.Curve]``
+    when building a wall from a vertical profile (a gable-end wall)."""
+
+
+class Line(Curve):
     def __init__(self, p1, p2):
         self.p1 = p1
         self.p2 = p2
@@ -249,6 +254,39 @@ class RoofType(FakeElement):
     pass
 
 
+class _ModelCurveArray:
+    """Stand-in for the ``ModelCurveArray`` ``NewFootPrintRoof`` returns — one
+    model curve per footprint edge, queried by ``Size`` / ``get_Item`` like Revit's."""
+
+    def __init__(self, n):
+        self._items = [FakeElement("model-curve", None) for _ in range(n)]
+
+    @property
+    def Size(self):
+        return len(self._items)
+
+    def get_Item(self, i):
+        return self._items[i]
+
+
+class FootPrintRoof(FakeElement):
+    """A footprint roof that records which edges were made slope-defining, so a
+    test can assert the eaves slope and the gable ends stay vertical."""
+
+    def __init__(self, name, doc):
+        super().__init__(name, doc)
+        self.slopes = {}  # model-curve -> slope angle (radians)
+
+    def set_DefinesSlope(self, model_curve, defines):
+        if defines:
+            self.slopes.setdefault(id(model_curve), 0.0)
+        else:
+            self.slopes.pop(id(model_curve), None)
+
+    def set_SlopeAngle(self, model_curve, angle):
+        self.slopes[id(model_curve)] = float(angle)
+
+
 class Grid(FakeElement):
     @staticmethod
     def Create(doc, line):
@@ -296,9 +334,23 @@ class FamilySymbol(FakeElement):
 
 class Wall(FakeElement):
     @staticmethod
-    def Create(doc, curve, wtype_id, level_id, height, offset, flip, structural):
+    def Create(doc, first, *rest):
+        """Two overloads, matched by arity (as Revit matches by signature):
+
+        * line:    ``Create(doc, curve, wtypeId, levelId, height, offset, flip, structural)``
+        * profile: ``Create(doc, IList[Curve], wtypeId, levelId, structural)`` — a
+          wall from a vertical profile loop, used for a gable-end wall.
+        """
         w = Wall("wall", doc)
-        w.curve, w.height, w.level_id, w.wtype_id = curve, height, level_id, wtype_id
+        if len(rest) == 3:  # profile overload
+            w.profile = list(first)
+            w.curve = None
+            w.height = None
+            w.wtype_id, w.level_id, w.structural = rest
+        else:  # line overload
+            w.profile = None
+            w.curve = first
+            w.wtype_id, w.level_id, w.height = rest[0], rest[1], rest[2]
         doc.created.append(("wall", w))
         return w
 
@@ -467,10 +519,12 @@ class _Creator:
         return rm
 
     def NewFootPrintRoof(self, curve_array, level, roof_type):
-        roof = FakeElement("roof", self.doc)
+        roof = FootPrintRoof("roof", self.doc)
         self.doc.created.append(("roof", roof))
-        # Real Revit returns (roof, modelCurveMapping); the builder handles a tuple.
-        return (roof, FakeElement("mapping", self.doc))
+        # Real Revit returns (roof, modelCurveMapping) — one model curve per
+        # footprint edge; the builder sets slopes on the eave edges.
+        mapping = _ModelCurveArray(len(getattr(curve_array, "curves", [])))
+        return (roof, mapping)
 
     def NewRoomTag(self, link_element_id, uv, view_id):
         t = FakeElement("room-tag", self.doc)
@@ -675,7 +729,7 @@ def _make_db_module():
     db = types.ModuleType("Autodesk.Revit.DB")
     for obj in (
         BuiltInParameter, BuiltInCategory, WallKind, WallFunction, StorageType,
-        FailureProcessingResult, IFailuresPreprocessor, Structure, XYZ, UV, Line,
+        FailureProcessingResult, IFailuresPreprocessor, Structure, XYZ, UV, Curve, Line,
         CurveLoop, CurveArray, Element, Level, WallType, FloorType, RoofType, Grid,
         Family, FamilySymbol, Wall, Floor, FamilyInstance, FilteredElementCollector,
         Transaction, ViewFamily, ViewFamilyType, ViewPlan, ViewSchedule, ViewSheet,

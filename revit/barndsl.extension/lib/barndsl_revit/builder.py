@@ -377,6 +377,40 @@ def _ensure_levels(doc, data, report):
     return out
 
 
+def _gable_wall(doc, w, wtype, level):
+    """A gable-end wall built from a vertical pentagon profile: two base corners,
+    two plate corners, and the apex at the ridge. Uses the profile overload of
+    ``Wall.Create`` (an ``IList<Curve>`` loop) so the wall top follows the roof
+    instead of stopping flat at the plate."""
+    from System.Collections.Generic import List
+
+    z = level.Elevation
+    plate = float(w["height"])
+    apex_h = float(w.get("apex_height", plate))
+    (sx, sy), (ex, ey) = w["start"], w["end"]
+    ax, ay = w["apex"]
+    pts = [
+        DB.XYZ(float(sx), float(sy), z),
+        DB.XYZ(float(ex), float(ey), z),
+        DB.XYZ(float(ex), float(ey), z + plate),
+        DB.XYZ(float(ax), float(ay), z + apex_h),
+        DB.XYZ(float(sx), float(sy), z + plate),
+    ]
+    profile = List[DB.Curve]()
+    n = len(pts)
+    for i in range(n):
+        profile.Add(DB.Line.CreateBound(pts[i], pts[(i + 1) % n]))
+    return DB.Wall.Create(doc, profile, wtype.Id, level.Id, False)
+
+
+def _is_gable(w):
+    return (
+        w.get("profile") == "gable"
+        and w.get("apex") is not None
+        and float(w.get("apex_height", 0.0)) > float(w.get("height", 0.0)) + 1e-6
+    )
+
+
 def _build_walls(doc, data, levels, res, report):
     made = {}
     for w in data["walls"]:
@@ -391,15 +425,28 @@ def _build_walls(doc, data, levels, res, report):
             report.skipped("wall", w["id"], "degenerate segment")
             continue
         wtype = res.ext_wall if w.get("exterior") else res.int_wall
-        try:
-            wall = DB.Wall.Create(
-                doc, curve, wtype.Id, level.Id, float(w["height"]), 0.0, False, False
-            )
-            made[w["id"]] = wall
-            _made(report, "wall", w["id"], wall)
-        except Exception as exc:
-            _logger.warning("wall %s: %s", w["id"], exc)
-            report.failed("wall", w["id"], str(exc))
+        wall = None
+        if _is_gable(w):
+            try:
+                wall = _gable_wall(doc, w, wtype, level)
+                _made(report, "wall", w["id"], wall, message="gable-end profile")
+            except Exception as exc:
+                report.note(
+                    "gable wall %s: profile build failed (%s); flat fallback"
+                    % (w["id"], exc)
+                )
+                wall = None
+        if wall is None:
+            try:
+                wall = DB.Wall.Create(
+                    doc, curve, wtype.Id, level.Id, float(w["height"]), 0.0, False, False
+                )
+                _made(report, "wall", w["id"], wall)
+            except Exception as exc:
+                _logger.warning("wall %s: %s", w["id"], exc)
+                report.failed("wall", w["id"], str(exc))
+                continue
+        made[w["id"]] = wall
     return made
 
 
@@ -636,12 +683,46 @@ def _build_grids(doc, data, report):
             report.failed("grid", label, str(exc))
 
 
-def _build_roof(doc, data, levels, res, report):
-    """A footprint roof over the building (experimental).
+def _iter_mapping(mapping):
+    """The model curves ``NewFootPrintRoof`` returns, in footprint-edge order.
 
-    Builds a flat footprint roof from the roof outline; the gable pitch the
-    exchange carries is left as a manual refinement (sloping the eave edges needs
-    the model-curve mapping a live Revit returns).
+    Revit hands back a ``ModelCurveArray`` (``Size`` / ``get_Item``); fall back to
+    plain iteration for anything already list-like."""
+    try:
+        return [mapping.get_Item(i) for i in range(mapping.Size)]
+    except Exception:
+        try:
+            return list(mapping)
+        except Exception:
+            return []
+
+
+def _slope_eaves(roof_el, mapping, roof, report):
+    """Make the eave edges slope-defining at the roof pitch, leaving the gable
+    ends vertical. ``outline_slopes`` flags which footprint edges are eaves."""
+    slopes = roof.get("outline_slopes") or []
+    angle = float(roof.get("slope_angle", 0.0))
+    if angle <= 0.0 or not slopes:
+        return 0
+    curves = _iter_mapping(mapping)
+    made = 0
+    for i, mc in enumerate(curves):
+        if i < len(slopes) and slopes[i]:
+            try:
+                roof_el.set_DefinesSlope(mc, True)
+                roof_el.set_SlopeAngle(mc, angle)
+                made += 1
+            except Exception as exc:
+                report.note("roof slope not applied to edge %d: %s" % (i, exc))
+    return made
+
+
+def _build_roof(doc, data, levels, res, report):
+    """A gable footprint roof over the building (experimental).
+
+    Builds the footprint roof and makes its **eave edges slope-defining** at the
+    plan's pitch (the gable ends stay vertical), so the roof comes out as a gable
+    rather than flat. Falls back to a flat roof if the slope can't be applied.
     """
     roof = data.get("roof")
     if not roof:
@@ -666,8 +747,12 @@ def _build_roof(doc, data, levels, res, report):
             )
         result = doc.Create.NewFootPrintRoof(arr, level, res.roof_type)
         roof_el = result[0] if isinstance(result, tuple) else result
-        _made(report, "roof", "roof", roof_el,
-              message="footprint roof; gable pitch is a manual refinement")
+        mapping = result[1] if isinstance(result, tuple) and len(result) > 1 else None
+        sloped = _slope_eaves(roof_el, mapping, roof, report) if mapping is not None else 0
+        msg = "gable roof; %d eave edge(s) sloped" % sloped if sloped else (
+            "flat footprint roof; gable pitch is a manual refinement"
+        )
+        _made(report, "roof", "roof", roof_el, message=msg)
     except Exception as exc:
         _logger.warning("roof: %s", exc)
         report.failed("roof", "roof", "experimental: %s" % exc)

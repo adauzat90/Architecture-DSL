@@ -326,6 +326,34 @@ def test_roof_skipped_without_roof_type():
     assert any(r.kind == "roof" and r.status == "skipped" for r in rep.records)
 
 
+def test_roof_slopes_its_eave_edges():
+    doc = _ready_doc()
+    data = _example_exchange("cedar_ridge.barn")
+    builder.build(doc, data)
+    roofs = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "roof"]
+    assert len(roofs) == 1
+    # Two eaves were made slope-defining, at the plan's pitch; gable ends aren't.
+    expected = sum(1 for s in data["roof"]["outline_slopes"] if s)
+    assert len(roofs[0].slopes) == expected == 2
+    angle = data["roof"]["slope_angle"]
+    assert all(a == pytest.approx(angle) for a in roofs[0].slopes.values())
+
+
+def test_gable_walls_build_from_a_profile():
+    doc = _ready_doc()
+    data = _example_exchange("cedar_ridge.barn")
+    rep = builder.build(doc, data)
+    walls = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "wall"]
+    gables = [w for w in walls if getattr(w, "profile", None)]
+    n_gable = sum(1 for w in data["walls"] if w.get("profile") == "gable")
+    assert n_gable > 0
+    # Every gable-end wall used the vertical-profile overload (a 5-edge pentagon);
+    # eave/interior walls used the flat line overload.
+    assert len(gables) == n_gable
+    assert all(len(w.profile) == 5 for w in gables)
+    assert rep.count(status="created", kind="wall") == len(data["walls"])
+
+
 def test_slabs_grids_roof_can_be_disabled():
     data = _framed_exchange()
     doc = _ready_doc()

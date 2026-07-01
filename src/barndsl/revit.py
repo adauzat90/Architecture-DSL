@@ -34,6 +34,7 @@ import math
 from dataclasses import asdict, dataclass, field
 
 from .constants import (
+    DEFAULT_ROOF_PITCH,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
@@ -69,8 +70,8 @@ EXCHANGE_SCHEMA = "barndsl.revit/1"
 # constants.py (imported at the top of this module) and re-exported here, so
 # ``barndsl.revit.MIN_STAIR_WIDTH`` etc. keep resolving for callers and tests.
 
-#: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
-DEFAULT_ROOF_PITCH = 4.0 / 12.0
+# DEFAULT_ROOF_PITCH is defined once in constants.py and imported above, so the
+# roof planner and the validator agree on the gable pitch.
 
 
 # --- exchange dataclasses ----------------------------------------------------
@@ -102,6 +103,13 @@ class RevitWall:
     height: float
     exterior: bool
     thickness: float
+    #: Top profile: ``"flat"`` (a plate-height rectangle, the default) or
+    #: ``"gable"`` for a gable-end wall whose top rises to the roof ridge. A gable
+    #: wall carries :attr:`apex` (the ridge point in plan) and :attr:`apex_height`
+    #: (feet above the wall base), so the consumer can build the pentagon profile.
+    profile: str = "flat"
+    apex: tuple[float, float] | None = None
+    apex_height: float = 0.0
 
     @property
     def orientation(self) -> str:
@@ -219,6 +227,7 @@ class RevitModel:
 
     name: str
     ceiling_height: float
+    floor_depth: float
     envelope_width: float
     envelope_length: float
     wings: list[tuple[float, float, float, float]]
@@ -241,6 +250,8 @@ class RevitModel:
             "plan": {
                 "name": self.name,
                 "ceiling_height": self.ceiling_height,
+                "floor_depth": self.floor_depth,
+                "floor_to_floor": self.ceiling_height + self.floor_depth,
                 "envelope_width": self.envelope_width,
                 "envelope_length": self.envelope_length,
                 "wings": [list(w) for w in self.wings],
@@ -255,6 +266,9 @@ class RevitModel:
                     "height": w.height,
                     "exterior": w.exterior,
                     "thickness": w.thickness,
+                    "profile": w.profile,
+                    "apex": list(w.apex) if w.apex is not None else None,
+                    "apex_height": w.apex_height,
                 }
                 for w in self.walls
             ],
@@ -590,14 +604,18 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
     edges. ``rise`` is the ridge height above the eaves for the given ``pitch``
     (rise:run) over half the short span. The outline is the bounding rectangle —
     a simplification for L/T/U footprints (a gable over the bounds), which the
-    builder can refine. Returns ``{top_level, pitch, rise, ridge, eaves,
-    outline, gable_axis}``; coordinates are ``[x, y]`` in feet.
+    builder can refine. ``slope_angle`` is the eave-edge slope in **radians**, and
+    ``outline_slopes`` is a bool per outline segment flagging the eave edges (the
+    ones the builder makes slope-defining). Returns ``{top_level, pitch, rise,
+    slope_angle, ridge, eaves, outline, outline_slopes, gable_axis}``; coordinates
+    are ``[x, y]`` in feet.
     """
     minx, miny, maxx, maxy = plan.bounds()
     w, l = maxx - minx, maxy - miny
     long_is_y = l >= w
     span = min(w, l)
     rise = (span / 2.0) * pitch
+    slope_angle = math.atan(pitch)
     if long_is_y:
         mid = (minx + maxx) / 2.0
         ridge = {"start": [mid, miny], "end": [mid, maxy]}
@@ -620,13 +638,23 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
         [[maxx, maxy], [minx, maxy]],
         [[minx, maxy], [minx, miny]],
     ]
+    # An outline edge is an *eave* (slope-defining) when it runs parallel to the
+    # ridge (the long axis); the gable ends run perpendicular and stay vertical.
+    def _is_eave(seg):
+        (sx, sy), (ex, ey) = seg
+        horizontal = abs(ey - sy) <= TOL
+        return horizontal if gable_axis == "x" else not horizontal
+
+    outline_slopes = [_is_eave(seg) for seg in outline]
     return {
         "top_level": top_level,
         "pitch": pitch,
         "rise": rise,
+        "slope_angle": slope_angle,
         "ridge": ridge,
         "eaves": eaves,
         "outline": outline,
+        "outline_slopes": outline_slopes,
         "gable_axis": gable_axis,
     }
 
@@ -666,6 +694,42 @@ def structural_grids(plan: Barndominium) -> list[dict]:
     return grids
 
 
+def _mark_gable_walls(walls: list[RevitWall], roof: dict, plate_height: float) -> None:
+    """Tag the top-level exterior walls on the gable ends with a gable profile.
+
+    A gable-end wall runs perpendicular to the ridge at either end of it; its top
+    rises from the eave plate to the ridge. We mark each such wall ``profile =
+    "gable"`` and carry the apex (the ridge point in plan) and its height above
+    the wall base, so the consumer can build the pentagon-profiled wall instead of
+    a flat rectangle capped at the plate. Eave and interior walls stay flat.
+    """
+    gable_axis = roof["gable_axis"]
+    apex_h = float(plate_height) + float(roof["rise"])
+    ridge = roof["ridge"]
+    if gable_axis == "y":
+        # Ridge runs north-south; gable ends are the east-west ("h") walls.
+        ridge_x = ridge["start"][0]
+        ends = {round(ridge["start"][1], 6), round(ridge["end"][1], 6)}
+        want, apex_from = "h", lambda w, a: (a, w.const_coord)
+        ridge_c = ridge_x
+    else:
+        # Ridge runs east-west; gable ends are the north-south ("v") walls.
+        ridge_y = ridge["start"][1]
+        ends = {round(ridge["start"][0], 6), round(ridge["end"][0], 6)}
+        want, apex_from = "v", lambda w, a: (w.const_coord, a)
+        ridge_c = ridge_y
+    for w in walls:
+        if not w.exterior or w.orientation != want:
+            continue
+        if round(w.const_coord, 6) not in ends:
+            continue
+        lo, hi = w.span
+        apex_along = min(max(ridge_c, lo), hi)  # clamp the apex into the wall run
+        w.profile = "gable"
+        w.apex = (float(apex_from(w, apex_along)[0]), float(apex_from(w, apex_along)[1]))
+        w.apex_height = apex_h
+
+
 # --- the public entry points -------------------------------------------------
 
 
@@ -677,7 +741,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         RevitLevel(
             index=i,
             name=f"Level {i + 1}",
-            elevation=float(i * height),
+            # Stack by floor-to-floor (ceiling + inter-floor assembly), so an
+            # upper level sits on the structure below it, not on its ceiling plane.
+            elevation=float(plan.level_elevation(i)),
             height=float(height),
         )
         for i in level_indexes
@@ -860,11 +926,15 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         )
 
     grids = structural_grids(plan)
-    roof = roof_plan(plan, max(level_indexes)) if plan.rooms else None
+    top_level = max(level_indexes)
+    roof = roof_plan(plan, top_level) if plan.rooms else None
+    if roof is not None:
+        _mark_gable_walls(walls_by_level.get(top_level, []), roof, height)
 
     return RevitModel(
         name=plan.name,
         ceiling_height=float(height),
+        floor_depth=float(plan.floor_depth),
         envelope_width=float(plan.envelope_width),
         envelope_length=float(plan.envelope_length),
         wings=[(float(w.x), float(w.y), float(w.width), float(w.length)) for w in plan.wings],
@@ -953,6 +1023,8 @@ def exchange_to_plan(data: dict) -> Barndominium:
         float(pinfo.get("envelope_length", 0.0)),
     )
     plan.ceiling(float(pinfo.get("ceiling_height", feet(9))))
+    if pinfo.get("floor_depth") is not None:
+        plan.floors(float(pinfo["floor_depth"]))
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))
