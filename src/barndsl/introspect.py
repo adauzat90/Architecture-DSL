@@ -269,13 +269,26 @@ def plan_summary(plan: Barndominium) -> dict:
         {"a": d.room_a, "b": d.room_b, "kind": d.kind, "width": d.width}
         for d in plan.interior_doors
     ]
-    return {
+    summary = {
         "name": plan.name,
         "rooms": rooms,
         "adjacency": adjacency,
         "unplaced": _unplaced(plan),
         "free_spans": _free_spans(plan),
     }
+    # Declared groupings only — the key is absent (not empty) when the plan
+    # declares none, so a plan with no suites/zones keeps the original shape.
+    suites = getattr(plan, "suites", None) or []
+    zones = getattr(plan, "zones", None) or []
+    if suites:
+        summary["suites"] = [
+            {"id": s.id, "members": list(s.members)} for s in suites
+        ]
+    if zones:
+        summary["zones"] = [
+            {"id": z.id, "members": list(z.members)} for z in zones
+        ]
+    return summary
 
 
 def _g(value: float) -> str:
@@ -329,4 +342,13 @@ def summary_text(summary: dict) -> str:
         lines.append("  none")
     for (room, wall, to), intervals in groups:
         lines.append(f"  {room} {wall} -> {to}: {', '.join(intervals)}")
+    # Declared groupings, only when present (nothing added otherwise).
+    if summary.get("suites"):
+        lines.append("Suites (id: members):")
+        for s in summary["suites"]:
+            lines.append(f"  {s['id']}: {' '.join(s['members'])}")
+    if summary.get("zones"):
+        lines.append("Zones (id: members):")
+        for z in summary["zones"]:
+            lines.append(f"  {z['id']}: {' '.join(z['members'])}")
     return "\n".join(lines)

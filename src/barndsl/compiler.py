@@ -61,7 +61,8 @@ from .validation import Issue, Severity, ValidationReport, validate
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
-    "roof", "orientation", "finish", "accessible", "site", "setback"
+    "roof", "orientation", "finish", "accessible", "site", "setback", "suite",
+    "zone"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -127,6 +128,17 @@ Statements:
         # `frame` uses as a post line (when it runs along the building's long
         # axis); rated = a fire-separation wall (verifies, and silences, the
         # garage/dwelling separation reminder). The rooms must share a wall.
+  suite <id>: <room> ...          # group rooms that read as one unit
+        # e.g. `suite primary: master_bed master_bath master_wic`. Members are
+        # room ids. Declared membership, not geometry: it makes the suite/zone
+        # design checks exact (MASTER_ENSUITE, BED_PRIVACY, BED_SOUND, an entry
+        # into a suited bedroom) instead of inferred. An unknown member is a
+        # SUITE_REF error; a room in two suites a SUITE_OVERLAP warning.
+  zone <id>: <member> ...         # group rooms/suites into a band (private wing, public core)
+        # e.g. `zone private: primary bed_2 bed_3 hall_beds`. Members are room
+        # ids OR suite ids. An unknown member is a ZONE_REF error; a room in two
+        # zones a ZONE_OVERLAP warning; a public room stranded in an otherwise
+        # private zone (or vice versa) a ZONE_CROSS info.
   door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
         # interior door between two rooms. swing (default) hinges; cased = an open
         # walk-through (no leaf); pocket/sliding slide; double/french = a pair of
@@ -860,6 +872,46 @@ def _parse_statement(
         plan.wall(a, b, *attrs)
         ws = plan.wall_specs[-1]
         ws.line, ws.col, ws.end_col = lineno, a_tok.col, a_tok.end_col
+    elif key == "suite":
+        # `suite <id>: <room> ...` — a named group of rooms (members are room
+        # ids). The `:` tokenizes away like the `room <id>:` colon. Unknown
+        # members are caught by the validator (SUITE_REF), like every reference.
+        sid_tok = c.ident("a suite id")
+        members: list[str] = []
+        while c.peek() is not None:
+            members.append(c.ident("a member room id").text)
+        if not members:
+            raise _ParseError(
+                "SYNTAX",
+                "A suite needs at least one member room.",
+                c.eol_col,
+                end_col=c.eol_col + 1,
+                hint="List the rooms in the suite, e.g. "
+                f"`suite {sid_tok.text}: master_bed master_bath master_wic`.",
+            )
+        plan.suite(sid_tok.text, *members)
+        s = plan.suites[-1]
+        s.line, s.col, s.end_col = lineno, kw.col, kw.end_col
+    elif key == "zone":
+        # `zone <id>: <member> ...` — a named band. Members are room ids OR
+        # suite ids (so a zone can group whole suites). Resolution/validation
+        # (ZONE_REF / ZONE_OVERLAP / ZONE_CROSS) happens in the validator.
+        zid_tok = c.ident("a zone id")
+        zmembers: list[str] = []
+        while c.peek() is not None:
+            zmembers.append(c.ident("a member room or suite id").text)
+        if not zmembers:
+            raise _ParseError(
+                "SYNTAX",
+                "A zone needs at least one member.",
+                c.eol_col,
+                end_col=c.eol_col + 1,
+                hint="List the rooms or suites in the zone, e.g. "
+                f"`zone {zid_tok.text}: primary bed_2 hall_beds`.",
+            )
+        plan.zone(zid_tok.text, *zmembers)
+        z = plan.zones[-1]
+        z.line, z.col, z.end_col = lineno, kw.col, kw.end_col
     elif key == "door":
         # Unified door statement. Two forms, told apart by what follows the id:
         #   interior:  door <a> - <b> [swing|cased|pocket|sliding] [opts]

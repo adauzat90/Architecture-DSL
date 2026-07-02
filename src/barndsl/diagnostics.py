@@ -433,6 +433,32 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "along the building's long axis, splitting the bents' clear span. The "
            "frame ignored the declaration; declare a wall running the long way, "
            "or leave the span to the auto interior supports."),
+        # --- suites / zones (the `suite` / `zone` statements) ---------------
+        _c("SUITE_REF", E, "Suite references unknown room",
+           "A `suite` statement lists a member room id that doesn't exist — a "
+           "mistyped id would otherwise group nothing. Reference a real room, or "
+           "declare it."),
+        _c("SUITE_OVERLAP", W, "Room in more than one suite",
+           "A room is declared a member of two different suites. A room belongs "
+           "to one suite (a bedroom's own bath/closet), so this is almost always "
+           "an authoring slip; drop it from all but one. A warning, not an error "
+           "— the plan still builds — matching the other declared-intent checks."),
+        _c("ZONE_REF", E, "Zone references unknown room or suite",
+           "A `zone` statement lists a member that names neither a room nor a "
+           "declared suite. Zone members are room ids or suite ids; reference an "
+           "existing one, or declare it."),
+        _c("ZONE_OVERLAP", W, "Room in more than one zone",
+           "A room falls in two zones — directly, or because it is in a suite "
+           "that a zone lists while another zone lists the room. Zones are "
+           "mutually-exclusive bands (private wing, public core), so this is an "
+           "authoring slip; keep each room in one zone."),
+        _c("ZONE_CROSS", I, "Room crosses its zone's band",
+           "A clearly public room (living/kitchen/dining) is the only such room "
+           "in a zone that otherwise holds only private rooms (bed/bath), or the "
+           "reverse — a public room stranded in the private band. A design nudge, "
+           "not a rule: it fires only when the room is in exactly one zone and "
+           "that zone is unambiguously the opposite band, so a mixed open-concept "
+           "zone (or a plan with no zones) never triggers it."),
         # --- structural frame (the `frame` directive) -----------------------
         _c("POST_OBSTRUCT", I, "Support post in open floor",
            "An auto-placed interior support post (needed where the beam span "

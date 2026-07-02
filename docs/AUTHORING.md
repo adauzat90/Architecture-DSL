@@ -90,6 +90,8 @@ setback [front <n>] [side <n>] [rear <n>]     # optional; required yard clearanc
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall (rooms must abut)
+suite <id>: <room> ...             # optional; group rooms that read as one unit
+zone <id>: <member> ...            # optional; group rooms/suites into a band (members: room OR suite ids)
 door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]   # exterior door
 door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door
@@ -130,6 +132,35 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
   - `rated` — the garage/dwelling fire separation, detailed and declared. It
     silences the `GARAGE_SEPARATION` reminder for that pair (verified, not
     reminded); a garage ceiling under habitable space still reminds.
+- `suite <id>: <room> ...` and `zone <id>: <member> ...` declare the plan's
+  **structure** — which rooms read as one unit, and which band they sit in:
+
+  ```barn
+  suite primary: master_bed master_bath master_wic
+  zone private: primary bed_2 bed_3 hall_beds
+  ```
+
+  A `suite`'s members are room ids; a `zone`'s members are room ids **or suite
+  ids**, so a zone can group whole suites. Both are declared *intent* like
+  `program`/`require` — not geometry — and the checks use them:
+  - An unknown member is a `SUITE_REF` / `ZONE_REF` **error** (a typo would
+    otherwise group nothing). A room in two suites is a `SUITE_OVERLAP`
+    **warning**; a room in two zones (directly, or via a suite one zone lists)
+    is a `ZONE_OVERLAP` warning — groups are meant to be mutually exclusive.
+  - A **declared suite sharpens the design checks** that otherwise *infer*
+    membership: a bedroom grouped with a full bath satisfies `MASTER_ENSUITE`
+    exactly (whatever the door graph looks like); two bedrooms in one suite
+    (a bunk room) don't fire `BED_SOUND`; a public room inside a bedroom's own
+    suite doesn't fire `BED_PRIVACY`; and a patio-door `entry` into a suited
+    bedroom doesn't fire `ENTRY_PRIVATE`. With **nothing declared the behaviour
+    is unchanged** — the sharpening only ever suppresses a nudge the declaration
+    explains.
+  - A `zone` enables `ZONE_CROSS` (**info**): a clearly public room
+    (living/kitchen/dining) whose only zone otherwise holds just private rooms
+    (bed/bath) — or the reverse — is a public room stranded in the private band.
+    It's deliberately conservative: it fires only when the room sits in exactly
+    one zone that's unambiguously the opposite band, so a mixed open-concept
+    zone (or a plan with no zones) never triggers it.
 - A **window kind** (right after the wall, default `casement`) sets the honest
   escape-opening math: a casement clears ~its full glazed size (the historical
   default), a `slider` ~half its glazed width, a `double-hung` ~half its glazed

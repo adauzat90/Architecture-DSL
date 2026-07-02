@@ -575,6 +575,47 @@ class WallSpec:
 
 
 @dataclass
+class Suite:
+    """A named group of rooms that read as one unit — a bedroom with its
+    ensuite bath and walk-in closet, say (the ``suite`` statement).
+
+    Declared *intent*, like :class:`ProgramSpec` and :class:`WallSpec`: the
+    membership isn't geometry, it's the author telling the checks which rooms
+    belong together. A member naming an unknown room is a ``SUITE_REF`` error;
+    a room declared in two suites is a ``SUITE_OVERLAP`` warning. When a suite
+    covers the rooms a design-quality check reasons about, that check uses the
+    declared membership instead of inferring it from types and adjacency.
+    ``members`` are room ids, deduplicated in declaration order.
+    """
+
+    id: str
+    members: tuple[str, ...] = ()
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Zone:
+    """A named band of the plan — the private wing, the public core (the
+    ``zone`` statement). Members are room ids **or** suite ids, so a zone can
+    group whole suites.
+
+    Declared intent like :class:`Suite`. An unknown member is a ``ZONE_REF``
+    error; a room in two zones (directly or via a suite) is a ``ZONE_OVERLAP``
+    warning; a clearly public room stranded in an otherwise-private zone (or the
+    reverse) is a ``ZONE_CROSS`` info. ``members`` are stored deduplicated in
+    declaration order.
+    """
+
+    id: str
+    members: tuple[str, ...] = ()
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
 class SiteSpec:
     """Declared lot dimensions and yard setbacks — the ``site`` / ``setback``
     statements. Optional, like :class:`ProgramSpec`: barndominiums are usually
@@ -698,6 +739,12 @@ class Barndominium:
     #: Declared shared-wall attributes (the ``wall`` statement): plumbing /
     #: bearing / rated walls between room pairs. See :class:`WallSpec`.
     wall_specs: list[WallSpec] = field(default_factory=list)
+    #: Declared room groupings (the ``suite`` statement) — a bedroom + ensuite
+    #: + closet read as one unit. Declaration order preserved. See :class:`Suite`.
+    suites: list[Suite] = field(default_factory=list)
+    #: Declared bands (the ``zone`` statement) — private wing, public core.
+    #: Members are room or suite ids. Declaration order preserved. See :class:`Zone`.
+    zones: list[Zone] = field(default_factory=list)
     #: Optional declared lot dimensions + yard setbacks (the ``site`` /
     #: ``setback`` statements). When set with dimensions and any setback, the
     #: validator checks the footprint fits the buildable rectangle. See
@@ -966,6 +1013,38 @@ class Barndominium:
             attrs.append(a)
         canonical = tuple(a for a in WALL_ATTRIBUTES if a in attrs)
         self.wall_specs.append(WallSpec(str(room_a), str(room_b), canonical))
+        return self
+
+    def suite(self, suite_id: str, *rooms: str) -> "Barndominium":
+        """Declare a suite (the ``suite`` statement): a named group of rooms
+        that read as one unit — e.g. ``suite("primary", "master_bed",
+        "master_bath", "master_wic")``.
+
+        Like :meth:`program` / :meth:`wall`, this records intent the validator
+        checks: a member naming an unknown room is a ``SUITE_REF`` error, and a
+        room declared in two suites a ``SUITE_OVERLAP`` warning. Declaration
+        order is preserved; duplicate members are dropped (keeping the first).
+        Needs at least one member.
+        """
+        if not rooms:
+            raise ValueError("a suite needs at least one member room.")
+        members = tuple(dict.fromkeys(str(r) for r in rooms))
+        self.suites.append(Suite(str(suite_id), members))
+        return self
+
+    def zone(self, zone_id: str, *members: str) -> "Barndominium":
+        """Declare a zone (the ``zone`` statement): a named band of the plan —
+        ``zone("private", "primary", "bed_2", "hall_beds")``. Members are room
+        ids **or** suite ids, so a zone can group whole suites.
+
+        Records intent like :meth:`suite`: an unknown member is a ``ZONE_REF``
+        error, a room in two zones a ``ZONE_OVERLAP`` warning. Declaration order
+        preserved; duplicate members dropped. Needs at least one member.
+        """
+        if not members:
+            raise ValueError("a zone needs at least one member.")
+        mems = tuple(dict.fromkeys(str(m) for m in members))
+        self.zones.append(Zone(str(zone_id), mems))
         return self
 
     def site(self, width: float, length: float) -> "Barndominium":

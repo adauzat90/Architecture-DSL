@@ -85,6 +85,11 @@ def emit_dsl(plan: Barndominium) -> str:
         # Declared wall attributes sit in the same contract block; attributes
         # are stored in canonical order, so this is already deterministic.
         out.append(f"wall {ws.room_a} - {ws.room_b} {' '.join(ws.attributes)}")
+    for s in getattr(plan, "suites", None) or []:
+        # Declared groupings ride the contract block, in declaration order.
+        out.append(f"suite {s.id}: {' '.join(s.members)}")
+    for z in getattr(plan, "zones", None) or []:
+        out.append(f"zone {z.id}: {' '.join(z.members)}")
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")

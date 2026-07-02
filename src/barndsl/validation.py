@@ -341,6 +341,66 @@ WET_TYPES = {
 }
 
 
+#: Room types that read as clearly "public" / "private" for the zone-band checks
+#: (ZONE_CROSS). Public = the shared living core; private = sleeping/bathing.
+#: Every other type (hall, closet, office, laundry, mudroom, garage, …) is
+#: neutral — it appears in both wings, so it neither triggers nor blocks a band.
+ZONE_PUBLIC_TYPES = {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
+ZONE_PRIVATE_TYPES = {RoomType.BEDROOM, RoomType.BATHROOM, RoomType.HALF_BATH}
+
+
+def _suite_members(plan: Barndominium) -> dict[str, tuple[str, ...]]:
+    """``suite id -> member room ids`` (declaration order preserved)."""
+    return {s.id: s.members for s in (getattr(plan, "suites", None) or [])}
+
+
+def _same_suite(plan: Barndominium, a_id: str, b_id: str) -> bool:
+    """True if two rooms are declared members of one common suite."""
+    for s in getattr(plan, "suites", None) or []:
+        if a_id in s.members and b_id in s.members:
+            return True
+    return False
+
+
+def _suites_of(plan: Barndominium, room_id: str) -> list[str]:
+    """The ids of every declared suite that lists ``room_id`` as a member."""
+    return [s.id for s in (getattr(plan, "suites", None) or []) if room_id in s.members]
+
+
+def _suite_contains_type(
+    plan: Barndominium, room_id: str, types: set[RoomType], by_id: dict[str, Room]
+) -> bool:
+    """True if ``room_id`` shares a declared suite with a room of one of ``types``."""
+    for s in getattr(plan, "suites", None) or []:
+        if room_id not in s.members:
+            continue
+        for m in s.members:
+            other = by_id.get(m)
+            if other is not None and other.id != room_id and other.type in types:
+                return True
+    return False
+
+
+def _zone_room_sets(plan: Barndominium, by_id: dict[str, Room]) -> dict[str, set[str]]:
+    """``zone id -> the set of room ids it covers``, expanding suite members.
+
+    A zone member is a room id (kept if it names a real room) or a suite id
+    (expanded to that suite's rooms). Unknown members are dropped here — they're
+    reported separately as ``ZONE_REF``.
+    """
+    suites = _suite_members(plan)
+    out: dict[str, set[str]] = {}
+    for z in getattr(plan, "zones", None) or []:
+        rooms: set[str] = set()
+        for m in z.members:
+            if m in by_id:
+                rooms.add(m)
+            elif m in suites:
+                rooms.update(r for r in suites[m] if r in by_id)
+        out[z.id] = rooms
+    return out
+
+
 def _door_graph(plan: Barndominium) -> dict[str, set[str]]:
     """Adjacency by interior doors (who can walk to whom)."""
     graph: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
@@ -756,6 +816,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_program(plan, add)
     _validate_requirements(plan, add)
     _validate_walls(plan, add)
+    _validate_suites_zones(plan, add)
     _validate_structure(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
@@ -2089,10 +2150,15 @@ def _dq_bed_privacy(plan: Barndominium, graph, by_id, add) -> None:
     # 2. Bedroom privacy: a bedroom shouldn't open straight onto a public room.
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
+            # A public room in the bedroom's OWN declared suite (a sitting area,
+            # say) isn't a privacy leak — the door is inside the suite. Only
+            # flag public neighbours outside it; with no suite declared the
+            # `_same_suite` filter is a no-op, so behaviour is unchanged.
             public_nb = [
                 n
                 for n in graph.get(room.id, ())
                 if n in by_id and by_id[n].type in PUBLIC_TYPES
+                and not _same_suite(plan, room.id, n)
             ]
             if public_nb:
                 onto = by_id[public_nb[0]].type.value
@@ -2190,7 +2256,11 @@ def _dq_entry_private(plan: Barndominium, graph, by_id, add) -> None:
                     hint="Land the entry in a mudroom, hall or living space, not a bath.",
                 )
             )
-        elif rt is RoomType.BEDROOM:
+        elif rt is RoomType.BEDROOM and not _suites_of(plan, d.room):
+            # An entry into a bedroom is normally the "maybe a patio door" info.
+            # A bedroom declared as its own `suite` is the primary suite, where a
+            # private patio/deck door is expected — so the declaration confirms
+            # the benign reading and the info is suppressed. Undeclared → fires.
             add(
                 Issue(
                     Severity.INFO,
@@ -2316,8 +2386,14 @@ def _dq_master_ensuite(plan: Barndominium, graph, by_id, add) -> None:
             continue
         # Satisfied as long as *any* bedroom has a private ensuite — don't depend
         # on an arbitrary "largest bedroom" tiebreak (two equal-area bedrooms used
-        # to flip a false positive). The largest just names where to add one.
-        if any(_bedroom_ensuite(b.id) for b in beds):
+        # to flip a false positive). The largest just names where to add one. A
+        # declared suite makes this exact: a bedroom grouped with a full bath in a
+        # `suite` *is* the primary suite, whatever the door graph looks like.
+        if any(
+            _bedroom_ensuite(b.id)
+            or _suite_contains_type(plan, b.id, {RoomType.BATHROOM}, by_id)
+            for b in beds
+        ):
             continue
         master = max(beds, key=lambda r: r.area)
         add(
@@ -2341,6 +2417,12 @@ def _dq_bed_sound(plan: Barndominium, graph, by_id, add) -> None:
     beds = [r for r in plan.rooms if r.type is RoomType.BEDROOM]
     for i, ba in enumerate(beds):
         for bb in beds[i + 1 :]:
+            # Two bedrooms declared in one `suite` (a bunk room, a nursery off
+            # the master) are *meant* to adjoin — the acoustic separation is
+            # intentional, so a declared shared suite silences the buffer nudge.
+            # No suite declared → unchanged.
+            if _same_suite(plan, ba.id, bb.id):
+                continue
             edge = shared_edge(ba, bb)
             if edge is not None and edge.length + EPSILON >= MIN_SOUND_BUFFER_WALL:
                 add(
@@ -3274,6 +3356,156 @@ def _validate_walls(plan: Barndominium, add) -> None:
                     **loc,
                 )
             )
+
+
+def _validate_suites_zones(plan: Barndominium, add) -> None:
+    """Check declared ``suite`` / ``zone`` statements against the plan.
+
+    Declared intent, like ``program`` / ``require`` / ``wall``: the grouping
+    isn't geometry, it's the author naming which rooms belong together, so the
+    checks here are all reference/consistency guards plus one design nudge.
+
+    * ``SUITE_REF`` / ``ZONE_REF`` (error) — a member names a room id (suite) or
+      room/suite id (zone) that doesn't exist; a typo would otherwise group
+      nothing.
+    * ``SUITE_OVERLAP`` / ``ZONE_OVERLAP`` (warning) — a room declared in two
+      suites, or a room in two zones (directly or via a suite). Overlapping
+      groups are almost always an authoring slip; a warning (not an error)
+      because it never makes the plan unbuildable, matching the intent-check
+      family (PROGRAM_MISMATCH / REQUIRE_UNMET).
+    * ``ZONE_CROSS`` (info) — a clearly public room (living/kitchen/dining)
+      whose only zone otherwise holds just private rooms (bed/bath), or the
+      reverse. A design nudge (a public room stranded in the private band), kept
+      conservative: it needs the room in exactly one zone, that zone to contain
+      at least one opposite-band room, and none of the same band — so a mixed
+      (open-concept) zone or a plan without zones never fires it.
+    """
+    suites = getattr(plan, "suites", None) or []
+    zones = getattr(plan, "zones", None) or []
+    if not suites and not zones:
+        return
+    by_id = {r.id: r for r in plan.rooms}
+    room_ids = set(by_id)
+    suite_ids = {s.id for s in suites}
+
+    # SUITE_REF: a suite member must be a real room.
+    for s in suites:
+        loc = _spec_loc(s)
+        for m in s.members:
+            if m not in room_ids:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "SUITE_REF",
+                        f"Suite '{s.id}' references unknown room '{m}'.",
+                        room=m,
+                        hint="Reference an existing room id, or declare the room.",
+                        **loc,
+                    )
+                )
+
+    # SUITE_OVERLAP: a room may live in only one suite.
+    first_suite: dict[str, str] = {}
+    warned_suite: set[str] = set()
+    for s in suites:
+        for m in s.members:
+            if m not in room_ids:
+                continue
+            if m in first_suite and m not in warned_suite:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "SUITE_OVERLAP",
+                        f"Room '{m}' is a member of more than one suite "
+                        f"('{first_suite[m]}' and '{s.id}').",
+                        room=m,
+                        hint="A room belongs to one suite; drop it from all but one.",
+                        **_spec_loc(s),
+                    )
+                )
+                warned_suite.add(m)
+            else:
+                first_suite.setdefault(m, s.id)
+
+    # ZONE_REF: a zone member must be a real room or a declared suite.
+    for z in zones:
+        loc = _spec_loc(z)
+        for m in z.members:
+            if m not in room_ids and m not in suite_ids:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "ZONE_REF",
+                        f"Zone '{z.id}' references unknown room or suite '{m}'.",
+                        room=m,
+                        hint="Reference an existing room id or a declared suite id.",
+                        **loc,
+                    )
+                )
+
+    # ZONE_OVERLAP: a room may live in only one zone (counting suite expansion).
+    zrooms = _zone_room_sets(plan, by_id)
+    room_zones: dict[str, list[str]] = {}
+    for z in zones:
+        for rid in zrooms.get(z.id, ()):  # deterministic order via plan rooms below
+            room_zones.setdefault(rid, [])
+            if z.id not in room_zones[rid]:
+                room_zones[rid].append(z.id)
+    zone_loc = {z.id: _spec_loc(z) for z in zones}
+    for r in plan.rooms:  # plan order → deterministic diagnostics
+        zs = room_zones.get(r.id)
+        if zs and len(zs) >= 2:
+            zlist = ", ".join("'" + z + "'" for z in zs)
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ZONE_OVERLAP",
+                    f"Room '{r.id}' is in more than one zone ({zlist}).",
+                    room=r.id,
+                    hint="A room belongs to one zone; drop it from all but one "
+                    "(a room inside a suite is already in that suite's zone).",
+                    **zone_loc[zs[-1]],
+                )
+            )
+
+    # ZONE_CROSS: a public room stranded in the private band, or the reverse.
+    for r in plan.rooms:
+        if r.type not in ZONE_PUBLIC_TYPES and r.type not in ZONE_PRIVATE_TYPES:
+            continue
+        zs = room_zones.get(r.id)
+        if not zs or len(zs) != 1:
+            continue  # only reason about a room with a single, unambiguous zone
+        others = [by_id[o] for o in zrooms[zs[0]] if o != r.id and o in by_id]
+        other_public = any(o.type in ZONE_PUBLIC_TYPES for o in others)
+        other_private = any(o.type in ZONE_PRIVATE_TYPES for o in others)
+        is_public = r.type in ZONE_PUBLIC_TYPES
+        # Public room whose zone is otherwise all-private (and vice versa).
+        if is_public and other_private and not other_public:
+            band, kind = "private", "public"
+        elif not is_public and other_public and not other_private:
+            band, kind = "public", "private"
+        else:
+            continue
+        add(
+            Issue(
+                Severity.INFO,
+                "ZONE_CROSS",
+                f"{kind.capitalize()} room '{r.id}' ({r.type.value}) sits in zone "
+                f"'{zs[0]}', which otherwise holds only {band} rooms — a {kind} "
+                f"room in the {band} band.",
+                room=r.id,
+                hint=f"Move '{r.id}' to a {kind} zone, or regroup the zones so the "
+                "band is consistent.",
+                **zone_loc[zs[0]],
+            )
+        )
+
+
+def _spec_loc(spec) -> dict:
+    """Source-location kwargs for a suite/zone (or any spec) statement."""
+    if getattr(spec, "line", None) is None:
+        return {}
+    return {"line": spec.line, "col": spec.col, "end_col": spec.end_col}
 
 
 #: An interior support post sitting at least this far (ft) from every wall of the
