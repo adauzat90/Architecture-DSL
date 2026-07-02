@@ -1,17 +1,17 @@
-# Cypress Retreat — Montgomery County, TX barndominium
-# 90 x 60 shell (5,400 sf): conditioned 3 bed / 2.5 bath residence on the west
-# half, an attached 3-bay activity gym on the east. Parents supervise the turf,
-# tumble and boat bays from the conditioned lounge and gallery through tempered
-# vision panels while staying in the a/c.
+# Cypress Retreat — Montgomery County, TX modern-farmhouse barndominium
+# Broken massing (not a plain rectangle): the conditioned house is a deep 60 ft
+# bar on the west; the gym is a shallower 48 ft bar on the east, so the footprint
+# steps back at the north-east (an L). A full-width covered porch fronts the house.
+# Board-and-batten + standing-seam metal, steep 6:12 gables — modern farmhouse.
 plan "Cypress Retreat"
-envelope 90 x 60
+envelope 90 x 48
+wing 54 x 12 at 0,48            # house runs 12 ft deeper than the gym -> L footprint
 ceiling 11
 orientation 0
 program 3 bed 3 bath
-note "Interconnected smoke + CO alarms per IRC R314/R315 (attached garage). Garage-to-dwelling wall = fire separation; garage doors = self-closing 20-min rated."
-finish siding "26 ga standing-seam-ready metal" roof "standing-seam metal"
-roof gable pitch 0.333
-frame bay 18 span 60 post 6
+finish siding "board-and-batten" roof "standing-seam metal"
+roof gable pitch 0.5
+note "Interconnected smoke + CO alarms per IRC R314/R315 (attached garage). Garage-to-dwelling wall = fire separation; garage doors = self-closing 20-min rated. Modern-farmhouse exterior: board-and-batten siding, black-framed windows, standing-seam metal roof, covered porch."
 
 # ======================= CONDITIONED RESIDENCE (x 0..54) =======================
 # ---- public core (south band, y 0..20) ----
@@ -40,17 +40,19 @@ room store:   closet    at 42,24 size 12 x 10        # bulk / storm-supply stora
 room bath2:   bathroom  at 24,34 size 12 x 10
 room laundry: laundry   at 36,34 size 18 x 10
 
-# ---- secondary bedrooms (north, y 48..60); closets stacked between the beds
-#      to buffer sound, and bed3's door caps the east end of the gallery ----
+# ---- secondary bedrooms (north wing, y 48..60) ----
 room bed2:    bedroom  at 20,48  size 12 x 12
 room closet2: closet   at 32,48  size 6 x 12
 room closet3: closet   at 38,48  size 6 x 12
-room bed3:    bedroom  at 44,48  size 10 x 12
+room bed3:    bedroom  at 44,48  size 10 x 12        # NE corner now on the L step -> east window
 
-# ============================ ATTACHED GYM (x 54..90) ==========================
-room turf:    other  at 54,0   size 18 x 30 ceiling 14   # artificial-turf training bay
-room tumble:  other  at 54,30  size 18 x 30 ceiling 14   # rubber-matted tumbling bay
-room boat:    garage at 72,0   size 18 x 60 ceiling 14   # boat / trailer garage (outer edge)
+# ============================ ATTACHED GYM (x 54..90, y 0..48) =================
+room turf:    other  at 54,0   size 18 x 24 ceiling 14   # artificial-turf training bay
+room tumble:  other  at 54,24  size 18 x 24 ceiling 14   # rubber-matted tumbling bay
+room boat:    garage at 72,0   size 18 x 48 ceiling 14   # boat / trailer garage (outer edge)
+
+# ------------------------------- covered porch --------------------------------
+porch front_porch at 0,-8 size 54 x 8 covered
 
 # ------------------------------- connections ----------------------------------
 # open conditioned core
@@ -90,18 +92,19 @@ entry hall west width 3 offset 0.5
 entry turf south width 3 offset 1
 entry tumble north width 3 offset 1
 entry boat south width 3 offset 3
-door boat east exterior width 12 offset 1.5 no-egress   # boat overhead door (12 ft, fits between gable posts)
+door boat east exterior width 16 offset 16 no-egress   # boat overhead door
 
 # ------------------------------- windows --------------------------------------
 # residence exterior daylight / egress
 window living south width 10 offset 3
 window living west width 8 offset 6
-window kitchen south width 7 offset 0.5
+window kitchen south width 8 offset 4
 window lounge south width 6 offset 2
-window mbed west width 10 offset 7
+window mbed west width 10 offset 5
 window mbath north width 3 offset 3
 window bed2 north width 5 offset 4
 window bed3 north width 5 offset 3
+window bed3 east width 4 offset 3        # new east window on the L step
 
 # gym exterior daylight
 window turf south width 8 offset 5
