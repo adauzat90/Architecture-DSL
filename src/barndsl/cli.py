@@ -601,7 +601,13 @@ def _cmd_revit_diff(args: argparse.Namespace) -> int:
 
     tol = args.tolerance if args.tolerance is not None else DEFAULT_TOLERANCE
     names = (os.path.basename(args.model), os.path.basename(args.plan))
-    d = diff_plans(model, authored, names=names, tolerance=tol)
+    try:
+        d = diff_plans(model, authored, names=names, tolerance=tol)
+    except Exception as exc:
+        # A schema-tagged exchange with a malformed body (version skew, partial
+        # export) surfaces here — an input problem, not drift: exit 2.
+        print(f"error: cannot diff these inputs: {exc}", file=sys.stderr)
+        return 2
     if getattr(args, "json", False):
         import json
 

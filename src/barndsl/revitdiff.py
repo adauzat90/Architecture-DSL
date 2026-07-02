@@ -194,7 +194,12 @@ def _at(ent: dict) -> list[float]:
     return [round(ent["centroid"][0], 4), round(ent["centroid"][1], 4)]
 
 
-def _diff_kind(model: dict[str, dict], authored: dict[str, dict], tol: float) -> dict:
+def _diff_kind(
+    model: dict[str, dict],
+    authored: dict[str, dict],
+    tol: float,
+    trust_ids: bool = True,
+) -> dict:
     """Diff one kind. ``model`` is the (edited) Revit side, ``authored`` the source.
 
     ``added`` = only in the model, ``removed`` = only in the authored plan. Same
@@ -207,11 +212,19 @@ def _diff_kind(model: dict[str, dict], authored: dict[str, dict], tol: float) ->
     }
     pairs: list[tuple[dict, dict, bool]] = []  # (model_ent, authored_ent, by_position)
 
-    # 1. Stable-id matches.
-    for k in sorted(set(model) & set(authored)):
-        pairs.append((model[k], authored[k], False))
-    model_left = [model[k] for k in sorted(model) if k not in authored]
-    auth_left = [authored[k] for k in sorted(authored) if k not in model]
+    # 1. Stable-id matches — skipped for kinds whose ids are POSITIONAL
+    #    (openings and walls are numbered in emission order, so deleting a
+    #    non-last element shifts every later id and a same-id pair may be two
+    #    different physical elements). Those kinds match by position only;
+    #    same-id-same-spot pairs still land exactly (distance 0 sorts first).
+    if trust_ids:
+        for k in sorted(set(model) & set(authored)):
+            pairs.append((model[k], authored[k], False))
+        model_left = [model[k] for k in sorted(model) if k not in authored]
+        auth_left = [authored[k] for k in sorted(authored) if k not in model]
+    else:
+        model_left = [model[k] for k in sorted(model)]
+        auth_left = [authored[k] for k in sorted(authored)]
 
     # 2. Greedy nearest-centroid fallback (deterministic: sort candidates by
     #    distance, then by index, and claim each side once).
@@ -230,7 +243,8 @@ def _diff_kind(model: dict[str, dict], authored: dict[str, dict], tol: float) ->
             continue
         used_m.add(mi)
         used_a.add(ai)
-        pairs.append((model_left[mi], auth_left[ai], True))
+        m_ent, a_ent = model_left[mi], auth_left[ai]
+        pairs.append((m_ent, a_ent, m_ent["id"] != a_ent["id"]))
 
     for mi, m in enumerate(model_left):
         if mi not in used_m:
@@ -286,14 +300,22 @@ def diff_plans(
     delta from :func:`barndsl.compare.compare_plans`.
     """
     tol = float(tolerance)
+    if tol < 0:
+        raise ValueError("tolerance must be >= 0")
     model_ex = _to_exchange(model)
     auth_ex = _to_exchange(authored)
 
     kinds = {
         "rooms": _diff_kind(_rooms(model_ex), _rooms(auth_ex), tol),
-        "doors": _diff_kind(_openings(model_ex, False), _openings(auth_ex, False), tol),
-        "windows": _diff_kind(_openings(model_ex, True), _openings(auth_ex, True), tol),
-        "walls": _diff_kind(_walls(model_ex), _walls(auth_ex), tol),
+        "doors": _diff_kind(
+            _openings(model_ex, False), _openings(auth_ex, False), tol,
+            trust_ids=False,
+        ),
+        "windows": _diff_kind(
+            _openings(model_ex, True), _openings(auth_ex, True), tol,
+            trust_ids=False,
+        ),
+        "walls": _diff_kind(_walls(model_ex), _walls(auth_ex), tol, trust_ids=False),
     }
 
     totals = {"added": 0, "removed": 0, "moved": 0, "changed": 0, "unchanged": 0}
@@ -372,7 +394,7 @@ def diff_text(d: dict[str, Any]) -> str:
     score = d.get("score")
     if score is not None:
         lines.append(
-            f"Score: authored {score['authored']:g} → model {score['model']:g}"
+            f"Score: {authored} {score['authored']:g} → {model} {score['model']:g}"
             f"  (Δ {score['delta']:+g})"
         )
 
@@ -392,6 +414,13 @@ def diff_text(d: dict[str, Any]) -> str:
         for e in kd["removed"]:
             lines.append(f"  removed  {e['label']} at ({e['at'][0]:g},{e['at'][1]:g})")
 
+    if any(
+        d["kinds"][k]["added"] and d["kinds"][k]["removed"] for k in _KINDS
+    ):
+        lines.append(
+            f"note: an element that moved more than {POSITION_MATCH_RADIUS:g} ft "
+            "matches nothing and reads as one removed + one added."
+        )
     if not d["drift"]:
         lines.append("No drift: the model matches the authored plan.")
     return "\n".join(lines)

@@ -251,3 +251,65 @@ def test_load_diff_input_sniffs_content(tmp_path):
     b.write_text(BASE, encoding="utf-8")
     loaded = load_diff_input(str(b))
     assert loaded.plan is not None
+
+
+# --- review fixes: positional ids, malformed input, negative tolerance ---------
+
+
+def test_deleting_the_first_window_does_not_alias_the_rest():
+    """Opening ids are positional, so id-matching after a non-last delete pairs
+    different physical windows and fabricates moves. Position-first matching
+    must report exactly one removed window and NO moves."""
+    three = BASE.replace(
+        "window b south width 4 offset 3",
+        "window b south width 4 offset 3\n"
+        "window c south width 4 offset 3\n"
+        "window d south width 4 offset 3",
+    )
+    model = three.replace("window b south width 4 offset 3\n", "")
+    d = diff_plans(_res(model), _res(three))
+    w = d["kinds"]["windows"]
+    assert len(w["removed"]) == 1
+    assert w["moved"] == []
+    assert w["unchanged"] == 2
+    # The removed one is reported at the FIRST window's position (on room b).
+    assert 10 <= w["removed"][0]["at"][0] <= 20
+
+
+def test_negative_tolerance_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError):
+        diff_plans(_res(BASE), _res(BASE), tolerance=-1)
+
+
+def test_cli_rejects_a_schema_valid_but_malformed_exchange(tmp_path, capsys):
+    bad = tmp_path / "model.json"
+    bad.write_text(
+        json.dumps({"schema": "barndsl.revit/1", "rooms": "not-a-list"}),
+        encoding="utf-8",
+    )
+    plan = _write(tmp_path, "p.barn", BASE)
+    assert main(["revit-diff", str(bad), str(plan)]) == 2
+    err = capsys.readouterr().err
+    assert "error" in err.lower() and "Traceback" not in err
+
+
+def test_score_line_uses_the_given_names():
+    model = BASE.replace("window b south width 4 offset 3\n", "")
+    d = diff_plans(_res(model), _res(BASE), names=("edited.json", "source.barn"))
+    text = diff_text(d)
+    if d.get("score") is not None:
+        assert "Score: source.barn" in text and "edited.json" in text
+
+
+def test_big_move_note_explains_add_remove_pairs():
+    # Move the window far beyond the match radius: it reads as removed+added,
+    # and the text says so.
+    model = BASE.replace(
+        "window b south width 4 offset 3", "window d north width 4 offset 3"
+    )
+    d = diff_plans(_res(model), _res(BASE))
+    w = d["kinds"]["windows"]
+    assert len(w["added"]) == 1 and len(w["removed"]) == 1
+    assert "reads as one removed + one added" in diff_text(d)
