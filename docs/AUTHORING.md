@@ -87,12 +87,13 @@ require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeata
 require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
-door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
-door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall (rooms must abut)
+door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]   # exterior door
 door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door
 open <id_a> - <id_b> [width <w>] [offset <o>]     # shorthand for `door <a> - <b> cased ...`
-entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
-window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
+entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
+window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
 frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
@@ -112,6 +113,31 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
   egress door (no-egress is implied) and doesn't count as a building entrance —
   the plan still needs a people-door `entry`. On a room that isn't a garage/shop
   it notes `OVERHEAD_ROOM`.
+- `wall <a> - <b> plumbing|bearing|rated` declares what the **shared wall**
+  between two abutting rooms *is* (one or more attributes; the rooms must really
+  share a wall — `WALL_NOADJ` error otherwise, `WALL_REF` for an unknown id):
+  - `plumbing` — the 2x6 wet wall the fixtures back onto. A wet room (bath /
+    kitchen / laundry / utility) backing onto a declared plumbing wall satisfies
+    the `WET_GROUP` grouping nudge; the flanking rooms' **clear dimensions**
+    lose half a 2x6 on that side; and the Revit exchange hints the thicker wall
+    type. Declared between two dry rooms it notes `WALL_UNUSED`.
+  - `bearing` — an interior bearing wall. When it runs along the building's
+    long axis, the auto `frame` honours it as an **interior post line** (a post
+    at every bent crossing it). One running across the span can't split it —
+    `WALL_BEARING_AXIS` info instead of a silent no-op.
+  - `rated` — the garage/dwelling fire separation, detailed and declared. It
+    silences the `GARAGE_SEPARATION` reminder for that pair (verified, not
+    reminded); a garage ceiling under habitable space still reminds.
+- A **window kind** (right after the wall, default `casement`) sets the honest
+  escape-opening math: a casement clears ~its full glazed size (the historical
+  default), a `slider` ~half its glazed width, a `double-hung` ~half its glazed
+  height, and `fixed` glass **never** counts for bedroom egress
+  (`BEDROOM_EGRESS` / `EGRESS_SIZE`) though it still daylights (`NAT_LIGHT`).
+- A `double`/`french` door (interior or exterior) is a **pair of half-width
+  leaves** (default 5 ft — the stock 60 in pair; stock pairs 48/60/64/72 in for
+  `DOOR_SIZE`). Egress clear width counts **one leaf** (IRC R311.2): a 5 ft pair
+  is two 30 in leaves and does *not* satisfy the 32 in egress-door minimum — use
+  `width 6` where the pair is the required exit.
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
 
@@ -320,6 +346,10 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - Every interior room is **reachable** from an `entry` through interior doors.
 - An `entry` must be on an **exterior** wall (it can't open onto another room).
 - Openings fit on their wall (`offset + width <= wall length`).
+- A `wall` statement names two existing rooms (`WALL_REF`) that really share a
+  wall (`WALL_NOADJ`) — it declares an attribute of a wall that must exist.
+- A bedroom whose only exterior windows are `fixed` has **no escape opening**
+  (`BEDROOM_EGRESS`) — fixed glass doesn't open.
 - Numbers are finite; ids/names are non-empty.
 
 **Warnings (should address):**

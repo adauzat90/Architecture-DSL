@@ -373,6 +373,16 @@ class _Renderer:
                 sgn = self._swing_sgn(door, a, b, edge)
                 hinge_far = getattr(door, "hinge", None) == "far"
                 self._door_symbol(ox, oy, edge.orientation, w, sgn, hinge_far)
+            elif kind in ("double", "french"):
+                # Two half-width leaves hinged at opposite jambs, meeting at
+                # the middle — the classic double-door plan symbol.
+                sgn = self._swing_sgn(door, a, b, edge)
+                half = w / 2.0
+                self._door_symbol(ox, oy, edge.orientation, half, sgn, False)
+                if edge.orientation == "v":
+                    self._door_symbol(ox, oy + half, edge.orientation, half, sgn, True)
+                else:
+                    self._door_symbol(ox + half, oy, edge.orientation, half, sgn, True)
             elif kind in ("pocket", "sliding"):
                 self._slide_symbol(ox, oy, edge.orientation, w)
             else:  # cased opening
@@ -385,17 +395,28 @@ class _Renderer:
             if level is not None and room.level != level:
                 continue
             x1, y1, x2, y2 = opening_endpoints(room, xdoor.wall, xdoor.offset, xdoor.width)
-            overhead = getattr(xdoor, "kind", "entry") == "overhead"
+            xkind = getattr(xdoor, "kind", "entry")
+            overhead = xkind == "overhead"
+            double = xkind in ("double", "french")
+            half = xdoor.width / 2.0
             if xdoor.wall in (Direction.NORTH, Direction.SOUTH):
                 if overhead:
                     sgn = 1.0 if xdoor.wall is Direction.SOUTH else -1.0
                     self._overhead_symbol(min(x1, x2), y1, "h", xdoor.width, sgn)
+                elif double:  # two half-width leaves hinged at opposite jambs
+                    lo = min(x1, x2)
+                    self._door_symbol(lo, y1, "h", half)
+                    self._door_symbol(lo + half, y1, "h", half, hinge_far=True)
                 else:
                     self._door_symbol(min(x1, x2), y1, "h", xdoor.width)
             else:
                 if overhead:
                     sgn = 1.0 if xdoor.wall is Direction.WEST else -1.0
                     self._overhead_symbol(x1, min(y1, y2), "v", xdoor.width, sgn)
+                elif double:
+                    lo = min(y1, y2)
+                    self._door_symbol(x1, lo, "v", half)
+                    self._door_symbol(x1, lo + half, "v", half, hinge_far=True)
                 else:
                     self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
 

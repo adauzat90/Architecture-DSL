@@ -39,6 +39,7 @@ from .constants import (
     FOOTING_DEPTH,
     FOOTING_SIZE,
     INTERIOR_WALL_THICKNESS,
+    PLUMBING_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
@@ -48,6 +49,8 @@ from .constants import (
     TURNDOWN_WIDTH,
 )
 from .elements import (
+    DOUBLE_LEAF_KINDS,
+    WINDOW_KINDS,
     Barndominium,
     Direction,
     Room,
@@ -125,6 +128,12 @@ class RevitWall:
     profile: str = "flat"
     apex: tuple[float, float] | None = None
     apex_height: float = 0.0
+    #: Declared wall kind from a matching `wall` statement: ``"plumbing"``,
+    #: ``"bearing"`` or ``"rated"`` (one of :data:`_WALL_KIND_PRECEDENCE` when a
+    #: statement declares several). ``None`` — and the JSON key absent — for an
+    #: ordinary wall, so old documents are byte-identical. Lets the consumer's
+    #: ``config.json`` map declared walls to real named wall types.
+    kind: str | None = None
 
     @property
     def orientation(self) -> str:
@@ -156,7 +165,11 @@ class RevitOpening:
 
     id: str
     category: str  # "door" | "window" | "cased_opening"
-    kind: str  # swing | pocket | sliding | cased | exterior | overhead | window
+    #: Doors: swing | pocket | sliding | double | french | cased | exterior |
+    #: overhead. Windows: the window kind (casement | slider | fixed |
+    #: double-hung; older documents wrote the generic "window", which imports
+    #: as the casement default).
+    kind: str
     level: int
     location: tuple[float, float]
     width: float
@@ -344,6 +357,9 @@ class RevitModel:
                     "profile": w.profile,
                     "apex": list(w.apex) if w.apex is not None else None,
                     "apex_height": w.apex_height,
+                    # Only a declared wall carries a kind; the key is absent
+                    # otherwise so undeclared documents stay byte-identical.
+                    **({"kind": w.kind} if w.kind is not None else {}),
                 }
                 for w in self.walls
             ],
@@ -538,6 +554,49 @@ def _extract_walls(plan: Barndominium, level: int, height: float, idgen) -> list
     walls = _walls_one_axis(rooms, sections, True, height, level, idgen)
     walls += _walls_one_axis(rooms, sections, False, height, level, idgen)
     return walls
+
+
+#: When one `wall` statement declares several attributes the exchange carries a
+#: single ``kind`` — picked in this order (life-safety first, then structure,
+#: then plumbing), documented so the mapping is deterministic.
+_WALL_KIND_PRECEDENCE = ("rated", "bearing", "plumbing")
+
+
+def _apply_wall_specs(plan: Barndominium, walls_by_level: dict[int, list[RevitWall]]) -> None:
+    """Tag the wall segments matching each declared ``wall`` statement.
+
+    Every extracted wall segment overlapping the declared pair's shared edge
+    (same grid line, same orientation) gains the spec's ``kind``; a segment
+    already tagged by an earlier statement keeps its first kind (declaration
+    order wins, deterministically). A ``plumbing`` declaration also raises the
+    segment's nominal ``thickness`` hint to the 2x6
+    :data:`~barndsl.constants.PLUMBING_WALL_THICKNESS`, matching the clear-
+    dimension math. Note the exchange merges contiguous like-classified
+    segments into runs, so a run longer than the declared wall is tagged whole.
+    """
+    for ws in getattr(plan, "wall_specs", None) or []:
+        a, b = plan.room(ws.room_a), plan.room(ws.room_b)
+        if a is None or b is None or a.id == b.id:
+            continue  # WALL_REF's problem
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue  # WALL_NOADJ's problem
+        kind = next((k for k in _WALL_KIND_PRECEDENCE if k in ws.attributes), None)
+        if kind is None:
+            continue
+        lvl = getattr(a, "level", 0)
+        for w in walls_by_level.get(lvl, []):
+            if w.orientation != edge.orientation:
+                continue
+            if abs(w.const_coord - edge.pos) > 1e-4:
+                continue
+            lo, hi = w.span
+            if min(hi, edge.hi) - max(lo, edge.lo) <= TOL:
+                continue  # no overlap along the run
+            if w.kind is None:
+                w.kind = kind
+            if "plumbing" in ws.attributes:
+                w.thickness = max(w.thickness, PLUMBING_WALL_THICKNESS)
 
 
 # --- opening hosting ---------------------------------------------------------
@@ -929,6 +988,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         lvl_walls = _extract_walls(plan, i, height, wall_ids)
         walls_by_level[i] = lvl_walls
         walls.extend(lvl_walls)
+    # Declared wall attributes (`wall a - b plumbing|bearing|rated`) tag the
+    # matching segments with a kind (and a 2x6 thickness hint for plumbing).
+    _apply_wall_specs(plan, walls_by_level)
 
     # Openings, hosted onto the walls just derived.
     op_ids = _ids("o")
@@ -970,15 +1032,19 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             continue
         orientation, pos, lo, hi, lvl = geom
         host = _find_host(walls_by_level.get(lvl, []), orientation, pos, lo, hi)
-        overhead = getattr(xd, "kind", "entry") == "overhead"
+        xkind = getattr(xd, "kind", "entry")
+        overhead = xkind == "overhead"
+        if overhead:
+            out_kind = "overhead"  # so the consumer picks a garage-door family
+        elif xkind in DOUBLE_LEAF_KINDS:
+            out_kind = xkind  # "double"/"french": a two-leaf exterior pair
+        else:
+            out_kind = "exterior"  # a single people-door, the historical kind
         openings.append(
             RevitOpening(
                 id=next(op_ids),
                 category="door",
-                # An overhead (sectional garage) door keeps its kind so the
-                # consumer can pick a garage-door family; a people-door stays
-                # the historical "exterior".
-                kind="overhead" if overhead else "exterior",
+                kind=out_kind,
                 level=lvl,
                 location=_location(orientation, pos, lo, hi),
                 width=float(hi - lo),
@@ -1007,7 +1073,10 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             RevitOpening(
                 id=next(op_ids),
                 category="window",
-                kind="window",
+                # The window kind (casement/slider/fixed/double-hung) folds into
+                # `kind` so the consumer can map families; the category stays
+                # "window", which is what the builder switches on.
+                kind=getattr(w, "kind", "casement"),
                 level=lvl,
                 location=_location(orientation, pos, lo, hi),
                 width=float(hi - lo),
@@ -1301,9 +1370,15 @@ def exchange_to_plan(data: dict) -> Barndominium:
             if wall is None:
                 continue
             head = float(o.get("sill", 0.0)) + float(o.get("height", 0.0))
+            # Window kind round-trips; an old document's generic "window" (or a
+            # missing kind) falls back to the casement default.
+            wkind = o.get("kind")
+            if wkind not in WINDOW_KINDS:
+                wkind = "casement"
             plan.add_window(
                 room.id, wall, width=width, offset=max(0.0, offset),
                 sill_height=float(o.get("sill", 0.0)), head_height=head,
+                kind=wkind,
             )
         elif o.get("exterior"):
             room = plan.room(rooms[0]) if rooms else None
@@ -1312,13 +1387,20 @@ def exchange_to_plan(data: dict) -> Barndominium:
             wall, offset = _infer_exterior_wall(room, loc, width)
             if wall is None:
                 continue
-            overhead = o.get("kind") == "overhead"
+            raw_kind = o.get("kind")
+            overhead = raw_kind == "overhead"
+            if overhead:
+                dkind = "overhead"
+            elif raw_kind in DOUBLE_LEAF_KINDS:
+                dkind = raw_kind  # a double/french pair round-trips its kind
+            else:
+                dkind = "entry"  # the historical "exterior" single door
             plan.entrance(
                 room.id, wall, width=width, offset=max(0.0, offset),
                 egress=bool(o.get("egress", True)),
                 # An overhead door round-trips its kind and panel height;
                 # entrance() re-forces egress=False for it.
-                kind="overhead" if overhead else "entry",
+                kind=dkind,
                 height=(
                     float(o["height"])
                     if overhead and o.get("height") is not None

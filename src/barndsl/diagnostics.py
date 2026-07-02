@@ -185,9 +185,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A swinging interior door is below the 30 in minimum clear width."),
         _c("DOOR_SIZE", I, "Non-standard door width",
            "A swing door's width isn't a manufactured leaf size (interior "
-           "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72), or an overhead "
-           "door isn't a stock sectional size (widths 8/9/10/12/16 ft, heights "
-           "7/8 ft). Snap it to the nearest so it's orderable off-the-shelf."),
+           "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72), a declared "
+           "double/french pair isn't a stock pair width (48/60/64/72 in total), "
+           "or an overhead door isn't a stock sectional size (widths 8/9/10/12/16 "
+           "ft, heights 7/8 ft). Snap it to the nearest so it's orderable "
+           "off-the-shelf."),
         _c("OVERHEAD_ROOM", I, "Overhead door in a living space",
            "An overhead (sectional garage) door is on a room that isn't a garage "
            "or shop — unusual for a living space. Either the room should be a "
@@ -256,14 +258,21 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "or reached by stairs not yet modelled."),
         # --- egress & light -------------------------------------------------
         _c("BEDROOM_EGRESS", E, "Bedroom has no escape opening",
-           "Every bedroom needs an emergency escape opening — a window or its "
-           "own exterior door — on an exterior wall (IRC R310)."),
+           "Every bedroom needs an emergency escape opening — a window that "
+           "opens, or its own exterior door — on an exterior wall (IRC R310). "
+           "A `fixed` window is glass that doesn't open: it daylights but is "
+           "never an escape opening."),
         _c("EGRESS_SIZE", W, "Egress opening too small",
            "A bedroom's escape opening is below the IRC R310 minimums: ~5.7 sq "
            "ft net clear opening (5.0 at grade), >= 20 in clear width, >= 24 in "
-           "clear height, sill <= 44 in above the floor."),
+           "clear height, sill <= 44 in above the floor. The clear opening "
+           "follows the window kind: a casement clears ~its full glazed size, a "
+           "slider ~half its glazed width, a double-hung ~half its glazed "
+           "height; fixed glass never counts."),
         _c("EGRESS_DOOR", W, "No wide egress door",
-           "No exterior egress door is at least 32 in clear wide (R311.2)."),
+           "No exterior egress door is at least 32 in clear wide (R311.2). A "
+           "double/french pair provides its required clear width through ONE "
+           "leaf, so it counts half its total width."),
         _c("NAT_LIGHT", W, "Insufficient natural light",
            "A habitable room's glazing on exterior walls is below 8% of floor "
            "area (R303.1)."),
@@ -324,7 +333,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "(info — it might be a patio door)."),
         _c("WET_GROUP", I, "Scattered plumbing",
            "Three or more wet rooms (bath/kitchen/laundry/utility) share no "
-           "walls, spreading plumbing runs out."),
+           "walls, spreading plumbing runs out. A declared plumbing wall — "
+           "`wall <bath> - <neighbour> plumbing` — that a wet room really backs "
+           "onto also satisfies this: the wet wall exists, just shared with a "
+           "dry room."),
         _c("CLOSET_SHAPE", I, "Long, skinny closet",
            "A closet has the floor area for a walk-in but is shaped as a narrow "
            "strip (>= 4:1). A more square footprint (under ~3:1, >= 4 ft deep) is "
@@ -353,7 +365,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "space above it. IRC R302.6 requires the common wall to be a fire "
            "separation (min ½ in gypsum) and, where a habitable room is above, the "
            "ceiling to be ⅝ in Type X gypsum. A barndominium shop bay is treated as "
-           "a garage. The DSL can't model the assembly, so this is a reminder."),
+           "a garage. Declaring the detailed wall — `wall <garage> - <room> rated` "
+           "— records the separation and silences the reminder for that pair "
+           "(verified, not just reminded); a ceiling can't be declared, so "
+           "habitable space above keeps reminding."),
         _c("GARAGE_DOOR", I, "Garage/dwelling door must be self-closing & rated",
            "A door between a garage or shop and the dwelling must be self-closing "
            "and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood door) per "
@@ -376,6 +391,26 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("REQUIRE_REF", E, "Requirement references unknown room",
            "A `require` statement names a room id that doesn't exist — a mistyped "
            "id would otherwise silently check nothing."),
+        # --- declared wall attributes (the `wall` statement) ------------------
+        _c("WALL_REF", E, "Wall statement references unknown room",
+           "A `wall` statement names a room id that doesn't exist — a mistyped id "
+           "would otherwise silently declare nothing."),
+        _c("WALL_NOADJ", E, "Wall statement between non-adjacent rooms",
+           "A `wall` statement declares attributes of the shared wall between two "
+           "rooms, but the pair doesn't share one (a corner touch isn't enough, "
+           "and rooms on different levels never share a wall) — the declared wall "
+           "doesn't exist. Same geometry rule an interior `door` needs."),
+        _c("WALL_UNUSED", I, "Plumbing wall serves no wet room",
+           "A wall is declared `plumbing` (a 2x6 wet wall for supply/waste runs) "
+           "but neither room flanking it is a bath, kitchen, laundry or utility — "
+           "the declaration matches no fixtures. Put the wet wall where fixtures "
+           "back onto it, or drop the attribute."),
+        _c("WALL_BEARING_AXIS", I, "Bearing wall runs across the frame's span",
+           "A wall declared `bearing` runs parallel to the frame's bents (across "
+           "the span), so it can't carry an interior post line — post lines run "
+           "along the building's long axis, splitting the bents' clear span. The "
+           "frame ignored the declaration; declare a wall running the long way, "
+           "or leave the span to the auto interior supports."),
         # --- structural frame (the `frame` directive) -----------------------
         _c("POST_OBSTRUCT", I, "Support post in open floor",
            "An auto-placed interior support post (needed where the beam span "

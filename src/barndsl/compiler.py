@@ -17,11 +17,12 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     require adjacent|separate <a> <b>  # declared spatial intent, checked vs the plan
     require exterior <room> [<wall>]   # (also: require area <room> >= <sqft>)
     room <id>: <type> <placement> size <W> x <L> [level <n>]
+    wall <id_a> - <id_b> plumbing|bearing|rated   # attribute(s) of the shared wall
     door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]
     door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # sectional garage door
     open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no leaf)
-    entry <id> <wall> [width <w>] [offset <o>] [no-egress]
-    window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
+    entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]
+    window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
     frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
@@ -41,8 +42,13 @@ import math
 from dataclasses import dataclass, field
 
 from .elements import (
+    DEFAULT_DOUBLE_DOOR_WIDTH,
+    DOOR_KINDS,
+    DOUBLE_LEAF_KINDS,
     OVERHEAD_DOOR_HEIGHT,
     OVERHEAD_DOOR_WIDTH,
+    WALL_ATTRIBUTES,
+    WINDOW_KINDS,
     Barndominium,
     Direction,
     FrameSpec,
@@ -54,13 +60,15 @@ from .validation import Issue, Severity, ValidationReport, validate
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
-    "room", "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
-    "orientation", "finish", "accessible"
+    "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
+    "roof", "orientation", "finish", "accessible"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
 
-_DOOR_KINDS = frozenset({"swing", "cased", "pocket", "sliding"})
+_DOOR_KINDS = frozenset(DOOR_KINDS)
+_WINDOW_KIND_SET = frozenset(WINDOW_KINDS)
+_WALL_ATTRS = ", ".join(WALL_ATTRIBUTES)
 _BED_WORDS = frozenset({"bed", "beds", "bedroom", "bedrooms"})
 #: 'bath' is an aggregate (bathroom + half_bath), matching the compile recap.
 _BATH_WORDS = frozenset({"bath", "baths", "bathroom", "bathrooms"})
@@ -112,18 +120,32 @@ Statements:
   room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
         # `ceiling <h>` overrides the plan ceiling for this room (a tray or a
         # taller great room); `vaulted` makes it open to the roof (no flat ceiling).
-  door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+  wall <id_a> - <id_b> plumbing|bearing|rated   # one or more attributes
+        # declared attributes of the SHARED wall between two abutting rooms:
+        # plumbing = a 2x6 wet wall (satisfies the wet-room grouping nudge when a
+        # wet room backs onto it); bearing = an interior bearing wall the auto
+        # `frame` uses as a post line (when it runs along the building's long
+        # axis); rated = a fire-separation wall (verifies, and silences, the
+        # garage/dwelling separation reminder). The rooms must share a wall.
+  door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
         # interior door between two rooms. swing (default) hinges; cased = an open
-        # walk-through (no leaf); pocket/sliding slide. offset = ft from the wall's
+        # walk-through (no leaf); pocket/sliding slide; double/french = a pair of
+        # half-width leaves (default 5 ft total). offset = ft from the wall's
         # S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
-  door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
+  door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]  # exterior door, on an exterior wall
   door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]
         # overhead/sectional garage door on a garage/shop's exterior wall. Defaults
         # 9 x 7 (the residential single); `width 16` is a double. Never an egress
         # door and not a building entrance — the plan still needs a people-door.
   open <id_a> - <id_b> [width <w>] [offset <o>]            # shorthand for `door <a> - <b> cased ...`
-  entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
-  window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]  # window; sill/head are ft above the floor
+  entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]
+        # shorthand for `door <id> <wall> exterior ...`; double/french = a pair of
+        # half-width leaves (egress clear width counts ONE leaf, IRC R311.2)
+  window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
+        # window; sill/head are ft above the floor. The kind (default casement)
+        # sets the escape-opening math: a casement opens ~its full glazed size, a
+        # slider opens ~half its width, a double-hung ~half its height, and FIXED
+        # glass never counts for bedroom egress (it still daylights).
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
@@ -739,6 +761,57 @@ def _parse_statement(
             )
         smap.room_line[rid] = lineno
         smap.room_col[rid] = (rid_tok.col, rid_tok.end_col)
+    elif key == "wall":
+        # `wall <a> - <b> plumbing|bearing|rated` — one or more attributes of
+        # the shared wall between two abutting rooms. Checked by the validator
+        # (WALL_REF / WALL_NOADJ) like every dangling reference.
+        a_tok = c.ident("a room id")
+        a = a_tok.text
+        sep = c.take("'-' or 'to'")
+        if sep.text.lower() not in ("-", "to"):
+            raise _ParseError(
+                "SYNTAX",
+                f"Expected '-' or 'to', got '{sep.text}'.",
+                sep.col,
+                end_col=sep.end_col,
+            )
+        b_tok = c.ident("the second room id")
+        b = b_tok.text
+        attrs: list[str] = []
+        while (tok := c.peek()) is not None:
+            at_tok = c.take("a wall attribute")
+            at = at_tok.text.lower()
+            if at not in WALL_ATTRIBUTES:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown wall attribute '{at_tok.text}'.",
+                    at_tok.col,
+                    end_col=at_tok.end_col,
+                    hint=f"Use one or more of: {_WALL_ATTRS}.",
+                )
+            if at not in attrs:
+                attrs.append(at)
+        if not attrs:
+            raise _ParseError(
+                "SYNTAX",
+                "Expected at least one wall attribute.",
+                c.eol_col,
+                end_col=c.eol_col + 1,
+                hint=f"Name what the shared wall is: {_WALL_ATTRS} "
+                f"(e.g. `wall {a} - {b} plumbing`).",
+            )
+        c.expect_end()
+        if a == b:
+            raise _ParseError(
+                "SYNTAX",
+                f"A wall statement names two different rooms, got '{a}' twice.",
+                b_tok.col,
+                end_col=b_tok.end_col,
+                hint="Name the two rooms the wall stands between.",
+            )
+        plan.wall(a, b, *attrs)
+        ws = plan.wall_specs[-1]
+        ws.line, ws.col, ws.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "door":
         # Unified door statement. Two forms, told apart by what follows the id:
         #   interior:  door <a> - <b> [swing|cased|pocket|sliding] [opts]
@@ -752,7 +825,12 @@ def _parse_statement(
             kind = "swing"
             if (tok := c.peek()) is not None and tok.text.lower() in _DOOR_KINDS:
                 kind = c.take("a door kind").text.lower()
-            width = 6.0 if kind == "cased" else 32 / 12  # cased opens wide
+            if kind == "cased":
+                width = 6.0  # cased opens wide
+            elif kind in DOUBLE_LEAF_KINDS:
+                width = DEFAULT_DOUBLE_DOOR_WIDTH  # the stock 60 in pair
+            else:
+                width = 32 / 12
             offset, swing_into, hinge = None, None, None
             while c.peek() is not None:
                 opt = c.take("an option").text.lower()
@@ -778,8 +856,8 @@ def _parse_statement(
                         "BAD_OPTION",
                         f"Unknown door option '{opt}'.",
                         c.toks[c.i - 1].col,
-                        hint="Options: a kind (swing/cased/pocket/sliding), width <n>, "
-                        "offset <n>, into <room>, hinge near|far.",
+                        hint="Options: a kind (swing/cased/pocket/sliding/double/"
+                        "french), width <n>, offset <n>, into <room>, hinge near|far.",
                         end_col=c.toks[c.i - 1].end_col,
                     )
             c.expect_end()
@@ -830,25 +908,34 @@ def _parse_statement(
                     a, wall, width=width, offset=offset, kind="overhead", height=height
                 )
             else:
-                width, offset, egress = 3.0, 1.0, True
+                width, offset, egress, ekind = 3.0, 1.0, True, "entry"
+                width_given = False
                 while c.peek() is not None:
                     opt = c.take("an option").text.lower()
                     if opt == "width":
                         width = c.number("door width")
+                        width_given = True
                     elif opt == "offset":
                         offset = c.number("offset")
                     elif opt in ("no-egress", "nonegress"):
                         egress = False
+                    elif opt in ("double", "french"):
+                        ekind = opt
                     else:
                         raise _ParseError(
                             "BAD_OPTION",
                             f"Unknown exterior-door option '{opt}'.",
                             c.toks[c.i - 1].col,
-                            hint="Options: width <n>, offset <n>, no-egress.",
+                            hint="Options: double|french, width <n>, offset <n>, "
+                            "no-egress.",
                             end_col=c.toks[c.i - 1].end_col,
                         )
+                if ekind in DOUBLE_LEAF_KINDS and not width_given:
+                    width = DEFAULT_DOUBLE_DOOR_WIDTH  # the stock 60 in pair
                 c.expect_end()
-                plan.entrance(a, wall, width=width, offset=offset, egress=egress)
+                plan.entrance(
+                    a, wall, width=width, offset=offset, egress=egress, kind=ekind
+                )
             ed = plan.exterior_doors[-1]
             ed.line, ed.col, ed.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "open":
@@ -886,30 +973,39 @@ def _parse_statement(
         rid_tok = c.ident("a room id")
         rid = rid_tok.text
         wall = c.wall()
-        width, offset, egress = 3.0, 1.0, True
+        width, offset, egress, ekind = 3.0, 1.0, True, "entry"
+        width_given = False
         while c.peek() is not None:
             opt = c.take("an option").text.lower()
             if opt == "width":
                 width = c.number("door width")
+                width_given = True
             elif opt == "offset":
                 offset = c.number("offset")
             elif opt in ("no-egress", "nonegress"):
                 egress = False
+            elif opt in ("double", "french"):
+                ekind = opt
             else:
                 raise _ParseError(
                     "BAD_OPTION",
                     f"Unknown entry option '{opt}'.",
                     c.toks[c.i - 1].col,
-                    hint="Options: width <n>, offset <n>, no-egress.",
+                    hint="Options: double|french, width <n>, offset <n>, no-egress.",
                     end_col=c.toks[c.i - 1].end_col,
                 )
-        plan.entrance(rid, wall, width=width, offset=offset, egress=egress)
+        if ekind in DOUBLE_LEAF_KINDS and not width_given:
+            width = DEFAULT_DOUBLE_DOOR_WIDTH  # the stock 60 in pair
+        plan.entrance(rid, wall, width=width, offset=offset, egress=egress, kind=ekind)
         ed = plan.exterior_doors[-1]
         ed.line, ed.col, ed.end_col = lineno, rid_tok.col, rid_tok.end_col
     elif key == "window":
         rid_tok = c.ident("a room id")
         rid = rid_tok.text
         wall = c.wall()
+        kind = "casement"  # the default: full glazed size = clear opening
+        if (tok := c.peek()) is not None and tok.text.lower() in _WINDOW_KIND_SET:
+            kind = c.take("a window kind").text.lower()
         width, offset = 4.0, 2.0
         sill, head = 3.0, 6.67  # ft above the floor; matches Window's defaults
         while c.peek() is not None:
@@ -927,10 +1023,15 @@ def _parse_statement(
                     "BAD_OPTION",
                     f"Unknown window option '{opt}'.",
                     c.toks[c.i - 1].col,
-                    hint="Options: width <n>, offset <n>, sill <n>, head <n>.",
+                    hint="Options: a kind (casement/slider/fixed/double-hung, "
+                    "right after the wall), width <n>, offset <n>, sill <n>, "
+                    "head <n>.",
                     end_col=c.toks[c.i - 1].end_col,
                 )
-        plan.add_window(rid, wall, width=width, offset=offset, sill_height=sill, head_height=head)
+        plan.add_window(
+            rid, wall, width=width, offset=offset, sill_height=sill,
+            head_height=head, kind=kind,
+        )
         win = plan.windows[-1]
         win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
     elif key == "porch":

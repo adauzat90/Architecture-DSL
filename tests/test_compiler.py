@@ -52,7 +52,8 @@ def test_unknown_room_type_is_flagged_with_hint():
 
 
 def test_unknown_statement_is_flagged():
-    result = compile_source("envelope 20 x 20\nwall a north\n")
+    # `wall` became a real statement, so use a keyword that stays unknown.
+    result = compile_source("envelope 20 x 20\nfence a north\n")
     assert any(d.code == "UNKNOWN_STMT" and d.line == 2 for d in result.errors)
 
 

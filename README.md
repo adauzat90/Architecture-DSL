@@ -52,15 +52,16 @@ program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, c
 require adjacent|separate <room_a> <room_b>   # optional; spatial intent, checked vs the plan
 require exterior <room> [<wall>]              #   (also: require area <room> >= <sqft>)
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
+wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall between two rooms
 roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
 orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
 finish [siding "<name>"] [roof "<name>"]  # optional; exterior material hints (metal siding, standing-seam)
-door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
-door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]   # exterior door
 door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door (9 x 7 default; width 16 = double)
 open <id_a> - <id_b> [width <w>] [offset <o>]   # shorthand for `door <a> - <b> cased ...`
-entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
-window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
+entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
+window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
@@ -88,6 +89,25 @@ intent (a required adjacency, separation, exterior wall, or minimum room area);
 both are re-checked mechanically on every compile (`PROGRAM_MISMATCH` /
 `REQUIRE_UNMET` warnings), so the brief lives in the source and survives every
 revision.
+`wall <a> - <b> plumbing|bearing|rated` declares what the **shared wall**
+between two abutting rooms *is* (the pair must really share one — `WALL_NOADJ`
+otherwise): a `plumbing` wall is the 2x6 wet wall the fixtures back onto (it
+satisfies the wet-room grouping nudge, thickens the flanking rooms'
+clear-dimension math, and hints a thicker wall type in the Revit exchange —
+`WALL_UNUSED` if no wet room backs onto it); a `bearing` wall is an interior
+bearing wall the auto `frame` honours as an **interior post line** when it runs
+along the building's long axis (one parallel to the bents' span can't split it —
+`WALL_BEARING_AXIS`); a `rated` wall records the garage/dwelling fire separation
+as built, turning the `GARAGE_SEPARATION` reminder into a verified fact (it
+silences for that pair; a garage ceiling under habitable space still reminds).
+**Window kinds** make egress honest: the default `casement` clears ~its full
+glazed size (exactly the historical math, so old plans are unchanged), a
+`slider` clears ~half its glazed width, a `double-hung` ~half its glazed height,
+and `fixed` glass still daylights (`NAT_LIGHT`) but is **never** an escape
+opening (`BEDROOM_EGRESS`/`EGRESS_SIZE`). A `double`/`french` door (interior or
+exterior) is a pair of half-width leaves — its egress clear width counts **one
+leaf** (IRC R311.2), it checks against stock pair widths (48/60/64/72 in), and
+it renders as two leaves.
 The footprint is one rectangle by default. For an **L/T/U-shaped building**, add
 `wing <W> x <L> at <x>,<y>` blocks: the footprint becomes the union of the
 `envelope` (the primary block at the origin) and every wing. Containment,
@@ -266,6 +286,10 @@ frame bay 12 span 40 post 6
 * When the span exceeds `span` feet, an **interior support post** line is added
   to split the beam; the validator flags one that strands in a room's open floor
   (`POST_OBSTRUCT`) so you can align a partition to it.
+* A declared interior bearing wall (`wall a - b bearing`) running along the long
+  axis is honoured as an **authored post line** — an interior post lands on it at
+  every bent crossing its run, so the beams bear on the wall you named instead of
+  (or in addition to) the auto-derived support line.
 * The post grid is the fixed discipline, so windows and doors belong in the
   **bays between posts**. A window or exterior door that a post lands inside is
   flagged (`POST_IN_OPENING`) — shift the opening into a clear bay (a post at the
@@ -317,7 +341,10 @@ is tested anywhere; only the final element creation needs Revit. What it does:
   *exterior* (open footprint beyond), then contiguous like segments merge back
   into runs. A partition shared by two rooms becomes **one** wall centreline, not
   two coincident ones. Walls carry an `exterior` flag and a nominal `thickness`
-  hint so the consumer can pick a 2x6 shell vs. a 2x4 partition wall type.
+  hint so the consumer can pick a 2x6 shell vs. a 2x4 partition wall type — and
+  a segment matching a declared `wall a - b plumbing|bearing|rated` statement
+  carries a `kind` key (absent otherwise) so `config.json` can map it to a real
+  named wall type (a plumbing wall also raises the thickness hint to a 2x6).
 * **Openings host onto walls.** Each interior door, cased opening, exterior door
   and window is matched to the wall id whose line carries it, with a centre
   point, width, height, and (for windows) sill — ready to place as a family.

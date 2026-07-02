@@ -64,6 +64,12 @@ DEFAULT_ROOF_PITCH = 4.0 / 12.0
 #: room schedule reports), so both agree on one number.
 EXTERIOR_WALL_THICKNESS = 6.5 / 12.0
 INTERIOR_WALL_THICKNESS = 4.5 / 12.0
+#: Nominal thickness (feet) of a declared **plumbing (wet) wall** — a 2x6
+#: partition deep enough to carry a 3 in waste stack (`wall a - b plumbing`).
+#: Rooms flanking a declared plumbing wall lose half of this (instead of half an
+#: ordinary partition) from their clear dimensions, and the Revit exchange hints
+#: the thicker wall type on the matching segments.
+PLUMBING_WALL_THICKNESS = 6.0 / 12.0
 
 # --- foundation (monolithic slab-on-grade) -----------------------------------
 #: The barndominium foundation is typically a monolithic slab-on-grade: a 4 in
