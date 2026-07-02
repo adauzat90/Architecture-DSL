@@ -1493,6 +1493,12 @@ def _check_clear_dimension(
             nominal = nominal_of(kind)
             unit = "sq ft" if kind == "area" else "ft"
             where = "usable area" if kind == "area" else "short side"
+            if room.type is RoomType.BEDROOM:
+                field = "min_bedroom_area" if kind == "area" else "min_bedroom_dimension"
+                base = MIN_BEDROOM_AREA if kind == "area" else MIN_BEDROOM_DIMENSION
+            else:
+                field, base = "min_hallway_width", MIN_HALLWAY_WIDTH
+            tag = _profile_tag(profile, field, f"{base:g} {unit}")
             add(
                 Issue(
                     Severity.INFO,
@@ -1500,7 +1506,8 @@ def _check_clear_dimension(
                     f"{room.type.value.replace('_', ' ').capitalize()} '{room.id}' "
                     f"measures {_f(nominal)} {unit} nominal but only ~{_f(clear)} {unit} "
                     f"clear (finish-face); the {minimum:g} {unit} minimum is measured "
-                    "between finished surfaces, so the built room falls short.",
+                    "between finished surfaces, so the built room falls short"
+                    + tag + ".",
                     room=room.id,
                     hint=f"Add wall thickness to the {where}: grow it ~"
                     f"{_f(minimum - clear)} {unit} so the clear dimension still meets "
@@ -1637,6 +1644,10 @@ def _validate_doors(plan: Barndominium, add) -> None:
                         )
                     elif (
                         target.type is RoomType.HALLWAY
+                        # Deliberately the raw constant, not the profile: this
+                        # is a residual swing-clearance heuristic, not the
+                        # R311.6 hall-width rule (HALL_WIDTH tracks the profile;
+                        # this asks "can you get past the open leaf").
                         and depth - door.width + EPSILON < MIN_HALLWAY_WIDTH
                     ):
                         # It opens, but a leaf swung into a narrow hall leaves less
@@ -2039,7 +2050,12 @@ def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> Non
                     Severity.WARNING, "STAIR_RUN",
                     f"Stair '{s.id}' is {_f(long_dim)} ft long, too short to climb "
                     f"{_f(rise)} ft: ~{risers} risers need about {_f(run_needed)} ft "
-                    f"of run (a {_f(max_riser * 12)} in riser / {_f(min_tread * 12)} in tread).",
+                    f"of run (a {_f(max_riser * 12)} in riser / {_f(min_tread * 12)} in tread)"
+                    + _profile_tag(
+                        profile, "max_riser_height",
+                        f"{MAX_RISER_HEIGHT * 12:g} in / {MIN_TREAD_DEPTH * 12:g} in"
+                    )
+                    + ".",
                     room=s.id,
                     hint=f"Lengthen its footprint to >= {_f(run_needed)} ft, or make it "
                     f">= {_f(2 * min_width)} ft wide to fit a switchback."))
@@ -2599,7 +2615,12 @@ def _dq_hall_tight(plan: Barndominium, graph, by_id, add, profile: Profile = DEF
                     "HALL_TIGHT",
                     f"Hallway '{room.id}' is {_f(room.min_dimension)} ft wide — legal "
                     f"(>= {hard:g} ft) but tight; {comfort:g} "
-                    "ft is comfortable for two people and moving furniture.",
+                    "ft is comfortable for two people and moving furniture"
+                    + _profile_tag(
+                        profile, "comfort_hallway_width",
+                        f"{COMFORT_HALLWAY_WIDTH:g} ft"
+                    )
+                    + ".",
                     room=room.id,
                     hint=f"Widen it to >= {comfort:g} ft.",
                 )
@@ -4026,7 +4047,12 @@ def _validate_egress_and_light(plan: Barndominium, add, profile: Profile = DEFAU
                         "NAT_LIGHT",
                         f"Glazing {_f(glazing)} sq ft is below the natural-light "
                         f"minimum of {_f(required)} sq ft "
-                        f"({light_ratio * 100:.0f}% of floor area).",
+                        f"({light_ratio * 100:.0f}% of floor area)"
+                        + _profile_tag(
+                            profile, "natural_light_ratio",
+                            f"{NATURAL_LIGHT_RATIO * 100:.0f}%"
+                        )
+                        + ".",
                         room=room.id,
                         hint=hint,
                     )

@@ -37,8 +37,20 @@ form builds as two sheds rising to a raised centre gable, and program / frame
 / roof style-pitch / notes / accessible survive the round-trip so
 PROGRAM_MISMATCH guards Revit-side edits), and **`barndsl revit-diff`**
 (§3.4 — the model-vs-authored drift report with position-first matching for
-positional-id kinds). Everything else below remains open; the notes are kept
-as the original review.
+positional-id kinds).
+
+Batch 7 added: **jurisdiction profiles** (§4 head — fourteen
+jurisdiction-variable thresholds read from a named Profile; default is
+byte-identical to the constants, strict/rural are disclaimed illustrative
+stances, JSON overrides any subset, `--profile` rides compile/score/build and
+amended diagnostics name the profile), **Design Options** (§3.3 — Design
+Option creation is UI-only in the Revit API, so Build Option builds one
+shortlisted candidate into the user's active option with per-candidate
+identity namespacing; one label = one namespace, enforced by the manifest
+loader), and **metric units** (§3.5 carried — the exchange accepts
+meters/metres/m on both consumers through a fail-loud conversion table;
+emission stays feet and byte-identical). Everything else below remains open;
+the notes are kept as the original review.
 
 A second full-app review with the same three questions as
 `docs/REVIEW_DSL_REVIT.md`: what would let **AI agents design better plans**,

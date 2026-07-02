@@ -373,3 +373,48 @@ def test_cli_profiles_dump_json(capsys):
 def test_profiles_text_has_disclaimer():
     assert "ILLUSTRATIVE" in profiles_text()
     assert "not legal advice" in profiles_text().lower()
+
+
+# --- review hardening: golden default-path messages + tag consistency ---------
+
+
+def test_default_path_messages_are_pinned_verbatim():
+    """The None-vs-DEFAULT comparison above cannot catch a rewording (both
+    sides run the same code) — pin the exact default text of messages the
+    profiling touched, so any drift from the pre-profile wording fails here."""
+    tight = compile_source(_PLAN_TIGHT)
+    msgs = {}
+    for d in tight.diagnostics:
+        msgs.setdefault(d.code, d.message)  # first per code (bed before hall)
+    assert msgs["ROOM_CLEAR"] == (
+        "Bedroom 'bed' measures 70 sq ft nominal but only ~62.4184 sq ft "
+        "clear (finish-face); the 70 sq ft minimum is measured between "
+        "finished surfaces, so the built room falls short."
+    )
+    assert msgs["HALL_TIGHT"] == (
+        "Hallway 'hall' is 3 ft wide \u2014 legal (>= 3 ft) but tight; 4 ft is "
+        "comfortable for two people and moving furniture."
+    )
+    assert msgs["NAT_LIGHT"] == (
+        "Glazing 0 sq ft is below the natural-light minimum of 5.6 sq ft "
+        "(8% of floor area)."
+    )
+    assert not any("(the '" in m for m in msgs.values())  # no profile tags
+
+
+def test_amended_stair_and_daylight_messages_name_the_profile():
+    """Review finding: STAIR_RUN / NAT_LIGHT / HALL_TIGHT showed amended
+    numbers without attribution — under strict they must name the profile."""
+    strict = get_profile("strict")
+
+    stair = compile_source(_PLAN_STAIR, profile=strict)
+    sr = next(d for d in stair.diagnostics if d.code == "STAIR_RUN")
+    assert "'strict' profile amends" in sr.message
+
+    day = compile_source(_DAYLIGHT, profile=strict)
+    nl = next(d for d in day.diagnostics if d.code == "NAT_LIGHT")
+    assert "'strict' profile amends" in nl.message
+
+    hall = compile_source(_HALL_TIGHT, profile=strict)
+    ht = next(d for d in hall.diagnostics if d.code == "HALL_TIGHT")
+    assert "'strict' profile amends" in ht.message
