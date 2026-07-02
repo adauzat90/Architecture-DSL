@@ -37,8 +37,12 @@ def test_syntax_error_stops_compilation_with_location():
     src = "plan \"X\"\nenvelope 40 x\nroom a: living at 0,0 size 10 x 10\n"
     result = compile_source(src)
     assert not result.ok
-    assert result.plan is None  # parse failure -> no plan, no semantic cascade
-    err = result.errors[0]
+    # Statement-level recovery (§1.3): the bad `envelope` line is skipped and its
+    # error recorded, but the surviving `room` still builds a partial plan so the
+    # continuous score gradient isn't lost. The result stays failed.
+    assert result.plan is not None
+    assert result.plan.room("a") is not None  # the survivor is present
+    err = result.errors[0]  # the parse error comes first, unchanged
     assert err.line == 2
     assert err.code in ("BAD_NUMBER", "SYNTAX")
 

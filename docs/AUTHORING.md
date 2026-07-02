@@ -85,6 +85,8 @@ note "free text"                   # optional; repeatable
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeatable); also:
 require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
+site <W> x <L>                     # optional; the lot's east-west × north-south dimensions (ft)
+setback [front <n>] [side <n>] [rear <n>]     # optional; required yard clearances (needs a `site`)
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall (rooms must abut)
@@ -138,6 +140,19 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
   `DOOR_SIZE`). Egress clear width counts **one leaf** (IRC R311.2): a 5 ft pair
   is two 30 in leaves and does *not* satisfy the 32 in egress-door minimum — use
   `width 6` where the pair is the required exit.
+- `site <W> x <L>` declares the **lot** (feet, east-west × north-south) and
+  `setback [front <n>] [side <n>] [rear <n>]` the required yard clearances (any
+  subset). The **buildable rectangle** is the lot minus its setbacks: `front` and
+  `rear` consume the plan's north-south depth (front along the plan's south/entry
+  edge, rear along its north), and a single `side` clears **both** the east and
+  west edges. If the building footprint — the envelope, any wings, **and any
+  porch** — doesn't fit inside the buildable rectangle, that's a `SETBACK` error
+  (a county/legal violation, so it's an error). barndsl has no lot-position
+  statement, so the check is by **dimensions only**: the footprint's bounding box
+  must fit the buildable width and length; *where* the building sits on the lot
+  isn't modelled. A `site` on its own imposes no check; a `setback` with no
+  `site` to measure against is a `SETBACK_NO_SITE` error. This is a sanity guard,
+  not a substitute for a surveyed site plan.
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
 
@@ -350,6 +365,10 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   wall (`WALL_NOADJ`) — it declares an attribute of a wall that must exist.
 - A bedroom whose only exterior windows are `fixed` has **no escape opening**
   (`BEDROOM_EGRESS`) — fixed glass doesn't open.
+- `SETBACK` — with a `site` + `setback` declared, the building footprint
+  (envelope + wings + porches) must fit the **buildable rectangle** (the lot minus
+  its setbacks). Checked by dimensions only; a `setback` with no `site` is a
+  `SETBACK_NO_SITE` error.
 - Numbers are finite; ids/names are non-empty.
 
 **Warnings (should address):**

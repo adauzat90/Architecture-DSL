@@ -326,6 +326,11 @@ class RevitModel:
     orientation: float = 0.0
     siding: str | None = None
     roofing: str | None = None
+    #: Optional lot block ``{"width", "length", "setbacks": {...}}`` carried from
+    #: a declared ``site``/``setback``. ``None`` — and the JSON key absent — when
+    #: no site is declared, so undeclared documents stay byte-identical and the
+    #: builder can place the model relative to a survey point when it is present.
+    site: dict | None = None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -446,6 +451,9 @@ class RevitModel:
                 }
                 for fx in self.fixtures
             ],
+            # Only a declared site carries a block; the key is absent otherwise so
+            # undeclared documents stay byte-identical.
+            **({"site": self.site} if self.site is not None else {}),
         }
 
     def to_json(self, indent: int | None = 2) -> str:
@@ -1271,7 +1279,31 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         orientation=float(getattr(plan, "orientation", 0.0)),
         siding=getattr(plan, "siding", None),
         roofing=getattr(plan, "roofing", None),
+        site=_site_block(plan),
     )
+
+
+def _site_block(plan: Barndominium) -> dict | None:
+    """The exchange's optional ``site`` block from a declared ``site``/``setback``.
+
+    ``None`` when no lot dimensions are declared, so the key stays absent (old
+    documents are byte-identical). Only declared setback edges appear, so the
+    reverse path restores exactly what was authored.
+    """
+    ss = getattr(plan, "site_spec", None)
+    if ss is None or not ss.has_dims:
+        return None
+    block: dict = {"width": float(ss.width), "length": float(ss.length)}
+    setbacks: dict = {}
+    if ss.front is not None:
+        setbacks["front"] = float(ss.front)
+    if ss.side is not None:
+        setbacks["side"] = float(ss.side)
+    if ss.rear is not None:
+        setbacks["rear"] = float(ss.rear)
+    if setbacks:
+        block["setbacks"] = setbacks
+    return block
 
 
 def to_revit_json(plan: Barndominium, indent: int | None = 2) -> str:
@@ -1352,6 +1384,20 @@ def exchange_to_plan(data: dict) -> Barndominium:
         plan.orient(float(pinfo["orientation"]))
     if pinfo.get("siding") or pinfo.get("roofing"):
         plan.finish(siding=pinfo.get("siding"), roof=pinfo.get("roofing"))
+    site = data.get("site")
+    if (
+        isinstance(site, dict)
+        and site.get("width") is not None
+        and site.get("length") is not None
+    ):
+        plan.site(float(site["width"]), float(site["length"]))
+        setbacks = site.get("setbacks") or {}
+        if setbacks:
+            plan.setback(
+                front=setbacks.get("front"),
+                side=setbacks.get("side"),
+                rear=setbacks.get("rear"),
+            )
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))

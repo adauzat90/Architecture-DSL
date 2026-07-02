@@ -84,20 +84,20 @@ def test_to_separator_is_accepted():
 
 def test_unknown_attribute_is_a_parse_error():
     r = compile_source(_plan("wall kitchen - living soundproof"))
-    assert r.plan is None
+    assert r.plan is not None and not r.ok  # §1.3: bad line skipped, survivors kept
     assert "BAD_OPTION" in _codes(r, "error")
 
 
 def test_missing_attribute_is_a_syntax_error():
     r = compile_source(_plan("wall kitchen - living"))
-    assert r.plan is None
+    assert r.plan is not None and not r.ok  # §1.3: bad line skipped, survivors kept
     (d,) = [d for d in r.errors if d.code == "SYNTAX"]
     assert "attribute" in d.message
 
 
 def test_same_room_twice_is_a_syntax_error():
     r = compile_source(_plan("wall kitchen - kitchen plumbing"))
-    assert r.plan is None
+    assert r.plan is not None and not r.ok  # §1.3: bad line skipped, survivors kept
     assert "SYNTAX" in _codes(r, "error")
 
 

@@ -68,7 +68,7 @@ def test_every_window_kind_parses(kind):
 
 def test_unknown_window_kind_reads_as_a_bad_option():
     r = compile_source(_bedroom_plan("window bed east hopper width 4 offset 4"))
-    assert r.plan is None
+    assert r.plan is not None and not r.ok  # §1.3: bad line skipped, survivors kept
     (d,) = [d for d in r.errors if d.code == "BAD_OPTION"]
     assert "hopper" in d.message
     assert "casement" in (d.hint or "")

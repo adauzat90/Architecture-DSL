@@ -47,6 +47,18 @@ def emit_dsl(plan: Barndominium) -> str:
         if getattr(plan, "roof_pitch", None):
             line += f" pitch {_n(plan.roof_pitch)}"
         out.append(line)
+    ss = getattr(plan, "site_spec", None)
+    if ss is not None and ss.has_dims:
+        out.append(f"site {_n(ss.width)} x {_n(ss.length)}")
+    if ss is not None and ss.has_setback:
+        line = "setback"
+        if ss.front is not None:
+            line += f" front {_n(ss.front)}"
+        if ss.side is not None:
+            line += f" side {_n(ss.side)}"
+        if ss.rear is not None:
+            line += f" rear {_n(ss.rear)}"
+        out.append(line)
     if plan.program_spec is not None:
         spec = plan.program_spec
         line = f"program {spec.beds} bed"

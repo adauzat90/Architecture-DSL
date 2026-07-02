@@ -715,6 +715,8 @@ def validate(plan: Barndominium) -> ValidationReport:
                 )
             )
 
+    _validate_site(plan, add)
+
     if not plan.rooms:
         add(
             Issue(
@@ -767,6 +769,99 @@ def validate(plan: Barndominium) -> ValidationReport:
         )
 
     return ValidationReport(issues)
+
+
+def _site_footprint_bounds(plan: Barndominium) -> tuple[float, float, float, float]:
+    """Bounding box ``(min_x, min_y, max_x, max_y)`` of everything with a physical
+    footprint on the lot — the building (envelope + wings) plus every porch. This
+    is what the setback check must clear, so a projecting porch counts against the
+    yard the same way the county measures it."""
+    minx, miny, maxx, maxy = plan.bounds()
+    for p in plan.porches:
+        minx = min(minx, p.x)
+        miny = min(miny, p.y)
+        maxx = max(maxx, p.x + p.width)
+        maxy = max(maxy, p.y + p.length)
+    return minx, miny, maxx, maxy
+
+
+def _validate_site(plan: Barndominium, add) -> None:
+    """Check a declared ``site`` / ``setback`` against the building footprint.
+
+    The buildable rectangle is the lot minus its setbacks: ``front``/``rear``
+    consume the plan's north-south depth and ``side`` clears both the east and
+    west edges. barndsl has no lot-position statement, so the check is by
+    **dimensions only** — the footprint's bounding box (building + porches) must
+    fit inside the buildable width and length; where it sits on the lot isn't
+    modelled (front is measured along the plan's south/entry edge). A footprint
+    that overruns is a ``SETBACK`` error (a legal/county violation, like the other
+    code checks); a ``setback`` with no ``site`` to measure against is a
+    ``SETBACK_NO_SITE`` error.
+    """
+    ss = getattr(plan, "site_spec", None)
+    if ss is None:
+        return
+    if not ss.has_dims:
+        if ss.has_setback:
+            loc = {
+                "line": ss.setback_line, "col": ss.setback_col,
+                "end_col": ss.setback_end_col,
+            }
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "SETBACK_NO_SITE",
+                    "A `setback` was declared but there is no `site` to measure it "
+                    "against.",
+                    hint="Add the lot dimensions with `site <W> x <L>` (feet), or "
+                    "drop the `setback`.",
+                    **loc,
+                )
+            )
+        return
+    if not ss.has_setback:
+        return  # a `site` on its own imposes no check
+
+    front = ss.front or 0.0
+    side = ss.side or 0.0
+    rear = ss.rear or 0.0
+    buildable_w = ss.width - 2.0 * side
+    buildable_l = ss.length - front - rear
+    minx, miny, maxx, maxy = _site_footprint_bounds(plan)
+    fp_w = maxx - minx
+    fp_l = maxy - miny
+
+    problems: list[str] = []
+    if buildable_w <= EPSILON or fp_w > buildable_w + EPSILON:
+        problems.append(
+            f"it is {_f(fp_w)} ft wide but only {_f(max(0.0, buildable_w))} ft is "
+            f"buildable east-west ({_f(ss.width)} ft lot − 2 × {_f(side)} ft side)"
+        )
+    if buildable_l <= EPSILON or fp_l > buildable_l + EPSILON:
+        problems.append(
+            f"it is {_f(fp_l)} ft deep but only {_f(max(0.0, buildable_l))} ft is "
+            f"buildable north-south ({_f(ss.length)} ft lot − {_f(front)} ft front "
+            f"− {_f(rear)} ft rear)"
+        )
+    if problems:
+        loc = {
+            "line": ss.setback_line or ss.line,
+            "col": ss.setback_col or ss.col,
+            "end_col": ss.setback_end_col or ss.end_col,
+        }
+        add(
+            Issue(
+                Severity.ERROR,
+                "SETBACK",
+                "The building footprint doesn't fit the buildable area: "
+                + "; ".join(problems)
+                + ".",
+                hint="Shrink the footprint, enlarge the `site`, or reduce the "
+                "`setback` — the footprint's bounding box (building + porches) "
+                "must fit inside the lot minus its setbacks.",
+                **loc,
+            )
+        )
 
 
 def _validate_geometry(plan: Barndominium, add) -> None:

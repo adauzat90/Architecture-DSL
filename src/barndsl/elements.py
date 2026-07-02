@@ -575,6 +575,51 @@ class WallSpec:
 
 
 @dataclass
+class SiteSpec:
+    """Declared lot dimensions and yard setbacks — the ``site`` / ``setback``
+    statements. Optional, like :class:`ProgramSpec`: barndominiums are usually
+    acreage builds where the lot isn't the constraint, but when a ``site`` is
+    declared the validator checks the building footprint fits inside the
+    **buildable rectangle** (the lot minus its setbacks).
+
+    ``width``/``length`` are the lot's east-west / north-south dimensions (feet;
+    ``None`` until a ``site`` statement sets them). Setbacks are the required
+    clear yard on each edge: ``front`` and ``rear`` consume the plan's
+    north-south depth (front along the plan's south/entry side, rear along its
+    north), and ``side`` applies to **both** the east and west edges (a single
+    value, the two side yards being equal — there is no lot-position statement to
+    tell them apart). Any subset may be declared; ``None`` means that edge has no
+    setback (treated as 0 in the fit math). A ``setback`` with no ``site`` is a
+    ``SETBACK_NO_SITE`` error; a footprint that overruns the buildable rectangle
+    is a ``SETBACK`` error (a county/legal violation, checked by dimensions only).
+    """
+
+    width: float | None = None
+    length: float | None = None
+    front: float | None = None
+    side: float | None = None
+    rear: float | None = None
+    #: Source location of the `site` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+    #: Source location of the `setback` statement (textual front-end only).
+    setback_line: int | None = None
+    setback_col: int | None = None
+    setback_end_col: int | None = None
+
+    @property
+    def has_dims(self) -> bool:
+        """True once a ``site <W> x <L>`` has set the lot dimensions."""
+        return self.width is not None and self.length is not None
+
+    @property
+    def has_setback(self) -> bool:
+        """True if any of front/side/rear was declared."""
+        return any(v is not None for v in (self.front, self.side, self.rear))
+
+
+@dataclass
 class Requirement:
     """A declared spatial requirement (design *intent*), one `require` statement.
 
@@ -653,6 +698,11 @@ class Barndominium:
     #: Declared shared-wall attributes (the ``wall`` statement): plumbing /
     #: bearing / rated walls between room pairs. See :class:`WallSpec`.
     wall_specs: list[WallSpec] = field(default_factory=list)
+    #: Optional declared lot dimensions + yard setbacks (the ``site`` /
+    #: ``setback`` statements). When set with dimensions and any setback, the
+    #: validator checks the footprint fits the buildable rectangle. See
+    #: :class:`SiteSpec`.
+    site_spec: SiteSpec | None = None
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
     #: true north. Used for solar/setback reasoning and to set Project North when
@@ -916,6 +966,43 @@ class Barndominium:
             attrs.append(a)
         canonical = tuple(a for a in WALL_ATTRIBUTES if a in attrs)
         self.wall_specs.append(WallSpec(str(room_a), str(room_b), canonical))
+        return self
+
+    def site(self, width: float, length: float) -> "Barndominium":
+        """Declare the lot (``site``) dimensions in feet — ``site <W> x <L>``.
+
+        Optional. Gives the ``orientation`` azimuth something to anchor to and,
+        with a ``setback``, lets the validator check the building footprint fits
+        the buildable rectangle (see :meth:`setback` and :class:`SiteSpec`).
+        """
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        self.site_spec.width = float(width)
+        self.site_spec.length = float(length)
+        return self
+
+    def setback(
+        self,
+        *,
+        front: float | None = None,
+        side: float | None = None,
+        rear: float | None = None,
+    ) -> "Barndominium":
+        """Declare yard setbacks (feet) — ``setback front <n> side <n> rear <n>``.
+
+        Any subset may be given. ``front``/``rear`` clear the plan's south/north
+        (depth) edges; ``side`` clears **both** the east and west edges. A
+        setback with no :meth:`site` is a ``SETBACK_NO_SITE`` error, since there
+        are no lot dimensions to measure it against. See :class:`SiteSpec`.
+        """
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        if front is not None:
+            self.site_spec.front = float(front)
+        if side is not None:
+            self.site_spec.side = float(side)
+        if rear is not None:
+            self.site_spec.rear = float(rear)
         return self
 
     def frame(

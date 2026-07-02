@@ -100,6 +100,20 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two rooms share an id; ids must be unique."),
         _c("NO_BATH", W, "No bathroom",
            "The plan has no bathroom or half-bath."),
+        # --- site / setbacks (the `site` / `setback` statements) -------------
+        _c("SETBACK", E, "Footprint violates the setbacks",
+           "The building footprint (envelope + wings + porches) doesn't fit "
+           "inside the buildable rectangle — the lot (`site`) minus its yard "
+           "setbacks. `front` and `rear` consume the plan's north-south depth "
+           "(front along the south/entry edge); `side` clears both the east and "
+           "west edges. A dimensions-only check — barndsl has no lot-position "
+           "statement — so it compares the footprint's bounding box against the "
+           "buildable width and length. Shrink the footprint, enlarge the lot, or "
+           "reduce the setbacks. Not a substitute for a survey/site plan."),
+        _c("SETBACK_NO_SITE", E, "Setback without a site",
+           "A `setback` statement declares yard setbacks but no `site <W> x <L>` "
+           "gives the lot dimensions to measure them against. Add a `site` line, "
+           "or drop the setbacks."),
         # --- geometry -------------------------------------------------------
         _c("ROOM_GEOMETRY", E, "Non-finite room geometry",
            "A room has nan/inf coordinates or size."),

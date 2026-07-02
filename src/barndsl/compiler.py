@@ -61,7 +61,7 @@ from .validation import Issue, Severity, ValidationReport, validate
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
-    "roof", "orientation", "finish", "accessible"
+    "roof", "orientation", "finish", "accessible", "site", "setback"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -162,6 +162,13 @@ Statements:
         # aisle). pitch is rise:run (e.g. 0.333 for 4:12).
   orientation <degrees>            # compass azimuth that plan-north (+y) points (0 = true north)
   finish [siding "<name>"] [roof "<name>"]  # exterior material hints (e.g. metal siding, standing-seam)
+  site <W> x <L>                   # optional lot dimensions in feet (east-west x north-south)
+  setback [front <n>] [side <n>] [rear <n>]  # required yard setbacks (feet); needs a `site`
+        # the buildable rectangle is the lot minus its setbacks: front/rear
+        # consume the plan's south/north depth, `side` clears BOTH east & west
+        # edges. If the building footprint (envelope + wings + porches) doesn't
+        # fit inside it, that's a SETBACK error (checked by dimensions only —
+        # there is no lot-position statement). A `setback` with no `site` errors.
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -605,6 +612,47 @@ def _parse_statement(
                 )
         c.expect_end()
         plan.finish(siding=siding, roof=roofing)
+    elif key == "site":
+        # `site <W> x <L>` — the lot's east-west x north-south dimensions (feet).
+        w = c.number("site width")
+        c.keyword("x")
+        length = c.number("site length")
+        c.expect_end()
+        plan.site(w, length)
+        ss = plan.site_spec
+        ss.line, ss.col, ss.end_col = lineno, kw.col, kw.end_col
+    elif key == "setback":
+        # `setback [front <n>] [side <n>] [rear <n>]` — any subset, in any order.
+        front = side = rear = None
+        while (tok := c.peek()) is not None:
+            opt = c.take("'front', 'side', or 'rear'").text.lower()
+            if opt == "front":
+                front = c.number("the front setback")
+            elif opt == "side":
+                side = c.number("the side setback")
+            elif opt == "rear":
+                rear = c.number("the rear setback")
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown setback edge '{tok.text}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint="Use `setback front <n> side <n> rear <n>` (any subset; "
+                    "`side` applies to both the east and west edges).",
+                )
+        if front is None and side is None and rear is None:
+            raise _ParseError(
+                "SYNTAX",
+                "A `setback` needs at least one of front/side/rear.",
+                c.eol_col,
+                end_col=c.eol_col + 1,
+                hint="e.g. `setback front 25 side 10 rear 20`.",
+            )
+        c.expect_end()
+        plan.setback(front=front, side=side, rear=rear)
+        ss = plan.site_spec
+        ss.setback_line, ss.setback_col, ss.setback_end_col = lineno, kw.col, kw.end_col
     elif key == "roof":
         # `roof <style> [pitch <p>]` — style in gable|shed|monitor.
         style_tok = c.take("a roof style (gable|shed|monitor)")
@@ -1287,29 +1335,52 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
                 )
             )
 
-    # If parsing failed, stop here — like a compiler that won't typecheck a
-    # program that doesn't parse. Fix syntax first.
-    if any(d.severity is Severity.ERROR for d in diagnostics):
+    # Statement-level error recovery (review §1.3): a statement that failed to
+    # parse already recorded its diagnostic and was skipped, but the *surviving*
+    # statements still built a partial plan. Rather than throw it away (the old
+    # behaviour: one typo dropped the whole design gradient an agent hill-climbs
+    # on), validate and score the survivors. The result stays FAILED — the parse
+    # errors keep ``ok`` False — so nothing downstream treats it as buildable.
+    had_parse_error = any(d.severity is Severity.ERROR for d in diagnostics)
+
+    # A source where nothing parsed into a room is genuinely unbuildable — there
+    # are no survivors to score — so keep the historical ``plan is None`` (an
+    # empty/garbage input scores a flat zero with no misleading semantic cascade;
+    # see score.py's plan-None handling).
+    if had_parse_error and not plan.rooms:
         return CompileResult(None, diagnostics, source)
 
     # Derive the structural frame (if requested) before checks, so the validator
-    # and renderer see the placed posts/beams.
+    # and renderer see the placed posts/beams. On a partial (parse-failed) plan
+    # the incomplete geometry may defeat the placer or a check, so guard those on
+    # the recovery path — a syntax error must never become a crash. A clean
+    # compile keeps the original, unguarded behaviour, so a real bug still bites.
     if plan.frame_spec is not None:
         from .structure import place_frame
 
-        place_frame(plan)
+        try:
+            place_frame(plan)
+        except Exception:
+            if not had_parse_error:
+                raise
 
-    report: ValidationReport = validate(plan)
-    for iss in report.issues:
-        # Anchor semantic diagnostics to the room's `room ...` line, and point
-        # the caret at the room's id token, so quality/code-check issues get the
-        # same column-accurate underline as syntax errors.
-        if iss.room is not None:
-            if iss.line is None:
-                iss.line = smap.room_line.get(iss.room)
-            if iss.col is None and iss.room in smap.room_col:
-                iss.col, iss.end_col = smap.room_col[iss.room]
-    diagnostics.extend(report.issues)
+    try:
+        report: ValidationReport | None = validate(plan)
+    except Exception:
+        if not had_parse_error:
+            raise
+        report = None
+    if report is not None:
+        for iss in report.issues:
+            # Anchor semantic diagnostics to the room's `room ...` line, and point
+            # the caret at the room's id token, so quality/code-check issues get the
+            # same column-accurate underline as syntax errors.
+            if iss.room is not None:
+                if iss.line is None:
+                    iss.line = smap.room_line.get(iss.room)
+                if iss.col is None and iss.room in smap.room_col:
+                    iss.col, iss.end_col = smap.room_col[iss.room]
+        diagnostics.extend(report.issues)
     return CompileResult(plan, diagnostics, source)
 
 
