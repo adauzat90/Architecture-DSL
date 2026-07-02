@@ -275,11 +275,16 @@ def _score(result: LayoutResult) -> tuple:
 
     In order of priority: fewer compiler **errors** (a buried bedroom or
     unreachable room is disqualifying), fewer **unmet adjacencies** (how much of
-    the requested program it honored), less **wasted** footprint, squarer **room
-    proportions** (no long, thin bedrooms), then a mild envelope-aspect tiebreak.
+    the requested program it honored), then the plan's **design score** — the
+    same deterministic 0–100 the agent loop maximises (warnings, design-quality
+    infos, space/circulation/proportion/daylight margins), so topology selection
+    stops emitting plans that immediately fire a pile of nudges it never tried
+    to avoid. The old waste/proportion/aspect terms stay as tiebreaks (the
+    design score coarsens them through its rounding).
     """
     from .compiler import compile_source
     from .emit import emit_dsl
+    from .score import design_score
 
     plan = result.plan
     report = compile_source(emit_dsl(plan), name=plan.name)
@@ -290,6 +295,7 @@ def _score(result: LayoutResult) -> tuple:
     return (
         len(report.errors),
         len(result.unsatisfied),
+        round(100.0 - design_score(report).total, 1),
         round(unused, 3),
         round(_proportion_penalty(plan), 2),
         round(aspect, 2),

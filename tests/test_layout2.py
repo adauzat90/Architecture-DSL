@@ -354,3 +354,30 @@ def test_oakline_example_compiles_clean():
     assert not result.errors, result.report()
     assert not result.warnings, result.report()
     assert out.unsatisfied == []
+
+
+def test_score_folds_in_the_design_score():
+    """Topology selection optimizes the same 0-100 the agent loop maximises.
+
+    Two candidates identical on errors/unmet adjacencies: the one whose plan
+    carries a design defect (a narrow door -> DOOR_NARROW warning) must rank
+    strictly worse, because the design score is the tuple's next term.
+    """
+    from barndsl.layout2 import LayoutResult
+
+    src = (
+        'plan "s"\nenvelope 30 x 24\nceiling 9\n'
+        "room living: living at 0,0 size 18 x 24\n"
+        "room bed: bedroom at 18,0 size 12 x 24\n"
+        "door living - bed width {w}\n"
+        "entry living south width 3 offset 4\n"
+        "window bed south width 4 offset 3\n"
+        "window living south width 6 offset 8\n"
+    )
+    clean = compile_source(src.format(w=3)).plan
+    narrow = compile_source(src.format(w=2)).plan
+    s_clean = _score(LayoutResult(clean, [], [], []))
+    s_narrow = _score(LayoutResult(narrow, [], [], []))
+    assert s_clean[:2] == s_narrow[:2]  # same errors / unmet adjacencies
+    assert s_clean < s_narrow  # the design score decides
+    assert s_narrow[2] - s_clean[2] >= 8  # a warning costs its 8 points
