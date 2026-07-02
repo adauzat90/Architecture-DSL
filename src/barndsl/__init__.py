@@ -80,7 +80,9 @@ from .revit import (
     to_revit_model,
 )
 from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
+from .compare import compare_plans, comparison_text
 from .introspect import plan_summary, summary_text
+from .revitlog import buildlog_issues
 from .score import ScoreReport, design_score
 from .structure import place_frame
 from .validation import Issue, Severity, ValidationReport, clear_dimensions, validate
@@ -130,6 +132,9 @@ __all__ = [
     "design_score",
     "ScoreReport",
     # resolved-geometry introspection (the geometry pack behind `barndsl inspect`)
+    "buildlog_issues",
+    "compare_plans",
+    "comparison_text",
     "plan_summary",
     "summary_text",
     # fixtures / appliances (seeds + clearance)

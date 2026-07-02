@@ -486,6 +486,8 @@ barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl compile examples/cedar_ridge.barn --strict # warnings also fail (CI gate)
 barndsl score   examples/cedar_ridge.barn          # deterministic 0-100 design score
+barndsl inspect examples/cedar_ridge.barn          # geometry pack: rooms, adjacency, free wall spans
+barndsl compare a.barn b.barn                      # scheme A vs B: score/takeoff/diagnostic deltas
 barndsl fmt -w examples/cedar_ridge.barn           # canonically reformat in place
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl build   examples/cedar_ridge.barn --format png  # PNG/PDF (needs [raster])
@@ -497,6 +499,7 @@ barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
+barndsl revit-log plan.buildlog.json               # what the Revit build couldn't do, as diagnostics
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means

@@ -541,6 +541,48 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         return 0
 
 
+def _cmd_compare(args: argparse.Namespace) -> int:
+    """Side-by-side of two plans: score, takeoff, resolved/introduced codes."""
+    from .compare import compare_plans, comparison_text
+
+    result_a = compile_file(args.file_a)
+    result_b = compile_file(args.file_b)
+    names = (os.path.basename(args.file_a), os.path.basename(args.file_b))
+    cmp = compare_plans(result_a, result_b, names)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(cmp, indent=2))
+    else:
+        print(comparison_text(cmp))
+    return 0 if result_a.plan is not None and result_b.plan is not None else 1
+
+
+def _cmd_revit_log(args: argparse.Namespace) -> int:
+    """Translate a *.buildlog.json into compile-style diagnostics."""
+    from .revitlog import buildlog_issues, issues_to_dict, load_buildlog
+
+    try:
+        log = load_buildlog(args.file)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    issues = buildlog_issues(log)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(issues_to_dict(issues), indent=2))
+    else:
+        if not issues:
+            print("Revit build clean: every element built as asked.")
+        for issue in issues:
+            print(issue)
+    # Exit like `compile --strict`: failures/skips (warnings) are the signal.
+    from .validation import Severity
+
+    return 1 if any(i.severity is not Severity.INFO for i in issues) else 0
+
+
 def _cmd_explain(args: argparse.Namespace) -> int:
     from .diagnostics import REGISTRY, explain
 
@@ -777,6 +819,23 @@ def main(argv: list[str] | None = None) -> int:
         "--interval", type=float, default=0.5, help="poll interval in seconds"
     )
     p_watch.set_defaults(func=_cmd_watch)
+
+    p_compare = sub.add_parser(
+        "compare",
+        help="side-by-side of two plans: score, takeoff, resolved/introduced codes",
+    )
+    p_compare.add_argument("file_a", help="path to scheme A (.barn)")
+    p_compare.add_argument("file_b", help="path to scheme B (.barn)")
+    p_compare.add_argument("--json", action="store_true", help="emit the comparison as JSON")
+    p_compare.set_defaults(func=_cmd_compare)
+
+    p_rlog = sub.add_parser(
+        "revit-log",
+        help="translate a *.buildlog.json from the pyRevit build into diagnostics",
+    )
+    p_rlog.add_argument("file", help="path to the *.buildlog.json sidecar")
+    p_rlog.add_argument("--json", action="store_true", help="emit diagnostics as JSON")
+    p_rlog.set_defaults(func=_cmd_revit_log)
 
     p_explain = sub.add_parser(
         "explain", help="explain a diagnostic code (or list them all)"

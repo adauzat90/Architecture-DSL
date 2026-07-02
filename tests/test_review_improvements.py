@@ -177,7 +177,7 @@ def test_registry_covers_every_code_emitted_in_the_source():
     """Guard: no check ships without a registry entry (and an explanation)."""
     src_dir = Path(__file__).resolve().parent.parent / "src" / "barndsl"
     emitted: set[str] = set()
-    for fname in ("validation.py", "compiler.py", "agent.py"):
+    for fname in ("validation.py", "compiler.py", "agent.py", "revitlog.py"):
         text = (src_dir / fname).read_text()
         # The code is the string literal right after a Severity.* or in a _ParseError.
         emitted.update(re.findall(r'Severity\.\w+,\s*"([A-Z_]{3,})"', text))

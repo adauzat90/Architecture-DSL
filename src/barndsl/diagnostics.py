@@ -439,6 +439,22 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "The source declares no `program` line, so the compiler cannot check the "
            "plan delivers the brief's beds/baths/area. Derive one from the brief — "
            "`program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`."),
+        # --- Revit build log (`barndsl revit-log`) ---------------------------
+        _c("REVIT_FAIL", W, "Element failed to build in Revit",
+           "The pyRevit builder hit an API error creating this element (see the "
+           "message for Revit's reason); the rest of the build carried on, so the "
+           "model is missing it. Usually a template/family problem — check the "
+           "build log's resources block for what was picked."),
+        _c("REVIT_SKIP", W, "Element skipped by the Revit build",
+           "The builder had nothing to build this element with — a missing level, "
+           "host wall, family or type — so it is absent from the model. Load a "
+           "matching family into the template or map the pass to a named type in "
+           "the config.json sidecar."),
+        _c("REVIT_NOTE", I, "Revit build used a stand-in",
+           "The element built, but not the way the plan asked: a stand-in family, "
+           "a flat fallback for a gable profile, or a type hint that matched "
+           "nothing. The model is usable; refine the template (or the config "
+           "mapping) to close the gap."),
     ]
 )
 
