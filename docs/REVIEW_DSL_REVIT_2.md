@@ -16,8 +16,19 @@ through the exchange and mapped to real Revit types/families by the builder),
 **`barndsl compare` and `barndsl revit-log`** (§4.1/§3.2 — scheme deltas, and
 the build log translated into REVIT_FAIL/REVIT_SKIP/REVIT_NOTE diagnostics),
 and the **solver objective alignment** (round-1 §1.4 — `_score` folds in the
-design score). Everything else below remains open; the notes are kept as the
-original review.
+design score).
+
+Batch 5 added: **solver seeding** (§1.4 — opt-in `seed_with_solver`: the
+layout engines' best compiling candidate becomes iteration 0, the floor the
+LLM must beat, and its DSL seeds the first generation prompt), **the gradient
+on failed compiles** (§1.3 — statement-level parser recovery keeps a scored
+partial plan, the loop revises from the best valid source with coherent
+feedback, and output commands refuse `recovered` partials), **`site` +
+`setback`** (§2.4 — a verifiable `SETBACK` check, carried through the
+exchange), and **`barndsl cost` + `barndsl packet`** (§4 head, §4.2 — an
+assembly budget with honest line math, and the one-file HTML client packet).
+Everything else below remains open; the notes are kept as the original
+review.
 
 A second full-app review with the same three questions as
 `docs/REVIEW_DSL_REVIT.md`: what would let **AI agents design better plans**,

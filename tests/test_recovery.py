@@ -138,3 +138,99 @@ def test_semantic_errors_still_produce_a_plan_as_before():
     r = compile_source(src)
     assert r.plan is not None and not r.ok
     assert "DOOR_REF" in _codes(r, "error")
+
+
+# --- the `recovered` flag and what it gates -----------------------------------
+
+GOOD = (
+    'plan "P"\n'
+    "envelope 40 x 30\n"
+    "ceiling 9\n"
+    "room living: living at 0,0 size 20 x 30\n"
+    "room kitchen: kitchen at 20,0 size 20 x 30\n"
+    "door living - kitchen width 3\n"
+    "entry living south width 3 offset 10\n"
+    "window living west width 10 offset 8\n"
+)
+PARSE_BAD = GOOD + "room bad: living at 0,0 size 10 x\n"
+SEMANTIC_BAD = GOOD + "window bogus north width 4\n"
+
+
+def test_recovered_flag_marks_parse_skips_only():
+    """`recovered` is True exactly when a statement was skipped by recovery —
+    a semantic error records an ERROR but skips nothing, so it stays False."""
+    assert compile_source(GOOD).recovered is False
+    assert compile_source(PARSE_BAD).recovered is True
+    r = compile_source(SEMANTIC_BAD)
+    assert r.recovered is False and r.errors
+
+
+def test_semantic_error_compiles_keep_unguarded_validation(monkeypatch):
+    """The recovery guard must not widen: a validator crash on a compile with
+    only SEMANTIC errors (no skipped statements) still propagates."""
+    import pytest
+
+    import barndsl.compiler as compiler
+
+    def boom(plan):
+        raise RuntimeError("validator bug")
+
+    monkeypatch.setattr(compiler, "validate", boom)
+    with pytest.raises(RuntimeError):
+        compile_source(SEMANTIC_BAD)
+
+
+def test_swallowed_validation_crash_is_reported_on_the_recovery_path(monkeypatch):
+    """When validation crashes on a genuine partial plan the swallow is
+    RECORDED — a RECOVERY_LIMIT warning says the diagnostics are incomplete."""
+    import barndsl.compiler as compiler
+
+    def boom(plan):
+        raise RuntimeError("validator bug")
+
+    monkeypatch.setattr(compiler, "validate", boom)
+    r = compile_source(PARSE_BAD)
+    assert r.plan is not None and r.recovered
+    assert "RECOVERY_LIMIT" in {d.code for d in r.warnings}
+
+
+def test_output_commands_refuse_a_recovered_partial(tmp_path, capsys):
+    """schedule/build/dxf/revit keep the pre-recovery contract: a parse error
+    yields no artifact and a failing exit code."""
+    from barndsl.cli import main
+
+    f = tmp_path / "partial.barn"
+    f.write_text(PARSE_BAD, encoding="utf-8")
+
+    assert main(["schedule", str(f)]) == 1
+    capsys.readouterr()
+
+    out_svg = tmp_path / "b.svg"
+    assert main(["build", str(f), "--out", str(out_svg)]) == 1
+    assert not out_svg.exists()
+    capsys.readouterr()
+
+    out_dxf = tmp_path / "b.dxf"
+    assert main(["dxf", str(f), "--out", str(out_dxf)]) == 1
+    assert not out_dxf.exists()
+    capsys.readouterr()
+
+    out_json = tmp_path / "r.json"
+    assert main(["revit", str(f), "--out", str(out_json)]) == 1
+    assert not out_json.exists()
+    capsys.readouterr()
+
+
+def test_build_json_reports_the_skipped_render_for_a_recovered_partial(tmp_path, capsys):
+    import json
+
+    from barndsl.cli import main
+
+    f = tmp_path / "partial.barn"
+    f.write_text(PARSE_BAD, encoding="utf-8")
+    out_svg = tmp_path / "b.svg"
+    assert main(["build", str(f), "--json", "--out", str(out_svg)]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["out"] is None
+    assert "recovery" in payload["render_error"]
+    assert not out_svg.exists()

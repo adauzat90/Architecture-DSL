@@ -233,3 +233,30 @@ def test_setback_codes_are_registered():
     for code in ("SETBACK", "SETBACK_NO_SITE"):
         assert code in REGISTRY
         assert "Unknown" not in explain(code)
+
+
+def test_degenerate_site_dimensions_are_an_error():
+    base = (
+        'plan "P"\nenvelope 40 x 30\nceiling 9\n'
+        "room living: living at 0,0 size 40 x 30\n"
+        "entry living south width 3 offset 10\n"
+        "window living west width 10 offset 8\n"
+    )
+    for line in ("site -40 x 30\n", "site 0 x 0\n"):
+        r = compile_source(base + line)
+        assert "SITE" in {d.code for d in r.errors}, line
+
+
+def test_negative_setback_is_an_error():
+    src = (
+        'plan "P"\nenvelope 40 x 30\nceiling 9\n'
+        "room living: living at 0,0 size 40 x 30\n"
+        "entry living south width 3 offset 10\n"
+        "window living west width 10 offset 8\n"
+        "site 120 x 200\n"
+        "setback front -5\n"
+    )
+    r = compile_source(src)
+    assert "SITE" in {d.code for d in r.errors}
+    # The degenerate declaration short-circuits the fit check.
+    assert "SETBACK" not in {d.code for d in r.errors}

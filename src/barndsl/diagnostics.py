@@ -110,10 +110,18 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "statement — so it compares the footprint's bounding box against the "
            "buildable width and length. Shrink the footprint, enlarge the lot, or "
            "reduce the setbacks. Not a substitute for a survey/site plan."),
+        _c("SITE", E, "Invalid site declaration",
+           "The `site` lot dimensions are zero/negative/non-finite, or a "
+           "`setback` value is negative. Declare a real lot: positive "
+           "dimensions, non-negative setbacks."),
         _c("SETBACK_NO_SITE", E, "Setback without a site",
            "A `setback` statement declares yard setbacks but no `site <W> x <L>` "
            "gives the lot dimensions to measure them against. Add a `site` line, "
            "or drop the setbacks."),
+        _c("RECOVERY_LIMIT", W, "Partial-plan checks incomplete",
+           "Parse-error recovery kept a partial plan, but frame placement or "
+           "validation crashed on it and was skipped - the diagnostics listed "
+           "are incomplete. Fix the parse error(s) to get the full report."),
         # --- geometry -------------------------------------------------------
         _c("ROOM_GEOMETRY", E, "Non-finite room geometry",
            "A room has nan/inf coordinates or size."),

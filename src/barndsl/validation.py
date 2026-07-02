@@ -819,6 +819,33 @@ def _validate_site(plan: Barndominium, add) -> None:
                 )
             )
         return
+    # A degenerate lot is an authoring error whether or not setbacks follow —
+    # mirror the ENVELOPE check's stance on non-positive/non-finite dims.
+    bad_dims = not (
+        math.isfinite(ss.width) and math.isfinite(ss.length)
+        and ss.width > EPSILON and ss.length > EPSILON
+    )
+    bad_setbacks = any(
+        v is not None and (not math.isfinite(v) or v < 0.0)
+        for v in (ss.front, ss.side, ss.rear)
+    )
+    if bad_dims or bad_setbacks:
+        what = []
+        if bad_dims:
+            what.append(f"lot dimensions {_f(ss.width)} x {_f(ss.length)} ft")
+        if bad_setbacks:
+            what.append("negative setback value(s)")
+        add(
+            Issue(
+                Severity.ERROR,
+                "SITE",
+                "Invalid site declaration: " + " and ".join(what) + ".",
+                line=ss.line, col=ss.col, end_col=ss.end_col,
+                hint="`site <W> x <L>` needs positive lot dimensions and "
+                "`setback` values can't be negative.",
+            )
+        )
+        return
     if not ss.has_setback:
         return  # a `site` on its own imposes no check
 

@@ -1188,6 +1188,9 @@ class CompileResult:
     plan: Barndominium | None
     diagnostics: list[Issue]
     source: str
+    #: True when parse-error recovery skipped statements: ``plan`` (if any) is
+    #: PARTIAL — good enough to score and inspect, not to build or export from.
+    recovered: bool = False
 
     @property
     def errors(self) -> list[Issue]:
@@ -1283,6 +1286,11 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
     diagnostics: list[Issue] = []
     plan = Barndominium(name=name or "Untitled")
     smap = _SourceMap()
+    # True once any statement was skipped by parse-error recovery. Tracked at
+    # the skip sites themselves (not inferred from ERROR diagnostics later):
+    # semantic build errors also record ERRORs but skip nothing, and they must
+    # keep the historical unguarded frame/validate behaviour.
+    skipped = False
 
     for lineno, raw in enumerate(source.splitlines(), start=1):
         toks = _tokenize_line(raw, lineno)
@@ -1299,6 +1307,7 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
                     hint='Add the closing quote, e.g. `plan "Name"`.',
                 )
             )
+            skipped = True
             continue
         if not toks:
             # A line of only separators/punctuation (e.g. ":::") tokenizes to
@@ -1319,6 +1328,7 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
                         f"{', '.join(_KEYWORDS)}.",
                     )
                 )
+                skipped = True
             continue
         try:
             _parse_statement(toks, plan, smap, lineno)
@@ -1334,6 +1344,7 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
                     hint=err.hint,
                 )
             )
+            skipped = True
 
     # Statement-level error recovery (review §1.3): a statement that failed to
     # parse already recorded its diagnostic and was skipped, but the *surviving*
@@ -1341,35 +1352,47 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
     # behaviour: one typo dropped the whole design gradient an agent hill-climbs
     # on), validate and score the survivors. The result stays FAILED — the parse
     # errors keep ``ok`` False — so nothing downstream treats it as buildable.
-    had_parse_error = any(d.severity is Severity.ERROR for d in diagnostics)
 
     # A source where nothing parsed into a room is genuinely unbuildable — there
     # are no survivors to score — so keep the historical ``plan is None`` (an
     # empty/garbage input scores a flat zero with no misleading semantic cascade;
     # see score.py's plan-None handling).
-    if had_parse_error and not plan.rooms:
+    if skipped and not plan.rooms:
         return CompileResult(None, diagnostics, source)
 
     # Derive the structural frame (if requested) before checks, so the validator
-    # and renderer see the placed posts/beams. On a partial (parse-failed) plan
-    # the incomplete geometry may defeat the placer or a check, so guard those on
-    # the recovery path — a syntax error must never become a crash. A clean
-    # compile keeps the original, unguarded behaviour, so a real bug still bites.
+    # and renderer see the placed posts/beams. On a partial (statements-skipped)
+    # plan the incomplete geometry may defeat the placer or a check, so guard
+    # those on the recovery path — a syntax error must never become a crash, but
+    # the swallow is *recorded* so incomplete diagnostics can't pass as complete.
+    # A clean or semantic-error compile keeps the original, unguarded behaviour,
+    # so a real bug still bites.
+    def _recovery_limit(what: str) -> Issue:
+        return Issue(
+            Severity.WARNING,
+            "RECOVERY_LIMIT",
+            f"{what} could not run on the partial plan; "
+            "diagnostics are incomplete.",
+            hint="Fix the parse error(s) above to get the full report.",
+        )
+
     if plan.frame_spec is not None:
         from .structure import place_frame
 
         try:
             place_frame(plan)
         except Exception:
-            if not had_parse_error:
+            if not skipped:
                 raise
+            diagnostics.append(_recovery_limit("Frame placement"))
 
     try:
         report: ValidationReport | None = validate(plan)
     except Exception:
-        if not had_parse_error:
+        if not skipped:
             raise
         report = None
+        diagnostics.append(_recovery_limit("Validation"))
     if report is not None:
         for iss in report.issues:
             # Anchor semantic diagnostics to the room's `room ...` line, and point
@@ -1381,7 +1404,7 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
                 if iss.col is None and iss.room in smap.room_col:
                     iss.col, iss.end_col = smap.room_col[iss.room]
         diagnostics.extend(report.issues)
-    return CompileResult(plan, diagnostics, source)
+    return CompileResult(plan, diagnostics, source, recovered=skipped)
 
 
 def compile_file(path: str) -> CompileResult:

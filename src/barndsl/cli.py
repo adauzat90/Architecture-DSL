@@ -164,17 +164,23 @@ def _cmd_build(args: argparse.Namespace) -> int:
         payload["score"] = design_score(result).to_dict()
         if result.plan is not None:
             payload["metrics"] = result.plan.metrics()
-            try:
-                save_render(result.plan, out, fmt)
-                payload["out"] = out
-            except (ImportError, ValueError) as exc:
+            if result.recovered:
                 payload["out"] = None
-                payload["render_error"] = str(exc)
+                payload["render_error"] = "parse-error recovery: partial plan not rendered"
+            else:
+                try:
+                    save_render(result.plan, out, fmt)
+                    payload["out"] = out
+                except (ImportError, ValueError) as exc:
+                    payload["out"] = None
+                    payload["render_error"] = str(exc)
         print(json.dumps(payload, indent=2))
         return 0 if result.ok else 1
 
     print(result.report(os.path.basename(args.file)))
-    if result.plan is None:
+    if result.plan is None or result.recovered:
+        # A recovered partial plan is for scoring/inspecting, not for output
+        # artifacts — keep the pre-recovery contract: no render on parse errors.
         return 1
     print()
     _print_metrics(result.plan)
@@ -353,7 +359,9 @@ def _cmd_revit(args: argparse.Namespace) -> int:
         result.plan.frame()
         result = compile_source(emit_dsl(result.plan), name=result.plan.name)
     print(result.report(os.path.basename(args.file)))
-    if result.plan is None:
+    if result.plan is None or result.recovered:
+        # Never emit an exchange for a partial recovery: the JSON could be
+        # imported into Revit regardless of this process's exit code.
         return 1
     from .revit import to_revit_model
 
@@ -442,7 +450,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     from .schedule import schedules_csv, schedules_markdown
 
     result = compile_file(args.file)
-    if result.plan is None:
+    if result.plan is None or result.recovered:
         print(result.report(os.path.basename(args.file)))
         return 1
 
@@ -492,7 +500,7 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
 
     result = compile_file(args.file)
     print(result.report(os.path.basename(args.file)))
-    if result.plan is None:
+    if result.plan is None or result.recovered:
         return 1
     save_dxf(result.plan, args.out)
     n_open = len(result.plan.windows) + len(result.plan.exterior_doors)
@@ -507,7 +515,7 @@ def _render_pass(args: argparse.Namespace) -> "object":
     print(result.report(os.path.basename(args.file)))
     if result.plan is not None:
         print("\n" + _program_summary(result.plan))
-        if args.out:
+        if args.out and not result.recovered:
             try:
                 save_svg(result.plan, args.out)
                 print(f"Wrote {args.out}")
