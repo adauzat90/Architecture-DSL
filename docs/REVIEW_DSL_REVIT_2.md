@@ -1,5 +1,24 @@
 # Review — DSL & Revit improvements, round 2 (2026-07)
 
+## Status (update)
+
+Implemented since this review: the **agent grounding batch** (§1.1 multimodal
+critic — the critique call now sees the rendered plan; §1.2 geometry pack —
+`barndsl inspect`, rooms/adjacency/unplaced-pockets/free-wall-spans appended
+to the loop's feedback; §4.3 explained scores — per-component causes in
+`ScoreReport.details`), **update-in-place Revit rebuilds** (§3.1 — identity +
+fingerprint stamps in Extensible Storage, config-aware per-kind context,
+unchanged elements keep their Revit ids and room numbers), the **`wall`
+statement and window/door kinds** (§2.1/§2.2 — plumbing/bearing/rated shared
+walls checked and honoured by the frame; casement/slider/fixed/double-hung
+windows with honest per-kind egress math; double/french doors; all carried
+through the exchange and mapped to real Revit types/families by the builder),
+**`barndsl compare` and `barndsl revit-log`** (§4.1/§3.2 — scheme deltas, and
+the build log translated into REVIT_FAIL/REVIT_SKIP/REVIT_NOTE diagnostics),
+and the **solver objective alignment** (round-1 §1.4 — `_score` folds in the
+design score). Everything else below remains open; the notes are kept as the
+original review.
+
 A second full-app review with the same three questions as
 `docs/REVIEW_DSL_REVIT.md`: what would let **AI agents design better plans**,
 what would raise the **Revit integration's** fidelity and usefulness, and what
