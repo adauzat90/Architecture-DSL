@@ -504,16 +504,26 @@ def _swing_region(
 
 
 def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
-    """The swept region of an interior swing door, or None if it doesn't swing."""
-    if door.kind != "swing":
+    """The swept region of an interior door's leaf, or None if nothing swings.
+
+    Pocket/sliding/cased doors have no leaf. A double/french pair sweeps two
+    half-width leaves; like the exterior check, approximate it with the hinge
+    end's quarter-disc (half the total width) so a wide pair can't silently
+    clash-exempt itself while the renderer draws two swinging leaves.
+    """
+    if door.kind not in ("swing", *DOUBLE_LEAF_KINDS):
         return None
-    w = door.width
-    start = edge.lo + door.offset if door.offset is not None else edge.mid - w / 2.0
+    leaf = door.width / 2.0 if door.kind in DOUBLE_LEAF_KINDS else door.width
+    start = edge.lo + door.offset if door.offset is not None else edge.mid - door.width / 2.0
     hinge_far = door.hinge == "far"
+    if hinge_far and door.kind in DOUBLE_LEAF_KINDS:
+        # The far leaf hinges at the opening's far end; its sweep starts at
+        # the pair's midpoint, so shift the region to the outer half.
+        start += door.width - leaf
     sgn = _swing_sgn(door, a, b, edge)
     if edge.orientation == "v":
-        return _swing_region(plan, "v", edge.pos, start, w, hinge_far, sgn)
-    return _swing_region(plan, "h", start, edge.pos, w, hinge_far, sgn)
+        return _swing_region(plan, "v", edge.pos, start, leaf, hinge_far, sgn)
+    return _swing_region(plan, "h", start, edge.pos, leaf, hinge_far, sgn)
 
 
 def _exterior_swing_region(plan: Barndominium, room: Room, door):
@@ -3321,7 +3331,11 @@ def _door_clear_width(door) -> float:
     its required clear opening through ONE leaf (IRC R311.2), so it counts half
     the total width; a single leaf counts its full width."""
     if getattr(door, "kind", "entry") in DOUBLE_LEAF_KINDS:
-        return door.width / 2.0
+        # Round the derived leaf to 1/100 ft so a 64-in stock pair authored as
+        # `width 5.333` yields a 32.0-in leaf instead of 31.998 (a 1/16-in
+        # grace, far below construction tolerance); a single leaf is the
+        # authored number and needs no rounding.
+        return round(door.width / 2.0, 2)
     return door.width
 
 

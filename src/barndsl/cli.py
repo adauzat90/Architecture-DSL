@@ -545,8 +545,12 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     """Side-by-side of two plans: score, takeoff, resolved/introduced codes."""
     from .compare import compare_plans, comparison_text
 
-    result_a = compile_file(args.file_a)
-    result_b = compile_file(args.file_b)
+    try:
+        result_a = compile_file(args.file_a)
+        result_b = compile_file(args.file_b)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     names = (os.path.basename(args.file_a), os.path.basename(args.file_b))
     cmp = compare_plans(result_a, result_b, names)
     if getattr(args, "json", False):

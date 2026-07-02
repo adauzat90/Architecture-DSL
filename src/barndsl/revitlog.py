@@ -38,6 +38,12 @@ _NOTE_MARKERS = (
     "no window family reads",
     "no door family reads",
     "purged",
+    # Sizing/placement degradations: the element exists at the wrong size or
+    # orientation — exactly "built, but not the way the plan asked".
+    "no settable",
+    "could not size",
+    "default size",
+    "not applied",
 )
 
 

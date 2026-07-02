@@ -1408,6 +1408,16 @@ def test_door_swing_clash_silent_when_doors_are_apart():
     assert "DOOR_SWING_CLASH" not in _codes(r, "info")
 
 
+def test_door_swing_clash_sees_a_french_pair():
+    # A double/french pair swings two leaves; converting the clashing door to
+    # french must NOT silence the check (review defect: double-leaf doors were
+    # invisible to DOOR_SWING_CLASH while the renderer drew swinging leaves).
+    r = compile_source(_CLASH.format(
+        doors="door living - bed french width 6 into bed offset 12 hinge far\n"
+              "door bed - closet width 2.5 into bed offset 0.5 hinge near"))
+    assert "DOOR_SWING_CLASH" in _codes(r, "info")
+
+
 def test_door_swing_clash_avoided_by_a_pocket_door():
     # A pocket leaf has no swing arc, so it can't clash.
     r = compile_source(_CLASH.format(

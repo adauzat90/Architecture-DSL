@@ -619,15 +619,20 @@ def _kind_wall_type(doc, kind):
     return matches[0] if matches else None
 
 
-def _kind_symbol(doc, category, tokens):
+def _kind_symbol(doc, category, tokens, exclude=()):
     """The first family symbol in ``category`` whose family or type name
-    contains one of ``tokens`` (case-insensitive). None if nothing matches."""
+    contains one of ``tokens`` (case-insensitive) and none of ``exclude`` —
+    a `double` door must not match "Overhead-Sectional Double" (a garage
+    family). None if nothing matches."""
     for sym in _symbols(doc, category):
         try:
             names = "%s %s" % (sym.Family.Name, _name(sym))
         except Exception:
             names = _name(sym)
-        if any(t in names.lower() for t in tokens):
+        low = names.lower()
+        if any(t in low for t in exclude):
+            continue
+        if any(t in low for t in tokens):
             return sym
     return None
 
@@ -1017,12 +1022,16 @@ def _resolve_resources(doc, options, report, data=None):
     for win_kind in sorted(
         {o.get("kind") for o in openings_in if o.get("category") == "window"}
     ):
+        # The default kind (casement) always uses the standard window pick —
+        # the config `window_family` override / auto-pick — so old plans build
+        # exactly as before and a casement-named family in the template can't
+        # hijack the override (or churn every default window's fingerprint).
+        if win_kind == "casement":
+            continue
         sym = _kind_symbol(doc, DB.BuiltInCategory.OST_Windows, _OPENING_KIND_TOKENS.get(win_kind, ()))
         if sym is None:
             sym = res.window
-            # The default kind falls back silently — old plans build exactly as
-            # before; an authored kind that matched nothing is worth a note.
-            if win_kind != "casement" and res.window is not None:
+            if res.window is not None:
                 report.note(
                     "no window family reads '%s'; the standard window family "
                     "stands in" % win_kind
@@ -1035,7 +1044,12 @@ def _resolve_resources(doc, options, report, data=None):
             if o.get("category") == "door" and o.get("kind") in ("double", "french")
         }
     ):
-        sym = _kind_symbol(doc, DB.BuiltInCategory.OST_Doors, _OPENING_KIND_TOKENS.get(door_kind, ()))
+        sym = _kind_symbol(
+            doc,
+            DB.BuiltInCategory.OST_Doors,
+            _OPENING_KIND_TOKENS.get(door_kind, ()),
+            exclude=_GARAGE_DOOR_HINTS,
+        )
         if sym is None:
             sym = res.door
             if res.door is not None:

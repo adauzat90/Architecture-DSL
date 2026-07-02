@@ -1440,20 +1440,54 @@ def test_changed_kind_wall_type_recreates_only_the_declared_wall():
     assert rep.count(status="kept", kind="room") == 3
 
 
+def _hosted_families(doc):
+    return {
+        e[2][1].Family.Name
+        for e in doc.created
+        if e[0] == "instance" and len(e[2]) >= 3 and isinstance(e[2][2], revit_fakes.Wall)
+    }
+
+
 def test_window_and_door_kinds_pick_matching_families():
     # An authored `fixed` window lands on the Fixed family; a `double` door
-    # prefers a double-leaf family over the single-flush standard.
+    # prefers a double-leaf family over the single-flush standard. Default
+    # (casement) windows stay on the standard pick — a casement-named family
+    # in the template must NOT hijack them (review defect: config override
+    # bypass + fingerprint churn on every default window).
     doc = _ready_doc()  # window family is literally named "Fixed"
     doc.add_family(BIC.OST_Windows, "Casement Std")
     doc.add_family(BIC.OST_Doors, "Double-Glass")
     builder.build(doc, _exchange(CEDAR_KINDS))
-    inst_syms = [e[2][1] for e in doc.created if e[0] == "instance"
-                 and len(e[2]) >= 3 and isinstance(e[2][2], revit_fakes.Wall)]
-    fams = {s.Family.Name for s in inst_syms}
+    fams = _hosted_families(doc)
     assert "Double-Glass" in fams  # the double living|bed door
-    assert "Fixed" in fams  # the fixed bed window
-    # The default-kind (casement) living window found the Casement family.
-    assert "Casement Std" in fams
+    assert "Fixed" in fams  # the fixed bed window AND the default windows
+    assert "Casement Std" not in fams  # default kind keeps the standard pick
+
+
+def test_default_windows_honour_the_window_family_override():
+    doc = _ready_doc()
+    doc.add_family(BIC.OST_Windows, "Casement Cheap Builder Grade")
+    doc.add_family(BIC.OST_Windows, "Premium Slider")
+    opts = report.BuildOptions(window_family="Fixed")
+    builder.build(doc, _exchange(CEDAR), opts)
+    fams = _hosted_families(doc)
+    assert "Casement Cheap Builder Grade" not in fams
+    assert "Fixed" in fams
+    # And nothing recreates on rebuild: the casement family's presence must
+    # not perturb default-window fingerprints.
+    rep = builder.build(doc, _exchange(CEDAR), opts)
+    assert rep.count(status="created") == 0
+
+
+def test_double_door_never_matches_a_garage_family():
+    # "Overhead-Sectional Double" contains the token but is a garage family;
+    # the double entry must fall back to the sized standard door, noted.
+    doc = _ready_doc()
+    doc.add_family(BIC.OST_Doors, "Overhead-Sectional Double")
+    rep = builder.build(doc, _exchange(CEDAR_KINDS))
+    fams = _hosted_families(doc)
+    assert "Overhead-Sectional Double" not in fams
+    assert any("no door family reads 'double'" in n for n in rep.notes)
 
 
 def test_unmatched_authored_kind_stands_in_with_a_note():

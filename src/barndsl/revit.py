@@ -455,7 +455,7 @@ class RevitModel:
 # --- wall extraction ---------------------------------------------------------
 
 
-def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
+def _walls_one_axis(rooms, sections, vertical, height, level, idgen, declared=()):
     """Derive deduplicated wall runs along one axis for a single level.
 
     ``vertical`` selects walls at constant ``x`` (running north-south); otherwise
@@ -466,7 +466,10 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
     line). Each atomic interval between consecutive breakpoints is a wall when a
     room touches it; it is *interior* when rooms sit on both sides and *exterior*
     when the empty side falls outside the footprint. Contiguous like-classified
-    intervals merge into one wall.
+    intervals merge into one wall — "like-classified" includes the declared
+    wall attributes (``declared``, from :func:`_declared_edges`), so a
+    plumbing/rated/bearing segment starts its own run instead of tagging (or
+    being swallowed by) a colinear neighbour.
     """
     # Accessors that swap meaning between the two axes. "line" is the constant
     # coordinate of an edge; "run" is the coordinate it varies along.
@@ -500,8 +503,10 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
             on_neg = any(run_lo(r) - TOL <= mid <= run_hi(r) + TOL for r in neg)
             seg = None
             if on_pos or on_neg:
+                attrs = frozenset()
                 if on_pos and on_neg:
                     exterior = False  # partition between two rooms
+                    attrs = _segment_attrs(declared, c, mid)
                 else:
                     # Probe just past the empty side; outside the footprint ⇒ exterior.
                     if vertical:
@@ -511,15 +516,19 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
                         px = mid
                         py = c - _PROBE if on_pos else c + _PROBE
                     exterior = not point_in_footprint(sections, px, py)
-                seg = (a, b, exterior)
+                seg = (a, b, exterior, attrs)
 
             if seg is None:
                 if run is not None:
                     walls.append(_make_wall(idgen, level, vertical, c, run, height))
                     run = None
                 continue
-            if run is not None and run[2] == seg[2] and abs(run[1] - seg[0]) <= TOL:
-                run = (run[0], seg[1], seg[2])  # extend the contiguous run
+            if (
+                run is not None
+                and run[2:] == seg[2:]  # same classification AND declared attrs
+                and abs(run[1] - seg[0]) <= TOL
+            ):
+                run = (run[0], seg[1], seg[2], seg[3])  # extend the contiguous run
             else:
                 if run is not None:
                     walls.append(_make_wall(idgen, level, vertical, c, run, height))
@@ -531,12 +540,15 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
 
 
 def _make_wall(idgen, level, vertical, c, run, height):
-    lo, hi, exterior = run
+    lo, hi, exterior, attrs = run
     if vertical:
         start, end = (c, lo), (c, hi)
     else:
         start, end = (lo, c), (hi, c)
     thickness = EXTERIOR_WALL_THICKNESS if exterior else INTERIOR_WALL_THICKNESS
+    kind = next((k for k in _WALL_KIND_PRECEDENCE if k in attrs), None)
+    if "plumbing" in attrs:
+        thickness = max(thickness, PLUMBING_WALL_THICKNESS)
     return RevitWall(
         id=next(idgen),
         level=level,
@@ -545,14 +557,19 @@ def _make_wall(idgen, level, vertical, c, run, height):
         height=float(height),
         exterior=exterior,
         thickness=thickness,
+        kind=kind,
     )
 
 
 def _extract_walls(plan: Barndominium, level: int, height: float, idgen) -> list[RevitWall]:
     rooms = [r for r in plan.rooms if getattr(r, "level", 0) == level]
     sections = plan.footprint_sections()
-    walls = _walls_one_axis(rooms, sections, True, height, level, idgen)
-    walls += _walls_one_axis(rooms, sections, False, height, level, idgen)
+    walls = _walls_one_axis(
+        rooms, sections, True, height, level, idgen, _declared_edges(plan, level, True)
+    )
+    walls += _walls_one_axis(
+        rooms, sections, False, height, level, idgen, _declared_edges(plan, level, False)
+    )
     return walls
 
 
@@ -562,41 +579,41 @@ def _extract_walls(plan: Barndominium, level: int, height: float, idgen) -> list
 _WALL_KIND_PRECEDENCE = ("rated", "bearing", "plumbing")
 
 
-def _apply_wall_specs(plan: Barndominium, walls_by_level: dict[int, list[RevitWall]]) -> None:
-    """Tag the wall segments matching each declared ``wall`` statement.
+def _declared_edges(plan: Barndominium, level: int, vertical: bool) -> list[tuple]:
+    """The declared ``wall`` statements' shared edges on one level and axis.
 
-    Every extracted wall segment overlapping the declared pair's shared edge
-    (same grid line, same orientation) gains the spec's ``kind``; a segment
-    already tagged by an earlier statement keeps its first kind (declaration
-    order wins, deterministically). A ``plumbing`` declaration also raises the
-    segment's nominal ``thickness`` hint to the 2x6
-    :data:`~barndsl.constants.PLUMBING_WALL_THICKNESS`, matching the clear-
-    dimension math. Note the exchange merges contiguous like-classified
-    segments into runs, so a run longer than the declared wall is tagged whole.
+    Returns ``(const_coord, lo, hi, attributes)`` tuples so the wall extraction
+    can tag each *atomic* segment before contiguous runs merge — a declared
+    kind therefore never bleeds past its own shared edge onto a colinear
+    neighbour's wall, and two statements on distinct colinear edges each keep
+    their own kind. Overlapping declarations on the same physical edge union
+    their attributes (the exchange's single ``kind`` then follows
+    :data:`_WALL_KIND_PRECEDENCE`, so ``rated`` beats ``plumbing`` regardless
+    of declaration order).
     """
+    want = "v" if vertical else "h"
+    out = []
     for ws in getattr(plan, "wall_specs", None) or []:
         a, b = plan.room(ws.room_a), plan.room(ws.room_b)
         if a is None or b is None or a.id == b.id:
             continue  # WALL_REF's problem
-        edge = shared_edge(a, b)
-        if edge is None:
-            continue  # WALL_NOADJ's problem
-        kind = next((k for k in _WALL_KIND_PRECEDENCE if k in ws.attributes), None)
-        if kind is None:
+        if getattr(a, "level", 0) != level or getattr(b, "level", 0) != level:
             continue
-        lvl = getattr(a, "level", 0)
-        for w in walls_by_level.get(lvl, []):
-            if w.orientation != edge.orientation:
-                continue
-            if abs(w.const_coord - edge.pos) > 1e-4:
-                continue
-            lo, hi = w.span
-            if min(hi, edge.hi) - max(lo, edge.lo) <= TOL:
-                continue  # no overlap along the run
-            if w.kind is None:
-                w.kind = kind
-            if "plumbing" in ws.attributes:
-                w.thickness = max(w.thickness, PLUMBING_WALL_THICKNESS)
+        edge = shared_edge(a, b)
+        if edge is None or edge.orientation != want:
+            continue  # WALL_NOADJ's problem (or the other axis)
+        if ws.attributes:
+            out.append((edge.pos, edge.lo, edge.hi, frozenset(ws.attributes)))
+    return out
+
+
+def _segment_attrs(declared: list[tuple], c: float, mid: float) -> frozenset:
+    """The union of declared attributes covering one atomic segment."""
+    attrs: set[str] = set()
+    for pos, lo, hi, a in declared:
+        if abs(pos - c) <= 1e-4 and lo - TOL <= mid <= hi + TOL:
+            attrs |= a
+    return frozenset(attrs)
 
 
 # --- opening hosting ---------------------------------------------------------
@@ -988,9 +1005,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         lvl_walls = _extract_walls(plan, i, height, wall_ids)
         walls_by_level[i] = lvl_walls
         walls.extend(lvl_walls)
-    # Declared wall attributes (`wall a - b plumbing|bearing|rated`) tag the
-    # matching segments with a kind (and a 2x6 thickness hint for plumbing).
-    _apply_wall_specs(plan, walls_by_level)
+    # Declared wall attributes (`wall a - b plumbing|bearing|rated`) were
+    # applied per atomic segment inside the extraction, so kinds never bleed
+    # across colinear neighbours and each declaration keeps its own run.
 
     # Openings, hosted onto the walls just derived.
     op_ids = _ids("o")
@@ -1357,6 +1374,38 @@ def exchange_to_plan(data: dict) -> Barndominium:
             ceiling_height=override,
             vaulted=bool(r.get("vaulted", False)),
         )
+
+    # Declared wall kinds ride the wall segments; re-derive the room pair each
+    # tagged segment separates so `wall a - b ...` statements survive the trip
+    # (a plumbing-thickness hint on a rated segment restores both attributes).
+    specs: dict[tuple[str, str], set[str]] = {}
+    for w in data.get("walls", []):
+        kind = w.get("kind")
+        if not kind or w.get("exterior"):
+            continue
+        (sx, sy), (ex, ey) = w.get("start", (0.0, 0.0)), w.get("end", (0.0, 0.0))
+        vertical = abs(sx - ex) <= 1e-9
+        orientation = "v" if vertical else "h"
+        const = sx if vertical else sy
+        lo, hi = sorted((sy, ey) if vertical else (sx, ex))
+        lvl_rooms = [r for r in plan.rooms if getattr(r, "level", 0) == w.get("level", 0)]
+        for i, ra in enumerate(lvl_rooms):
+            for rb in lvl_rooms[i + 1 :]:
+                edge = shared_edge(ra, rb)
+                if (
+                    edge is None
+                    or edge.orientation != orientation
+                    or abs(edge.pos - const) > 1e-4
+                ):
+                    continue
+                if min(hi, edge.hi) - max(lo, edge.lo) <= TOL:
+                    continue
+                attrs = specs.setdefault((ra.id, rb.id), set())
+                attrs.add(kind)
+                if float(w.get("thickness", 0.0)) >= PLUMBING_WALL_THICKNESS - 1e-9:
+                    attrs.add("plumbing")
+    for (ra_id, rb_id), attrs in specs.items():
+        plan.wall(ra_id, rb_id, *sorted(attrs))
 
     for o in data.get("openings", []):
         rooms = o.get("rooms", [])
