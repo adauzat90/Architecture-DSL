@@ -57,6 +57,7 @@ orientation <degrees>              # optional; compass azimuth plan-north (+y) p
 finish [siding "<name>"] [roof "<name>"]  # optional; exterior material hints (metal siding, standing-seam)
 door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door (9 x 7 default; width 16 = double)
 open <id_a> - <id_b> [width <w>] [offset <o>]   # shorthand for `door <a> - <b> cased ...`
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
@@ -78,6 +79,10 @@ circulation graph exactly like a door, but renders as a plain gap (no swing
 arc), defaults to a wide opening, and is exempt from the narrow-door warning.
 An `open` into a **bathroom** is a privacy defect (a bath needs a door), so it
 warns (`OPEN_BATH`).
+`door <id> <wall> overhead` is an **overhead/sectional garage door** on a
+garage/shop bay's exterior wall — 9 × 7 by default (`width 16` for a double); it
+renders as a gap with a dashed track (no swing arc) and is never an egress door
+or a building entrance, so the plan still needs a people-door `entry`.
 `program` declares the intended counts and `require` the brief's **spatial**
 intent (a required adjacency, separation, exterior wall, or minimum room area);
 both are re-checked mechanically on every compile (`PROGRAM_MISMATCH` /

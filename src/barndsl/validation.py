@@ -91,6 +91,13 @@ MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
 STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
 STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
 DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
+# Overhead (sectional garage) door stock sizes, in **feet** — garage doors are
+# ordered in feet, unlike leaf doors: singles 8/9/10 wide, doubles 12/16; panels
+# 7 or 8 ft tall. An opening wider than OVERHEAD_HEADER_SPAN outruns a stock
+# header and wants engineering with the frame.
+STD_OVERHEAD_DOOR_WIDTHS_FT = (8, 9, 10, 12, 16)
+STD_OVERHEAD_DOOR_HEIGHTS_FT = (7, 8)
+OVERHEAD_HEADER_SPAN = 10.0
 # --- accessibility / aging-in-place (opt-in; ANSI A117.1) --------------------
 ACCESSIBLE_CLEAR_DOOR = 32 / 12  # 32 in clear opening (A117.1 §404)
 ACCESSIBLE_LEAF_MIN = 34 / 12  # a ~34 in leaf yields the 32 in clear
@@ -1369,6 +1376,9 @@ def _validate_doors(plan: Barndominium, add) -> None:
             )
             continue
         room = plan.room(xdoor.room)
+        if xdoor.overhead:
+            _check_overhead_door(xdoor, room, add)
+            continue
         if room is not None and room.type in (RoomType.GARAGE, RoomType.SHOP):
             continue  # a garage/shop opening is an overhead door, not a leaf size
         nearest = _nearest_std(xdoor.width * 12, STD_EXTERIOR_DOOR_WIDTHS_IN)
@@ -1385,6 +1395,58 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     **_door_loc(xdoor),
                 )
             )
+
+
+def _check_overhead_door(xdoor, room, add) -> None:
+    """Overhead (sectional garage) door checks: an unusual host room, a
+    non-stock sectional size, and a double-width opening's header reality."""
+    loc = _door_loc(xdoor)
+    if room is not None and room.type not in GARAGE_TYPES:
+        add(
+            Issue(
+                Severity.INFO,
+                "OVERHEAD_ROOM",
+                f"Overhead door on '{xdoor.room}' ({room.type.value}) — an "
+                "overhead door in a living space is unusual; is this a "
+                "garage/shop?",
+                room=xdoor.room,
+                hint="Put it on a garage/shop bay, or use `entry` for a "
+                "people door.",
+                **loc,
+            )
+        )
+    h = xdoor.height if xdoor.height is not None else float(STD_OVERHEAD_DOOR_HEIGHTS_FT[0])
+    near_w = _nearest_std(xdoor.width, STD_OVERHEAD_DOOR_WIDTHS_FT)
+    near_h = _nearest_std(h, STD_OVERHEAD_DOOR_HEIGHTS_FT)
+    tol = DOOR_SIZE_TOL_IN / 12
+    if abs(near_w - xdoor.width) > tol or abs(near_h - h) > tol:
+        add(
+            Issue(
+                Severity.INFO,
+                "DOOR_SIZE",
+                f"Overhead door on '{xdoor.room}' is {_f(xdoor.width)} x {_f(h)} "
+                "ft, not a standard sectional size.",
+                room=xdoor.room,
+                hint=f"Use a stock size, e.g. `width {near_w:g} height {near_h:g}` "
+                "— widths 8/9/10/12/16 ft, heights 7/8 ft (16 x 7 is the usual "
+                "double).",
+                **loc,
+            )
+        )
+    if xdoor.width > OVERHEAD_HEADER_SPAN + EPSILON:
+        add(
+            Issue(
+                Severity.INFO,
+                "OVERHEAD_HEADER",
+                f"A {_f(xdoor.width)} ft opening needs an engineered header — "
+                "coordinate with the frame.",
+                room=xdoor.room,
+                hint="Have the header and jamb posts over this opening engineered "
+                f"(a stock header tops out around {OVERHEAD_HEADER_SPAN:g} ft), or "
+                "split it into two singles.",
+                **loc,
+            )
+        )
 
 
 def _validate_openings(plan: Barndominium, add) -> None:
@@ -1713,20 +1775,30 @@ def _validate_access(plan: Barndominium, add) -> None:
                 adjacency[b].add(a)
 
     entries = {d.room for d in plan.exterior_doors if d.room in interior_rooms}
-    if not entries:
+    # An overhead garage door is vehicle access, not a building entrance: it
+    # still makes its garage/shop reachable (the BFS below), but only a
+    # people-door satisfies NO_ENTRY.
+    people_doors = [d for d in plan.exterior_doors if not d.overhead]
+    if not people_doors:
         # Don't also cry NO_ENTRY when entries exist but reference unknown rooms
-        # (DOOR_REF already explains that); only when there are no entries at all.
-        if not plan.exterior_doors:
-            first = next(iter(plan.rooms)).id
-            add(
-                Issue(
-                    Severity.ERROR,
-                    "NO_ENTRY",
-                    "Plan has no exterior door — no way to enter the building.",
-                    hint=f"Add an entrance on an exterior wall, e.g. "
-                    f"`entry {first} south width 3 offset 4`.",
-                )
+        # (DOOR_REF already explains that); only when there are none at all.
+        first = next(iter(plan.rooms)).id
+        message = (
+            "Plan has no entry door — an overhead door is vehicle access, "
+            "not a way to enter on foot."
+            if plan.exterior_doors
+            else "Plan has no exterior door — no way to enter the building."
+        )
+        add(
+            Issue(
+                Severity.ERROR,
+                "NO_ENTRY",
+                message,
+                hint=f"Add an entrance on an exterior wall, e.g. "
+                f"`entry {first} south width 3 offset 4`.",
             )
+        )
+    if not entries:
         return
 
     reached: set[str] = set()
@@ -2093,11 +2165,14 @@ def _dq_hall_tight(plan: Barndominium, graph, by_id, add) -> None:
 def _dq_no_back_door(plan: Barndominium, graph, by_id, add) -> None:
     # 8e. Front *and* back door: a home wants a second exterior door (a back/side
     #     door off the kitchen, mudroom or laundry) — for daily flow and a second
-    #     way out. Garage/porch doors don't count as the house's back door.
+    #     way out. Garage/porch doors don't count as the house's back door, and
+    #     neither does an overhead garage door (vehicle access, wherever it is).
     people_doors = [
         d
         for d in plan.exterior_doors
-        if d.room in by_id and by_id[d.room].type not in (RoomType.GARAGE, RoomType.PORCH)
+        if not d.overhead
+        and d.room in by_id
+        and by_id[d.room].type not in (RoomType.GARAGE, RoomType.PORCH)
     ]
     if plan.rooms and plan.exterior_doors and len(people_doors) < 2:
         where = (
@@ -3002,8 +3077,11 @@ def _validate_load_path(plan: Barndominium, add) -> None:
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:
+    # An overhead door never counts as egress (`entrance` forces egress=False
+    # for it; the kind check guards a hand-built ExteriorDoor too).
     has_egress_door = any(
-        d.egress and d.width + EPSILON >= MIN_EGRESS_DOOR_WIDTH for d in plan.exterior_doors
+        d.egress and not d.overhead and d.width + EPSILON >= MIN_EGRESS_DOOR_WIDTH
+        for d in plan.exterior_doors
     )
     if plan.exterior_doors and not has_egress_door:
         add(

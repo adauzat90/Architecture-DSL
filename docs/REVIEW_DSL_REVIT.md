@@ -1,5 +1,20 @@
 # Review — DSL & Revit improvements (2026-07)
 
+## Status (update)
+
+Implemented since this review: the **bug batch** (§5 — wing-aware
+metrics/stair checks, authored roof pitch; interior-door egress turned out to
+be correct as-is since `InteriorDoor` has no egress concept), the **design
+score** (§1.1 — `barndsl score`, `score.py`), the **agent-loop mechanics**
+(§1.2 — best-iteration-wins, structured JSON feedback, anchored critic with a
+`target_score` gate, the `NO_PROGRAM` nudge), the **`require` statement**
+(§1.3), **overhead/garage doors** (§2.1), and the **Revit fidelity batch**
+(§3.1–3.3 — swing/hinge through the exchange with builder flips, Project
+North from `orientation`, finish-hint type selection, sized column/beam
+sections, cased openings as real wall openings, wall-oriented fixtures, an
+egress stamp). Everything else below remains open; the notes are kept as the
+original review.
+
 A full-app review focused on three questions: what would let **AI agents design
 better plans**, what would make the **Revit integration** higher-fidelity and
 more useful, and what would give **architects** more value. Findings cite

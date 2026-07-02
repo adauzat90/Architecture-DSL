@@ -156,7 +156,7 @@ class RevitOpening:
 
     id: str
     category: str  # "door" | "window" | "cased_opening"
-    kind: str  # swing | pocket | sliding | cased | exterior | window
+    kind: str  # swing | pocket | sliding | cased | exterior | overhead | window
     level: int
     location: tuple[float, float]
     width: float
@@ -970,18 +970,28 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             continue
         orientation, pos, lo, hi, lvl = geom
         host = _find_host(walls_by_level.get(lvl, []), orientation, pos, lo, hi)
+        overhead = getattr(xd, "kind", "entry") == "overhead"
         openings.append(
             RevitOpening(
                 id=next(op_ids),
                 category="door",
-                kind="exterior",
+                # An overhead (sectional garage) door keeps its kind so the
+                # consumer can pick a garage-door family; a people-door stays
+                # the historical "exterior".
+                kind="overhead" if overhead else "exterior",
                 level=lvl,
                 location=_location(orientation, pos, lo, hi),
                 width=float(hi - lo),
-                height=DEFAULT_DOOR_HEIGHT,
+                height=(
+                    float(xd.height)
+                    if overhead and xd.height is not None
+                    else DEFAULT_DOOR_HEIGHT
+                ),
                 sill=0.0,
                 exterior=True,
-                egress=bool(xd.egress),
+                # An overhead door is never an egress route (entrance() forces
+                # the flag; the kind guard covers a hand-built door too).
+                egress=bool(xd.egress) and not overhead,
                 rooms=[xd.room],
                 host_wall=host,
             )
@@ -1302,9 +1312,18 @@ def exchange_to_plan(data: dict) -> Barndominium:
             wall, offset = _infer_exterior_wall(room, loc, width)
             if wall is None:
                 continue
+            overhead = o.get("kind") == "overhead"
             plan.entrance(
                 room.id, wall, width=width, offset=max(0.0, offset),
                 egress=bool(o.get("egress", True)),
+                # An overhead door round-trips its kind and panel height;
+                # entrance() re-forces egress=False for it.
+                kind="overhead" if overhead else "entry",
+                height=(
+                    float(o["height"])
+                    if overhead and o.get("height") is not None
+                    else None
+                ),
             )
         else:  # interior door or cased opening
             if len(rooms) < 2:

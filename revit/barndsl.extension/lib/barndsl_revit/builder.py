@@ -372,6 +372,24 @@ def _floor_type_named(doc, name):
     return None
 
 
+#: Family-name fragments that read as an overhead/sectional garage door.
+_GARAGE_DOOR_HINTS = ("garage", "overhead", "sectional")
+
+
+def _garage_door_symbol(doc):
+    """The first door family whose name reads like a garage door, or None.
+
+    The auto-pick for kind == "overhead" openings: prefer a family named like
+    "Garage-Sectional" / "Overhead Door" over the standard swing-leaf family.
+    """
+    for s in _symbols(doc, DB.BuiltInCategory.OST_Doors):
+        name = (s.Family.Name or "").lower()
+        for hint in _GARAGE_DOOR_HINTS:
+            if hint in name:
+                return s
+    return None
+
+
 def _symbol_named(doc, bic, family_name):
     if not family_name:
         return None
@@ -540,6 +558,7 @@ class _Resources(object):
         self.ext_wall = None
         self.int_wall = None
         self.door = None
+        self.garage_door = None
         self.window = None
         self.floor = None
         self.column = None
@@ -598,6 +617,15 @@ def _resolve_resources(doc, options, report, data=None):
         (_symbols(doc, DB.BuiltInCategory.OST_Doors) or [None])[0],
         "door family",
     )
+    # Overhead (garage) doors get their own pick: a named override, else the
+    # first door family whose name reads garage/overhead/sectional. None means
+    # the standard door family stands in (noted per overhead opening).
+    res.garage_door = named_or(
+        options.garage_door_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_Doors, n),
+        _garage_door_symbol(doc),
+        "garage-door family",
+    )
     res.window = named_or(
         options.window_family,
         lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_Windows, n),
@@ -644,6 +672,9 @@ def _resolve_resources(doc, options, report, data=None):
     report.resources["exterior_wall"] = _name(res.ext_wall) if res.ext_wall else "(none)"
     report.resources["interior_wall"] = _name(res.int_wall) if res.int_wall else "(none)"
     report.resources["door_family"] = res.door.Family.Name if res.door else "(none loaded)"
+    report.resources["garage_door_family"] = (
+        res.garage_door.Family.Name if res.garage_door else "(standard door)"
+    )
     report.resources["window_family"] = res.window.Family.Name if res.window else "(none loaded)"
     report.resources["floor_type"] = _name(res.floor) if res.floor else "(none)"
 
@@ -951,6 +982,7 @@ def _stamp_egress(inst, o):
 
 def _build_openings(doc, data, levels, walls, res, options, report):
     door_base = _activate(res.door, doc)
+    garage_base = _activate(res.garage_door, doc)
     win_base = _activate(res.window, doc)
     st = DB.Structure.StructuralType.NonStructural
     cache = {}
@@ -971,7 +1003,20 @@ def _build_openings(doc, data, levels, walls, res, options, report):
             # failure fall through to the old sized-door-family stand-in.
             if _cased_wall_opening(doc, o, host, wall_d, level, report):
                 continue
+        overhead = o.get("kind") == "overhead"
         base = win_base if kind == "window" else door_base
+        if overhead:
+            # Prefer the garage-door family for a sectional/overhead door; the
+            # sized standard door family stands in (with a note) when none is
+            # loaded, so the opening still lands at the right size.
+            if garage_base is not None:
+                base = garage_base
+            elif base is not None:
+                report.note(
+                    "overhead door %s: no garage-door family loaded (a name "
+                    "containing garage/overhead/sectional); the sized standard "
+                    "door family stands in" % o["id"]
+                )
         if base is None:
             report.skipped(kind, o["id"], "no %s family loaded" % kind)
             continue
@@ -994,6 +1039,10 @@ def _build_openings(doc, data, levels, walls, res, options, report):
                     p.Set(float(o.get("sill", 0.0)))
             except Exception:
                 pass
+        elif overhead:
+            # An overhead door rides up its tracks — no swing to flip, and it
+            # is never egress, so there is no flag to stamp.
+            message = "overhead (garage) door"
         elif not cased:
             # Honour the authored swing side/hinge and stamp the egress flag.
             message = _flip_door_swing(inst, o, rooms_by_id, wall_d, report)

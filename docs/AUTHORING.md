@@ -89,6 +89,7 @@ require exterior <room> [<wall>]              #   `require area <room> >= <sqft>
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door
 open <id_a> - <id_b> [width <w>] [offset <o>]     # shorthand for `door <a> - <b> cased ...`
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
@@ -104,6 +105,13 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 - `<offset>` is feet from the wall's **start corner** (its south or west end) to
   the near edge of the opening. The opening must fit: `offset + width <= wall
   length` (and `offset >= 0`).
+- `door <id> <wall> overhead` is a **sectional garage door** on a garage/shop
+  bay's exterior wall. Defaults to the residential 9 × 7 single; `width 16` is a
+  double (stock widths 8/9/10/12/16 ft, heights 7/8 ft — off-standard nudges
+  `DOOR_SIZE`, and wider than 10 ft notes `OVERHEAD_HEADER`). It is never an
+  egress door (no-egress is implied) and doesn't count as a building entrance —
+  the plan still needs a people-door `entry`. On a room that isn't a garage/shop
+  it notes `OVERHEAD_ROOM`.
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
 

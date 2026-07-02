@@ -199,6 +199,17 @@ class Room:
 #: circulation graph; they differ in how they render and which checks apply.
 DOOR_KINDS = ("swing", "cased", "pocket", "sliding")
 
+#: The exterior-door kinds. ``entry`` is a hinged people-door (the default);
+#: ``overhead`` is a sectional/overhead garage door — vehicle access on a
+#: garage/shop bay. An overhead door has no swing, is never an egress door, and
+#: doesn't count as a building entrance (the plan still needs an ``entry``).
+EXTERIOR_DOOR_KINDS = ("entry", "overhead")
+
+#: Overhead (sectional garage) door defaults: the residential 9 x 7 single.
+#: A double is ``width 16``; stock heights are 7 or 8 ft.
+OVERHEAD_DOOR_WIDTH = 9.0
+OVERHEAD_DOOR_HEIGHT = 7.0
+
 
 @dataclass
 class InteriorDoor:
@@ -246,10 +257,22 @@ class ExteriorDoor:
     #: near edge of the opening.
     offset: float = 1.0
     egress: bool = True
+    #: One of :data:`EXTERIOR_DOOR_KINDS`. ``overhead`` is a sectional garage
+    #: door (a 9 x 7 single; 16 wide for a double) — it rides up its tracks, so
+    #: it has no swing and never counts as an egress door or a people-entry.
+    kind: str = "entry"
+    #: Opening height (ft). ``None`` means the standard 6'-8" leaf; an overhead
+    #: door defaults to 7 ft (set by :meth:`Barndominium.entrance`).
+    height: float | None = None
     #: Source location of the `entry` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
+
+    @property
+    def overhead(self) -> bool:
+        """True for a sectional/overhead (garage) door — no leaf, no egress."""
+        return self.kind == "overhead"
 
 
 @dataclass
@@ -1076,10 +1099,24 @@ class Barndominium:
         width: float = feet(3),
         offset: float = 1.0,
         egress: bool = True,
+        kind: str = "entry",
+        height: float | None = None,
     ) -> "Barndominium":
-        """Add an exterior door on ``wall`` of ``room``."""
+        """Add an exterior door on ``wall`` of ``room``.
+
+        ``kind="overhead"`` makes it a sectional garage door: ``egress`` is
+        forced False (vehicle access, never an escape route) and ``height``
+        defaults to the stock 7 ft panel.
+        """
+        if kind == "overhead":
+            egress = False
+            if height is None:
+                height = OVERHEAD_DOOR_HEIGHT
         self.exterior_doors.append(
-            ExteriorDoor(room, Direction(wall), float(width), float(offset), egress)
+            ExteriorDoor(
+                room, Direction(wall), float(width), float(offset), egress,
+                kind=kind, height=None if height is None else float(height),
+            )
         )
         return self
 

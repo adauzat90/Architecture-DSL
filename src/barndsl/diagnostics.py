@@ -185,8 +185,17 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A swinging interior door is below the 30 in minimum clear width."),
         _c("DOOR_SIZE", I, "Non-standard door width",
            "A swing door's width isn't a manufactured leaf size (interior "
-           "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72). Snap it to the "
-           "nearest so it's orderable off-the-shelf."),
+           "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72), or an overhead "
+           "door isn't a stock sectional size (widths 8/9/10/12/16 ft, heights "
+           "7/8 ft). Snap it to the nearest so it's orderable off-the-shelf."),
+        _c("OVERHEAD_ROOM", I, "Overhead door in a living space",
+           "An overhead (sectional garage) door is on a room that isn't a garage "
+           "or shop — unusual for a living space. Either the room should be a "
+           "garage/shop bay, or the door should be a people-door (`entry`)."),
+        _c("OVERHEAD_HEADER", I, "Wide overhead opening needs an engineered header",
+           "An overhead door wider than 10 ft (a 12 or 16 ft double) spans more "
+           "than a stock header carries — the header and the jamb posts over the "
+           "opening must be engineered with the building frame."),
         _c("OPEN_BATH", W, "Bathroom has no door",
            "A bathroom is joined by an `open` passage; baths need a door for privacy."),
         # --- openings -------------------------------------------------------
@@ -237,7 +246,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "The DSL can't place alarms — confirm them on the electrical plan."),
         # --- access ---------------------------------------------------------
         _c("NO_ENTRY", E, "No exterior door",
-           "The plan has no exterior door — no way to enter the building."),
+           "The plan has no exterior people-door — no way to enter the building. "
+           "An overhead garage door doesn't count (vehicle access, not an "
+           "entrance), so a plan whose only exterior door is overhead still "
+           "needs an `entry`."),
         _c("NO_ACCESS", E, "Room unreachable",
            "A room can't be reached from any entrance through interior doors. "
            "A warning (not error) for a closet/pantry/loft, which may be open "
@@ -276,7 +288,7 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("NO_BACK_DOOR", I, "Only one exterior door",
            "A home wants a front *and* a back door — a second exterior door (off "
            "the kitchen, mudroom or laundry, on another wall) for daily flow and a "
-           "second way out. Garage/porch doors don't count."),
+           "second way out. Garage/porch doors and overhead doors don't count."),
         _c("BATH_OVERSIZE", I, "Ensuite larger than its bedroom",
            "A private (ensuite) bath is larger than the bedroom it serves, a sign "
            "the suite is mis-proportioned. A bath should be the same size or smaller."),

@@ -7,7 +7,7 @@ the emitted text reproduces an equivalent plan.
 from __future__ import annotations
 
 from .constants import FLOOR_ASSEMBLY_DEPTH
-from .elements import Barndominium
+from .elements import OVERHEAD_DOOR_HEIGHT, Barndominium
 
 
 def _n(value: float) -> str:
@@ -118,6 +118,15 @@ def emit_dsl(plan: Barndominium) -> str:
     if plan.exterior_doors:
         out.append("")
         for xd in plan.exterior_doors:
+            if getattr(xd, "kind", "entry") == "overhead":
+                # An overhead door has no egress flag (no-egress is implied);
+                # height is always emitted (7 is the stock default).
+                h = xd.height if xd.height is not None else OVERHEAD_DOOR_HEIGHT
+                out.append(
+                    f"door {xd.room} {xd.wall.value} overhead width {_n(xd.width)} "
+                    f"height {_n(h)} offset {_n(xd.offset)}"
+                )
+                continue
             line = f"entry {xd.room} {xd.wall.value} width {_n(xd.width)} offset {_n(xd.offset)}"
             if not xd.egress:
                 line += " no-egress"

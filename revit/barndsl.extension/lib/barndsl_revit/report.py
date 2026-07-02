@@ -31,6 +31,10 @@ _OVERRIDE_KEYS = (
     "exterior_wall_type",
     "interior_wall_type",
     "door_family",
+    #: A door family for kind == "overhead" openings (sectional garage doors).
+    #: Unset, the builder auto-picks a door family whose name contains
+    #: garage/overhead/sectional, falling back to the standard door family.
+    "garage_door_family",
     "window_family",
     "floor_type",
     "roof_type",
@@ -83,6 +87,7 @@ class BuildOptions(object):
         exterior_wall_type=None,
         interior_wall_type=None,
         door_family=None,
+        garage_door_family=None,
         window_family=None,
         floor_type=None,
         roof_type=None,
@@ -116,6 +121,7 @@ class BuildOptions(object):
         self.exterior_wall_type = exterior_wall_type
         self.interior_wall_type = interior_wall_type
         self.door_family = door_family
+        self.garage_door_family = garage_door_family
         self.window_family = window_family
         self.floor_type = floor_type
         self.roof_type = roof_type
