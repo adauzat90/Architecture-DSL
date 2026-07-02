@@ -21,6 +21,7 @@ barndsl.extension/
   barndsl.tab/
     Plan.panel/
       Build Plan.pushbutton/      # pick a .json or .barn → build or preview it
+      Build Option.pushbutton/    # pick a candidate from candidates.json → build it into the active Design Option
       Document.pushbutton/        # views + tags + schedules + a sheet per level
       Export Exchange.pushbutton/ # pick a .barn → write its .json (no model change)
       Diagnostics.pushbutton/     # report environment + available types/families
@@ -163,6 +164,107 @@ the v1 schema is still read); that a kept room whose bounding walls are deleted
 and recreated inside the same transaction stays placed and re-bounds; and the
 exact reach of Revit's host-delete cascade (the fakes mirror the documented
 behaviour: hosted instances and wall cuts die with the wall).
+
+## Build candidates as Design Options (the Build Option button)
+
+The agent's `design()` loop doesn't produce one plan — it shortlists several
+scored iterations and, today, ships only the winner. **Build Option** turns that
+into *"the agent shortlisted, you choose in the model"*: it builds one chosen
+candidate into a native Revit **Design Option**, so an architect can flip between
+schemes, compare them in real views, and keep the one they want — the way
+generated design actually wants to be consumed.
+
+### The API limitation (verified)
+
+**The Revit API cannot create Design Options or option sets.** `DB.DesignOption`
+is read-only — there is no supported call to make an option set, add options to
+it, or activate one; that is a UI-only operation in every version this extension
+targets (Revit 2025 included). What the API *does* give us is the one hook that
+makes this workflow possible: **any element created while a Design Option is
+active in the UI is automatically assigned to that option.** So the command never
+touches the DesignOption API to *write* — it just builds into whatever option you
+have active, and the identity namespacing (below) keeps each candidate's elements
+independent. Build Option reads the active option's name only to show it back to
+you (a read-only sanity check); if that read isn't available it prints a reminder
+instead.
+
+### The workflow
+
+1. **Shortlist and export (terminal).** Run the agent, then export each candidate
+   you want to offer to its own exchange with the core CLI — one file per
+   candidate:
+
+   ```bash
+   barndsl revit iteration_3.barn --out plan_a.json
+   barndsl revit iteration_7.barn --out plan_b.json
+   ```
+
+   (Producing the per-candidate `.barn`/exchange files from a `design()` run is a
+   core/CLI step — see the note in the batch report; this extension only consumes
+   the exchange JSON.)
+
+2. **Write a manifest** — a `candidates.json` next to those exchanges the command
+   reads to build its pick-list:
+
+   ```json
+   {
+     "schema": "barndsl.options/1",
+     "candidates": [
+       {"label": "iteration-3, score 84", "exchange": "plan_a.json"},
+       {"label": "iteration-7, score 79", "exchange": "plan_b.json"}
+     ]
+   }
+   ```
+
+   `label` is what you pick from the list (and what namespaces the build);
+   `exchange` is the candidate's `barndsl.revit/1` JSON, resolved relative to the
+   manifest.
+
+3. **Create the option set in Revit, once (UI).** **Manage → Design Options → New**
+   an option set (e.g. "Schemes"), **New** an option per candidate under it, then
+   select an option and **Edit Selected** to *activate* it. (This is the UI-only
+   step the API can't do for you.)
+
+4. **Build Option.** With an option active, run **barndsl → Plan → Build Option**,
+   pick the manifest, then pick the candidate — its model lands in the active
+   option. Switch the active option and repeat for the next candidate. Choose
+   **Build** or **Preview (dry run)** just like Build Plan.
+
+### Identity namespacing (why candidates don't collide)
+
+Every managed element a build stamps carries an **identity key** so a rebuild can
+*diff* (keep unchanged elements, recreate changed ones, purge removed ones). That
+diff historically considered **every** managed element in the document — which
+would be a disaster here: building candidate B would see candidate A's elements as
+"removed from the plan" and purge them.
+
+Build Option fixes this by **namespacing every identity key with the candidate's
+label**. A candidate's build only ever matches — and only ever deletes — elements
+in its own namespace; another candidate's (and a plain Build Plan's) elements are
+left completely untouched. So:
+
+- rebuilding the **same** candidate keeps all of its elements (Revit ids, and any
+  dimensions/tags on them, survive) — the normal diff guarantee, per candidate;
+- building candidate **B** after **A** never disturbs A;
+- a `"rebuild": "full"` of one candidate purges and recreates only *that*
+  candidate's elements.
+
+The namespace is applied **only** when a candidate label is set. A plain Build
+Plan produces byte-identical identity keys and fingerprints to before, so existing
+models never recreate — the two paths coexist in the same document. The build
+report (and the `*.buildlog.json`) records the candidate label the build ran
+under.
+
+Config sidecars work exactly as for Build Plan (`<exchange>.config.json` or
+`barndsl_revit.config.json` beside it) — the candidate label is orthogonal to the
+config, so the same template mapping can drive every candidate.
+
+**Needs live-Revit confirmation:** that elements created by the build genuinely
+land in the active Design Option (the auto-assignment hook), and that
+`DesignOption.GetActiveDesignOptionId` reads the active option as expected for the
+sanity-check note. The identity namespacing and cross-candidate diff isolation
+themselves are pure exchange bookkeeping and are covered by the fakes tests
+(`tests/test_revit_builder.py`).
 
 ## Documentation (the Document button)
 
@@ -372,6 +474,37 @@ The pure reconstruction (`exchange_to_plan`) and the name heuristics are covered
 by the repo suite (`tests/test_revit_roundtrip.py`, `tests/test_revit_naming.py`);
 the Revit-reading step (`builder.read_model`) needs a running Revit.
 
+## Units (`units`)
+
+Every exchange carries a top-level `units` field. The exchange is canonically
+**feet** — Revit's internal unit — and the producer *always emits* `"units":
+"feet"` (this never changes, so element fingerprints are stable and a re-export
+is byte-identical). What the field buys is **acceptance**: a document may declare
+metric, and both consumers normalise it to feet before anything reads a
+coordinate.
+
+- **Accepted spellings.** `feet` (canonical), and the metric aliases `meters`,
+  `metres`, `m`. A missing `units` is treated as feet (legacy documents). Any
+  other value is rejected, naming the value and the supported set — a
+  `RevitImportError` from `exchange_to_plan`, an `ExchangeError` (a hard `load`
+  failure) in the extension.
+- **Conversion factor.** `1 m = 1/0.3048 ft`, rounded to 6 decimals
+  (`3.28084`). Areas convert by the **square** of the factor, the lone volume
+  (`foundation.concrete_yd3`) by the cube. Angles and ratios — `orientation`,
+  `roof_pitch`/`pitch`, `slope_angle` — are **not** converted.
+- **Where it happens.** `exchange_to_plan` (core) and `exchange.load` (extension)
+  each normalise up front; the feet path is a pass-through (no copy, no
+  mutation), so the common case is untouched. The Revit builder therefore stays
+  entirely unit-unaware — post-normalisation everything is feet.
+- **Schema-driven + fails loud.** The conversion walks a table (`_UNIT_FIELDS`)
+  classifying every field of every record as length / area / volume / point /
+  pass-through. A **new numeric field added to the exchange without a table
+  entry raises** during conversion rather than importing an unconverted (and
+  silently corrupt) value — so extending the exchange forces a matching table
+  entry. The table is duplicated in `barndsl.revit` and `barndsl_revit.exchange`
+  (the extension can't import the core); `tests/test_revit_units.py` asserts the
+  two copies never drift.
+
 ## Testing
 
 Everything that *can* be tested without Revit is. The Revit-free modules are
@@ -389,7 +522,10 @@ the **dry-run rollback**, **named overrides**, structure/slab/porch/grid/roof/st
 passes (including the switchback → two runs + landing), the **diff re-build**
 (unchanged plans keep every element id; a moved room recreates only its own
 elements; a changed wall recreates its hosted openings; removed/legacy elements
-are purged; `"rebuild": "full"` still purges everything), `diagnose`, and
+are purged; `"rebuild": "full"` still purges everything), the **Design Options
+candidate isolation** (a candidate build namespaces its identities, rebuilding one
+candidate keeps it, building candidate B never purges candidate A, and a plain
+build stays byte-identical), `diagnose`, and
 `read_model`'s round-trip; `tests/test_revit_document.py` covers
 the **Document** pass (views, tags, schedules, sheets, and its idempotent
 re-document). These verify the builder *drives the API correctly* —

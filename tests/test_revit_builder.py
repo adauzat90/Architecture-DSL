@@ -1112,6 +1112,133 @@ def test_kept_ceilings_are_reported_when_the_ceiling_type_disappears():
     assert len(kept_keys) == 3
 
 
+# --- candidates as Design Options (§3.3) -------------------------------------
+#
+# The agent shortlists N scored iterations; the architect picks among them IN
+# Revit. Since the Revit API can't *create* Design Options (DB.DesignOption is
+# read-only — option sets are UI-only), the Build Option command builds ONE
+# candidate exchange into whatever option the user has active, with every
+# managed-element identity namespaced per candidate so each option's elements
+# diff-rebuild independently and purging one candidate never touches another.
+
+
+def _candidate_ids(doc, label):
+    """{identity_key: revit id} for elements stamped under ``label``'s namespace."""
+    prefix = bx.candidate_prefix(label)
+    return {k: rid for k, rid in _managed_ids(doc).items() if k.startswith(prefix)}
+
+
+def test_candidate_namespacing_leaves_plain_identities_byte_identical():
+    # The namespace must apply ONLY when a label is set — a plain build's keys
+    # and fingerprints stay byte-for-byte what they were, so existing models
+    # never recreate on the next rebuild.
+    data = _exchange(CEDAR)
+    plain = bx.identities(data)
+    assert bx.identities(data, candidate=None) == plain
+    # No plain key reads as a candidate key.
+    assert not any(bx.is_candidate_key(k) for _kind, _src, k, _fp in plain)
+
+
+def test_candidate_identities_are_namespaced_but_share_fingerprints():
+    data = _exchange(CEDAR)
+    plain = bx.identities(data)
+    a = bx.identities(data, candidate="iteration-3, score 84")
+    b = bx.identities(data, candidate="iteration-7, score 79")
+    # Every candidate key is namespaced, and A's and B's key sets are disjoint.
+    assert all(bx.is_candidate_key(k) for _k, _s, k, _f in a)
+    assert not (set(k for _k, _s, k, _f in a) & set(k for _k, _s, k, _f in b))
+    # Fingerprints are identical geometry → identical fp across A/B/plain; only
+    # the identity keys separate the namespaces.
+    assert [fp for _k, _s, _key, fp in a] == [fp for _k, _s, _key, fp in plain]
+    assert [fp for _k, _s, _key, fp in b] == [fp for _k, _s, _key, fp in plain]
+
+
+def test_candidate_rebuild_is_idempotent():
+    # Rebuilding the SAME candidate twice keeps every element (its Revit ids,
+    # and any annotations on them, survive) — the diff guarantee, per candidate.
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    opts = report.BuildOptions(candidate="scheme-A")
+    builder.build(doc, data, opts)
+    ids1 = _candidate_ids(doc, "scheme-A")
+    assert ids1
+    rep2 = builder.build(doc, data, report.BuildOptions(candidate="scheme-A"))
+    assert _candidate_ids(doc, "scheme-A") == ids1
+    assert rep2.count(status="kept") == len(ids1)
+    created = [r for r in rep2.records if r.status == "created"]
+    assert all(r.kind == "project" for r in created)
+
+
+def test_building_candidate_b_does_not_purge_candidate_a():
+    # THE regression risk: today's diff/purge considers EVERY managed element in
+    # the document, so without namespacing, building B would purge A's model.
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="scheme-A"))
+    a_ids = _candidate_ids(doc, "scheme-A")
+    assert a_ids
+
+    # Build a DIFFERENT candidate (different plan) — A must be untouched.
+    builder.build(doc, _exchange(CEDAR_SPLIT), report.BuildOptions(candidate="scheme-B"))
+    b_ids = _candidate_ids(doc, "scheme-B")
+    assert b_ids
+    # A survived intact, keys+ids unchanged; A and B coexist in disjoint namespaces.
+    assert _candidate_ids(doc, "scheme-A") == a_ids
+    assert not (set(a_ids) & set(b_ids))
+
+    # Rebuilding A still keeps all of A and still doesn't disturb B.
+    repA = builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="scheme-A"))
+    assert repA.count(status="kept") == len(a_ids)
+    assert _candidate_ids(doc, "scheme-A") == a_ids
+    assert _candidate_ids(doc, "scheme-B") == b_ids
+
+
+def test_candidate_build_does_not_touch_a_plain_build_and_vice_versa():
+    # A plain (winner-only) build and candidate builds must not purge each other.
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))  # plain
+    plain_ids = {k: rid for k, rid in _managed_ids(doc).items()
+                 if not bx.is_candidate_key(k)}
+    assert plain_ids
+
+    builder.build(doc, _exchange(CEDAR_SPLIT), report.BuildOptions(candidate="alt"))
+    # The plain build is untouched by the candidate build.
+    assert {k: rid for k, rid in _managed_ids(doc).items()
+            if not bx.is_candidate_key(k)} == plain_ids
+
+    # And a plain rebuild keeps the plain elements without purging the candidate.
+    alt_ids = _candidate_ids(doc, "alt")
+    builder.build(doc, _exchange(CEDAR))
+    assert {k: rid for k, rid in _managed_ids(doc).items()
+            if not bx.is_candidate_key(k)} == plain_ids
+    assert _candidate_ids(doc, "alt") == alt_ids
+
+
+def test_full_rebuild_of_one_candidate_purges_only_that_candidate():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="A"))
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="B"))
+    b_ids = _candidate_ids(doc, "B")
+    # A "full" rebuild of A purges+recreates A's elements; B is untouched.
+    rep = builder.build(
+        doc, _exchange(CEDAR), report.BuildOptions(candidate="A", rebuild="full")
+    )
+    assert rep.count(status="kept") == 0
+    assert rep.count(status="created", kind="wall") > 0
+    assert _candidate_ids(doc, "B") == b_ids  # the other candidate survived
+
+
+def test_candidate_label_is_recorded_in_the_report():
+    doc = _ready_doc()
+    rep = builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="iteration-3"))
+    assert rep.candidate == "iteration-3"
+    assert rep.to_dict()["candidate"] == "iteration-3"
+    assert "iteration-3" in rep.to_markdown()
+    # A plain build carries no candidate key (byte-identical log).
+    plain = builder.build(doc, _exchange(CEDAR))
+    assert plain.candidate is None
+    assert "candidate" not in plain.to_dict()
+
+
 def test_document_artifacts_are_not_misreported_as_a_legacy_build():
     # document()'s dimensions/elevation markers are managed but never in a
     # build's incoming set — the rebuild purges them as ordinary stale

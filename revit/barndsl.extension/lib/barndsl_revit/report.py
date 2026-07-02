@@ -117,6 +117,7 @@ class BuildOptions(object):
         foundation_family=None,
         location_line=None,
         rebuild="diff",
+        candidate=None,
     ):
         self.structure = bool(structure)
         self.size_families = bool(size_families)
@@ -156,6 +157,12 @@ class BuildOptions(object):
         self.location_line = location_line
         rebuild = str(rebuild or "diff").strip().lower()
         self.rebuild = rebuild if rebuild in ("diff", "full") else "diff"
+        #: When set, this build targets one shortlisted *candidate* (Design
+        #: Options workflow): its label namespaces every managed element's
+        #: identity so the candidate diff-rebuilds independently of the others.
+        #: Not a ``config.json`` key (it is per-build, set by the Build Option
+        #: command) so leaving it out keeps plain builds byte-identical.
+        self.candidate = candidate or None
 
     @classmethod
     def from_dict(cls, data):
@@ -212,8 +219,12 @@ class BuildReport(object):
     the diagnostics view. ``problems`` holds the exchange-validation cautions.
     """
 
-    def __init__(self, dry_run=False):
+    def __init__(self, dry_run=False, candidate=None):
         self.dry_run = bool(dry_run)
+        #: The shortlisted candidate label this build ran under (Design Options
+        #: workflow), or ``None`` for an ordinary build. Recorded so the report
+        #: (and the build log) names which option/candidate produced the model.
+        self.candidate = candidate or None
         self.records = []
         self.notes = []
         self.problems = []
@@ -288,7 +299,12 @@ class BuildReport(object):
     # -- serialisation -----------------------------------------------------
 
     def to_dict(self):
-        return {
+        out = {}
+        if self.candidate:
+            # Only present for a candidate build, so plain builds' logs stay
+            # byte-identical to before.
+            out["candidate"] = self.candidate
+        out.update({
             "dry_run": self.dry_run,
             "summary": self.summary_line(),
             "counts": self.counts_by_kind(),
@@ -296,7 +312,8 @@ class BuildReport(object):
             "problems": list(self.problems),
             "notes": list(self.notes),
             "records": [r.to_dict() for r in self.records],
-        }
+        })
+        return out
 
     def to_json(self, indent=2):
         import json
@@ -313,6 +330,8 @@ class BuildReport(object):
         lines = []
         title = "Dry run (nothing was committed)" if self.dry_run else "Build report"
         lines.append("### %s" % title)
+        if self.candidate:
+            lines.append("_Candidate:_ **%s**" % self.candidate)
         lines.append("**%s**" % self.summary_line())
 
         counts = self.counts_by_kind()

@@ -302,9 +302,19 @@ class _Rebuild(object):
     reports it ``kept`` and skips creation.
     """
 
-    def __init__(self, fps=None, kept=None):
+    def __init__(self, fps=None, kept=None, candidate=None):
         self.fps = fps or {}
         self.kept = kept or {}
+        #: When set, every identity key a pass computes is namespaced under this
+        #: candidate label (Design Options workflow) before it is looked up or
+        #: stamped — so option-scoped builds diff independently. ``None`` leaves
+        #: keys byte-identical, so a plain build stamps exactly as before.
+        self.candidate = candidate or None
+
+    def key(self, base):
+        """Namespace a pass's base identity key for the current candidate (a
+        no-op for a plain build)."""
+        return _exchange.namespaced_key(base, self.candidate)
 
     def fp(self, key):
         return self.fps.get(key, "")
@@ -397,18 +407,43 @@ _KIND_FLAGS = {
 }
 
 
-def _purge_managed(doc, report):
+def _in_scope(elem, candidate):
+    """Does this managed element belong to the current build's *candidate scope*?
+
+    A candidate build (Design Options workflow) owns **only** elements whose
+    stamped identity key sits under its own namespace — it never touches another
+    candidate's elements, a plain build's elements, or identity-less legacy
+    elements. A plain build (``candidate`` is ``None``) owns every element that
+    is *not* namespaced to some candidate — every plain-keyed element plus legacy
+    (identity-less) managed elements, exactly the historic reach. This is what
+    makes the diff/purge cross-candidate safe: building candidate B never purges
+    candidate A's model.
+    """
+    ident = _es_identity(elem)
+    if candidate:
+        if ident is None:
+            return False  # legacy / plain / other-candidate — leave it alone
+        return ident[0].startswith(_exchange.candidate_prefix(candidate))
+    # Plain build: own everything that isn't a candidate's.
+    if ident is None:
+        return True
+    return not _exchange.is_candidate_key(ident[0])
+
+
+def _purge_managed(doc, report, candidate=None):
     """Delete every element a previous barndsl build created, so a re-build
     replaces rather than duplicates (the ``rebuild: "full"`` path). Identifies
     them by the managed mark (Extensible Storage, or the legacy Comments mark);
-    never touches anything the user drew. Runs inside the build transaction."""
+    never touches anything the user drew, nor — under a ``candidate`` build —
+    any element outside that candidate's namespace. Runs inside the build
+    transaction."""
     try:
         elems = DB.FilteredElementCollector(doc).WhereElementIsNotElementType().ToElements()
     except Exception:
         return 0
     removed = 0
     for e in list(elems):
-        if _is_managed(e):
+        if _is_managed(e) and _in_scope(e, candidate):
             try:
                 doc.Delete(e.Id)
                 removed += 1
@@ -419,7 +454,7 @@ def _purge_managed(doc, report):
     return removed
 
 
-def _diff_managed(doc, idents, options, report):
+def _diff_managed(doc, idents, options, report, candidate=None):
     """The diff arm of a replace re-build: keep managed elements whose stamped
     identity+fingerprint match an incoming record, delete the rest.
 
@@ -435,6 +470,13 @@ def _diff_managed(doc, idents, options, report):
     each host wall's fingerprint into its openings', so any opening whose host
     is deleted was never a keep — a later ``Delete`` on the already-gone element
     is swallowed. Runs inside the build transaction.
+
+    Under a ``candidate`` build the whole diff is scoped to that candidate's
+    namespace (:func:`_in_scope`): elements from other candidates — and from
+    plain builds — are neither kept-here nor deleted, so building candidate B is
+    guaranteed not to purge candidate A's model (the incoming keys are already
+    namespaced, so a foreign element could never match one anyway; the scope
+    guard also keeps foreign elements out of the legacy-purge arm).
     """
     incoming = {}
     for kind, _source, key, fp in idents:
@@ -450,6 +492,8 @@ def _diff_managed(doc, idents, options, report):
     removed = 0
     legacy = 0
     for e in list(elems):
+        if not (_is_managed(e) and _in_scope(e, candidate)):
+            continue  # unmanaged, or another candidate's / a plain build's element
         ident = _es_identity(e)
         if ident is not None:
             key, fp = ident
@@ -461,7 +505,7 @@ def _diff_managed(doc, idents, options, report):
                 removed += 1
             except Exception:
                 pass
-        elif _is_managed(e):
+        else:
             legacy += 1
             try:
                 doc.Delete(e.Id)
@@ -1152,7 +1196,7 @@ def _build_walls(doc, data, levels, res, options, report, rebuild):
     loc_line = _wall_location_line_value(getattr(options, "location_line", None))
     constrained = 0
     for w in data["walls"]:
-        key = _exchange.wall_identity(w)
+        key = rebuild.key(_exchange.wall_identity(w))
         kept = rebuild.take(key)
         if kept is not None:
             # Unchanged since the last build: the existing wall (and any user
@@ -1364,7 +1408,7 @@ def _build_openings(doc, data, levels, walls, res, options, report, rebuild):
     for o in data["openings"]:
         cased = o["category"] == "cased_opening"
         kind = "window" if o["category"] == "window" else "door"
-        key = _exchange.opening_identity(o)
+        key = rebuild.key(_exchange.opening_identity(o))
         kept = rebuild.take(key)
         if kept is not None:
             # Unchanged opening on an unchanged (kept) host wall — the
@@ -1487,14 +1531,14 @@ def _build_rooms(doc, data, levels, report, rebuild):
     counters = {}
     taken = {}
     for r in data["rooms"]:
-        elem = rebuild.kept.get(_exchange.room_identity(r))
+        elem = rebuild.kept.get(rebuild.key(_exchange.room_identity(r)))
         if elem is None:
             continue
         num = _room_number(elem)
         if num:
             taken.setdefault(r.get("level", 0), set()).add(num)
     for r in data["rooms"]:
-        key = _exchange.room_identity(r)
+        key = rebuild.key(_exchange.room_identity(r))
         kept = rebuild.take(key)
         if kept is not None:
             # A kept room keeps its number (and any user edits to its
@@ -1552,7 +1596,7 @@ def _build_ceilings(doc, data, levels, res, report, rebuild):
         # to keep still exist in the document, so report them before bailing
         # (or they'd silently vanish from the report while staying built).
         for r in rooms:
-            key = _exchange.ceiling_identity(r)
+            key = rebuild.key(_exchange.ceiling_identity(r))
             kept = rebuild.take(key)
             if kept is not None:
                 report.kept("ceiling", r["id"], revit_id=_rid(kept))
@@ -1562,7 +1606,7 @@ def _build_ceilings(doc, data, levels, res, report, rebuild):
     from System.Collections.Generic import List
 
     for r in rooms:
-        key = _exchange.ceiling_identity(r)
+        key = rebuild.key(_exchange.ceiling_identity(r))
         kept = rebuild.take(key)
         if kept is not None:
             report.kept("ceiling", r["id"], revit_id=_rid(kept))
@@ -1660,7 +1704,7 @@ def _build_structure(doc, data, levels, res, options, report, rebuild):
         report.note("structural columns skipped: no structural-column family loaded")
     for i, c in enumerate(columns):
         src = "post %d" % i
-        key = _exchange.column_identity(c)
+        key = rebuild.key(_exchange.column_identity(c))
         kept = rebuild.take(key)
         if kept is not None:
             report.kept("column", src, revit_id=_rid(kept))
@@ -1688,7 +1732,7 @@ def _build_structure(doc, data, levels, res, options, report, rebuild):
         report.note("structural framing skipped: no structural-framing family loaded")
     for i, f in enumerate(framing):
         src = "%s %d" % (f.get("role", "beam"), i)
-        key = _exchange.framing_identity(f)
+        key = rebuild.key(_exchange.framing_identity(f))
         kept = rebuild.take(key)
         if kept is not None:
             report.kept("framing", src, revit_id=_rid(kept))
@@ -1757,7 +1801,7 @@ def _build_fixtures(doc, data, levels, res, report, rebuild):
         report.note("appliances skipped: no specialty-equipment family loaded")
     st = DB.Structure.StructuralType.NonStructural
     for fx in fixtures:
-        key = _exchange.fixture_identity(fx)
+        key = rebuild.key(_exchange.fixture_identity(fx))
         kept = rebuild.take(key)
         if kept is not None:
             report.kept("fixture", fx.get("id"), revit_id=_rid(kept))
@@ -1798,7 +1842,7 @@ def _build_porches(doc, data, levels, res, report, rebuild):
     from System.Collections.Generic import List
 
     for p in porches:
-        key = _exchange.porch_identity(p)
+        key = rebuild.key(_exchange.porch_identity(p))
         kept = rebuild.take(key)
         if kept is not None:
             report.kept("porch", p.get("id"), revit_id=_rid(kept))
@@ -1844,7 +1888,7 @@ def _build_slabs(doc, data, levels, res, report, rebuild):
 
     for s in slabs:
         src = "level %s" % s.get("level")
-        key = _exchange.slab_identity(s)
+        key = rebuild.key(_exchange.slab_identity(s))
         kept = rebuild.take(key)
         if kept is not None:
             report.kept("slab", src, revit_id=_rid(kept))
@@ -1889,7 +1933,7 @@ def _build_foundation(doc, data, levels, res, report, rebuild):
             report.note("pad footings skipped: no structural-foundation family loaded")
         for i, f in enumerate(footings):
             src = "post %d" % i
-            key = _exchange.footing_identity(f)
+            key = rebuild.key(_exchange.footing_identity(f))
             kept = rebuild.take(key)
             if kept is not None:
                 report.kept("footing", src, revit_id=_rid(kept))
@@ -1925,7 +1969,7 @@ def _build_grids(doc, data, report, rebuild):
         return
     for g in grids:
         label = str(g.get("label", "?"))
-        key = _exchange.grid_identity(g)
+        key = rebuild.key(_exchange.grid_identity(g))
         kept = rebuild.take(key)
         if kept is not None:
             report.kept("grid", label, revit_id=_rid(kept))
@@ -2000,14 +2044,14 @@ def _build_roof(doc, data, levels, res, report, rebuild):
         for i, sec in enumerate(sections):
             _build_one_roof(
                 doc, sec, levels, res, report, rebuild,
-                identity="%s|%d" % (_exchange.ROOF_IDENTITY, i),
+                identity=rebuild.key("%s|%d" % (_exchange.ROOF_IDENTITY, i)),
                 source="roof %d" % i,
                 base_height=float(sec.get("base_height", 0.0)),
             )
         return
     _build_one_roof(
         doc, roof, levels, res, report, rebuild,
-        identity=_exchange.ROOF_IDENTITY, source="roof", base_height=0.0,
+        identity=rebuild.key(_exchange.ROOF_IDENTITY), source="roof", base_height=0.0,
     )
 
 
@@ -2402,7 +2446,8 @@ def build(doc, data, options=None):
     if options is None:
         options = _report.BuildOptions()
     data = _exchange.load(data)
-    report = _report.BuildReport(dry_run=options.dry_run)
+    candidate = getattr(options, "candidate", None)
+    report = _report.BuildReport(dry_run=options.dry_run, candidate=candidate)
     report.problems = _exchange.validate(data)
 
     res = _resolve_resources(doc, options, report, data)
@@ -2416,8 +2461,8 @@ def build(doc, data, options=None):
     # resolved resources/options fold into the fingerprints, so a config change
     # (a different wall type, family, location line, sizing) recreates the
     # elements it affects instead of keeping ones built the old way.
-    idents = _exchange.identities(data, _resource_context(res, options))
-    rebuild = _Rebuild(fps=dict((k, f) for _kind, _src, k, f in idents))
+    idents = _exchange.identities(data, _resource_context(res, options), candidate=candidate)
+    rebuild = _Rebuild(fps=dict((k, f) for _kind, _src, k, f in idents), candidate=candidate)
 
     label = "Preview barndsl plan" if options.dry_run else "Build barndsl plan"
     t = DB.Transaction(doc, label)
@@ -2425,9 +2470,9 @@ def build(doc, data, options=None):
     try:
         if options.replace:
             if getattr(options, "rebuild", "diff") == "full":
-                _purge_managed(doc, report)
+                _purge_managed(doc, report, candidate)
             else:
-                rebuild.kept = _diff_managed(doc, idents, options, report)
+                rebuild.kept = _diff_managed(doc, idents, options, report, candidate)
         _set_project_north(doc, data, report)
         levels = _ensure_levels(doc, data, report)
         walls = _build_walls(doc, data, levels, res, options, report, rebuild)

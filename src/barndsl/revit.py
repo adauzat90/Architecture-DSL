@@ -1564,6 +1564,304 @@ class RevitImportError(ValueError):
     """The exchange can't be reconstructed into a plan."""
 
 
+# --- units normalisation -----------------------------------------------------
+#
+# The exchange's *canonical* internal unit is the decimal foot, and EMISSION is
+# always feet (``to_dict`` writes ``"units": "feet"``) so fingerprints never
+# move. ACCEPTANCE, though, allows metric: a document that declares metric units
+# is normalised to feet here, at load time, before anything reads a coordinate —
+# so every downstream reader (this module *and* the pyRevit builder) works purely
+# in feet and needs no unit awareness of its own.
+#
+# The conversion is **schema-driven**: :data:`_UNIT_FIELDS` names every field of
+# every exchange record as a length / area / volume / point-list / pass-through.
+# Walking a record against its table, an *unknown numeric* field (a length added
+# to the exchange without a table entry) raises loudly instead of silently
+# importing an unconverted — and therefore geometrically corrupt — value. Angles
+# and ratios (``orientation``, ``roof_pitch``, ``pitch``, ``slope_angle``) are
+# deliberately marked ``skip``; areas convert by the *square* of the factor.
+#
+# This table is duplicated verbatim in the pyRevit extension's loader
+# (``revit/barndsl.extension/lib/barndsl_revit/exchange.py``), which cannot import
+# this module (it runs under pyRevit's engine, isolated from ``src``).
+# ``tests/test_revit_units.py`` asserts the two copies stay byte-for-byte in sync.
+
+#: 1 m = 1/0.3048 ft, rounded to 6 decimals. Plenty for a sub-1e-6 round-trip and
+#: tidier than the full expansion (3 m → 9.84252 ft, not 9.842519685…). The area
+#: factor is this squared; the volume factor (only ``concrete_yd3``) is cubed.
+FOOT_PER_METER = round(1.0 / 0.3048, 6)  # 3.28084
+
+#: Accepted ``units`` spellings. Canonical is feet; the metric aliases normalise
+#: to feet. Anything else is rejected, naming the value and the supported set.
+_FEET_UNITS = frozenset(("feet",))
+_METER_UNITS = frozenset(("meters", "metres", "m"))
+
+#: Per-record field classification, shared with the extension loader (keep in
+#: sync). Values: "len" (×factor), "area" (×factor²), "vol" (×factor³), "pts" (a
+#: flat coordinate list, each ×factor), "rects" (a list of flat coordinate
+#: lists), "skip" (leave unchanged — strings, bools, indices, counts, angles,
+#: ratios). Container fields (nested dicts / segment lists) are marked "skip"
+#: here and handled structurally by the walker below.
+_UNIT_FIELDS = {
+    "plan": {
+        "name": "skip", "ceiling_height": "len", "floor_depth": "len",
+        "floor_to_floor": "len", "envelope_width": "len", "envelope_length": "len",
+        "wings": "rects", "orientation": "skip", "siding": "skip", "roofing": "skip",
+        "roof_style": "skip", "roof_pitch": "skip", "notes": "skip",
+        "accessible": "skip", "program": "skip", "frame": "skip",
+        "suites": "skip", "zones": "skip",
+    },
+    "program": {"beds": "skip", "baths": "skip", "required": "skip", "min_area": "area"},
+    "frame": {"bay": "len", "span": "len", "post": "len", "ridge": "skip"},
+    "level": {"index": "skip", "name": "skip", "elevation": "len", "height": "len"},
+    "wall": {
+        "id": "skip", "level": "skip", "start": "pts", "end": "pts", "height": "len",
+        "exterior": "skip", "thickness": "len", "profile": "skip", "apex": "pts",
+        "apex_height": "len", "kind": "skip",
+    },
+    "opening": {
+        "id": "skip", "category": "skip", "kind": "skip", "level": "skip",
+        "location": "pts", "width": "len", "height": "len", "sill": "len",
+        "exterior": "skip", "egress": "skip", "rooms": "skip", "host_wall": "skip",
+        "swing_into": "skip", "hinge": "skip",
+    },
+    "room": {
+        "id": "skip", "name": "skip", "type": "skip", "level": "skip", "point": "pts",
+        "area": "area", "x": "len", "y": "len", "width": "len", "length": "len",
+        "clear_width": "len", "clear_length": "len", "clear_area": "area",
+        "ceiling_height": "len", "vaulted": "skip", "zone": "skip",
+    },
+    "column": {
+        "point": "pts", "size": "len", "role": "skip", "level": "skip",
+        "base": "len", "top": "len",
+    },
+    "framing": {
+        "start": "pts", "end": "pts", "role": "skip", "level": "skip",
+        "z": "len", "size": "len",
+    },
+    "area": {
+        "id": "skip", "kind": "skip", "x": "len", "y": "len", "width": "len",
+        "length": "len", "level": "skip", "meta": "skip",
+    },
+    "meta": {
+        "covered": "skip", "from_level": "skip", "to_level": "skip",
+        "rise": "len", "plan": "skip",
+    },
+    "stairplan": {
+        "risers": "skip", "riser_height": "len", "tread": "len", "layout": "skip",
+        "fits": "skip", "runs": "skip", "landings": "skip",
+    },
+    "stairrun": {"start": "pts", "end": "pts", "width": "len", "risers": "skip"},
+    "landing": {"x": "len", "y": "len", "width": "len", "length": "len"},
+    "slab": {"level": "skip", "x": "len", "y": "len", "width": "len", "length": "len"},
+    "grid": {"label": "skip", "start": "pts", "end": "pts"},
+    "roof": {
+        "top_level": "skip", "style": "skip", "pitch": "skip", "rise": "len",
+        "slope_angle": "skip", "gable_axis": "skip", "outline_slopes": "skip",
+        "ridge": "skip", "eaves": "skip", "outline": "skip", "sections": "skip",
+        "role": "skip", "base_height": "len",
+    },
+    "foundation": {
+        "top": "len", "slab_thickness": "len", "sections": "rects", "edge": "skip",
+        "footings": "skip", "concrete_yd3": "vol",
+    },
+    "edge": {"width": "len", "depth": "len", "segments": "skip"},
+    "footing": {"point": "pts", "size": "len", "depth": "len", "role": "skip"},
+    "fixture": {
+        "id": "skip", "kind": "skip", "room": "skip", "level": "skip", "x": "len",
+        "y": "len", "width": "len", "length": "len", "wall": "skip", "point": "pts",
+    },
+    "site": {"width": "len", "length": "len", "setbacks": "skip"},
+    "setbacks": {"front": "len", "side": "len", "rear": "len"},
+}
+
+
+def _scale(v, f):
+    """Multiply a scalar length by ``f`` (a non-number — ``None``, a bool — passes)."""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v * f
+    return v
+
+
+def _scale_list(v, f):
+    """Multiply each number of a flat coordinate list by ``f`` (``None`` passes)."""
+    if v is None:
+        return v
+    return [_scale(x, f) for x in v]
+
+
+def _convert_record(rec, table, factor, where):
+    """Convert one flat record in place against its field ``table``.
+
+    Any key not in the table whose value is numeric raises :class:`RevitImportError`
+    — the deliberate "fails loudly" contract, so a future length field added to the
+    exchange can't slip through unconverted. Non-numeric extras pass through.
+    """
+    if not isinstance(rec, dict):
+        return
+    for k in list(rec.keys()):
+        kind = table.get(k)
+        if kind is None:
+            v = rec[k]
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                raise RevitImportError(
+                    "unit conversion: unknown numeric field %r in a %s record "
+                    "(the units table needs an entry for it)" % (k, where)
+                )
+            continue
+        if kind == "len":
+            rec[k] = _scale(rec[k], factor)
+        elif kind == "area":
+            rec[k] = _scale(rec[k], factor * factor)
+        elif kind == "vol":
+            rec[k] = _scale(rec[k], factor * factor * factor)
+        elif kind == "pts":
+            rec[k] = _scale_list(rec[k], factor)
+        elif kind == "rects":
+            v = rec[k]
+            if v is not None:
+                rec[k] = [_scale_list(x, factor) for x in v]
+        # "skip": intentionally unchanged
+
+
+def _convert_seg(seg, factor):
+    """Scale a ``{"start": [x, y], "end": [x, y]}`` segment in place."""
+    if isinstance(seg, dict):
+        if seg.get("start") is not None:
+            seg["start"] = _scale_list(seg["start"], factor)
+        if seg.get("end") is not None:
+            seg["end"] = _scale_list(seg["end"], factor)
+
+
+def _convert_outline(outline, factor):
+    """Scale a list of ``[[x, y], [x, y]]`` segments (roof / turndown edge)."""
+    if not outline:
+        return outline
+    return [[_scale_list(pt, factor) for pt in seg] for seg in outline]
+
+
+def _convert_roof(roof, factor):
+    """Scale a roof (or roof-section) dict in place, recursing into sub-planes."""
+    _convert_record(roof, _UNIT_FIELDS["roof"], factor, "roof")
+    _convert_seg(roof.get("ridge"), factor)
+    for e in roof.get("eaves", []) or []:
+        _convert_seg(e, factor)
+    if roof.get("outline"):
+        roof["outline"] = _convert_outline(roof["outline"], factor)
+    for sec in roof.get("sections", []) or []:
+        _convert_roof(sec, factor)
+
+
+def _convert_foundation(found, factor):
+    """Scale a foundation block in place (slab/turndown/footings)."""
+    _convert_record(found, _UNIT_FIELDS["foundation"], factor, "foundation")
+    edge = found.get("edge")
+    if isinstance(edge, dict):
+        _convert_record(edge, _UNIT_FIELDS["edge"], factor, "foundation edge")
+        if edge.get("segments"):
+            edge["segments"] = _convert_outline(edge["segments"], factor)
+    for ft in found.get("footings", []) or []:
+        _convert_record(ft, _UNIT_FIELDS["footing"], factor, "footing")
+
+
+def _convert_area(area, factor):
+    """Scale an area (porch / stair) and its ``meta`` (incl. the stair plan)."""
+    _convert_record(area, _UNIT_FIELDS["area"], factor, "area")
+    meta = area.get("meta")
+    if isinstance(meta, dict):
+        _convert_record(meta, _UNIT_FIELDS["meta"], factor, "area meta")
+        sp = meta.get("plan")
+        if isinstance(sp, dict):
+            _convert_record(sp, _UNIT_FIELDS["stairplan"], factor, "stair plan")
+            for run in sp.get("runs", []) or []:
+                _convert_record(run, _UNIT_FIELDS["stairrun"], factor, "stair run")
+            for land in sp.get("landings", []) or []:
+                _convert_record(land, _UNIT_FIELDS["landing"], factor, "stair landing")
+
+
+def _convert_document(data, factor):
+    """Convert every length/area in an exchange dict in place by ``factor``.
+
+    The schema-driven walker (see :data:`_UNIT_FIELDS`). Used to normalise a
+    metric document to feet (``factor = FOOT_PER_METER``); the tests also drive
+    it with the reciprocal to synthesise a metric document from a feet one.
+    """
+    plan = data.get("plan")
+    if isinstance(plan, dict):
+        _convert_record(plan, _UNIT_FIELDS["plan"], factor, "plan")
+        prog = plan.get("program")
+        if isinstance(prog, dict):
+            _convert_record(prog, _UNIT_FIELDS["program"], factor, "program")
+        fr = plan.get("frame")
+        if isinstance(fr, dict):
+            _convert_record(fr, _UNIT_FIELDS["frame"], factor, "frame")
+    for lv in data.get("levels", []) or []:
+        _convert_record(lv, _UNIT_FIELDS["level"], factor, "level")
+    for w in data.get("walls", []) or []:
+        _convert_record(w, _UNIT_FIELDS["wall"], factor, "wall")
+    for o in data.get("openings", []) or []:
+        _convert_record(o, _UNIT_FIELDS["opening"], factor, "opening")
+    for r in data.get("rooms", []) or []:
+        _convert_record(r, _UNIT_FIELDS["room"], factor, "room")
+    struct = data.get("structure")
+    if isinstance(struct, dict):
+        for c in struct.get("columns", []) or []:
+            _convert_record(c, _UNIT_FIELDS["column"], factor, "column")
+        for f in struct.get("framing", []) or []:
+            _convert_record(f, _UNIT_FIELDS["framing"], factor, "framing")
+    for a in data.get("areas", []) or []:
+        _convert_area(a, factor)
+    for s in data.get("slabs", []) or []:
+        _convert_record(s, _UNIT_FIELDS["slab"], factor, "slab")
+    for g in data.get("grids", []) or []:
+        _convert_record(g, _UNIT_FIELDS["grid"], factor, "grid")
+    roof = data.get("roof")
+    if isinstance(roof, dict):
+        _convert_roof(roof, factor)
+    found = data.get("foundation")
+    if isinstance(found, dict):
+        _convert_foundation(found, factor)
+    for fx in data.get("fixtures", []) or []:
+        _convert_record(fx, _UNIT_FIELDS["fixture"], factor, "fixture")
+    site = data.get("site")
+    if isinstance(site, dict):
+        _convert_record(site, _UNIT_FIELDS["site"], factor, "site")
+        sb = site.get("setbacks")
+        if isinstance(sb, dict):
+            _convert_record(sb, _UNIT_FIELDS["setbacks"], factor, "setback")
+    return data
+
+
+def normalize_exchange_units(data: dict) -> dict:
+    """Return an exchange in feet, ready for reconstruction.
+
+    A ``feet`` document (the only unit the producer ever emits) passes through
+    **untouched** — the byte-identical path, no conversion, so nothing perturbs a
+    fingerprint. A metric document (``meters`` / ``metres`` / ``m``) is
+    deep-copied and every length/area normalised to feet by :func:`_convert_document`
+    (its ``units`` then rewritten to ``feet``). Any other value raises
+    :class:`RevitImportError`, naming it and the supported set.
+    """
+    units = data.get("units", "feet")
+    if units in _FEET_UNITS:
+        return data
+    if units in _METER_UNITS:
+        import copy
+
+        out = copy.deepcopy(data)
+        _convert_document(out, FOOT_PER_METER)
+        out["units"] = "feet"
+        return out
+    raise RevitImportError(
+        "unsupported units %r (expected feet %s or metric %s)"
+        % (units, sorted(_FEET_UNITS), sorted(_METER_UNITS))
+    )
+
+
 def _infer_exterior_wall(room: Room, location, width: float, tol: float = 1e-3):
     """Return ``(Direction, offset)`` for an opening on ``room``'s exterior wall.
 
@@ -1601,15 +1899,19 @@ def exchange_to_plan(data: dict) -> Barndominium:
     — roof style/pitch, notes, the accessibility opt-in, the ``program`` and the
     ``frame`` request — round-trips too when present (each is an optional key, so
     an older document without it still loads). The declared program surviving the
-    trip is what keeps ``PROGRAM_MISMATCH`` guarding edits made in Revit. Raises
-    :class:`RevitImportError` on a document that isn't this schema.
+    trip is what keeps ``PROGRAM_MISMATCH`` guarding edits made in Revit. A
+    metric document (``units`` = ``meters``/``metres``/``m``) is normalised to
+    feet before reconstruction; ``feet`` passes through untouched. Raises
+    :class:`RevitImportError` on a document that isn't this schema or whose units
+    are unsupported.
     """
     if not isinstance(data, dict) or data.get("schema") != EXCHANGE_SCHEMA:
         raise RevitImportError(
             "not a %s exchange (got schema %r)" % (EXCHANGE_SCHEMA, (data or {}).get("schema"))
         )
-    if data.get("units", "feet") != "feet":
-        raise RevitImportError("unsupported units %r" % data.get("units"))
+    # Normalise units to feet up front: feet passes through untouched, a metric
+    # document is converted, anything else raises. Everything below reads feet.
+    data = normalize_exchange_units(data)
 
     from .elements import Barndominium
 
