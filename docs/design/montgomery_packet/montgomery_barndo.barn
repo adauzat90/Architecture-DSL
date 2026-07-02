@@ -49,7 +49,8 @@ room bed3:    bedroom  at 44,48  size 10 x 12        # NE corner now on the L st
 # ============================ ATTACHED GYM (x 54..90, y 0..48) =================
 room turf:    other  at 54,0   size 18 x 24 ceiling 14   # artificial-turf training bay
 room tumble:  other  at 54,24  size 18 x 24 ceiling 14   # rubber-matted tumbling bay
-room boat:    garage at 72,0   size 18 x 48 ceiling 14   # boat / trailer garage (outer edge)
+room airlock: mudroom at 72,0  size 6 x 48              # air-lock / gear vestibule buffering the garage
+room boat:    garage at 78,0   size 12 x 48 ceiling 14   # boat / trailer garage (outer edge)
 
 # ------------------------------- covered porch --------------------------------
 porch front_porch at 0,-8 size 54 x 8 covered
@@ -81,18 +82,21 @@ door bed3 - closet3 width 2.5 offset 0.5
 # conditioned -> gym (safety door, self-closing)
 door lounge - turf swing width 3 offset 14
 
-# gym interior circulation
+# gym interior circulation + air-lock buffer to the garage
+# (turf/tumble -> airlock -> boat: two doors in series, staggered so it works
+#  as a vestibule/air-lock rather than a straight-through path)
 door turf - tumble width 3 offset 1
-door turf - boat width 3 offset 1
-door tumble - boat width 3 offset 1
+door turf - airlock width 3 offset 1
+door tumble - airlock width 3 offset 1
+door airlock - boat swing width 3 offset 33
 
 # ------------------------------- exterior doors -------------------------------
 entry living south width 3 offset 20
 entry hall west width 3 offset 0.5
 entry turf south width 3 offset 1
 entry tumble north width 3 offset 1
-entry boat south width 3 offset 3
-door boat east exterior width 16 offset 16 no-egress   # boat overhead door
+entry boat east width 3 offset 6                        # boat man-door
+door boat north exterior width 10 offset 1 no-egress   # boat overhead door (rear, pulls in lengthwise)
 
 # ------------------------------- windows --------------------------------------
 # residence exterior daylight / egress
@@ -113,5 +117,6 @@ window tumble north width 8 offset 5
 # tempered interior vision panels — parent supervision sightlines
 window lounge east width 6 offset 6      # lounge -> turf
 window turf north width 8 offset 5       # turf -> tumble
-window turf east width 6 offset 8        # turf -> boat bay
-window tumble east width 6 offset 8      # tumble -> boat bay
+window turf east width 6 offset 8        # turf -> airlock
+window tumble east width 6 offset 8      # tumble -> airlock
+window airlock east width 4 offset 20    # airlock -> boat bay
