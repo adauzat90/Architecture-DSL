@@ -21,8 +21,10 @@
         is the v1 abutment placer.
 
     barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
-        Run the Claude agent: brief → DSL → compile → critique → refine.
-        Requires `pip install 'barndsl[agent]'` and ANTHROPIC_API_KEY.
+                   [--target-score S]
+        Run the Claude agent: brief → DSL → compile → score → critique → refine,
+        keeping the best-scoring iteration. Requires `pip install 'barndsl[agent]'`
+        and ANTHROPIC_API_KEY.
 
     barndsl revit FILE.barn [--out FILE.json] [--frame]
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
@@ -275,7 +277,8 @@ def _cmd_design(args: argparse.Namespace) -> int:
         crit = ""
         if step.critique is not None:
             crit = "  (critic: satisfied)" if step.critique.satisfied else "  (critic: needs work)"
-        print(f"  iteration {step.iteration}: {step.result.summary()}{crit}")
+        score = f"  score {step.score.total:g}/100" if step.score is not None else ""
+        print(f"  iteration {step.iteration}: {step.result.summary()}{score}{crit}")
 
     print(f"Designing with {args.model} (up to {args.iterations} iteration(s))...\n")
     agent = BarndoAgent(model=args.model)
@@ -285,12 +288,16 @@ def _cmd_design(args: argparse.Namespace) -> int:
             max_iterations=args.iterations,
             critique=not args.no_critique,
             on_step=on_step,
+            target_score=args.target_score if args.target_score > 0 else None,
         )
     except Exception as exc:  # pragma: no cover - network/runtime errors
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"\n--- final DSL (after {result.iterations} iteration(s)) ---")
+    print(
+        f"\n--- final DSL (best of {result.iterations} iteration(s): "
+        f"iteration {result.best_iteration}, score {result.score.total:g}/100) ---"
+    )
     print(result.source.rstrip())
     print("\n--- compiler report ---")
     print(result.result.report())
@@ -640,6 +647,12 @@ def main(argv: list[str] | None = None) -> int:
     p_design.add_argument("--iterations", type=int, default=3, help="max refine iterations")
     p_design.add_argument("--model", default="claude-opus-4-8", help="Claude model id")
     p_design.add_argument("--no-critique", action="store_true", help="skip the design critic")
+    p_design.add_argument(
+        "--target-score",
+        type=float,
+        default=90.0,
+        help="keep iterating while the design score is below this (0 disables the gate)",
+    )
     p_design.set_defaults(func=_cmd_design)
 
     p_revit = sub.add_parser(

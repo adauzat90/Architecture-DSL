@@ -375,6 +375,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
         # --- agent layer ----------------------------------------------------
         _c("DESIGN", I, "Architect's critique",
            "A design-quality suggestion folded in from the agent's architect review."),
+        _c("NO_PROGRAM", I, "No `program` statement",
+           "The source declares no `program` line, so the compiler cannot check the "
+           "plan delivers the brief's beds/baths/area. Derive one from the brief — "
+           "`program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`."),
     ]
 )
 

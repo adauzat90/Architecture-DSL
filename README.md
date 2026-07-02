@@ -411,9 +411,14 @@ print(result.source)        # the DSL the model wrote
 print(result.result.report())
 ```
 
-Each round: **write DSL → compile → critique (design quality) → revise**, until
-it compiles clean and the critic is satisfied (or the cap is hit). Uses Claude
-(`claude-opus-4-8`) — the compiler's diagnostics are the steering signal.
+Each round: **write DSL → compile → score → critique (design quality) →
+revise**, until it compiles clean, the critic is satisfied AND the
+deterministic 0-100 design score clears `target_score` (default 90; `None`
+disables the gate) — or the cap is hit. Every iteration is scored and the
+**best-scoring one wins** (`result.best_iteration` says which), so a
+regression on the last round is never returned. Uses Claude
+(`claude-opus-4-8`) — the compiler's structured diagnostics plus the score's
+per-component deductions are the steering signal.
 
 ## Two front-ends, one core
 

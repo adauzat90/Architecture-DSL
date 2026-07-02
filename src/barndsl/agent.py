@@ -6,10 +6,17 @@ straight back as the next prompt — a compile-fix loop, exactly like a develope
 iterating against compiler output:
 
     1. **write**    DSL source from the brief (+ prior source + diagnostics);
-    2. **compile**  → plan + diagnostics (line, code, hint);
-    3. **critique** the design for quality (optional, model-driven);
-    4. **revise**   feed diagnostics + critique back, rewrite the DSL, repeat —
-       until it compiles clean and the critic is satisfied (or the cap is hit).
+    2. **compile**  → plan + diagnostics (line, code, hint) + a deterministic
+       0-100 design score (see :mod:`barndsl.score`);
+    3. **critique** the design for quality (optional, model-driven, anchored to
+       the score evidence);
+    4. **revise**   feed the structured diagnostics + score + critique back,
+       rewrite the DSL, repeat — until it compiles clean, the critic is
+       satisfied AND the score clears ``target_score`` (or the cap is hit).
+
+The loop hill-climbs on the score: every step is scored, and ``design()``
+returns the **best-scoring** iteration, not the last — a regression on the
+final round is never silently returned.
 
 Requires ``anthropic`` and ``ANTHROPIC_API_KEY``. Install ``pip install 'barndsl[agent]'``.
 """
@@ -22,9 +29,13 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
+from .score import ScoreReport, design_score
 from .validation import Issue, Severity
 
 DEFAULT_MODEL = "claude-opus-4-8"
+
+#: Below this score the design is not "done" even if the critic is satisfied.
+DEFAULT_TARGET_SCORE = 90.0
 
 _DESIGN_RULES = """\
 DESIGN RULES the compiler enforces (write DSL that satisfies them):
@@ -50,7 +61,11 @@ _GENERATE_SYSTEM = (
     + DSL_REFERENCE
     + "\n"
     + _DESIGN_RULES
-    + "\nAlways reply with ONLY the DSL source (optionally inside a ```barn code "
+    + "\nYou MUST declare the brief's program as a `program` statement derived "
+    "from the brief — grammar: `program <n> bed [<m> bath] [<k> <type> ...] "
+    "[area <sqft>]` (e.g. `program 3 bed 2 bath area 1800`) — so the compiler "
+    "checks the plan delivers what was asked, not what you remembered.\n"
+    "\nAlways reply with ONLY the DSL source (optionally inside a ```barn code "
     "block). Do not add prose before or after."
 )
 
@@ -59,10 +74,14 @@ _CRITIQUE_SYSTEM = (
     "source plus the compiler's report) for design quality and livability. Judge "
     "flow and adjacencies (kitchen by dining, baths by beds, mudroom by entry), "
     "privacy, light, wasted space, and whether it is pleasant to live in — not "
-    "just code-compliant. Be constructive but exacting.\n\n" + DSL_REFERENCE
+    "just code-compliant. Anchor your verdict in the evidence you are given: "
+    "the design score, its per-component deductions, and the diagnostics. Be "
+    "constructive but exacting.\n\n" + DSL_REFERENCE
 )
 
 _FENCE_RE = re.compile(r"```(?:[a-zA-Z]+)?\s*\n(.*?)```", re.DOTALL)
+
+_PROGRAM_RE = re.compile(r"^\s*program\b", re.MULTILINE)
 
 
 def _extract_source(text: str) -> str:
@@ -73,6 +92,32 @@ def _extract_source(text: str) -> str:
     return text.strip() + "\n"
 
 
+def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> str:
+    """Render a compact, deterministic feedback block for the revision prompt.
+
+    Structured fields from :meth:`CompileResult.to_dict` — one line per
+    diagnostic (``severity CODE (room) line N: message | hint: ...``) headed by
+    the score total and its non-zero per-component deductions. Token-lean by
+    design: no source snippets, no caret art — the model gets fields to act on,
+    not human formatting to scrape.
+    """
+    if score is None:
+        score = design_score(result)
+    deductions = ", ".join(f"{k} -{v:g}" for k, v in score.components.items() if v)
+    lines = [
+        f"Design score: {score.total:g}/100"
+        + (f" — deductions: {deductions}" if deductions else " — no deductions")
+    ]
+    for d in result.to_dict()["diagnostics"]:
+        where = f" ({d['room']})" if d["room"] else ""
+        loc = f" line {d['line']}" if d["line"] else ""
+        line = f"{d['severity']} {d['code']}{where}{loc}: {d['message']}"
+        if d["hint"]:
+            line += f" | hint: {d['hint']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 class CritiqueSpec(BaseModel):
     """The model's design-quality review."""
 
@@ -80,6 +125,12 @@ class CritiqueSpec(BaseModel):
         description="True only if the plan is genuinely good and needs no changes."
     )
     assessment: str = Field(description="One-paragraph overall judgement.")
+    rationale: str = Field(
+        description=(
+            "The concrete evidence for the verdict: which diagnostics and score "
+            "components (by code/name) justify satisfied being true or false."
+        )
+    )
     suggestions: list[str] = Field(
         default_factory=list, description="Specific, actionable changes. Empty if satisfied."
     )
@@ -91,6 +142,15 @@ class DesignStep:
     source: str
     result: CompileResult
     critique: CritiqueSpec | None = None
+    score: ScoreReport | None = None
+
+
+def _best_step(history: list[DesignStep]) -> DesignStep:
+    """The highest-scoring step; ties go to the later iteration."""
+    return max(
+        history,
+        key=lambda s: (s.score.total if s.score is not None else -1.0, s.iteration),
+    )
 
 
 @dataclass
@@ -107,9 +167,25 @@ class DesignResult:
     def iterations(self) -> int:
         return len(self.history)
 
+    @property
+    def best_iteration(self) -> int:
+        """Which iteration won (its source/result are what this carries)."""
+        if not self.history:
+            return 0
+        return _best_step(self.history).iteration
+
+    @property
+    def score(self) -> ScoreReport:
+        """The winning step's score report (recomputed if it wasn't stored)."""
+        if self.history:
+            best = _best_step(self.history)
+            if best.score is not None:
+                return best.score
+        return design_score(self.result)
+
 
 class BarndoAgent:
-    """Drives the write → compile → critique → revise loop."""
+    """Drives the write → compile → score → critique → revise loop."""
 
     def __init__(self, model: str = DEFAULT_MODEL, client=None):
         self.model = model
@@ -138,8 +214,11 @@ class BarndoAgent:
             prompt += f"\nYour previous DSL:\n```barn\n{prior}```\n"
         if diagnostics:
             prompt += (
-                "\nThe compiler reported the following. Fix EVERY error and "
-                "address warnings where reasonable:\n\n" + diagnostics + "\n"
+                "\nCompiler feedback on it (one line per diagnostic; the design "
+                "score at the top is the number you are maximising — 100 is a "
+                "clean, well-designed plan, and each deduction names where the "
+                "points went). Fix EVERY error, address warnings where "
+                "reasonable, and raise the score:\n\n" + diagnostics + "\n"
             )
         prompt += "\nReturn the complete, revised DSL source."
 
@@ -154,13 +233,17 @@ class BarndoAgent:
         text = "".join(b.text for b in msg.content if b.type == "text")
         return _extract_source(text)
 
-    def critique(self, result: CompileResult) -> CritiqueSpec:
+    def critique(self, result: CompileResult, score: ScoreReport | None = None) -> CritiqueSpec:
+        if score is None:
+            score = design_score(result)
         prompt = (
             "Review this barndominium plan.\n\n"
             f"DSL source:\n```barn\n{result.source}```\n\n"
-            f"Compiler report:\n{result.report()}\n\n"
+            f"Score and diagnostics (your evidence):\n{render_feedback(result, score)}\n\n"
             "Assess the design and list concrete improvements. Set satisfied=true "
-            "only if it compiles clean AND is a genuinely good layout."
+            "only if it compiles clean AND is a genuinely good layout, and in "
+            "`rationale` cite the specific diagnostics and score components that "
+            "justify your verdict."
         )
         resp = self.client.messages.parse(
             model=self.model,
@@ -171,7 +254,9 @@ class BarndoAgent:
         )
         crit = resp.parsed_output
         if crit is None:  # pragma: no cover
-            return CritiqueSpec(satisfied=result.ok, assessment="(no critique returned)")
+            return CritiqueSpec(
+                satisfied=result.ok, assessment="(no critique returned)", rationale=""
+            )
         return crit
 
     # -- full loop ---------------------------------------------------------
@@ -182,6 +267,7 @@ class BarndoAgent:
         max_iterations: int = 3,
         critique: bool = True,
         on_step=None,
+        target_score: float | None = DEFAULT_TARGET_SCORE,
     ) -> DesignResult:
         history: list[DesignStep] = []
         source: str | None = None
@@ -190,23 +276,33 @@ class BarndoAgent:
         for i in range(1, max_iterations + 1):
             source = self.write_source(brief, prior=source, diagnostics=feedback)
             result = compile_source(source, name=None)
-            crit = self.critique(result) if (critique and result.plan is not None) else None
+            # The program nudge is folded before scoring: it is deterministic
+            # (a pure function of the source), so the score stays a contract —
+            # and a missing `program` line now costs points the loop can win back.
+            _fold_program_nudge(result)
+            score = design_score(result)
+            crit = self.critique(result, score) if (critique and result.plan is not None) else None
             # Fold the architect's review into the diagnostic stream as INFO, so
             # design feedback travels the same channel as the compiler's errors.
+            # (After scoring: the critique is model-driven, the score is not.)
             _fold_critique(result, crit)
 
-            step = DesignStep(i, source, result, crit)
+            step = DesignStep(i, source, result, crit, score)
             history.append(step)
             if on_step:
                 on_step(step)
 
             done = result.ok and (crit is None or crit.satisfied)
+            # Gate mechanically: the critic's "satisfied" alone can't end the
+            # loop while the score says there are points on the table.
+            if target_score is not None and score.total < target_score:
+                done = False
             if done or i == max_iterations:
                 break
-            feedback = result.report()
+            feedback = render_feedback(result, score)
 
-        last = history[-1]
-        return DesignResult(last.source, last.result, history)
+        best = _best_step(history)
+        return DesignResult(best.source, best.result, history)
 
 
 def _fold_critique(result: CompileResult, crit: CritiqueSpec | None) -> None:
@@ -224,8 +320,38 @@ def _fold_critique(result: CompileResult, crit: CritiqueSpec | None) -> None:
         )
 
 
+def _fold_program_nudge(result: CompileResult) -> None:
+    """Append an INFO when the source declares no ``program`` statement.
+
+    Deterministic (regex on the source, no model call) and folded the same way
+    :func:`_fold_critique` folds the critique — the nudge rides the diagnostic
+    stream into the next revision prompt, so the loop self-corrects until the
+    brief's intent is declared where the compiler can check it.
+    """
+    if _PROGRAM_RE.search(result.source):
+        return
+    result.diagnostics.append(
+        Issue(
+            Severity.INFO,
+            "NO_PROGRAM",
+            "No `program` statement: declare the brief's intent so the compiler "
+            "checks the plan delivers it.",
+            hint=(
+                "Derive it from the brief, e.g. `program 3 bed 2 bath area 1800` "
+                "(grammar: `program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`)."
+            ),
+        )
+    )
+
+
 def design(
-    brief: str, model: str = DEFAULT_MODEL, max_iterations: int = 3, on_step=None
+    brief: str,
+    model: str = DEFAULT_MODEL,
+    max_iterations: int = 3,
+    on_step=None,
+    target_score: float | None = DEFAULT_TARGET_SCORE,
 ) -> DesignResult:
     """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``."""
-    return BarndoAgent(model=model).design(brief, max_iterations=max_iterations, on_step=on_step)
+    return BarndoAgent(model=model).design(
+        brief, max_iterations=max_iterations, on_step=on_step, target_score=target_score
+    )
