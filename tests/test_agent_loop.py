@@ -6,11 +6,15 @@ What the loop must guarantee (see `barndsl/agent.py`):
   `design()` returns the highest-scoring step — a regression on the final
   round is never returned;
 - **structured feedback**: the revision prompt carries `render_feedback`'s
-  compact score-headed diagnostic lines, not the caret-art `report()`;
+  compact score-headed diagnostic lines (score header + cause lines, one line
+  per diagnostic, then the geometry pack), not the caret-art `report()`;
 - **NO_PROGRAM nudge**: a source without a `program` statement earns a
   deterministic INFO that rides the feedback into the next round;
 - **target-score gate**: the critic saying "satisfied" cannot end the loop
-  while the score is below `target_score`.
+  while the score is below `target_score`;
+- **multimodal critique**: when `_plan_png` yields bytes, the critique call
+  carries a base64 PNG image block (and the system prompt says so); when it
+  yields None — no plan, or cairosvg missing — the call stays text-only.
 """
 
 from __future__ import annotations
@@ -72,12 +76,21 @@ class _FakeStream:
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=self._text)])
 
 
+def _prompt_text(content) -> str:
+    """The text of a user turn, whether it's a bare string or content blocks."""
+    if isinstance(content, str):
+        return content
+    return "".join(b["text"] for b in content if b.get("type") == "text")
+
+
 class FakeClient:
     """Scripted `.messages.stream(...)` / `.messages.parse(...)`.
 
     `sources` are returned (fenced, like a real reply) one per generation call;
     `critiques` one per critique call. Prompts are recorded so tests can assert
-    what the model was actually shown.
+    what the model was actually shown — `parse_prompts` holds the critique text
+    (image block or not), `parse_contents`/`parse_systems` the raw content and
+    system prompt for the multimodal assertions.
     """
 
     def __init__(self, sources: list[str], critiques: list[CritiqueSpec] | None = None):
@@ -85,6 +98,8 @@ class FakeClient:
         self._critiques = list(critiques or [])
         self.stream_prompts: list[str] = []
         self.parse_prompts: list[str] = []
+        self.parse_contents: list = []
+        self.parse_systems: list[str] = []
         self.messages = self  # so client.messages.stream / .parse resolve here
 
     def stream(self, **kwargs):
@@ -92,7 +107,10 @@ class FakeClient:
         return _FakeStream(f"```barn\n{self._sources.pop(0)}```")
 
     def parse(self, **kwargs):
-        self.parse_prompts.append(kwargs["messages"][0]["content"])
+        content = kwargs["messages"][0]["content"]
+        self.parse_contents.append(content)
+        self.parse_systems.append(kwargs["system"])
+        self.parse_prompts.append(_prompt_text(content))
         return SimpleNamespace(parsed_output=self._critiques.pop(0))
 
 
@@ -165,10 +183,17 @@ def test_render_feedback_is_score_headed_structured_and_deterministic():
     score = design_score(result)
     text = render_feedback(result)
 
-    head, *lines = text.splitlines()
+    head, *rest = text.splitlines()
     assert head.startswith(f"Design score: {score.total:g}/100")
     assert "deductions:" in head and "warnings -" in head
-    # one compact line per diagnostic: severity CODE (room) line N: msg | hint: ...
+    # the header is followed by one indented cause line per score detail …
+    causes = rest[: len(score.details)]
+    assert causes and all(c.startswith("  ") and ": " in c for c in causes)
+    # … then one compact line per diagnostic (severity CODE (room) line N: msg
+    # | hint: ...) up to the geometry pack.
+    body = rest[len(score.details) :]
+    geo_at = body.index("Rooms (id type level x,y w x l | exterior walls):")
+    lines = body[:geo_at]
     assert len(lines) == len(result.diagnostics)
     assert any(line.startswith("warning NAT_LIGHT (living) line 4:") for line in lines)
     assert any("| hint:" in line for line in lines)
@@ -183,6 +208,45 @@ def test_render_feedback_on_a_clean_plan_reports_no_zero_components():
     text = render_feedback(result)
     assert text.startswith("Design score: ")
     assert "errors -" not in text and "warnings -" not in text
+
+
+def test_render_feedback_carries_the_score_causes():
+    result = compile_source(MEDIOCRE)
+    score = design_score(result)
+    text = render_feedback(result, score)
+    assert score.details  # MEDIOCRE deducts continuous points, so causes exist
+    for name, cause in score.details.items():
+        assert f"  {name} -{score.components[name]:g}: {cause}" in text
+
+
+# -- the geometry pack ----------------------------------------------------------
+
+
+def test_render_feedback_appends_the_geometry_pack():
+    from barndsl.introspect import plan_summary, summary_text
+
+    result = compile_source(MEDIOCRE)
+    text = render_feedback(result)
+    assert "  living living L0 0,0 18 x 24 | south north west" in text
+    assert "Adjacency (door edges): living-bed (swing 2.67)" in text
+    assert "Unplaced footprint (L0): none" in text
+    # verbatim the block `barndsl inspect` prints — one source of truth
+    assert text.endswith(summary_text(plan_summary(result.plan)))
+
+
+def test_render_feedback_without_a_plan_has_no_geometry_pack():
+    result = compile_source(BROKEN)
+    assert result.plan is None
+    text = render_feedback(result)
+    assert "Rooms (" not in text and "Free wall spans" not in text
+
+
+def test_revision_prompt_includes_the_free_wall_spans():
+    client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    _agent(client).design("a starter home", max_iterations=2, target_score=None)
+
+    revision = client.stream_prompts[1]
+    assert "Free wall spans" in revision and "-> exterior:" in revision
 
 
 def test_revision_prompt_carries_the_structured_feedback_not_the_caret_report():
@@ -274,3 +338,94 @@ def test_critique_prompt_is_anchored_to_the_score_and_asks_for_rationale():
     # CritiqueSpec makes the evidence a required field of the structured output
     assert "rationale" in CritiqueSpec.model_fields
     assert CritiqueSpec.model_fields["rationale"].is_required()
+
+
+# -- the multimodal critic -------------------------------------------------------
+
+
+def test_critique_attaches_the_plan_image_when_a_png_renders(monkeypatch):
+    import base64
+
+    import barndsl.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_plan_png", lambda result: b"not-really-a-png")
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=1, target_score=None)
+
+    (content,) = client.parse_contents
+    assert isinstance(content, list)
+    image, text = content
+    assert image["type"] == "image"
+    assert image["source"]["type"] == "base64"
+    assert image["source"]["media_type"] == "image/png"
+    assert base64.b64decode(image["source"]["data"]) == b"not-really-a-png"
+    assert text["type"] == "text" and "Design score:" in text["text"]
+    # the system prompt now claims the image and demands a visual citation
+    (system,) = client.parse_systems
+    assert "image of this plan is attached" in system
+    assert "`rationale` must cite what you see in the drawing" in system
+
+
+def test_critique_stays_text_only_when_no_png_is_available(monkeypatch):
+    import barndsl.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_plan_png", lambda result: None)
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=1, target_score=None)
+
+    (content,) = client.parse_contents
+    assert isinstance(content, str) and "Design score:" in content
+    # …and the system prompt must NOT claim an image that isn't there.
+    (system,) = client.parse_systems
+    assert "attached" not in system
+
+
+def test_plan_png_is_none_without_a_plan():
+    from barndsl.agent import _plan_png
+
+    assert compile_source(BROKEN).plan is None
+    assert _plan_png(compile_source(BROKEN)) is None
+
+
+def test_plan_png_is_none_when_cairosvg_is_missing(monkeypatch):
+    import sys
+
+    from barndsl.agent import _plan_png
+
+    monkeypatch.setitem(sys.modules, "cairosvg", None)  # `import cairosvg` fails
+    assert _plan_png(compile_source(CLEAN)) is None  # never raises
+
+
+def test_plan_png_rasterises_the_rendered_svg_when_cairosvg_is_present(monkeypatch):
+    import sys
+    import types
+
+    from barndsl.agent import _plan_png
+
+    calls: dict = {}
+    fake = types.ModuleType("cairosvg")
+
+    def svg2png(bytestring=None, **kwargs):
+        calls["svg"] = bytestring
+        return b"png-bytes"
+
+    fake.svg2png = svg2png
+    monkeypatch.setitem(sys.modules, "cairosvg", fake)
+    assert _plan_png(compile_source(CLEAN)) == b"png-bytes"
+    assert b"<svg" in calls["svg"]  # it rasterised the real render
+
+
+def test_plan_png_swallows_raster_failures(monkeypatch):
+    import sys
+    import types
+
+    from barndsl.agent import _plan_png
+
+    fake = types.ModuleType("cairosvg")
+
+    def svg2png(**kwargs):
+        raise RuntimeError("no cairo library")
+
+    fake.svg2png = svg2png
+    monkeypatch.setitem(sys.modules, "cairosvg", fake)
+    assert _plan_png(compile_source(CLEAN)) is None

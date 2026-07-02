@@ -7,9 +7,12 @@ iterating against compiler output:
 
     1. **write**    DSL source from the brief (+ prior source + diagnostics);
     2. **compile**  → plan + diagnostics (line, code, hint) + a deterministic
-       0-100 design score (see :mod:`barndsl.score`);
+       0-100 design score (see :mod:`barndsl.score`) + the resolved geometry
+       pack (see :mod:`barndsl.introspect`);
     3. **critique** the design for quality (optional, model-driven, anchored to
-       the score evidence);
+       the score evidence — with the rendered floor-plan image attached when
+       the optional ``cairosvg`` raster dependency is installed, so the critic
+       judges the drawing, not just the text);
     4. **revise**   feed the structured diagnostics + score + critique back,
        rewrite the DSL, repeat — until it compiles clean, the critic is
        satisfied AND the score clears ``target_score`` (or the cap is hit).
@@ -23,12 +26,14 @@ Requires ``anthropic`` and ``ANTHROPIC_API_KEY``. Install ``pip install 'barndsl
 
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
+from .introspect import plan_summary, summary_text
 from .score import ScoreReport, design_score
 from .validation import Issue, Severity
 
@@ -79,6 +84,16 @@ _CRITIQUE_SYSTEM = (
     "constructive but exacting.\n\n" + DSL_REFERENCE
 )
 
+#: Appended to the critique system prompt only when a rendered PNG rides along —
+#: the critic must not be told an image is attached when it isn't.
+_CRITIQUE_VISION = (
+    "\n\nA rendered floor-plan image of this plan is attached. Judge what only "
+    "a drawing shows — proportion, circulation legibility, wasted pockets, "
+    "dead-end halls, facade rhythm — and your `rationale` must cite what you "
+    "see in the drawing (e.g. \"the kitchen is an island unreachable from the "
+    "garage\"), not only the diagnostics."
+)
+
 _FENCE_RE = re.compile(r"```(?:[a-zA-Z]+)?\s*\n(.*?)```", re.DOTALL)
 
 _PROGRAM_RE = re.compile(r"^\s*program\b", re.MULTILINE)
@@ -97,9 +112,15 @@ def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> 
 
     Structured fields from :meth:`CompileResult.to_dict` — one line per
     diagnostic (``severity CODE (room) line N: message | hint: ...``) headed by
-    the score total and its non-zero per-component deductions. Token-lean by
-    design: no source snippets, no caret art — the model gets fields to act on,
-    not human formatting to scrape.
+    the score total, its non-zero per-component deductions and their cause
+    lines (:attr:`ScoreReport.details` — the worst offenders, by name and
+    number). When the compile produced a plan, the geometry pack from
+    :func:`barndsl.introspect.plan_summary` is appended — resolved room
+    rectangles with exterior walls, the door/adjacency edges, unplaced
+    footprint pockets, and the free wall spans an opening can legally use — so
+    the model reads coordinates off a table instead of re-deriving them from
+    its own source. Token-lean by design: no source snippets, no caret art —
+    the model gets fields to act on, not human formatting to scrape.
     """
     if score is None:
         score = design_score(result)
@@ -108,6 +129,8 @@ def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> 
         f"Design score: {score.total:g}/100"
         + (f" — deductions: {deductions}" if deductions else " — no deductions")
     ]
+    for name, cause in score.details.items():
+        lines.append(f"  {name} -{score.components[name]:g}: {cause}")
     for d in result.to_dict()["diagnostics"]:
         where = f" ({d['room']})" if d["room"] else ""
         loc = f" line {d['line']}" if d["line"] else ""
@@ -115,7 +138,30 @@ def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> 
         if d["hint"]:
             line += f" | hint: {d['hint']}"
         lines.append(line)
+    if result.plan is not None:
+        lines.append(summary_text(plan_summary(result.plan)))
     return "\n".join(lines)
+
+
+def _plan_png(result: CompileResult) -> bytes | None:
+    """Render the compiled plan to PNG bytes for the multimodal critique.
+
+    Best-effort and silent by design: returns ``None`` (never raises) when the
+    compile produced no plan or the optional ``cairosvg`` raster dependency is
+    missing or fails — the critique then runs text-only, exactly as before.
+    cairosvg stays optional (``pip install 'barndsl[raster]'``), the same guard
+    :func:`barndsl.render.save_render` applies.
+    """
+    if result.plan is None:
+        return None
+    try:
+        import cairosvg
+
+        from .render import render_svg
+
+        return cairosvg.svg2png(bytestring=render_svg(result.plan).encode("utf-8"))
+    except Exception:
+        return None
 
 
 class CritiqueSpec(BaseModel):
@@ -245,11 +291,29 @@ class BarndoAgent:
             "`rationale` cite the specific diagnostics and score components that "
             "justify your verdict."
         )
+        # Give the critic eyes: attach the rendered plan when it can be
+        # rasterised, and only then claim (in the system prompt) that it was.
+        png = _plan_png(result)
+        system = _CRITIQUE_SYSTEM
+        content: str | list = prompt
+        if png is not None:
+            system = _CRITIQUE_SYSTEM + _CRITIQUE_VISION
+            content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64.b64encode(png).decode("ascii"),
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ]
         resp = self.client.messages.parse(
             model=self.model,
             max_tokens=8000,
-            system=_CRITIQUE_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
+            system=system,
+            messages=[{"role": "user", "content": content}],
             output_format=CritiqueSpec,
         )
         crit = resp.parsed_output

@@ -9,7 +9,13 @@
 
     barndsl score FILE.barn [--json]
         Compile and print the deterministic 0-100 design score (see score.py)
-        with its per-component deductions — the number an agent hill-climbs on.
+        with its per-component deductions and their causes (the worst offending
+        rooms, by name and number) — the number an agent hill-climbs on.
+
+    barndsl inspect FILE.barn [--json]
+        Compile and dump the plan's resolved geometry (see introspect.py):
+        room rectangles with exterior walls, the door/adjacency edges, unplaced
+        footprint pockets, and the free wall spans an opening can legally use.
 
     barndsl demo [--out FILE.svg]
         Compile and render the bundled example (examples/cedar_ridge.barn).
@@ -196,10 +202,37 @@ def _cmd_score(args: argparse.Namespace) -> int:
     print(f"\nDesign score: {report.total:g} / 100")
     print("  Deductions:")
     for name, points in report.components.items():
-        print(f"    {name:<12} -{points:g}")
+        cause = report.details.get(name)
+        print(f"    {name:<12} -{points:g}" + (f"  — {cause}" if cause else ""))
     c = report.counts
     print(f"  Diagnostics: {c['error']} error(s), {c['warning']} warning(s), {c['info']} info(s)")
     return 0 if result.plan is not None else 1
+
+
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    """Dump the compiled plan's resolved geometry (the "geometry pack").
+
+    Prints the same summary the agent loop appends to its feedback — rooms,
+    door edges, unplaced pockets, free wall spans — or, with ``--json``, the
+    raw :func:`~barndsl.introspect.plan_summary` dict. Like ``score``, it only
+    fails (exit 1) when there is no plan at all: a plan with diagnostics is
+    exactly when you want to look up its geometry.
+    """
+    from .introspect import plan_summary, summary_text
+
+    result = compile_file(args.file)
+    if result.plan is None:
+        print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 1
+    summary = plan_summary(result.plan)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(summary, indent=2))
+        return 0
+    print(f"Plan: {result.plan.name}")
+    print(summary_text(summary))
+    return 0
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
@@ -611,6 +644,19 @@ def main(argv: list[str] | None = None) -> int:
         help="emit the score report as machine-readable JSON",
     )
     p_score.set_defaults(func=_cmd_score)
+
+    p_inspect = sub.add_parser(
+        "inspect",
+        help="dump the resolved geometry: rooms, door edges, unplaced pockets, "
+        "free wall spans",
+    )
+    p_inspect.add_argument("file", help="path to a .barn DSL file")
+    p_inspect.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the geometry summary as machine-readable JSON",
+    )
+    p_inspect.set_defaults(func=_cmd_inspect)
 
     p_demo = sub.add_parser("demo", help="compile and render the bundled example")
     p_demo.add_argument("--out", default="barndo.svg", help="output SVG path")

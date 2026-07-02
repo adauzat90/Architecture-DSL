@@ -80,6 +80,7 @@ from .revit import (
     to_revit_model,
 )
 from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
+from .introspect import plan_summary, summary_text
 from .score import ScoreReport, design_score
 from .structure import place_frame
 from .validation import Issue, Severity, ValidationReport, clear_dimensions, validate
@@ -128,6 +129,9 @@ __all__ = [
     # design score (deterministic 0-100, for agents to hill-climb on)
     "design_score",
     "ScoreReport",
+    # resolved-geometry introspection (the geometry pack behind `barndsl inspect`)
+    "plan_summary",
+    "summary_text",
     # fixtures / appliances (seeds + clearance)
     "Fixture",
     "fixtures_for",
