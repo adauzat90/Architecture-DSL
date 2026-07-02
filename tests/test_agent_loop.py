@@ -429,3 +429,143 @@ def test_plan_png_swallows_raster_failures(monkeypatch):
     fake.svg2png = svg2png
     monkeypatch.setitem(sys.modules, "cairosvg", fake)
     assert _plan_png(compile_source(CLEAN)) is None
+
+
+# -- solver seeding (candidate 0) ---------------------------------------------
+
+
+def _solver_brief():
+    """A fresh v2 solver brief whose best topology compiles clean (~84)."""
+    from barndsl.layout2 import LayoutBrief2, RoomSpec2
+
+    return LayoutBrief2(
+        name="Solver Seed",
+        rooms=[
+            RoomSpec2("living", "living", area=360),
+            RoomSpec2("kitchen", "kitchen", area=200),
+            RoomSpec2("bed1", "bedroom", area=170),
+            RoomSpec2("bath", "bathroom", area=70),
+        ],
+        adjacencies=[("living", "kitchen"), ("living", "bed1"), ("bed1", "bath")],
+    )
+
+
+def test_solver_seed_is_iteration_0_and_wins_when_the_llm_never_beats_it():
+    """The best solver candidate is recorded as iteration 0; when every LLM round
+    is worse (here: broken), best-iteration-wins hands the solver's plan back."""
+    from barndsl.agent import _solver_seed_step
+
+    seed = _solver_seed_step(_solver_brief())
+    assert seed is not None and seed.iteration == 0 and seed.result.ok
+
+    client = FakeClient(sources=[BROKEN, BROKEN])  # LLM never produces a plan
+    result = _agent(client).design(
+        "a small barndo", max_iterations=2, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+
+    assert len(result.history) == 3  # seed + 2 LLM rounds
+    assert result.history[0].iteration == 0
+    assert result.best_iteration == 0
+    assert result.result.ok and result.source == result.history[0].source
+    assert result.score.total == seed.score.total
+
+
+def test_generation_prompt_includes_the_solver_seed_source():
+    from barndsl.agent import _solver_seed_step
+
+    seed = _solver_seed_step(_solver_brief())
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+
+    first = client.stream_prompts[0]
+    assert "deterministic layout solver produced this" in first
+    assert "room living: living at" in first  # the seed's DSL rides along
+    assert seed.source.strip() in first
+
+
+def test_seed_accepts_a_textual_brief():
+    """A textual v2 brief is parsed and solved just like a LayoutBrief2."""
+    brief_text = (
+        'plan "Text Seed"\n'
+        "room living: living area 360\n"
+        "room kitchen: kitchen area 200\n"
+        "room bed1: bedroom area 170\n"
+        "room bath: bathroom area 70\n"
+        "adjacent living kitchen bed1\n"
+        "adjacent bed1 bath\n"
+    )
+    client = FakeClient(sources=[BROKEN])
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=brief_text,
+    )
+    assert result.history[0].iteration == 0 and result.history[0].result.ok
+    assert result.best_iteration == 0  # the seed beats the broken LLM round
+
+
+def test_seed_degrades_gracefully_when_the_solver_yields_nothing():
+    """An unusable solver spec leaves the loop exactly as it is without seeding."""
+    client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    result = _agent(client).design(
+        "a starter home", max_iterations=2, target_score=None,
+        seed_with_solver="this is not a valid brief statement",
+    )
+    # No iteration-0 step: the first recorded step is the first LLM round.
+    assert all(s.iteration >= 1 for s in result.history)
+    assert result.history[0].iteration == 1
+    assert result.best_iteration == 2  # CLEAN, exactly as the unseeded loop
+
+
+def test_seed_falsy_is_todays_behaviour():
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    assert [s.iteration for s in result.history] == [1]
+
+
+# -- regression legibility in the feedback header -----------------------------
+
+
+def test_feedback_flags_a_regression_after_a_failed_iteration():
+    """CLEAN → BROKEN → CLEAN: the revision prompt after the broken round must
+    name the best prior valid score as a regression to recover from."""
+    client = FakeClient(
+        sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
+    )
+    _agent(client).design("a cottage", max_iterations=3, target_score=None)
+
+    revision = client.stream_prompts[2]  # the prompt after the broken round 2
+    assert "REGRESSION" in revision
+    assert "iteration 1" in revision
+    assert "does not compile" in revision
+
+
+def test_regression_line_absent_when_render_feedback_has_no_best_prior():
+    """Default call is unchanged — no best_prior, no REGRESSION line."""
+    text = render_feedback(compile_source(BROKEN))
+    assert "REGRESSION" not in text
+
+
+def test_render_feedback_regression_line_for_a_lower_score():
+    best = DesignStep(2, CLEAN, compile_source(CLEAN), None, design_score(compile_source(CLEAN)))
+    worse = compile_source(MEDIOCRE)
+    text = render_feedback(worse, best_prior=best)
+    assert "REGRESSION" in text
+    assert f"scored {best.score.total:g}" in text
+    assert "iteration 2" in text
+
+
+def test_revision_reverts_to_the_best_valid_source_after_a_broken_round():
+    """After a broken round the loop revises from the best VALID source, not the
+    broken one it just produced (a behaviour change from always-latest)."""
+    client = FakeClient(
+        sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
+    )
+    _agent(client).design("a cottage", max_iterations=3, target_score=None)
+
+    revision = client.stream_prompts[2]
+    assert "envelope banana" not in revision  # the broken source is NOT the prior
+    assert 'plan "Stillwater Cottage"' in revision  # CLEAN is carried forward

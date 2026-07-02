@@ -107,7 +107,12 @@ def _extract_source(text: str) -> str:
     return text.strip() + "\n"
 
 
-def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> str:
+def render_feedback(
+    result: CompileResult,
+    score: ScoreReport | None = None,
+    *,
+    best_prior: "DesignStep | None" = None,
+) -> str:
     """Render a compact, deterministic feedback block for the revision prompt.
 
     Structured fields from :meth:`CompileResult.to_dict` — one line per
@@ -121,6 +126,12 @@ def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> 
     the model reads coordinates off a table instead of re-deriving them from
     its own source. Token-lean by design: no source snippets, no caret art —
     the model gets fields to act on, not human formatting to scrape.
+
+    ``best_prior`` is the best *valid* iteration recorded so far (or ``None``).
+    When it is supplied and this attempt regressed against it — failed to
+    compile, or scored lower — a single ``REGRESSION`` line is added under the
+    header so the model reads the lost gradient as a regression and knows to
+    revise from that iteration, not this broken one.
     """
     if score is None:
         score = design_score(result)
@@ -129,6 +140,16 @@ def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> 
         f"Design score: {score.total:g}/100"
         + (f" — deductions: {deductions}" if deductions else " — no deductions")
     ]
+    if best_prior is not None and best_prior.score is not None:
+        broke = result.plan is None or bool(result.errors)
+        if broke or score.total < best_prior.score.total:
+            what = "does not compile" if broke else f"scored {score.total:g}"
+            lines.append(
+                f"REGRESSION: best valid iteration so far scored "
+                f"{best_prior.score.total:g} (iteration {best_prior.iteration}); "
+                f"this attempt {what} — you lost the gradient, revise from that "
+                f"iteration, not this one."
+            )
     for name, cause in score.details.items():
         lines.append(f"  {name} -{score.components[name]:g}: {cause}")
     for d in result.to_dict()["diagnostics"]:
@@ -199,6 +220,24 @@ def _best_step(history: list[DesignStep]) -> DesignStep:
     )
 
 
+def _best_valid_step(history: list[DesignStep]) -> DesignStep | None:
+    """The highest-scoring step that actually *compiled* (a plan, no errors).
+
+    Ties go to the later iteration. Returns ``None`` when nothing valid has been
+    recorded yet — used both to head off a regression (the "best prior valid"
+    reference in the feedback) and to pick a sound source to revise from when the
+    latest attempt failed to compile.
+    """
+    valid = [
+        s
+        for s in history
+        if s.result.plan is not None and not s.result.errors and s.score is not None
+    ]
+    if not valid:
+        return None
+    return max(valid, key=lambda s: (s.score.total, s.iteration))
+
+
 @dataclass
 class DesignResult:
     source: str
@@ -253,9 +292,22 @@ class BarndoAgent:
     # -- single steps ------------------------------------------------------
 
     def write_source(
-        self, brief: str, prior: str | None = None, diagnostics: str | None = None
+        self,
+        brief: str,
+        prior: str | None = None,
+        diagnostics: str | None = None,
+        seed: str | None = None,
     ) -> str:
         prompt = f"Design brief:\n{brief}\n"
+        if seed and not prior:
+            prompt += (
+                "\nA deterministic layout solver produced this dimensionally "
+                "sound draft from the brief — rooms tile the envelope, interior "
+                "doors sit on shared walls, and egress/daylight windows are "
+                "placed. Start from it and improve the DESIGN (flow, adjacencies, "
+                "proportion, light, wasted space); do NOT start from scratch and "
+                "do not regress its geometry:\n```barn\n" + seed + "```\n"
+            )
         if prior:
             prompt += f"\nYour previous DSL:\n```barn\n{prior}```\n"
         if diagnostics:
@@ -332,13 +384,42 @@ class BarndoAgent:
         critique: bool = True,
         on_step=None,
         target_score: float | None = DEFAULT_TARGET_SCORE,
+        seed_with_solver=None,
     ) -> DesignResult:
+        """Run the write → compile → score → critique → revise loop.
+
+        ``seed_with_solver`` opts into seeding the loop from the deterministic
+        layout engines (:mod:`barndsl.layout`/:mod:`barndsl.layout2`). ``design``
+        itself only receives a free-text ``brief``, which the solver can't
+        consume, so the caller passes an explicit solver program: a
+        :class:`~barndsl.layout2.LayoutBrief2`, a
+        :class:`~barndsl.layout.LayoutBrief`, or a textual brief (parsed as a v2
+        brief). The best solver candidate is recorded as **iteration 0** — the
+        floor best-iteration-wins must beat — and its DSL is handed to the first
+        generation prompt as a dimensionally sound draft to refine rather than a
+        blank page. Falsy (the default) leaves the loop exactly as it was; if the
+        solver produces nothing that compiles, seeding is silently skipped.
+        """
         history: list[DesignStep] = []
         source: str | None = None
         feedback: str | None = None
 
+        # Candidate 0: the deterministic solver's best plan, if one was requested
+        # and it compiles. Recorded as iteration 0 so best-iteration-wins can
+        # return it, and its source seeds the first generation prompt.
+        seed_source: str | None = None
+        if seed_with_solver:
+            seed_step = _solver_seed_step(seed_with_solver)
+            if seed_step is not None:
+                history.append(seed_step)
+                seed_source = seed_step.source
+                if on_step:
+                    on_step(seed_step)
+
         for i in range(1, max_iterations + 1):
-            source = self.write_source(brief, prior=source, diagnostics=feedback)
+            source = self.write_source(
+                brief, prior=source, diagnostics=feedback, seed=seed_source
+            )
             result = compile_source(source, name=None)
             # The program nudge is folded before scoring: it is deterministic
             # (a pure function of the source), so the score stays a contract —
@@ -363,7 +444,19 @@ class BarndoAgent:
                 done = False
             if done or i == max_iterations:
                 break
-            feedback = render_feedback(result, score)
+            # Flag a regression against the best valid iteration *before* this one,
+            # so a broken or lower-scoring round reads as a regression.
+            feedback = render_feedback(
+                result, score, best_prior=_best_valid_step(history[:-1])
+            )
+            # When the latest attempt failed to compile, revise from the best
+            # valid source instead of stranding the model on non-compiling code.
+            # (Behaviour change: previously the loop always revised from the
+            # latest source, even when it was broken.)
+            if result.plan is None or result.errors:
+                best_valid = _best_valid_step(history)
+                if best_valid is not None:
+                    source = best_valid.source
 
         best = _best_step(history)
         return DesignResult(best.source, best.result, history)
@@ -408,14 +501,93 @@ def _fold_program_nudge(result: CompileResult) -> None:
     )
 
 
+def _solver_candidate_sources(spec) -> list[str]:
+    """Emit DSL for each solver candidate derived from ``spec``.
+
+    ``spec`` is a program the deterministic engines can solve — a
+    :class:`barndsl.layout2.LayoutBrief2` (run through the space-filling
+    topologies), a :class:`barndsl.layout.LayoutBrief` (the v1 greedy engine), or
+    a textual brief (parsed as a v2 brief). Enumerates engines × topologies the
+    way the CLI does, capped at the three v2 topologies (bands · slice · dual) so
+    runtime stays bounded — every one is near-free (no API call). Returns one DSL
+    string per topology that produced a plan; any failure is skipped, so seeding
+    always degrades gracefully to "no seed".
+    """
+    from .emit import emit_dsl
+    from .layout import LayoutBrief, solve_layout
+    from .layout2 import LayoutBrief2, parse_brief2, solve_layout2
+
+    if isinstance(spec, str):
+        try:
+            spec = parse_brief2(spec)
+        except Exception:
+            return []
+
+    results = []
+    if isinstance(spec, LayoutBrief2):
+        for engine in ("bands", "slice", "dual"):
+            try:
+                out = solve_layout2(spec, engine=engine)
+            except Exception:
+                continue
+            if out is not None and out.plan is not None:
+                results.append(out)
+    elif isinstance(spec, LayoutBrief):
+        try:
+            out = solve_layout(spec)
+        except Exception:
+            out = None
+        if out is not None and out.plan is not None:
+            results.append(out)
+    else:
+        return []
+
+    sources: list[str] = []
+    for out in results:
+        try:
+            sources.append(emit_dsl(out.plan))
+        except Exception:
+            continue
+    return sources
+
+
+def _solver_seed_step(spec) -> DesignStep | None:
+    """The solver's best compiling candidate, as iteration 0 — or ``None``.
+
+    Each candidate is compiled, folded through the same ``program`` nudge the
+    loop applies (so its score is directly comparable to the LLM's iterations),
+    and scored with :func:`design_score`; the highest-scoring one that actually
+    compiles (a plan, no errors) wins. Returns ``None`` when the solver yields
+    nothing that compiles, so the loop then proceeds exactly as it does today.
+    """
+    best: DesignStep | None = None
+    for src in _solver_candidate_sources(spec):
+        try:
+            result = compile_source(src, name=None)
+        except Exception:
+            continue
+        if result.plan is None or result.errors:
+            continue
+        _fold_program_nudge(result)
+        score = design_score(result)
+        if best is None or score.total > best.score.total:
+            best = DesignStep(0, result.source, result, None, score)
+    return best
+
+
 def design(
     brief: str,
     model: str = DEFAULT_MODEL,
     max_iterations: int = 3,
     on_step=None,
     target_score: float | None = DEFAULT_TARGET_SCORE,
+    seed_with_solver=None,
 ) -> DesignResult:
     """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``."""
     return BarndoAgent(model=model).design(
-        brief, max_iterations=max_iterations, on_step=on_step, target_score=target_score
+        brief,
+        max_iterations=max_iterations,
+        on_step=on_step,
+        target_score=target_score,
+        seed_with_solver=seed_with_solver,
     )
