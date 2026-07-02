@@ -43,6 +43,34 @@ GUARD_HEIGHT = 36.0 / 12.0
 #: Glazing must total at least 8% of a habitable room's floor area.
 NATURAL_LIGHT_RATIO = 0.08
 
+# --- habitability / circulation minimums (IRC R304/R305/R311) ----------------
+# These were previously defined inline in ``validation.py``; they live here now
+# so the jurisdiction-profile layer (``profiles.py``) can build its DEFAULT
+# thresholds from one source without importing the validator (which would be a
+# cycle). ``validation.py`` still imports them by the same names, so the check
+# code reads unchanged.
+#: Minimum ceiling height for habitable space: 7 ft (IRC R305.1).
+MIN_CEILING = 7.0
+#: Minimum floor area of a habitable room (a bedroom): 70 sq ft (IRC R304.1).
+MIN_BEDROOM_AREA = 70.0
+#: Minimum horizontal dimension of a habitable room: 7 ft (IRC R304.2).
+MIN_BEDROOM_DIMENSION = 7.0
+#: Minimum hallway width: 36 in — a hard code minimum (IRC R311.6).
+MIN_HALLWAY_WIDTH = 3.0
+#: A hall under this passes code but feels tight (comfort target, not code).
+COMFORT_HALLWAY_WIDTH = 4.0
+
+# --- emergency escape openings (IRC R310) ------------------------------------
+#: Net clear escape opening on an upper floor: 5.7 sq ft.
+MIN_EGRESS_AREA = 5.7
+#: Net clear escape opening at grade (level 0): 5.0 sq ft (IRC R310.2.1 exc).
+MIN_EGRESS_AREA_GRADE = 5.0
+#: Minimum clear opening width / height: 20 in / 24 in.
+MIN_EGRESS_OPENING_WIDTH = 20 / 12
+MIN_EGRESS_OPENING_HEIGHT = 24 / 12
+#: Maximum sill height above the finished floor: 44 in.
+MAX_EGRESS_SILL = 44 / 12
+
 # --- vertical assembly -------------------------------------------------------
 #: Depth (feet) of the inter-floor assembly between two stacked levels — the
 #: joists/trusses + subfloor + ceiling finish that a *ceiling height* alone

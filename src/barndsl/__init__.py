@@ -88,6 +88,13 @@ from .introspect import plan_summary, summary_text
 from .revitlog import buildlog_issues
 from .score import ScoreReport, design_score
 from .structure import place_frame
+from .profiles import (
+    DEFAULT as DEFAULT_PROFILE,
+    Profile,
+    get_profile,
+    load_profile,
+    profiles_text,
+)
 from .validation import Issue, Severity, ValidationReport, clear_dimensions, validate
 
 __all__ = [
@@ -131,6 +138,12 @@ __all__ = [
     "Issue",
     "Severity",
     "clear_dimensions",
+    # jurisdiction profiles (amendable code thresholds)
+    "Profile",
+    "DEFAULT_PROFILE",
+    "load_profile",
+    "get_profile",
+    "profiles_text",
     # design score (deterministic 0-100, for agents to hill-climb on)
     "design_score",
     "ScoreReport",

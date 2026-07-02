@@ -19,18 +19,29 @@ from enum import Enum
 from typing import Protocol
 
 from .constants import (
+    COMFORT_HALLWAY_WIDTH,
     EPSILON,
     EXTERIOR_WALL_THICKNESS,
     GUARD_DROP_TRIGGER,
     GUARD_HEIGHT,
     INTERIOR_WALL_THICKNESS,
+    MAX_EGRESS_SILL,
     MAX_RISER_HEIGHT,
+    MIN_BEDROOM_AREA,
+    MIN_BEDROOM_DIMENSION,
+    MIN_CEILING,
+    MIN_EGRESS_AREA,
+    MIN_EGRESS_AREA_GRADE,
+    MIN_EGRESS_OPENING_HEIGHT,
+    MIN_EGRESS_OPENING_WIDTH,
+    MIN_HALLWAY_WIDTH,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
     PLUMBING_WALL_THICKNESS,
     STAIR_HEADROOM,
 )
+from .profiles import DEFAULT, Profile
 from .elements import (
     DOUBLE_LEAF_KINDS,
     GARAGE_TYPES,
@@ -63,12 +74,13 @@ class _WallOpening(Protocol):
     col: int | None
     end_col: int | None
 
-# Approximate IRC-derived thresholds (feet unless noted).
-MIN_CEILING = 7.0
-MIN_BEDROOM_AREA = 70.0
-MIN_BEDROOM_DIMENSION = 7.0
-MIN_HALLWAY_WIDTH = 3.0  # 36 in — hard minimum (HALL_WIDTH error)
-COMFORT_HALLWAY_WIDTH = 4.0  # a hall under this passes code but feels tight (HALL_TIGHT)
+# The IRC-derived habitability / circulation / egress / stair / daylight
+# thresholds these checks compare against now live in ``constants.py`` (the
+# single source of truth) and are imported above. A jurisdiction ``Profile``
+# (profiles.py) supplies the *enforced* value for each of them at check time —
+# ``DEFAULT`` reproduces the constants exactly, so an unprofiled compile is
+# byte-identical. Only these ~14 numbers are profile-driven; everything else
+# below keeps its bare constant.
 #: A hallway that runs this far past its last served door is a circulation stub
 #: (a dead end) — wasted footprint you walk into and back out of.
 MIN_HALL_STUB = 2.5
@@ -130,14 +142,10 @@ BUILD_MODULE = 3.0
 #: Two door swings overlapping by less than this (ft) are treated as just grazing.
 SWING_CLASH_EPS = 0.02
 
-# Emergency-escape opening minimums (IRC R310). The area is the net *clear*
-# opening; we approximate it from the modelled width × (head − sill), which is
-# generous for a single-hung sash but matches the project's "loosely IRC" stance.
-MIN_EGRESS_AREA = 5.7  # sq ft, upper floors
-MIN_EGRESS_AREA_GRADE = 5.0  # sq ft, at-grade floor (level 0)
-MIN_EGRESS_OPENING_WIDTH = 20 / 12  # 20 in clear
-MIN_EGRESS_OPENING_HEIGHT = 24 / 12  # 24 in clear
-MAX_EGRESS_SILL = 44 / 12  # sill <= 44 in above the finished floor
+# The emergency-escape opening minimums (IRC R310) are imported from constants;
+# the modelled clear opening is width × (head − sill), generous for a single-hung
+# sash but consistent with the project's "loosely IRC" stance. A jurisdiction
+# Profile can amend the enforced values.
 
 
 class Severity(str, Enum):
@@ -326,6 +334,22 @@ def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
 def _f(value: float) -> str:
     """Format a measurement: drop a trailing .0 (so 28.0 -> '28')."""
     return f"{value:g}"
+
+
+def _amended(profile: Profile, field: str) -> bool:
+    """True when ``profile`` enforces a value other than the IRC baseline for
+    ``field`` — used to keep a diagnostic's wording honest (and byte-identical
+    under the default profile) about *what number was actually enforced*."""
+    return getattr(profile, field) != getattr(DEFAULT, field)
+
+
+def _profile_tag(profile: Profile, field: str, base_str: str) -> str:
+    """A parenthetical naming the profile behind an amended threshold, e.g.
+    " (the 'strict' profile amends the IRC base of 70)". Empty for the default
+    profile, so default-profile messages are unchanged."""
+    if not _amended(profile, field):
+        return ""
+    return f" (the '{profile.name}' profile amends the IRC base of {base_str})"
 
 
 #: Public, shared living spaces — bedrooms ideally don't open straight onto these.
@@ -796,8 +820,15 @@ def _check_wings(plan: Barndominium, add, tol: float = EPSILON) -> None:
         )
 
 
-def validate(plan: Barndominium) -> ValidationReport:
-    """Run all checks and return a :class:`ValidationReport`."""
+def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationReport:
+    """Run all checks and return a :class:`ValidationReport`.
+
+    ``profile`` supplies the jurisdiction-variable code thresholds (see
+    :mod:`barndsl.profiles`); ``None`` uses :data:`~barndsl.profiles.DEFAULT`,
+    the IRC baseline, which is byte-identical to the pre-profile behaviour.
+    """
+    if profile is None:
+        profile = DEFAULT
     issues: list[Issue] = []
     add = issues.append
 
@@ -811,27 +842,29 @@ def validate(plan: Barndominium) -> ValidationReport:
             )
         )
     _check_wings(plan, add)
-    if plan.ceiling_height < MIN_CEILING:
+    min_ceiling = profile.min_ceiling_height
+    ceil_tag = _profile_tag(profile, "min_ceiling_height", f"{MIN_CEILING:.0f} ft")
+    if plan.ceiling_height < min_ceiling:
         add(
             Issue(
                 Severity.ERROR,
                 "CEILING",
                 f"Ceiling height {_f(plan.ceiling_height)} ft is below the "
-                f"{MIN_CEILING:.0f} ft minimum for habitable space.",
-                hint=f"Set `ceiling {MIN_CEILING:.0f}` or greater (9–12 is typical).",
+                f"{min_ceiling:g} ft minimum for habitable space{ceil_tag}.",
+                hint=f"Set `ceiling {min_ceiling:g}` or greater (9–12 is typical).",
             )
         )
     for room in plan.rooms:
         rc = getattr(room, "ceiling_height", None)
-        if rc is not None and not getattr(room, "vaulted", False) and rc < MIN_CEILING:
+        if rc is not None and not getattr(room, "vaulted", False) and rc < min_ceiling:
             add(
                 Issue(
                     Severity.ERROR,
                     "CEILING",
                     f"Room '{room.id}' sets a {_f(rc)} ft ceiling, below the "
-                    f"{MIN_CEILING:.0f} ft minimum for habitable space.",
+                    f"{min_ceiling:g} ft minimum for habitable space{ceil_tag}.",
                     room=room.id,
-                    hint=f"Raise its `ceiling` to >= {MIN_CEILING:.0f}, or drop the "
+                    hint=f"Raise its `ceiling` to >= {min_ceiling:g}, or drop the "
                     "override to inherit the plan ceiling.",
                 )
             )
@@ -862,17 +895,17 @@ def validate(plan: Barndominium) -> ValidationReport:
         )
 
     _validate_geometry(plan, add)
-    _validate_room_programs(plan, add)
+    _validate_room_programs(plan, add, profile)
     _validate_fixtures(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
-    _validate_stairs(plan, add)
+    _validate_stairs(plan, add, profile)
     _validate_guards(plan, add)
     _validate_life_safety(plan, add)
     _validate_load_path(plan, add)
     _validate_access(plan, add)
-    _validate_egress_and_light(plan, add)
-    _validate_design_quality(plan, add)
+    _validate_egress_and_light(plan, add, profile)
+    _validate_design_quality(plan, add, profile)
     _validate_accessibility(plan, add)
     _validate_program(plan, add)
     _validate_requirements(plan, add)
@@ -1321,46 +1354,56 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
             )
 
 
-def _validate_room_programs(plan: Barndominium, add) -> None:
+def _validate_room_programs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
+    bed_area = profile.min_bedroom_area
+    bed_dim = profile.min_bedroom_dimension
+    hall_w = profile.min_hallway_width
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
-            if room.area < MIN_BEDROOM_AREA:
-                need_len = _suggest_int(MIN_BEDROOM_AREA / max(room.width, EPSILON))
+            if room.area < bed_area:
+                need_len = _suggest_int(bed_area / max(room.width, EPSILON))
                 hint = (
                     f"Enlarge it, e.g. `size {_f(room.width)} x {need_len}`."
                     if need_len is not None
-                    else f"Enlarge it to at least {MIN_BEDROOM_AREA:.0f} sq ft."
+                    else f"Enlarge it to at least {bed_area:g} sq ft."
+                )
+                tag = _profile_tag(profile, "min_bedroom_area", f"{MIN_BEDROOM_AREA:.0f} sq ft")
+                minlbl = f"IRC minimum is {bed_area:g} sq ft" if not tag else (
+                    f"the enforced minimum is {bed_area:g} sq ft"
                 )
                 add(
                     Issue(
                         Severity.ERROR,
                         "BEDROOM_AREA",
-                        f"Bedroom is {_f(room.area)} sq ft; IRC minimum is "
-                        f"{MIN_BEDROOM_AREA:.0f} sq ft.",
+                        f"Bedroom is {_f(room.area)} sq ft; {minlbl}{tag}.",
                         room=room.id,
                         hint=hint,
                     )
                 )
-            if room.min_dimension < MIN_BEDROOM_DIMENSION:
+            if room.min_dimension < bed_dim:
+                tag = _profile_tag(
+                    profile, "min_bedroom_dimension", f"{MIN_BEDROOM_DIMENSION:.0f} ft"
+                )
                 add(
                     Issue(
                         Severity.ERROR,
                         "BEDROOM_DIM",
                         f"Bedroom's smallest dimension is {_f(room.min_dimension)} ft; "
-                        f"minimum is {MIN_BEDROOM_DIMENSION:.0f} ft.",
+                        f"minimum is {bed_dim:g} ft{tag}.",
                         room=room.id,
-                        hint=f"Make both dimensions >= {MIN_BEDROOM_DIMENSION:.0f} ft.",
+                        hint=f"Make both dimensions >= {bed_dim:g} ft.",
                     )
                 )
-        if room.type is RoomType.HALLWAY and room.min_dimension < MIN_HALLWAY_WIDTH:
+        if room.type is RoomType.HALLWAY and room.min_dimension < hall_w:
+            tag = _profile_tag(profile, "min_hallway_width", f"{MIN_HALLWAY_WIDTH:.0f} ft")
             add(
                 Issue(
                     Severity.ERROR,
                     "HALL_WIDTH",
                     f"Hallway is {_f(room.min_dimension)} ft wide; minimum is "
-                    f"{MIN_HALLWAY_WIDTH:.0f} ft.",
+                    f"{hall_w:g} ft{tag}.",
                     room=room.id,
-                    hint=f"Widen it to >= {MIN_HALLWAY_WIDTH:.0f} ft.",
+                    hint=f"Widen it to >= {hall_w:g} ft.",
                 )
             )
         floor = MIN_USABLE_AREA.get(room.type)
@@ -1397,10 +1440,10 @@ def _validate_room_programs(plan: Barndominium, add) -> None:
                     hint=f"Widen the short side to >= {short_floor:.0f} ft.",
                 )
             )
-        _check_clear_dimension(plan, room, add)
+        _check_clear_dimension(plan, room, add, profile)
 
 
-def _clear_targets(room: Room):
+def _clear_targets(room: Room, profile: Profile = DEFAULT):
     """The *hard-code* minimums the IRC measures between finished surfaces, keyed
     by room type → ``(kind, minimum)`` where ``kind`` is ``"area"`` or ``"short"``.
 
@@ -1412,13 +1455,18 @@ def _clear_targets(room: Room):
     for losing a wall thickness.)
     """
     if room.type is RoomType.BEDROOM:
-        return [("area", MIN_BEDROOM_AREA), ("short", MIN_BEDROOM_DIMENSION)]
+        return [
+            ("area", profile.min_bedroom_area),
+            ("short", profile.min_bedroom_dimension),
+        ]
     if room.type is RoomType.HALLWAY:
-        return [("short", MIN_HALLWAY_WIDTH)]
+        return [("short", profile.min_hallway_width)]
     return []
 
 
-def _check_clear_dimension(plan: Barndominium, room: Room, add) -> None:
+def _check_clear_dimension(
+    plan: Barndominium, room: Room, add, profile: Profile = DEFAULT
+) -> None:
     """Flag a room that meets a clear-measured minimum on its nominal rectangle
     but falls below it once the bounding walls' thickness is subtracted.
 
@@ -1426,7 +1474,7 @@ def _check_clear_dimension(plan: Barndominium, room: Room, add) -> None:
     hard-code targets — if it already fails one on paper, that error owns the
     problem and a clear nudge would just be noise.
     """
-    targets = _clear_targets(room)
+    targets = _clear_targets(room, profile)
     if not targets:
         return
 
@@ -1451,12 +1499,12 @@ def _check_clear_dimension(plan: Barndominium, room: Room, add) -> None:
                     "ROOM_CLEAR",
                     f"{room.type.value.replace('_', ' ').capitalize()} '{room.id}' "
                     f"measures {_f(nominal)} {unit} nominal but only ~{_f(clear)} {unit} "
-                    f"clear (finish-face); the {minimum:.0f} {unit} minimum is measured "
+                    f"clear (finish-face); the {minimum:g} {unit} minimum is measured "
                     "between finished surfaces, so the built room falls short.",
                     room=room.id,
                     hint=f"Add wall thickness to the {where}: grow it ~"
                     f"{_f(minimum - clear)} {unit} so the clear dimension still meets "
-                    f"{minimum:.0f} {unit}.",
+                    f"{minimum:g} {unit}.",
                 )
             )
             return  # one nudge per room is enough
@@ -1925,7 +1973,7 @@ def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
     ]
 
 
-def _validate_stairs(plan: Barndominium, add) -> None:
+def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
     for s in plan.stairs:
         if not all(math.isfinite(v) for v in (s.x, s.y, s.width, s.length)):
             add(Issue(Severity.ERROR, "STAIR_GEOMETRY",
@@ -1977,21 +2025,24 @@ def _validate_stairs(plan: Barndominium, add) -> None:
             and s.to_level >= 0
             and plan.ceiling_height > 0
         ):
+            max_riser = profile.max_riser_height
+            min_tread = profile.min_tread_depth
+            min_width = profile.min_stair_width
             rise = plan.ceiling_height * abs(s.to_level - s.from_level)
-            risers = max(1, math.ceil(rise / MAX_RISER_HEIGHT))
-            run_needed = max(1, risers - 1) * MIN_TREAD_DEPTH
+            risers = max(1, math.ceil(rise / max_riser))
+            run_needed = max(1, risers - 1) * min_tread
             long_dim, short_dim = max(s.width, s.length), min(s.width, s.length)
-            could_switchback = short_dim + EPSILON >= 2 * MIN_STAIR_WIDTH
+            could_switchback = short_dim + EPSILON >= 2 * min_width
             needed = run_needed / 2 if could_switchback else run_needed
             if long_dim + EPSILON < needed:
                 add(Issue(
                     Severity.WARNING, "STAIR_RUN",
                     f"Stair '{s.id}' is {_f(long_dim)} ft long, too short to climb "
                     f"{_f(rise)} ft: ~{risers} risers need about {_f(run_needed)} ft "
-                    "of run (a 7.75 in riser / 10 in tread).",
+                    f"of run (a {_f(max_riser * 12)} in riser / {_f(min_tread * 12)} in tread).",
                     room=s.id,
                     hint=f"Lengthen its footprint to >= {_f(run_needed)} ft, or make it "
-                    f">= {_f(2 * MIN_STAIR_WIDTH)} ft wide to fit a switchback."))
+                    f">= {_f(2 * min_width)} ft wide to fit a switchback."))
             else:
                 # Headroom (R311.7.2): a person descending under the upper floor
                 # needs 6'-8" clear until they pass the stairwell opening's edge.
@@ -2000,7 +2051,7 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                 # opening by the run's long footprint dimension — if even the whole
                 # footprint is shorter than that, no cut can develop headroom.
                 riser_h = rise / risers
-                open_needed = STAIR_HEADROOM * (MIN_TREAD_DEPTH / max(riser_h, EPSILON))
+                open_needed = STAIR_HEADROOM * (min_tread / max(riser_h, EPSILON))
                 if long_dim + EPSILON < open_needed:
                     add(Issue(
                         Severity.WARNING, "STAIR_HEADROOM",
@@ -2531,23 +2582,26 @@ def _dq_closet_shape(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_hall_tight(plan: Barndominium, graph, by_id, add) -> None:
-    # 8d. Comfort width: a hall at the 3 ft code minimum passes but feels tight
-    #     for two people or moving furniture; 4 ft is the comfortable target.
+def _dq_hall_tight(plan: Barndominium, graph, by_id, add, profile: Profile = DEFAULT) -> None:
+    # 8d. Comfort width: a hall at the code minimum passes but feels tight for two
+    #     people or moving furniture; the profile's comfort width is the target.
+    #     A profile whose comfort width equals its hard minimum disables the nudge.
+    hard = profile.min_hallway_width
+    comfort = profile.comfort_hallway_width
     for room in plan.rooms:
         if (
             room.type is RoomType.HALLWAY
-            and MIN_HALLWAY_WIDTH <= room.min_dimension < COMFORT_HALLWAY_WIDTH - 1e-9
+            and hard <= room.min_dimension < comfort - 1e-9
         ):
             add(
                 Issue(
                     Severity.INFO,
                     "HALL_TIGHT",
                     f"Hallway '{room.id}' is {_f(room.min_dimension)} ft wide — legal "
-                    f"(>= {MIN_HALLWAY_WIDTH:.0f} ft) but tight; {COMFORT_HALLWAY_WIDTH:.0f} "
+                    f"(>= {hard:g} ft) but tight; {comfort:g} "
                     "ft is comfortable for two people and moving furniture.",
                     room=room.id,
-                    hint=f"Widen it to >= {COMFORT_HALLWAY_WIDTH:.0f} ft.",
+                    hint=f"Widen it to >= {comfort:g} ft.",
                 )
             )
 
@@ -3085,7 +3139,7 @@ _DESIGN_QUALITY_CHECKS = (
 )
 
 
-def _validate_design_quality(plan: Barndominium, add) -> None:
+def _validate_design_quality(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
     """Soft, advisory checks (mostly INFO) that nudge toward a livable layout.
 
     These never block compilation -- they flow through the *same* diagnostic
@@ -3097,7 +3151,13 @@ def _validate_design_quality(plan: Barndominium, add) -> None:
     graph = _door_graph(plan)
     by_id = {r.id: r for r in plan.rooms}
     for check in _DESIGN_QUALITY_CHECKS:
-        check(plan, graph, by_id, add)
+        # Only the hall-comfort nudge reads jurisdiction thresholds; every other
+        # check keeps the plain ``(plan, graph, by_id, add)`` shape (and stays
+        # directly unit-testable with those four args).
+        if check is _dq_hall_tight:
+            check(plan, graph, by_id, add, profile)
+        else:
+            check(plan, graph, by_id, add)
 
 
 def _validate_program(plan: Barndominium, add) -> None:
@@ -3776,7 +3836,7 @@ def _door_clear_width(door) -> float:
     return door.width
 
 
-def _validate_egress_and_light(plan: Barndominium, add) -> None:
+def _validate_egress_and_light(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
     # An overhead door never counts as egress (`entrance` forces egress=False
     # for it; the kind check guards a hand-built ExteriorDoor too). A double
     # door counts one leaf (see _door_clear_width).
@@ -3847,19 +3907,26 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                 # of a double); a window must clear the area and both dimensions
                 # — per its kind's honest clear opening (a slider opens ~half its
                 # width, a double-hung ~half its height) — and sit low enough.
-                min_area = MIN_EGRESS_AREA_GRADE if room.level == 0 else MIN_EGRESS_AREA
+                min_area = (
+                    profile.min_egress_area_grade if room.level == 0
+                    else profile.min_egress_area
+                )
+                min_ow = profile.min_egress_opening_width
+                min_oh = profile.min_egress_opening_height
+                max_sill = profile.max_egress_sill
 
-                def _win_ok(w) -> bool:
+                def _win_ok(w, min_ow=min_ow, min_oh=min_oh, min_area=min_area,
+                            max_sill=max_sill) -> bool:
                     cw, ch = w.clear_opening
                     return (
-                        cw + EPSILON >= MIN_EGRESS_OPENING_WIDTH
-                        and ch + EPSILON >= MIN_EGRESS_OPENING_HEIGHT
+                        cw + EPSILON >= min_ow
+                        and ch + EPSILON >= min_oh
                         and cw * ch + EPSILON >= min_area
-                        and w.sill_height <= MAX_EGRESS_SILL + EPSILON
+                        and w.sill_height <= max_sill + EPSILON
                     )
 
                 door_ok = any(
-                    _door_clear_width(d) + EPSILON >= MIN_EGRESS_OPENING_WIDTH
+                    _door_clear_width(d) + EPSILON >= min_ow
                     for d in ext_doors
                 )
                 if not (door_ok or any(_win_ok(w) for w in escape_windows)):
@@ -3879,15 +3946,27 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                         )
                     else:
                         detail = "its only exterior opening is a too-narrow door"
+                    egress_amended = any(
+                        _amended(profile, f) for f in (
+                            "min_egress_area", "min_egress_area_grade",
+                            "min_egress_opening_width", "min_egress_opening_height",
+                            "max_egress_sill",
+                        )
+                    )
+                    rule = (
+                        f"the '{profile.name}' profile's escape-opening minimum"
+                        if egress_amended
+                        else "the IRC R310 minimum"
+                    )
                     add(
                         Issue(
                             Severity.WARNING,
                             "EGRESS_SIZE",
                             f"Bedroom '{room.id}' has an escape opening but it's below "
-                            f"the IRC R310 minimum ({_f(min_area)} sq ft clear, "
-                            f"{MIN_EGRESS_OPENING_WIDTH * 12:.0f} in wide × "
-                            f"{MIN_EGRESS_OPENING_HEIGHT * 12:.0f} in tall, sill "
-                            f"<= {MAX_EGRESS_SILL * 12:.0f} in); {detail}.",
+                            f"{rule} ({_f(min_area)} sq ft clear, "
+                            f"{min_ow * 12:.0f} in wide × "
+                            f"{min_oh * 12:.0f} in tall, sill "
+                            f"<= {max_sill * 12:.0f} in); {detail}.",
                             room=room.id,
                             hint=f"Widen/enlarge the egress window so its clear opening "
                             f"is >= {_f(min_area)} sq ft (a casement clears ~its full "
@@ -3920,7 +3999,8 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
             glazing = sum(
                 w.glazed_area for w in plan.windows_for(room.id) if w.wall in walls
             )
-            required = room.area * NATURAL_LIGHT_RATIO
+            light_ratio = profile.natural_light_ratio
+            required = room.area * light_ratio
             if glazing + EPSILON < required:
                 add_width = max(0.0, (required - glazing) / _WINDOW_TYP_HEIGHT)
                 suggest = _suggest_int(add_width)
@@ -3946,7 +4026,7 @@ def _validate_egress_and_light(plan: Barndominium, add) -> None:
                         "NAT_LIGHT",
                         f"Glazing {_f(glazing)} sq ft is below the natural-light "
                         f"minimum of {_f(required)} sq ft "
-                        f"({NATURAL_LIGHT_RATIO * 100:.0f}% of floor area).",
+                        f"({light_ratio * 100:.0f}% of floor area).",
                         room=room.id,
                         hint=hint,
                     )

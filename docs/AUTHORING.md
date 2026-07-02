@@ -696,6 +696,55 @@ print(validate(plan))   # same diagnostics
 print(emit_dsl(plan))   # → .barn source (loft emitted as `... level 1`)
 ```
 
+## Jurisdiction profiles: compiling under local code amendments
+
+The code checks enforce one IRC-flavoured rule set by default. But the numeric
+thresholds a check compares against — minimum ceiling height, habitable-room
+area and width, hallway width, egress-window clear area/dimensions/sill, stair
+riser/tread, daylight glazing — are exactly the numbers a county or state
+*amends*. A **jurisdiction profile** bundles those ~14 amendable thresholds so
+"compile under these local rules" is one flag instead of mental math on every
+diagnostic.
+
+```bash
+barndsl profiles                             # list the built-ins and their numbers
+barndsl compile plan.barn --profile strict   # a tighter, accessibility-leaning set
+barndsl compile plan.barn --profile rural    # a looser example
+barndsl compile plan.barn --profile travis.json   # your own JSON override file
+barndsl score   plan.barn --profile strict   # score/build honour it too
+```
+
+Built-ins: `default` (alias `irc-2021`, the baseline — compiling with it is
+identical to compiling with no profile), `strict`, and `rural`. A **JSON file**
+overrides any subset of the thresholds and can extend a built-in:
+
+```json
+{ "name": "Travis County", "extends": "default",
+  "min_ceiling_height": 7.5, "min_tread_depth": 0.9167 }
+```
+
+Unknown keys are rejected with the list of valid ones. Measurements are in feet
+(so an 11 in tread is `0.9167`). From Python:
+
+```python
+from barndsl import compile_file, load_profile
+result = compile_file("plan.barn", profile=load_profile("strict"))
+```
+
+A profiled diagnostic stays **honest about what number was enforced**: it prints
+the enforced threshold, names the profile, and cites the IRC base value it
+amended — e.g. *"Ceiling height 7 ft is below the 7.5 ft minimum for habitable
+space (the 'strict' profile amends the IRC base of 7 ft)."* Only these ~14
+thresholds are profile-driven; every other check (geometry, door/opening sizes,
+fixture clearances, the design-quality nudges) is unchanged.
+
+> **Not legal advice.** The non-default built-in profiles (`strict`, `rural`)
+> are ILLUSTRATIVE examples of *how* thresholds vary between jurisdictions —
+> plausible numbers chosen to demonstrate the mechanism. They are **not**
+> transcribed from any adopted code. Always confirm the thresholds your
+> jurisdiction actually enforces with the authority having jurisdiction before
+> relying on a compile.
+
 ## Porches
 
 `porch <id> at <x>,<y> size <W> x <L> [covered|open]` is an exterior platform. It

@@ -172,7 +172,7 @@ def test_semantic_error_compiles_keep_unguarded_validation(monkeypatch):
 
     import barndsl.compiler as compiler
 
-    def boom(plan):
+    def boom(plan, profile=None):
         raise RuntimeError("validator bug")
 
     monkeypatch.setattr(compiler, "validate", boom)
@@ -185,7 +185,7 @@ def test_swallowed_validation_crash_is_reported_on_the_recovery_path(monkeypatch
     RECORDED — a RECOVERY_LIMIT warning says the diagnostics are incomplete."""
     import barndsl.compiler as compiler
 
-    def boom(plan):
+    def boom(plan, profile=None):
         raise RuntimeError("validator bug")
 
     monkeypatch.setattr(compiler, "validate", boom)

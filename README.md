@@ -521,6 +521,9 @@ barndsl new "Cedar Ridge" --out cedar.barn         # scaffold a clean starter pl
 barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl compile examples/cedar_ridge.barn --strict # warnings also fail (CI gate)
+barndsl compile examples/cedar_ridge.barn --profile strict   # amend code thresholds to a jurisdiction
+barndsl compile examples/cedar_ridge.barn --profile travis.json  # or a JSON override file
+barndsl profiles                                   # list the built-in jurisdiction profiles
 barndsl score   examples/cedar_ridge.barn          # deterministic 0-100 design score
 barndsl inspect examples/cedar_ridge.barn          # geometry pack: rooms, adjacency, free wall spans
 barndsl compare a.barn b.barn                      # scheme A vs B: score/takeoff/diagnostic deltas
@@ -566,6 +569,20 @@ estimate, and diagnostics appendix into one self-contained, print-ready HTML fil
 (SVG inlined, no external requests, works offline). It adds no new dependency — to
 get a PDF, open it in a browser and *Print → Save as PDF*; CSS page-breaks
 paginate it into sections.
+
+**Jurisdiction profiles.** The code checks enforce one IRC-flavoured rule set by
+default, but a real project answers to a county or state that *amends* the
+numbers. `--profile NAME_OR_JSON` (on `compile`, `score`, `build`) swaps in a
+named set of thresholds so "compile under these local rules" is one flag instead
+of mental math. Built-ins: `default` (alias `irc-2021`), `strict` (tighter,
+accessibility-leaning), `rural` (looser). A JSON file overrides any subset of the
+thresholds (`{"extends": "strict", "min_ceiling_height": 8}`); unknown keys are
+rejected. `barndsl profiles` prints every built-in and the numbers it sets.
+Diagnostics stay honest — a profiled message prints the number actually enforced
+and names the profile and IRC base. **The non-default profiles are ILLUSTRATIVE
+examples of how thresholds vary — not legal advice, and not transcribed from any
+adopted code. Confirm the numbers your jurisdiction enforces with the authority
+having jurisdiction.**
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
 

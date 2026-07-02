@@ -64,6 +64,51 @@ def _repo_example() -> str:
     return os.path.join(repo_root, "examples", "cedar_ridge.barn")
 
 
+def _resolve_profile(args: argparse.Namespace):
+    """Resolve ``--profile`` to a Profile, or ``None`` for the default.
+
+    Exits the process with code 2 (like a bad file) on an unknown name or an
+    unreadable/invalid JSON override, printing the actionable error to stderr.
+    """
+    spec = getattr(args, "profile", None)
+    if not spec:
+        return None
+    from .profiles import load_profile
+
+    try:
+        return load_profile(spec)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _add_profile_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--profile",
+        default=None,
+        metavar="NAME_OR_JSON",
+        help="jurisdiction profile: a built-in name (default/strict/rural, alias "
+        "irc-2021) or a path to a JSON override file. Amends the code thresholds "
+        "the checks enforce. See `barndsl profiles`.",
+    )
+
+
+def _cmd_profiles(args: argparse.Namespace) -> int:
+    """List the built-in jurisdiction profiles and their thresholds."""
+    from .profiles import load_profile, profiles_text
+
+    if getattr(args, "profile", None):
+        # Resolve and dump a single profile (built-in or JSON) as JSON — handy
+        # for inspecting exactly what a `--profile` argument will enforce.
+        prof = _resolve_profile(args)
+        import json
+
+        print(json.dumps(prof.to_dict(), indent=2))
+        return 0
+    print(profiles_text())
+    return 0
+
+
 def _print_metrics(plan) -> None:
     m = plan.metrics()
     print(f"  Footprint:        {m['footprint_sqft']:.0f} sq ft")
@@ -104,7 +149,7 @@ def _print_coords(plan) -> None:
 
 
 def _cmd_compile(args: argparse.Namespace) -> int:
-    result = compile_file(args.file)
+    result = compile_file(args.file, profile=_resolve_profile(args))
     if getattr(args, "json", False):
         import json
 
@@ -148,7 +193,8 @@ def _strict_rc(result, args) -> int:
 def _cmd_build(args: argparse.Namespace) -> int:
     from .render import save_render
 
-    result = compile_file(args.file)
+    profile = _resolve_profile(args)
+    result = compile_file(args.file, profile=profile)
     if result.plan is not None and getattr(args, "frame", False) and result.plan.frame_spec is None:
         # `--frame` auto-places a default post-and-beam frame even when the source
         # has no `frame` directive — recompile from the emitted DSL so the new
@@ -156,7 +202,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         from .emit import emit_dsl
 
         result.plan.frame()
-        result = compile_source(emit_dsl(result.plan), name=result.plan.name)
+        result = compile_source(emit_dsl(result.plan), name=result.plan.name, profile=profile)
 
     fmt = getattr(args, "format", None)
     out = args.out or f"barndo.{fmt or 'svg'}"
@@ -202,7 +248,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 def _cmd_score(args: argparse.Namespace) -> int:
     from .score import design_score
 
-    result = compile_file(args.file)
+    result = compile_file(args.file, profile=_resolve_profile(args))
     report = design_score(result)
     if getattr(args, "json", False):
         import json
@@ -787,6 +833,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit non-zero on warnings AND info nudges",
     )
+    _add_profile_flag(p_compile)
     p_compile.set_defaults(func=_cmd_compile)
 
     p_build = sub.add_parser("build", help="compile and render a .barn file to SVG/PNG/PDF")
@@ -813,6 +860,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="auto-place a default post-and-beam frame if the source has none",
     )
+    _add_profile_flag(p_build)
     p_build.set_defaults(func=_cmd_build)
 
     p_score = sub.add_parser(
@@ -824,6 +872,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="emit the score report as machine-readable JSON",
     )
+    _add_profile_flag(p_score)
     p_score.set_defaults(func=_cmd_score)
 
     p_inspect = sub.add_parser(
@@ -1043,8 +1092,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_explain.set_defaults(func=_cmd_explain)
 
+    p_profiles = sub.add_parser(
+        "profiles",
+        help="list the built-in jurisdiction profiles and the thresholds they set",
+    )
+    p_profiles.add_argument(
+        "--profile",
+        default=None,
+        metavar="NAME_OR_JSON",
+        help="instead of the table, dump one resolved profile (built-in name or "
+        "JSON override file) as JSON",
+    )
+    p_profiles.set_defaults(func=_cmd_profiles)
+
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except SystemExit as exc:
+        # A command signalling a fatal input error (e.g. an unresolvable
+        # --profile) raises SystemExit(code); surface it as an int return so
+        # callers/tests get the exit code uniformly, like the other commands.
+        return exc.code if isinstance(exc.code, int) else 2
 
 
 if __name__ == "__main__":  # pragma: no cover

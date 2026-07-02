@@ -1334,8 +1334,16 @@ def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[st
     return out
 
 
-def compile_source(source: str, name: str | None = None) -> CompileResult:
-    """Compile DSL ``source`` into a validated plan + diagnostics."""
+def compile_source(
+    source: str, name: str | None = None, profile: "Profile | None" = None
+) -> CompileResult:
+    """Compile DSL ``source`` into a validated plan + diagnostics.
+
+    ``profile`` selects the jurisdiction thresholds the code checks compare
+    against (see :mod:`barndsl.profiles`); ``None`` uses the IRC baseline
+    (:data:`~barndsl.profiles.DEFAULT`), which is byte-identical to the
+    pre-profile behaviour.
+    """
     diagnostics: list[Issue] = []
     plan = Barndominium(name=name or "Untitled")
     smap = _SourceMap()
@@ -1440,7 +1448,7 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
             diagnostics.append(_recovery_limit("Frame placement"))
 
     try:
-        report: ValidationReport | None = validate(plan)
+        report: ValidationReport | None = validate(plan, profile)
     except Exception:
         if not skipped:
             raise
@@ -1460,7 +1468,7 @@ def compile_source(source: str, name: str | None = None) -> CompileResult:
     return CompileResult(plan, diagnostics, source, recovered=skipped)
 
 
-def compile_file(path: str) -> CompileResult:
-    """Compile a ``.barn`` file."""
+def compile_file(path: str, profile: "Profile | None" = None) -> CompileResult:
+    """Compile a ``.barn`` file (see :func:`compile_source` for ``profile``)."""
     with open(path, encoding="utf-8") as fh:
-        return compile_source(fh.read())
+        return compile_source(fh.read(), profile=profile)
