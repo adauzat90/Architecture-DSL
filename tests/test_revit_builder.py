@@ -917,6 +917,133 @@ def test_fake_wall_delete_cascades_to_hosted_instances():
     assert hosted.Id.Value not in doc._by_id
 
 
+def test_changed_wall_type_override_recreates_walls():
+    # Config changes must not be invisible to the diff: rebuilding with a
+    # different (resolved) wall type / location line recreates the walls with
+    # the new resources instead of keeping ones built the old way.
+    doc = _ready_doc()
+    doc.add_wall_type("Ext2", function=WallFunction.Exterior)
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+
+    opts = report.BuildOptions(
+        exterior_wall_type="Ext2", location_line="finish_face_exterior"
+    )
+    rep = builder.build(doc, data, opts)
+    assert rep.count(status="kept", kind="wall") == 0
+    assert rep.count(status="created", kind="wall") > 0
+    # The rebuilt exterior walls really use the overridden type + location line.
+    ext2_id = next(w.Id.Value for w in doc.wall_types if w.Name == "Ext2")
+    from revit_fakes import BuiltInParameter as BIP
+
+    walls = [e for e in doc._by_id.values()
+             if isinstance(e, revit_fakes.Wall) and builder._is_managed(e)]
+    ext2_walls = [w for w in walls
+                  if getattr(w, "wtype_id", None) is not None and w.wtype_id.Value == ext2_id]
+    assert ext2_walls
+    assert any(w.get_Parameter(BIP.WALL_KEY_REF_PARAM).AsDouble() == 2 for w in ext2_walls)
+    # Wall-independent elements (rooms) were kept; hosted openings recreated
+    # with their walls.
+    assert rep.count(status="kept", kind="room") == 3
+    assert rep.count(status="kept", kind="door") == 0
+
+    # Rebuilding again with the *same* options keeps everything.
+    rep2 = builder.build(doc, data, opts)
+    assert rep2.count(status="created", kind="wall") == 0
+    assert rep2.count(status="kept", kind="wall") == rep.count(status="created", kind="wall")
+
+
+#: CEDAR with the living room split in two — bed/bath are untouched (kept).
+CEDAR_SPLIT = CEDAR.replace(
+    "room living: living at 0,0 size 24 x 30",
+    "room living: living at 0,0 size 24 x 20\nroom office: office at 0,20 size 24 x 10",
+)
+
+
+def test_inserted_room_gets_a_unique_number_and_kept_rooms_keep_theirs():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    from revit_fakes import BuiltInParameter as BIP
+
+    before = {r.Id.Value: r.get_Parameter(BIP.ROOM_NUMBER).AsString()
+              for r in doc.placed_rooms}
+    kept_ids = {r.Id.Value for r in doc.placed_rooms
+                if r.get_Parameter(BIP.ROOM_NAME).AsString().lower() in ("bed", "bath")}
+    assert len(kept_ids) == 2
+
+    builder.build(doc, _exchange(CEDAR_SPLIT))
+    after = {r.Id.Value: r.get_Parameter(BIP.ROOM_NUMBER).AsString()
+             for r in doc.placed_rooms}
+    numbers = list(after.values())
+    # No duplicate numbers, and the kept rooms still hold their originals.
+    assert len(numbers) == len(set(numbers)) == 4
+    for rid in kept_ids:
+        assert after[rid] == before[rid]
+
+
+def test_kept_ceilings_are_reported_when_the_ceiling_type_disappears():
+    doc = _ready_doc()
+    doc.add_ceiling_type("2x2 ACT")
+    data = _exchange(CEDAR)
+    rep1 = builder.build(doc, data)
+    assert rep1.count(status="created", kind="ceiling") == 3
+    doc.ceiling_types.clear()  # the type vanished from the project
+    rep2 = builder.build(doc, data)
+    # The ceilings themselves survive (the diff kept them) and are reported so.
+    assert rep2.count(status="kept", kind="ceiling") == 3
+    assert any("no ceiling type" in n for n in rep2.notes)
+    kept_keys = [k for k in _managed_ids(doc) if k.startswith("ceiling|")]
+    assert len(kept_keys) == 3
+
+
+def test_document_artifacts_are_not_misreported_as_a_legacy_build():
+    # document()'s dimensions/elevation markers are managed but never in a
+    # build's incoming set — the rebuild purges them as ordinary stale
+    # elements, not with the misleading "older barndsl build" note.
+    doc = _ready_doc()
+    doc.add_view_family_type("Floor Plan", revit_fakes.ViewFamily.FloorPlan)
+    doc.add_view_family_type("Elevation", revit_fakes.ViewFamily.Elevation)
+    data = _framed_exchange()
+    builder.build(doc, data)
+    builder.document(doc)
+    assert any(isinstance(e, revit_fakes.Dimension) for e in doc._by_id.values())
+
+    rep = builder.build(doc, data)
+    assert not any("older barndsl build" in n for n in rep.notes)
+    assert any("changed/removed" in n for n in rep.notes)
+    # The stale doc artifacts were purged (re-document recreates them)...
+    assert not any(isinstance(e, revit_fakes.Dimension) for e in doc._by_id.values())
+    assert not any(isinstance(e, revit_fakes.ElevationMarker) for e in doc._by_id.values())
+    # ...while the model itself was kept in place.
+    assert rep.count(status="kept", kind="wall") > 0
+    assert rep.count(status="created", kind="wall") == 0
+
+
+def test_plan_ceiling_height_change_recreates_walls_and_ceilings_only():
+    doc = _ready_doc()
+    doc.add_ceiling_type("2x2 ACT")
+    data_a = _exchange(CEDAR)  # ceiling 10
+    builder.build(doc, data_a)
+    ids1 = _managed_ids(doc)
+
+    rep = builder.build(doc, _exchange(CEDAR.replace("ceiling 10", "ceiling 9")))
+    ids2 = _managed_ids(doc)
+    # Wall heights and ceiling planes moved: all recreated (openings ride along
+    # via the host coupling; room records fold the plan ceiling in too).
+    assert rep.count(status="kept", kind="wall") == 0
+    assert rep.count(status="created", kind="wall") > 0
+    assert rep.count(status="kept", kind="ceiling") == 0
+    assert rep.count(status="created", kind="ceiling") == 3
+    # Ceiling-independent elements keep their Revit ids.
+    for prefix in ("slab|", "fixture|"):
+        keys = [k for k in ids1 if k.startswith(prefix)]
+        assert keys, "expected %s elements in the first build" % prefix
+        for k in keys:
+            assert ids2[k] == ids1[k]
+    assert rep.count(status="kept", kind="fixture") > 0
+    assert rep.count(status="kept", kind="slab") == 1
+
+
 # --- door swing / hinge ------------------------------------------------------
 
 

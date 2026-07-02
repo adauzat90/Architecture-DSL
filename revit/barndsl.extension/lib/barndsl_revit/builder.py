@@ -313,6 +313,57 @@ class _Rebuild(object):
         return self.kept.pop(key, None)
 
 
+def _resource_context(res, options):
+    """Per-kind context strings for the **resolved** resources + placement
+    options that shape each kind's elements.
+
+    Passed to :func:`exchange.identities` and folded into the fingerprints
+    so that rebuilding with a different wall type, family, ``location_line`` or
+    ``size_families`` setting *recreates* the affected elements — otherwise a
+    diff rebuild would keep elements built with the old resources while the
+    report claimed the new ones were in use. Uses the resolved names (override
+    → hint → auto-pick), so only an *effective* change re-fingerprints.
+
+    Deliberate exception: the auto-picked **ceiling type** is not folded in. It
+    has no config override, and folding it would make kept ceilings get purged
+    (unreproducible — the pass skips without a type) the moment a project loses
+    its ceiling type, which is strictly worse than keeping them.
+    """
+
+    def nm(x):
+        return _name(x) if x is not None else "(none)"
+
+    def fam(x):
+        try:
+            return x.Family.Name if x is not None else "(none)"
+        except Exception:
+            return "(none)"
+
+    sizing = "sized" if options.size_families else "unsized"
+    opening = "opening:%s|%s|%s|%s" % (
+        fam(res.door), fam(res.garage_door), fam(res.window), sizing
+    )
+    struct = "structure:%s|%s|%s" % (fam(res.column), fam(res.beam), sizing)
+    floor = "floor:%s" % nm(res.floor)
+    return {
+        "wall": "wall:%s|%s|%s" % (
+            nm(res.ext_wall), nm(res.int_wall),
+            # None and "centerline" land walls identically, so they share a context.
+            (getattr(options, "location_line", None) or "centerline"),
+        ),
+        "door": opening,
+        "window": opening,
+        "opening": opening,
+        "slab": floor,
+        "porch": floor,
+        "roof": "roof:%s" % nm(res.roof_type),
+        "column": struct,
+        "framing": struct,
+        "fixture": "fixture:%s|%s" % (fam(res.plumbing), fam(res.appliance)),
+        "footing": "footing:%s" % fam(res.footing),
+    }
+
+
 #: Which options flag turns each managed element kind's pass off. A disabled
 #: pass builds nothing, so a diff rebuild must not *keep* those kinds either —
 #: mirroring the full purge, which deletes them.
@@ -1275,21 +1326,38 @@ def _set_string_param(elem, bip, value):
     return False
 
 
+def _room_number(elem):
+    """A placed room's number string, or None. Best-effort."""
+    try:
+        p = elem.get_Parameter(DB.BuiltInParameter.ROOM_NUMBER)
+        return p.AsString() if p is not None else None
+    except Exception:
+        return None
+
+
 def _build_rooms(doc, data, levels, report, rebuild):
     # Number rooms sequentially per level: 101.., 201.. — the residential
-    # convention (floor number × 100 + running count).
+    # convention (floor number × 100 + running count). Kept rooms keep their
+    # stamped numbers, so pre-collect those per level: a new/recreated room
+    # must skip past them (or an inserted room would collide with a kept one).
     counters = {}
+    taken = {}
+    for r in data["rooms"]:
+        elem = rebuild.kept.get(_exchange.room_identity(r))
+        if elem is None:
+            continue
+        num = _room_number(elem)
+        if num:
+            taken.setdefault(r.get("level", 0), set()).add(num)
     for r in data["rooms"]:
         key = _exchange.room_identity(r)
         kept = rebuild.take(key)
         if kept is not None:
             # A kept room keeps its number (and any user edits to its
-            # parameters) — but it still consumes its slot in the numbering so
-            # a recreated neighbour lands back on its old number. Rooms are
-            # placed at seeds independent of walls; a kept room whose bounding
-            # walls were recreated in the same transaction should re-bound to
-            # the new walls (needs live-Revit confirmation).
-            counters[r.get("level", 0)] = counters.get(r.get("level", 0), 0) + 1
+            # parameters). Rooms are placed at seeds independent of walls; a
+            # kept room whose bounding walls were recreated in the same
+            # transaction should re-bound to the new walls (needs live-Revit
+            # confirmation).
             report.kept("room", r["id"], revit_id=_rid(kept))
             continue
         level = levels.get(r["level"])
@@ -1307,10 +1375,13 @@ def _build_rooms(doc, data, levels, report, rebuild):
             continue
         _set_string_param(room, DB.BuiltInParameter.ROOM_NAME, r.get("name", r["id"]))
         lvl = r.get("level", 0)
+        lvl_taken = taken.setdefault(lvl, set())
         counters[lvl] = counters.get(lvl, 0) + 1
-        _set_string_param(
-            room, DB.BuiltInParameter.ROOM_NUMBER, "%d%02d" % (lvl + 1, counters[lvl])
-        )
+        while "%d%02d" % (lvl + 1, counters[lvl]) in lvl_taken:
+            counters[lvl] += 1
+        number = "%d%02d" % (lvl + 1, counters[lvl])
+        lvl_taken.add(number)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_NUMBER, number)
         floor, base, ceil, wall = _ROOM_FINISHES.get(r.get("type", ""), _ROOM_FINISH_DEFAULT)
         _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_FLOOR, floor)
         _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_BASE, base)
@@ -1328,6 +1399,14 @@ def _build_ceilings(doc, data, levels, res, report, rebuild):
     if not rooms:
         return
     if res.ceiling_type is None:
+        # No type to build *new* ceilings with — but ceilings the diff decided
+        # to keep still exist in the document, so report them before bailing
+        # (or they'd silently vanish from the report while staying built).
+        for r in rooms:
+            key = _exchange.ceiling_identity(r)
+            kept = rebuild.take(key)
+            if kept is not None:
+                report.kept("ceiling", r["id"], revit_id=_rid(kept))
         report.note("ceilings skipped: no ceiling type in project")
         return
     plan_h = float(data.get("plan", {}).get("ceiling_height", 8.0))
@@ -2153,8 +2232,11 @@ def build(doc, data, options=None):
 
     # Every incoming record's identity key + fingerprint — stamped onto what
     # this build creates (so the *next* build can diff), and diffed against the
-    # previous build's stamps below (when replacing in "diff" mode).
-    idents = _exchange.identities(data)
+    # previous build's stamps below (when replacing in "diff" mode). The
+    # resolved resources/options fold into the fingerprints, so a config change
+    # (a different wall type, family, location line, sizing) recreates the
+    # elements it affects instead of keeping ones built the old way.
+    idents = _exchange.identities(data, _resource_context(res, options))
     rebuild = _Rebuild(fps=dict((k, f) for _kind, _src, k, f in idents))
 
     label = "Preview barndsl plan" if options.dry_run else "Build barndsl plan"
@@ -2434,7 +2516,11 @@ def _dimension_ground_plan(doc, view, report):
                 p2 = DB.XYZ(minx - 5.0, maxy, 0.0)
             line = DB.Line.CreateBound(p1, p2)
             dim = DB.Dimension.Create(doc, view, line, refs)
-            _mark(dim)
+            # A "doc|" key (never in a build's incoming set) so the next model
+            # re-build purges it as an ordinary stale element — not with the
+            # misleading "older barndsl build" legacy note. Re-created by the
+            # next document() run.
+            _mark(dim, key="doc|dimension|%s" % ("x" if along_x else "y"))
             report.created("dimension", "grid line", revit_id=_rid(dim))
             made += 1
         except Exception as exc:
@@ -2473,7 +2559,8 @@ def _make_elevations(doc, plan_view, report):
     except Exception as exc:
         report.failed("elevation", "marker", str(exc))
         return
-    _mark(marker)
+    # Keyed like the dimensions: stale (not legacy) to the next model re-build.
+    _mark(marker, key="doc|elevation-marker")
     for i, name in enumerate(("North", "East", "South", "West")):
         try:
             elev = marker.CreateElevation(doc, plan_view.Id, i)

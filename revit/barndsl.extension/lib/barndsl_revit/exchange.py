@@ -210,7 +210,10 @@ def porch_identity(a):
 
 
 def grid_identity(g):
-    return "grid|%s" % g.get("label")
+    # The label alone can collide (letters wrap A..Z on a very long frame), so
+    # the start point disambiguates — a collision would let the diff stale-keep
+    # the wrong grid line.
+    return "grid|%s|%s" % (g.get("label"), _pt(g.get("start", (0.0, 0.0))))
 
 
 def footing_identity(f):
@@ -221,7 +224,7 @@ def footing_identity(f):
 ROOF_IDENTITY = "roof"
 
 
-def identities(data):
+def identities(data, context=None):
     """Every managed record's ``(kind, source, identity_key, fingerprint)``.
 
     One entry per element the builder would create and stamp — the incoming
@@ -229,7 +232,17 @@ def identities(data):
     (stairs and levels are excluded: stairs are never purged, levels are
     reused). Level elevations are folded into each record's fingerprint so an
     edited level rebuilds what sits on it.
+
+    ``context`` (optional) maps a kind to an opaque environment string — the
+    builder passes its *resolved* resources/options per kind, so a config
+    change (a different wall type, family, location line, sizing) changes the
+    affected fingerprints and the elements are recreated with the new
+    resources. It is folded here, not post-hoc, so dependent fingerprints see
+    it too: an opening's fingerprint builds on its host wall's *contextual*
+    fingerprint (a wall recreated for a type change cascade-deletes its hosted
+    openings, so they must re-fingerprint with it).
     """
+    ctx = context or {}
     out = []
     levels = levels_by_index(data)
 
@@ -239,9 +252,15 @@ def identities(data):
             return ""
         return "%.4f" % float(lv.get("elevation", 0.0))
 
+    def fp_of(kind, record, extra=""):
+        add = ctx.get(kind)
+        if add:
+            extra = (extra + "|" + str(add)) if extra else str(add)
+        return fingerprint(record, extra)
+
     wall_fp = {}
     for w in data.get("walls", []):
-        fp = fingerprint(_strip(w, ("id",)), lvl_extra(w.get("level")))
+        fp = fp_of("wall", _strip(w, ("id",)), lvl_extra(w.get("level")))
         wall_fp[w.get("id")] = fp
         out.append(("wall", w.get("id"), wall_identity(w), fp))
 
@@ -250,67 +269,67 @@ def identities(data):
         kind = "opening" if cased else (
             "window" if o.get("category") == "window" else "door"
         )
-        # The host wall's fingerprint is the dependency: a recreated wall means
-        # every opening hosted on it must be recreated too (Revit deletes
-        # hosted instances with their host).
+        # The host wall's (contextual) fingerprint is the dependency: a
+        # recreated wall means every opening hosted on it must be recreated
+        # too (Revit deletes hosted instances with their host).
         host_fp = wall_fp.get(o.get("host_wall"), "")
-        fp = fingerprint(_strip(o, ("id", "host_wall")), host_fp)
+        fp = fp_of(kind, _strip(o, ("id", "host_wall")), host_fp)
         out.append((kind, o.get("id"), opening_identity(o), fp))
 
     plan_ceiling = str((data.get("plan") or {}).get("ceiling_height", ""))
     for r in data.get("rooms", []):
         extra = lvl_extra(r.get("level"))
-        out.append(("room", r.get("id"), room_identity(r), fingerprint(r, extra)))
+        out.append(("room", r.get("id"), room_identity(r), fp_of("room", r, extra)))
         # The ceiling is derived from the room record + the plan default height.
         out.append((
             "ceiling", r.get("id"), ceiling_identity(r),
-            fingerprint(r, extra + "|" + plan_ceiling),
+            fp_of("ceiling", r, extra + "|" + plan_ceiling),
         ))
 
     structure = data.get("structure") or {}
     for i, c in enumerate(structure.get("columns", [])):
         out.append((
             "column", "post %d" % i, column_identity(c),
-            fingerprint(c, lvl_extra(c.get("level"))),
+            fp_of("column", c, lvl_extra(c.get("level"))),
         ))
     for i, f in enumerate(structure.get("framing", [])):
         out.append((
             "framing", "%s %d" % (f.get("role", "beam"), i), framing_identity(f),
-            fingerprint(f, lvl_extra(f.get("level"))),
+            fp_of("framing", f, lvl_extra(f.get("level"))),
         ))
 
     for fx in data.get("fixtures", []) or []:
         out.append((
             "fixture", fx.get("id"), fixture_identity(fx),
-            fingerprint(fx, lvl_extra(fx.get("level", 0))),
+            fp_of("fixture", fx, lvl_extra(fx.get("level", 0))),
         ))
 
     for s in data.get("slabs", []) or []:
         out.append((
             "slab", "level %s" % s.get("level"), slab_identity(s),
-            fingerprint(s, lvl_extra(s.get("level"))),
+            fp_of("slab", s, lvl_extra(s.get("level"))),
         ))
 
     for a in data.get("areas", []) or []:
         if a.get("kind") == "porch":
             out.append((
-                "porch", a.get("id"), porch_identity(a), fingerprint(a, lvl_extra(0)),
+                "porch", a.get("id"), porch_identity(a), fp_of("porch", a, lvl_extra(0)),
             ))
 
     for g in data.get("grids", []) or []:
-        out.append(("grid", str(g.get("label", "?")), grid_identity(g), fingerprint(g)))
+        out.append(("grid", str(g.get("label", "?")), grid_identity(g), fp_of("grid", g)))
 
     roof = data.get("roof")
     if roof:
         out.append((
             "roof", "roof", ROOF_IDENTITY,
-            fingerprint(roof, lvl_extra(roof.get("top_level", 0))),
+            fp_of("roof", roof, lvl_extra(roof.get("top_level", 0))),
         ))
 
     foundation = data.get("foundation") or {}
     for i, f in enumerate(foundation.get("footings", []) or []):
         out.append((
-            "footing", "post %d" % i, footing_identity(f), fingerprint(f, lvl_extra(0)),
+            "footing", "post %d" % i, footing_identity(f), fp_of("footing", f, lvl_extra(0)),
         ))
 
     return out

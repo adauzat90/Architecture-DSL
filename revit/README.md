@@ -135,7 +135,15 @@ across the agent's iterations — while changed elements are deleted and recreat
 and removed ones purged. Dependencies cascade correctly: an opening's fingerprint
 folds in its host wall's, so a recreated wall always recreates the doors/windows
 hosted on it (Revit deletes hosted instances with their host); kept rooms keep
-their room numbers. The per-run outcome shows in the report as **kept** alongside
+their room numbers (new rooms number around them, never colliding). The
+fingerprints also fold in the **resolved types/families and placement options**
+per element kind, so changing the config (a different `exterior_wall_type`,
+`door_family`, `location_line`, `size_families`, …) rebuilds exactly the
+elements that config shapes — a kept element is guaranteed built with the
+resources the report names. (Deliberate exception: the auto-picked ceiling type
+isn't folded in — it has no config override, and a project that *loses* its
+ceiling type keeps its built ceilings rather than deleting what couldn't be
+rebuilt.) The per-run outcome shows in the report as **kept** alongside
 created/skipped/failed.
 
 Set `"rebuild": "full"` in the config to restore the old purge-everything-and-
