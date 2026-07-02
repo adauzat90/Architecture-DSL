@@ -441,6 +441,7 @@ barndsl new "Cedar Ridge" --out cedar.barn         # scaffold a clean starter pl
 barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl compile examples/cedar_ridge.barn --strict # warnings also fail (CI gate)
+barndsl score   examples/cedar_ridge.barn          # deterministic 0-100 design score
 barndsl fmt -w examples/cedar_ridge.barn           # canonically reformat in place
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl build   examples/cedar_ridge.barn --format png  # PNG/PDF (needs [raster])
@@ -465,6 +466,20 @@ coordinates pass straight through (feet, x-east/y-north). `barndsl build
 --format png|pdf` rasterises the SVG (optional `cairosvg`).
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
+
+## The design score
+
+`barndsl score plan.barn` compiles a plan and prints a **deterministic 0–100
+design score** — the "how good is it?" number to go with the compiler's "what's
+wrong?". A plan with errors scores 0 (unbuildable); warnings and info nudges
+deduct fixed points (8 and 2 each, capped); four continuous terms then refine —
+unassigned footprint, hallway share of interior area, habitable-room elongation
+past 1.6:1, and glazing shortfall below the 8% daylight floor. Same plan in,
+same score out (no randomness, no LLM), and `--json` breaks the total into its
+per-component deductions, so an agent can hill-climb it: compare candidates,
+keep the best, catch a regression. The full formula is the module docstring in
+`barndsl/score.py` — the score is a contract, not a vibe. `compile --json` and
+`build --json` include the same report under a `"score"` key.
 
 ## Install
 

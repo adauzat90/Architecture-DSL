@@ -7,6 +7,10 @@
         Compile, and if it's valid, render an annotated 2D floor plan. `--frame`
         auto-places a default post-and-beam structural frame if the source has none.
 
+    barndsl score FILE.barn [--json]
+        Compile and print the deterministic 0-100 design score (see score.py)
+        with its per-component deductions — the number an agent hill-climbs on.
+
     barndsl demo [--out FILE.svg]
         Compile and render the bundled example (examples/cedar_ridge.barn).
 
@@ -90,7 +94,11 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         import json
 
-        print(json.dumps(result.to_dict(), indent=2))
+        from .score import design_score
+
+        payload = result.to_dict()
+        payload["score"] = design_score(result).to_dict()
+        print(json.dumps(payload, indent=2))
         return 0 if result.ok else 1
     print(result.report(os.path.basename(args.file)))
     if result.plan is not None:
@@ -142,7 +150,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         import json
 
+        from .score import design_score
+
         payload = result.to_dict()
+        payload["score"] = design_score(result).to_dict()
         if result.plan is not None:
             payload["metrics"] = result.plan.metrics()
             try:
@@ -166,6 +177,27 @@ def _cmd_build(args: argparse.Namespace) -> int:
         return 2
     print(f"\nWrote {out}")
     return 0 if result.ok else 1
+
+
+def _cmd_score(args: argparse.Namespace) -> int:
+    from .score import design_score
+
+    result = compile_file(args.file)
+    report = design_score(result)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(report.to_dict(), indent=2))
+        return 0 if result.plan is not None else 1
+
+    print(result.summary())
+    print(f"\nDesign score: {report.total:g} / 100")
+    print("  Deductions:")
+    for name, points in report.components.items():
+        print(f"    {name:<12} -{points:g}")
+    c = report.counts
+    print(f"  Diagnostics: {c['error']} error(s), {c['warning']} warning(s), {c['info']} info(s)")
+    return 0 if result.plan is not None else 1
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
@@ -561,6 +593,17 @@ def main(argv: list[str] | None = None) -> int:
         help="auto-place a default post-and-beam frame if the source has none",
     )
     p_build.set_defaults(func=_cmd_build)
+
+    p_score = sub.add_parser(
+        "score", help="compile and print the 0-100 design score with its components"
+    )
+    p_score.add_argument("file", help="path to a .barn DSL file")
+    p_score.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the score report as machine-readable JSON",
+    )
+    p_score.set_defaults(func=_cmd_score)
 
     p_demo = sub.add_parser("demo", help="compile and render the bundled example")
     p_demo.add_argument("--out", default="barndo.svg", help="output SVG path")
