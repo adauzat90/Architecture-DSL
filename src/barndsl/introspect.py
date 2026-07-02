@@ -34,6 +34,8 @@ takes. An opening placed inside a reported span is legal by construction.
 
 from __future__ import annotations
 
+import math
+
 from .constants import EPSILON
 from .elements import Barndominium, Direction, Room
 from .geometry import SharedEdge, point_in_footprint, shared_edge
@@ -144,15 +146,23 @@ def _free_spans(plan: Barndominium) -> list[dict]:
             for to, t_lo, t_hi, origin in targets:
                 for f_lo, f_hi in free:
                     s_lo, s_hi = max(f_lo, t_lo), min(f_hi, t_hi)
-                    if s_hi - s_lo + EPSILON < MIN_SPAN:
+                    # Round *into* the interval (ceil the low end, floor the
+                    # high) so a reported boundary can never poke outside the
+                    # true free span — legality survives the 4-dp trim. The
+                    # 1e-7 guard band absorbs float-representation noise
+                    # (10.665 stored as 10.66499…) and is an order of
+                    # magnitude inside the validator's EPSILON tolerance.
+                    r_lo = math.ceil((s_lo - origin - 1e-7) * 1e4) / 1e4
+                    r_hi = math.floor((s_hi - origin + 1e-7) * 1e4) / 1e4
+                    if r_hi - r_lo + EPSILON < MIN_SPAN:
                         continue
                     out.append(
                         {
                             "room": room.id,
                             "wall": wall.value,
                             "to": to,
-                            "lo": round(s_lo - origin, 4),
-                            "hi": round(s_hi - origin, 4),
+                            "lo": r_lo,
+                            "hi": r_hi,
                         }
                     )
     return out

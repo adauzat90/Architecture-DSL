@@ -195,6 +195,62 @@ def test_reported_spans_are_legal_by_construction():
     assert not codes & {"DOOR_OOB", "OPENING_OOB", "OPENING_CLASH", "DOOR_NOADJ"}
 
 
+# Sub-centi-foot geometry: a centred 2.67 door on 9.9041-long walls puts the
+# blocked interval's ends on >4-decimal values, so naive outward rounding of
+# the free spans would report boundaries a hair inside the door (or outside
+# the wall) — exactly the placements this test exercises.
+MESSY = """\
+plan "Messy"
+envelope 30 x 24
+ceiling 9
+room living: living at 0,0 size 17.7071 x 24
+room bed: bedroom at 17.7071 ,0 size 12.2929 x 9.9041
+room bath: bathroom at 17.7071,9.9041 size 12.2929 x 14.0959
+door living - bed width 2.67
+door living - bath width 2.67
+entry living south width 3 offset 4
+"""
+
+
+def test_span_edges_survive_rounding_on_messy_geometry():
+    """Openings at *both* edges of every reported span stay legal.
+
+    Rounding a span boundary outward by even 5e-5 (50x the validator's
+    EPSILON) fires OPENING_CLASH against the centred door or OPENING_OOB past
+    the wall end — the confirmed review defect this test pins.
+    """
+    summary = _summary(MESSY)
+    bad = {"DOOR_OOB", "OPENING_OOB", "OPENING_CLASH", "DOOR_NOADJ", "DOOR_FIT"}
+    width = 2.0
+    checked = 0
+    for span in summary["free_spans"]:
+        if span["room"] != "living" or span["hi"] - span["lo"] < width:
+            continue
+        for offset in (span["lo"], span["hi"] - width):
+            if span["to"] == "exterior":
+                stmt = f"window living {span['wall']} width {width} offset {offset}\n"
+            else:
+                stmt = f"door living - {span['to']} width {width} offset {offset}\n"
+            result = compile_source(MESSY + stmt)
+            assert result.plan is not None
+            codes = {d.code for d in result.diagnostics}
+            assert not codes & bad, (span, offset, codes & bad)
+            checked += 1
+    assert checked >= 8  # both edges of several spans actually exercised
+
+
+def test_a_whole_span_fill_stays_legal():
+    """An opening exactly filling a reported span compiles clash-free."""
+    summary = _summary(MESSY)
+    span = _spans(summary, "living", "east", "bed")[0]
+    lo, hi = span
+    stmt = f"door living - bed width {hi - lo} offset {lo}\n"
+    result = compile_source(MESSY + stmt)
+    assert result.plan is not None
+    codes = {d.code for d in result.diagnostics}
+    assert not codes & {"DOOR_OOB", "OPENING_OOB", "OPENING_CLASH", "DOOR_FIT"}
+
+
 def test_cross_level_rooms_share_no_spans():
     src = FULL + "room loft: loft at 0,0 size 18 x 24 level 1\n"
     summary = _summary(src)
