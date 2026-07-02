@@ -105,6 +105,8 @@ model. Use it to shake a plan out against a project template before committing.
 | `plan.siding` / `plan.roofing` | **Finish hints select types**: between the named `config.json` override (highest) and the Function auto-pick (fallback), an exterior wall type / roof type whose *name* contains a hint token (case-insensitive; `siding "metal"` → "Exterior - Metal Panel") is preferred. The report notes which path picked the type. |
 | `levels` | Reused if one exists at the same elevation, else a new `Level`. |
 | `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). A **gable-end** wall (flagged `profile: gable`) builds from a vertical pentagon profile so its top rises to the ridge; a profile failure falls back to a flat wall with a note. |
+| `walls[].kind` | A **declared wall kind** (`wall a - b plumbing\|bearing\|rated` in the DSL) maps to its own wall type: the named `plumbing_wall_type`/`rated_wall_type`/`bearing_wall_type` config override, else an Interior-function type whose *name* reads like the kind (plumbing/wet, rated/fire, bearing), else the standard interior type. The kind resolution is folded into those walls' rebuild fingerprints, so changing the mapping recreates exactly the declared segments. |
+| `openings[].kind` (window kinds, `double`/`french` doors) | An authored **window kind** (`casement`/`slider`/`fixed`/`double-hung`) or double-leaf door prefers a family whose name reads like the kind (e.g. a `fixed` window → the "Fixed" family, `double` door → "Double-Glass"); the standard sized family stands in with a note when nothing matches (silently for the default `casement`, so old plans build exactly as before). |
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. A door's authored **swing** (`swing_into`/`hinge`) flips the instance's facing/hand so the leaf opens into the named room; **egress** doors are stamped `barndsl egress` in Comments so a schedule can filter them. |
 | `openings` (cased) | A `cased_opening` (the doorless walk-through) cuts a **real wall opening** (`NewOpening`: floor to the opening height, the opening wide) instead of hanging a swinging leaf. If the cut fails it falls back to the sized door family with a note (the old behaviour). Reported as kind `opening`. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named, **numbered** (101, 102, … per level) and given default **finishes** (floor/base/ceiling/wall) by room type — a residential room schedule filled in, ready to refine. |
@@ -219,6 +221,9 @@ folder). Unknown keys are ignored, so you can leave comments.
 {
   "exterior_wall_type": "Exterior - Brick on Mtl. Stud",
   "interior_wall_type": "Interior - 4 7/8\" Partition (1-hr)",
+  "plumbing_wall_type": "Interior - 6 1/8\" Partition (Plumbing)",
+  "rated_wall_type": "Interior - 5 1/2\" Partition (1-hr)",
+  "bearing_wall_type": "Interior - Bearing 2x6",
   "door_family": "Single-Flush",
   "window_family": "Fixed",
   "floor_type": "Generic 12\"",

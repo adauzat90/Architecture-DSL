@@ -345,12 +345,13 @@ def _resource_context(res, options):
     )
     struct = "structure:%s|%s|%s" % (fam(res.column), fam(res.beam), sizing)
     floor = "floor:%s" % nm(res.floor)
-    return {
-        "wall": "wall:%s|%s|%s" % (
-            nm(res.ext_wall), nm(res.int_wall),
-            # None and "centerline" land walls identically, so they share a context.
-            (getattr(options, "location_line", None) or "centerline"),
-        ),
+    wall = "wall:%s|%s|%s" % (
+        nm(res.ext_wall), nm(res.int_wall),
+        # None and "centerline" land walls identically, so they share a context.
+        (getattr(options, "location_line", None) or "centerline"),
+    )
+    out = {
+        "wall": wall,
         "door": opening,
         "window": opening,
         "opening": opening,
@@ -362,6 +363,22 @@ def _resource_context(res, options):
         "fixture": "fixture:%s|%s" % (fam(res.plumbing), fam(res.appliance)),
         "footing": "footing:%s" % fam(res.footing),
     }
+    # Per-sub-kind context ("wall/plumbing", "window/fixed", "door/double"):
+    # read by identities() for exactly the records carrying that kind, so a
+    # changed kind mapping recreates only the matching elements. A kind that
+    # resolved to the pass's standard pick is omitted — it builds identically,
+    # and omitting it keeps pre-kind fingerprints byte-compatible (no one-time
+    # recreate of every default window on the first rebuild).
+    for k, v in sorted(res.kind_walls.items()):
+        if v is not res.int_wall:
+            out["wall/%s" % k] = "%s|%s=%s" % (wall, k, nm(v))
+    for k, v in sorted(res.window_kinds.items()):
+        if v is not res.window:
+            out["window/%s" % k] = "%s|%s=%s" % (opening, k, fam(v))
+    for k, v in sorted(res.door_kinds.items()):
+        if v is not res.door:
+            out["door/%s" % k] = "%s|%s=%s" % (opening, k, fam(v))
+    return out
 
 
 #: Which options flag turns each managed element kind's pass off. A disabled
@@ -565,6 +582,54 @@ def _hinted_wall_type(doc, hint):
         except Exception:
             pass
     return matches[0] if matches else None
+
+
+#: Name tokens that identify a wall type for a declared wall kind, and a
+#: door/window family for an authored opening kind (contains-any, lowercase).
+_WALL_KIND_TOKENS = {
+    "plumbing": ("plumbing", "wet"),
+    "rated": ("rated", "fire"),
+    "bearing": ("bearing",),
+}
+_OPENING_KIND_TOKENS = {
+    "casement": ("casement",),
+    "slider": ("slid",),  # matches Slider and Sliding
+    "fixed": ("fixed",),
+    "double-hung": ("hung",),
+    "double": ("double",),
+    "french": ("french",),
+}
+
+
+def _kind_wall_type(doc, kind):
+    """A basic wall type whose name reads like the declared ``kind``
+    (plumbing/wet, rated/fire, bearing). Prefers Interior-function types —
+    declared walls are shared room walls. None if no name matches."""
+    tokens = _WALL_KIND_TOKENS.get(kind, ())
+    matches = [
+        wt for wt in _basic_wall_types(doc)
+        if any(t in _name(wt).lower() for t in tokens)
+    ]
+    for wt in matches:
+        try:
+            if wt.Function == DB.WallFunction.Interior:
+                return wt
+        except Exception:
+            pass
+    return matches[0] if matches else None
+
+
+def _kind_symbol(doc, category, tokens):
+    """The first family symbol in ``category`` whose family or type name
+    contains one of ``tokens`` (case-insensitive). None if nothing matches."""
+    for sym in _symbols(doc, category):
+        try:
+            names = "%s %s" % (sym.Family.Name, _name(sym))
+        except Exception:
+            names = _name(sym)
+        if any(t in names.lower() for t in tokens):
+            return sym
+    return None
 
 
 def _hinted_roof_type(doc, hint):
@@ -789,6 +854,11 @@ class _Resources(object):
         self.plumbing = None
         self.appliance = None
         self.footing = None
+        # Declared-wall-kind → wall type, and opening-kind → family symbol,
+        # resolved only for the kinds the incoming exchange actually uses.
+        self.kind_walls = {}
+        self.window_kinds = {}
+        self.door_kinds = {}
 
 
 def _resolve_resources(doc, options, report, data=None):
@@ -928,6 +998,52 @@ def _resolve_resources(doc, options, report, data=None):
     except Exception:
         res.ceiling_type = None
     report.resources["ceiling_type"] = _name(res.ceiling_type) if res.ceiling_type else "(none)"
+
+    # Declared wall kinds (plumbing/bearing/rated) and opening kinds, resolved
+    # only for the kinds the incoming exchange actually uses: a named config
+    # override, else a wall type / family whose name reads like the kind, else
+    # the pass's standard pick (interior wall / window / door family).
+    walls_in = (data or {}).get("walls") or []
+    openings_in = (data or {}).get("openings") or []
+    for wall_kind in sorted({w.get("kind") for w in walls_in if w.get("kind")}):
+        chosen = named_or(
+            getattr(options, "%s_wall_type" % wall_kind, None),
+            lambda n: _wall_type_named(doc, n),
+            _kind_wall_type(doc, wall_kind) or res.int_wall,
+            "%s wall type" % wall_kind,
+        )
+        res.kind_walls[wall_kind] = chosen
+        report.resources["%s_wall" % wall_kind] = _name(chosen) if chosen else "(none)"
+    for win_kind in sorted(
+        {o.get("kind") for o in openings_in if o.get("category") == "window"}
+    ):
+        sym = _kind_symbol(doc, DB.BuiltInCategory.OST_Windows, _OPENING_KIND_TOKENS.get(win_kind, ()))
+        if sym is None:
+            sym = res.window
+            # The default kind falls back silently — old plans build exactly as
+            # before; an authored kind that matched nothing is worth a note.
+            if win_kind != "casement" and res.window is not None:
+                report.note(
+                    "no window family reads '%s'; the standard window family "
+                    "stands in" % win_kind
+                )
+        res.window_kinds[win_kind] = sym
+    for door_kind in sorted(
+        {
+            o.get("kind")
+            for o in openings_in
+            if o.get("category") == "door" and o.get("kind") in ("double", "french")
+        }
+    ):
+        sym = _kind_symbol(doc, DB.BuiltInCategory.OST_Doors, _OPENING_KIND_TOKENS.get(door_kind, ()))
+        if sym is None:
+            sym = res.door
+            if res.door is not None:
+                report.note(
+                    "no door family reads '%s'; the sized standard door family "
+                    "stands in" % door_kind
+                )
+        res.door_kinds[door_kind] = sym
     return res
 
 
@@ -1041,6 +1157,11 @@ def _build_walls(doc, data, levels, res, options, report, rebuild):
             report.skipped("wall", w["id"], "degenerate segment")
             continue
         wtype = res.ext_wall if w.get("exterior") else res.int_wall
+        # A declared wall kind (plumbing/bearing/rated) maps to its resolved
+        # type; declared walls are interior, so exterior segments keep theirs.
+        kind_wt = res.kind_walls.get(w.get("kind"))
+        if kind_wt is not None and not w.get("exterior"):
+            wtype = kind_wt
         wall = None
         gable = _is_gable(w)
         if gable:
@@ -1215,6 +1336,12 @@ def _build_openings(doc, data, levels, walls, res, options, report, rebuild):
     door_base = _activate(res.door, doc)
     garage_base = _activate(res.garage_door, doc)
     win_base = _activate(res.window, doc)
+    win_kind_bases = dict(
+        (k, _activate(s, doc)) for k, s in res.window_kinds.items() if s is not None
+    )
+    door_kind_bases = dict(
+        (k, _activate(s, doc)) for k, s in res.door_kinds.items() if s is not None
+    )
     st = DB.Structure.StructuralType.NonStructural
     cache = {}
     wall_dicts = _exchange.walls_by_id(data)
@@ -1244,7 +1371,10 @@ def _build_openings(doc, data, levels, walls, res, options, report, rebuild):
                                    key=key, fp=rebuild.fp(key)):
                 continue
         overhead = o.get("kind") == "overhead"
-        base = win_base if kind == "window" else door_base
+        if kind == "window":
+            base = win_kind_bases.get(o.get("kind"), win_base)
+        else:
+            base = door_kind_bases.get(o.get("kind"), door_base)
         if overhead:
             # Prefer the garage-door family for a sectional/overhead door; the
             # sized standard door family stands in (with a note) when none is

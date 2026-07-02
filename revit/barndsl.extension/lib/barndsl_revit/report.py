@@ -34,6 +34,12 @@ KINDS = (
 _OVERRIDE_KEYS = (
     "exterior_wall_type",
     "interior_wall_type",
+    #: Wall types for interior walls a `wall` statement declared. Unset, the
+    #: builder auto-picks a basic wall type whose name reads plumbing/wet,
+    #: rated/fire, or bearing, falling back to the interior wall type.
+    "plumbing_wall_type",
+    "rated_wall_type",
+    "bearing_wall_type",
     "door_family",
     #: A door family for kind == "overhead" openings (sectional garage doors).
     #: Unset, the builder auto-picks a door family whose name contains
@@ -96,6 +102,9 @@ class BuildOptions(object):
         sections=True,
         exterior_wall_type=None,
         interior_wall_type=None,
+        plumbing_wall_type=None,
+        rated_wall_type=None,
+        bearing_wall_type=None,
         door_family=None,
         garage_door_family=None,
         window_family=None,
@@ -131,6 +140,9 @@ class BuildOptions(object):
         self.sections = bool(sections)
         self.exterior_wall_type = exterior_wall_type
         self.interior_wall_type = interior_wall_type
+        self.plumbing_wall_type = plumbing_wall_type
+        self.rated_wall_type = rated_wall_type
+        self.bearing_wall_type = bearing_wall_type
         self.door_family = door_family
         self.garage_door_family = garage_door_family
         self.window_family = window_family

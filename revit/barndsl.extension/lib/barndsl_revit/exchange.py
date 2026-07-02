@@ -252,15 +252,23 @@ def identities(data, context=None):
             return ""
         return "%.4f" % float(lv.get("elevation", 0.0))
 
-    def fp_of(kind, record, extra=""):
-        add = ctx.get(kind)
+    def fp_of(kind, record, extra="", sub=None):
+        # A record with a declared/authored sub-kind (a plumbing wall, a fixed
+        # window) reads the more specific context key when the builder provides
+        # one ("wall/plumbing"), so a changed kind mapping recreates exactly the
+        # matching records; everything else shares the plain per-kind context.
+        add = None
+        if sub:
+            add = ctx.get("%s/%s" % (kind, sub))
+        if add is None:
+            add = ctx.get(kind)
         if add:
             extra = (extra + "|" + str(add)) if extra else str(add)
         return fingerprint(record, extra)
 
     wall_fp = {}
     for w in data.get("walls", []):
-        fp = fp_of("wall", _strip(w, ("id",)), lvl_extra(w.get("level")))
+        fp = fp_of("wall", _strip(w, ("id",)), lvl_extra(w.get("level")), sub=w.get("kind"))
         wall_fp[w.get("id")] = fp
         out.append(("wall", w.get("id"), wall_identity(w), fp))
 
@@ -273,7 +281,7 @@ def identities(data, context=None):
         # recreated wall means every opening hosted on it must be recreated
         # too (Revit deletes hosted instances with their host).
         host_fp = wall_fp.get(o.get("host_wall"), "")
-        fp = fp_of(kind, _strip(o, ("id", "host_wall")), host_fp)
+        fp = fp_of(kind, _strip(o, ("id", "host_wall")), host_fp, sub=o.get("kind"))
         out.append((kind, o.get("id"), opening_identity(o), fp))
 
     plan_ceiling = str((data.get("plan") or {}).get("ceiling_height", ""))

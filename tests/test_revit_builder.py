@@ -1378,3 +1378,108 @@ def test_read_model_skips_unplaced_rooms():
     exchange, rep = builder.read_model(doc)
     assert exchange["rooms"] == []
     assert any(r.kind == "room" and r.status == "skipped" for r in rep.records)
+
+
+# --- declared wall kinds + opening kinds (review round 2 §2.1/§2.2 builder pass)
+
+
+#: CEDAR with a declared plumbing wall and authored opening kinds.
+CEDAR_KINDS = CEDAR.replace(
+    "door living - bed width 2.67",
+    "door living - bed double width 5\nwall living - bath plumbing",
+).replace(
+    "window bed east width 4 offset 4",
+    "window bed east fixed width 4 offset 4",
+)
+
+
+def test_declared_wall_kind_picks_a_matching_wall_type():
+    # A `wall a - b plumbing` segment lands on the wall type whose name reads
+    # like the kind; undeclared interior walls keep the standard interior type.
+    doc = _ready_doc()
+    wet = doc.add_wall_type("Interior - Plumbing 2x6", function=WallFunction.Interior)
+    rep = builder.build(doc, _exchange(CEDAR_KINDS))
+    assert rep.resources["plumbing_wall"] == "Interior - Plumbing 2x6"
+    walls = [e for e in doc._by_id.values()
+             if isinstance(e, revit_fakes.Wall) and builder._is_managed(e)]
+    wet_walls = [w for w in walls if w.wtype_id.Value == wet.Id.Value]
+    assert len(wet_walls) == 1  # exactly the declared living|bath segment
+    int_id = next(w.Id.Value for w in doc.wall_types if w.Name == "Int")
+    assert any(w.wtype_id.Value == int_id for w in walls)  # the rest unchanged
+
+
+def test_declared_wall_kind_override_wins_and_falls_back():
+    # A named config override beats the name match; with neither, the interior
+    # wall type stands in (the declaration still builds a wall).
+    doc = _ready_doc()
+    doc.add_wall_type("Interior - Plumbing 2x6", function=WallFunction.Interior)
+    special = doc.add_wall_type("Wet Wall Special", function=WallFunction.Interior)
+    opts = report.BuildOptions(plumbing_wall_type="Wet Wall Special")
+    rep = builder.build(doc, _exchange(CEDAR_KINDS), opts)
+    assert rep.resources["plumbing_wall"] == "Wet Wall Special"
+    walls = [e for e in doc._by_id.values()
+             if isinstance(e, revit_fakes.Wall) and builder._is_managed(e)]
+    assert any(w.wtype_id.Value == special.Id.Value for w in walls)
+
+    doc2 = _ready_doc()  # no plumbing-named type, no override
+    rep2 = builder.build(doc2, _exchange(CEDAR_KINDS))
+    assert rep2.resources["plumbing_wall"] == "Int"
+
+
+def test_changed_kind_wall_type_recreates_only_the_declared_wall():
+    # Folding the kind resolution into the wall context must be surgical: when
+    # the plumbing mapping changes, the declared segment is recreated and the
+    # rest of the model is kept.
+    doc = _ready_doc()
+    data = _exchange(CEDAR_KINDS)
+    builder.build(doc, data)  # plumbing falls back to Int (no match)
+    doc.add_wall_type("Interior - Plumbing 2x6", function=WallFunction.Interior)
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="wall") == 1
+    assert rep.count(status="kept", kind="wall") > 0
+    assert rep.count(status="kept", kind="room") == 3
+
+
+def test_window_and_door_kinds_pick_matching_families():
+    # An authored `fixed` window lands on the Fixed family; a `double` door
+    # prefers a double-leaf family over the single-flush standard.
+    doc = _ready_doc()  # window family is literally named "Fixed"
+    doc.add_family(BIC.OST_Windows, "Casement Std")
+    doc.add_family(BIC.OST_Doors, "Double-Glass")
+    builder.build(doc, _exchange(CEDAR_KINDS))
+    inst_syms = [e[2][1] for e in doc.created if e[0] == "instance"
+                 and len(e[2]) >= 3 and isinstance(e[2][2], revit_fakes.Wall)]
+    fams = {s.Family.Name for s in inst_syms}
+    assert "Double-Glass" in fams  # the double living|bed door
+    assert "Fixed" in fams  # the fixed bed window
+    # The default-kind (casement) living window found the Casement family.
+    assert "Casement Std" in fams
+
+
+def test_unmatched_authored_kind_stands_in_with_a_note():
+    # No double-leaf door family loaded: the standard family stands in, noted.
+    doc = _ready_doc()
+    rep = builder.build(doc, _exchange(CEDAR_KINDS))
+    assert any("no door family reads 'double'" in n for n in rep.notes)
+    # Default casement windows fall back *silently* (old plans, old behavior).
+    assert not any("casement" in n.lower() for n in rep.notes)
+
+
+def test_default_kinds_do_not_perturb_fingerprints():
+    # A plan with only default-kind windows/doors fingerprints identically
+    # whether or not the kind plumbing exists — rebuild keeps everything, and
+    # the kind entries are omitted from the context when they resolve to the
+    # standard picks.
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    rep = builder.build(doc, data)
+    assert rep.count(status="created") == 0
+    ctx = builder._resource_context(
+        builder._resolve_resources(doc, report.BuildOptions(), report.BuildReport(), data),
+        report.BuildOptions(),
+    )
+    # Default-kind resolutions land on the standard picks, so no
+    # per-sub-kind context keys appear and every fingerprint matches the
+    # pre-kind era.
+    assert not any("/" in k for k in ctx)
