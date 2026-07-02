@@ -97,9 +97,25 @@ behind a *Document* ribbon button. Harness-tested in `tests/test_revit_document.
 (counts, two-level views/sheets, idempotence, skip-without-view-type/title-block,
 disable flags, managed-only tagging).
 
+Fidelity fixes (review §3.1–3.3) — DONE: the exchange now carries door
+`swing_into`/`hinge` (and the builder flips facing/hand to match), a nominal
+`size` on framing (beams share the post section; columns/beams get
+duplicate-per-size `barndsl WxD` types); `orientation` rotates Project true
+north (`ProjectPosition.Angle`); `siding`/`roofing` hints pick wall/roof types
+by name between the named config override and the auto-pick; cased openings cut
+a real wall opening (`NewOpening`) instead of a leaf-door stand-in (door-family
+fallback with a note); fixtures rotate to back onto their wall; exterior egress
+doors are stamped `barndsl egress` in Comments for schedule filtering. All
+harness-tested (`test_revit_builder.py`, fakes extended with
+facing/hand flips, `NewOpening`, `RotateElement`, `ActiveProjectLocation`);
+interior-door `egress` stays hardcoded False in the exchange because
+`InteriorDoor` genuinely has no egress concept.
+
 Still needs a live Revit (not unit-testable here): validate every builder/document
 call against Revit 2025; harden the experimental reader (wall-type/level inference,
 non-rectangular rooms); the gable-roof slope; turned/multi-flight stair landings;
+the true-north sign convention, swing default-hand assumption, cased-opening
+cuts and fixture default-facing assumption from the fidelity batch;
 and (a smaller follow-on) dimension strings, which aren't placed yet.
 
 ## Agent aids

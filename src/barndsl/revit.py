@@ -166,6 +166,12 @@ class RevitOpening:
     egress: bool
     rooms: list[str]
     host_wall: str | None
+    #: The room id the leaf swings *into* (interior swing doors only; ``None``
+    #: leaves the consumer at the family default). Optional/additive — an old
+    #: ``barndsl.revit/1`` document without it still loads.
+    swing_into: str | None = None
+    #: Hinge end: ``"near"`` (the south/west end of the opening) or ``"far"``.
+    hinge: str | None = None
 
 
 @dataclass
@@ -233,6 +239,11 @@ class RevitFraming:
     role: str
     level: int
     z: float = 0.0
+    #: Nominal square section (ft). In this MVP the ridge/bent beams share the
+    #: frame's nominal post section (member sizing is the engineer's job); the
+    #: consumer can duplicate-and-size a framing type from it like it does for
+    #: columns. ``0`` means no size hint (old exchanges).
+    size: float = 0.0
 
 
 @dataclass
@@ -350,6 +361,8 @@ class RevitModel:
                     "egress": o.egress,
                     "rooms": list(o.rooms),
                     "host_wall": o.host_wall,
+                    "swing_into": o.swing_into,
+                    "hinge": o.hinge,
                 }
                 for o in self.openings
             ],
@@ -392,6 +405,7 @@ class RevitModel:
                         "role": f.role,
                         "level": f.level,
                         "z": f.z,
+                        "size": f.size,
                     }
                     for f in self.framing
                 ],
@@ -938,9 +952,15 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                 height=DEFAULT_CASED_HEIGHT if cased else DEFAULT_DOOR_HEIGHT,
                 sill=0.0,
                 exterior=False,
+                # InteriorDoor has no egress concept (egress routes through
+                # exterior doors/windows), so interior openings are never egress.
                 egress=False,
                 rooms=[d.room_a, d.room_b],
                 host_wall=host,
+                # Carry the authored swing side/hinge so the consumer can flip
+                # the built instance instead of landing at the family default.
+                swing_into=d.swing_into,
+                hinge=d.hinge,
             )
         )
 
@@ -1036,6 +1056,10 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         )
         for p in plan.posts
     ]
+    # The frame carries no per-beam section; in this MVP the ridge/bent beams
+    # share the posts' nominal square section (a 6x6 frame gets 6x6 beams), so
+    # the consumer can size a framing type the way it sizes columns.
+    beam_size = max((float(p.size) for p in plan.posts), default=0.0)
     framing = [
         RevitFraming(
             start=(float(b.x1), float(b.y1)),
@@ -1044,6 +1068,7 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             level=getattr(b, "level", 0),
             z=_plate_z(getattr(b, "level", 0))
             + (float(roof_rise) if b.role == "ridge" else 0.0),
+            size=beam_size,
         )
         for b in plan.beams
     ]
@@ -1291,6 +1316,9 @@ def exchange_to_plan(data: dict) -> Barndominium:
             plan.connect(
                 a.id, b.id, width=width, kind=o.get("kind", "swing"),
                 offset=None if offset is None else max(0.0, offset),
+                # Optional swing side/hinge (additive fields; absent on old docs).
+                swing_into=o.get("swing_into"),
+                hinge=o.get("hinge"),
             )
 
     for area in data.get("areas", []):

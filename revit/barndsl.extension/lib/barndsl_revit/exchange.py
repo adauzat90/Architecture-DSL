@@ -98,6 +98,14 @@ def validate(data):
             problems.append(
                 "opening %s is on unknown level %r" % (o.get("id"), o.get("level"))
             )
+        # Optional swing side (additive barndsl.revit/1 field): must name one of
+        # the rooms the opening serves, or the builder can't pick a side.
+        swing = o.get("swing_into")
+        if swing is not None and swing not in (o.get("rooms") or []):
+            problems.append(
+                "opening %s swings into %r, which is not one of its rooms"
+                % (o.get("id"), swing)
+            )
 
     for w in data.get("walls", []):
         if w.get("level") not in level_indexes:

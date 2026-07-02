@@ -161,6 +161,37 @@ def test_cased_opening_classified_separately_from_doors():
     assert all(o.kind == "cased" for o in cased)
 
 
+def test_door_swing_and_hinge_carry_into_the_exchange():
+    # `into <room>` / `hinge far` (elements.InteriorDoor.swing_into/hinge) ride
+    # the opening as optional fields, so the builder can flip the built instance.
+    src = (
+        'plan "Swing"\n'
+        "envelope 40 x 30\n"
+        "ceiling 9\n"
+        "room living: living at 0,0 size 24 x 30\n"
+        "room bed: bedroom at 24,0 size 16 x 30\n"
+        "door living - bed width 2.67 into bed hinge far\n"
+        "entry living south width 3 offset 10\n"
+        "window bed east width 4 offset 4\n"
+    )
+    model = to_revit_model(compile_source(src).plan)
+    doc = model.to_dict()
+    interior = [o for o in doc["openings"] if o["category"] == "door" and not o["exterior"]]
+    assert len(interior) == 1
+    assert interior[0]["swing_into"] == "bed"
+    assert interior[0]["hinge"] == "far"
+    # Exterior doors and windows never carry a swing side.
+    for o in doc["openings"]:
+        if o["exterior"] or o["category"] == "window":
+            assert o["swing_into"] is None and o["hinge"] is None
+    # And the reverse direction restores them (round-trip fixed point).
+    from barndsl import exchange_to_plan
+
+    back = exchange_to_plan(doc)
+    assert back.interior_doors[0].swing_into == "bed"
+    assert back.interior_doors[0].hinge == "far"
+
+
 def test_interior_door_serves_two_rooms_exterior_one():
     model = to_revit_model(_compile_example("cedar_ridge.barn"))
     for o in model.openings:
@@ -199,6 +230,23 @@ def test_frame_lowers_to_columns_and_framing():
     assert len(model.framing) == len(plan.beams)
     assert {f.role for f in model.framing} <= {"frame", "ridge"}
     assert {c.role for c in model.columns} <= {"post", "interior"}
+
+
+def test_framing_carries_the_posts_nominal_section():
+    # Beams share the frame's nominal post section in this MVP (revit.py notes
+    # it), so the builder can duplicate-and-size a framing type like it does for
+    # columns. An unframed plan has no framing, so no size to check there.
+    plan = _compile_example("cedar_ridge.barn")
+    plan.frame()
+    plan = compile_source(emit_dsl(plan), name=plan.name).plan
+    model = to_revit_model(plan)
+    assert model.framing
+    post_size = max(p.size for p in plan.posts)
+    assert post_size > 0
+    for f in model.framing:
+        assert f.size == pytest.approx(post_size)
+    doc = model.to_dict()
+    assert all(f["size"] == pytest.approx(post_size) for f in doc["structure"]["framing"])
 
 
 def test_no_structure_when_no_frame():

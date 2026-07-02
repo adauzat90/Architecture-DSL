@@ -619,12 +619,15 @@ def test_created_elements_are_marked_managed():
 
 def test_managed_mark_does_not_touch_the_comments_field():
     # Regression: the marker used to squat on Comments, clobbering user
-    # annotations. It now lives in Extensible Storage; Comments stays empty.
+    # annotations. It now lives in Extensible Storage; the only Comments value a
+    # build writes is the egress stamp on egress doors ("barndsl egress"), which
+    # is a schedule filter, not the managed marker.
     doc = _ready_doc()
     builder.build(doc, _exchange(CEDAR))
     for e in doc._by_id.values():
         p = e.get_Parameter(revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)
-        assert p is None or p.AsString() in ("", None)
+        assert p is None or p.AsString() in ("", None, "barndsl egress")
+        assert p is None or p.AsString() != builder.MANAGED_MARK
 
 
 def test_legacy_comments_marker_is_still_recognised():
@@ -664,6 +667,283 @@ def test_replace_leaves_unmanaged_elements_alone():
     user_wall = revit_fakes.Wall("user", doc)
     builder.build(doc, _exchange(CEDAR), report.BuildOptions(replace=True))
     assert user_wall.Id.Value in doc._by_id  # survived the purge
+
+
+# --- door swing / hinge ------------------------------------------------------
+
+
+SWING = """\
+plan "Swing"
+envelope 40 x 30
+ceiling 9
+room living: living at 0,0 size 24 x 30
+room bed: bedroom at 24,0 size 16 x 30
+door living - bed width 2.67 into %s hinge %s
+entry living south width 3 offset 10
+window bed east width 4 offset 4
+"""
+
+
+def _door_instance_at_x(doc, x):
+    """The wall-hosted door instance placed at plan x == ``x``."""
+    for e in doc.created:
+        if e[0] != "instance":
+            continue
+        inst, args = e[1], e[2]
+        sym = args[1] if len(args) > 1 else None
+        if getattr(sym, "_category", None) != BIC.OST_Doors:
+            continue
+        if abs(args[0].X - x) < 1e-6:
+            return inst
+    return None
+
+
+def test_door_flips_facing_into_the_named_room():
+    # The shared wall runs north-south at x=24; the fake's default facing off it
+    # is +X (east, toward bed). `into living` needs the leaf on the west side.
+    doc = _ready_doc()
+    rep = builder.build(doc, _exchange(SWING % ("living", "near")))
+    inst = _door_instance_at_x(doc, 24.0)
+    assert inst is not None
+    assert inst.FacingFlipped is True
+    assert inst.FacingOrientation.X == -1.0
+    assert inst.HandFlipped is False  # hinge near = the family default
+    recs = [r for r in rep.records if r.kind == "door" and "living" in r.message]
+    assert recs and "flipped" in recs[0].message
+
+
+def test_door_keeps_default_facing_when_it_already_swings_right():
+    # `into bed` matches the fake's default facing (+X): no flip.
+    doc = _ready_doc()
+    builder.build(doc, _exchange(SWING % ("bed", "far")))
+    inst = _door_instance_at_x(doc, 24.0)
+    assert inst.FacingFlipped is False
+    assert inst.FacingOrientation.X == 1.0
+    # hinge far flips the hand.
+    assert inst.HandFlipped is True
+
+
+def test_door_without_swing_is_left_at_the_family_default():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    for e in doc.created:
+        if e[0] == "instance":
+            assert e[1].FacingFlipped is False and e[1].HandFlipped is False
+
+
+def test_egress_doors_are_stamped_in_comments():
+    # Exterior egress doors get "barndsl egress" in Comments so a schedule can
+    # filter them; interior doors (no egress concept) stay clean.
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    from revit_fakes import BuiltInParameter as BIP
+
+    stamps = []
+    for e in doc.created:
+        if e[0] == "instance":
+            sym = e[2][1] if len(e[2]) > 1 else None
+            if getattr(sym, "_category", None) == BIC.OST_Doors:
+                stamps.append(e[1].get_Parameter(BIP.ALL_MODEL_INSTANCE_COMMENTS).AsString())
+    # CEDAR has one egress entry and two interior doors.
+    assert stamps.count("barndsl egress") == 1
+    assert stamps.count("") == 2
+
+
+# --- project north (orientation) ---------------------------------------------
+
+
+def test_orientation_rotates_true_north():
+    import math
+
+    doc = _ready_doc()
+    src = CEDAR + "orientation 90\n"
+    rep = builder.build(doc, _exchange(src))
+    pos = doc.ActiveProjectLocation.GetProjectPosition(revit_fakes.XYZ.Zero)
+    assert pos.Angle == pytest.approx(math.radians(90.0))
+    assert rep.count(status="created", kind="project") == 1
+
+
+def test_zero_orientation_leaves_project_north_alone():
+    doc = _ready_doc()
+    rep = builder.build(doc, _exchange(CEDAR))
+    pos = doc.ActiveProjectLocation.GetProjectPosition(revit_fakes.XYZ.Zero)
+    assert pos.Angle == 0.0
+    assert rep.count(kind="project") == 0
+
+
+# --- finish hints select types -------------------------------------------------
+
+
+def test_siding_hint_picks_a_matching_exterior_wall_type():
+    doc = _ready_doc()
+    doc.add_wall_type("Exterior - Metal Panel", function=WallFunction.Exterior)
+    src = CEDAR + 'finish siding "metal"\n'
+    rep = builder.build(doc, _exchange(src))
+    assert rep.resources["exterior_wall"] == "Exterior - Metal Panel"
+    assert any("siding hint" in n for n in rep.notes)
+
+
+def test_named_override_beats_the_siding_hint():
+    doc = _ready_doc()
+    doc.add_wall_type("Exterior - Metal Panel", function=WallFunction.Exterior)
+    src = CEDAR + 'finish siding "metal"\n'
+    opts = report.BuildOptions(exterior_wall_type="Ext")
+    rep = builder.build(doc, _exchange(src), opts)
+    assert rep.resources["exterior_wall"] == "Ext"
+
+
+def test_unmatched_siding_hint_falls_back_to_the_auto_pick_with_a_note():
+    doc = _ready_doc()  # no metal wall type
+    src = CEDAR + 'finish siding "metal"\n'
+    rep = builder.build(doc, _exchange(src))
+    assert rep.resources["exterior_wall"] == "Ext"
+    assert any("siding hint 'metal' matched no wall type" in n for n in rep.notes)
+
+
+def test_roofing_hint_picks_a_matching_roof_type():
+    doc = _ready_doc(roof=False)
+    doc.add_roof_type("Asphalt Shingle")
+    doc.add_roof_type("Standing Seam Metal")
+    src = CEDAR + 'finish roof "standing-seam metal"\n'
+    rep = builder.build(doc, _exchange(src))
+    assert rep.resources["roof_type"] == "Standing Seam Metal"
+    assert any("roofing hint" in n for n in rep.notes)
+
+
+def test_named_roof_type_override_beats_the_roofing_hint():
+    doc = _ready_doc(roof=False)
+    doc.add_roof_type("Asphalt Shingle")
+    doc.add_roof_type("Standing Seam Metal")
+    src = CEDAR + 'finish roof "metal"\n'
+    opts = report.BuildOptions(roof_type="Asphalt Shingle")
+    rep = builder.build(doc, _exchange(src), opts)
+    assert rep.resources["roof_type"] == "Asphalt Shingle"
+
+
+# --- column / beam sections ----------------------------------------------------
+
+
+def _section_symbols(doc, category):
+    return [s for s in doc.symbols.get(category, []) if s.Name.startswith("barndsl")]
+
+
+def test_columns_and_beams_are_sized_from_the_exchange():
+    doc = _ready_doc(columns=True, framing=True)
+    # Give the structural families settable section params (b/h, like timber
+    # and steel families carry).
+    for cat in (BIC.OST_StructuralColumns, BIC.OST_StructuralFraming):
+        doc.symbols[cat][0].set_param("b", 0.0)
+        doc.symbols[cat][0].set_param("h", 0.0)
+    data = _framed_exchange()
+    builder.build(doc, data)
+    post_size = data["structure"]["columns"][0]["size"]
+    assert post_size > 0
+    # One duplicated "barndsl WxD" type per category, its section set.
+    for cat in (BIC.OST_StructuralColumns, BIC.OST_StructuralFraming):
+        sized = _section_symbols(doc, cat)
+        assert len(sized) == 1
+        assert sized[0].Name == "barndsl %.2fx%.2f" % (post_size, post_size)
+        assert sized[0].LookupParameter("b").AsDouble() == pytest.approx(post_size)
+        assert sized[0].LookupParameter("h").AsDouble() == pytest.approx(post_size)
+    # Every column/beam instance was placed with the sized type.
+    from revit_fakes import Structure
+
+    for st in (Structure.StructuralType.Column, Structure.StructuralType.Beam):
+        placed = _instances_of(doc, st)
+        assert placed
+        assert all(args[1].Name.startswith("barndsl") for _inst, args in placed)
+
+
+def test_section_sizing_falls_back_to_the_default_type_with_a_note():
+    # The stock fake families carry no b/h/Width/Depth params, so sizing can't
+    # take: instances keep the default type and the report says why.
+    doc = _ready_doc(columns=True, framing=True)
+    rep = builder.build(doc, _framed_exchange())
+    assert any("no settable section" in n for n in rep.notes)
+    from revit_fakes import Structure
+
+    cols = _instances_of(doc, Structure.StructuralType.Column)
+    assert cols and all(not args[1].Name.startswith("barndsl") for _inst, args in cols)
+    assert rep.count(status="created", kind="column") > 0
+
+
+def test_section_sizing_disabled_with_size_families_off():
+    doc = _ready_doc(columns=True, framing=True)
+    for cat in (BIC.OST_StructuralColumns, BIC.OST_StructuralFraming):
+        doc.symbols[cat][0].set_param("b", 0.0)
+        doc.symbols[cat][0].set_param("h", 0.0)
+    builder.build(doc, _framed_exchange(), report.BuildOptions(size_families=False))
+    assert not _section_symbols(doc, BIC.OST_StructuralColumns)
+    assert not _section_symbols(doc, BIC.OST_StructuralFraming)
+
+
+# --- cased openings ------------------------------------------------------------
+
+
+CASED = """\
+plan "Cased"
+envelope 40 x 30
+ceiling 9
+room living: living at 0,0 size 24 x 30
+room dining: dining at 24,0 size 16 x 30
+open living - dining width 6
+entry living south width 3 offset 10
+window dining east width 4 offset 4
+"""
+
+
+def test_cased_opening_builds_as_a_wall_cut_not_a_door():
+    doc = _ready_doc()
+    data = _exchange(CASED)
+    cased = [o for o in data["openings"] if o["category"] == "cased_opening"]
+    assert len(cased) == 1
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="opening") == 1
+    # No leaf: the only door instance is the entry (at the exchange width 3).
+    doors = [e for e in doc.created if e[0] == "instance"
+             and getattr(e[2][1], "_category", None) == BIC.OST_Doors]
+    assert len(doors) == 1
+    # The cut is a rectangle: floor to the opening height, the opening wide.
+    ops = [e for e in doc.created if e[0] == "opening"]
+    assert len(ops) == 1
+    _kind, op, (host, p1, p2) = ops[0]
+    assert hasattr(host, "wtype_id")  # cut into the host wall
+    width = abs(p2.X - p1.X) + abs(p2.Y - p1.Y)
+    assert width == pytest.approx(cased[0]["width"])
+    assert p1.Z == pytest.approx(0.0)
+    assert p2.Z == pytest.approx(cased[0]["height"])
+
+
+def test_cased_opening_falls_back_to_a_door_family_with_a_note():
+    doc = _ready_doc()
+    doc.fail_new_opening = True
+    rep = builder.build(doc, _exchange(CASED))
+    assert rep.count(status="created", kind="opening") == 0
+    # Fallback: the cased opening lands as a sized door family (old behaviour),
+    # plus the entry door → 2 door records, and a note explains the downgrade.
+    assert rep.count(status="created", kind="door") == 2
+    assert any("door-family fallback" in n for n in rep.notes)
+
+
+# --- fixture orientation ---------------------------------------------------------
+
+
+def test_fixtures_rotate_to_back_onto_their_wall():
+    doc = _ready_doc()
+    data = _example_exchange("cedar_ridge.barn")
+    rep = builder.build(doc, data)
+    import math
+
+    expected = {"S": 0.0, "N": math.pi, "E": math.pi / 2.0, "W": -math.pi / 2.0}
+    want_rotated = [fx for fx in data["fixtures"] if expected[fx["wall"]] != 0.0]
+    assert want_rotated, "example should have fixtures on non-south walls"
+    # One rotation per non-south fixture, at the wall's angle (S = the default).
+    assert len(doc.rotations) == len(want_rotated)
+    angles = sorted(a for _eid, a in doc.rotations)
+    assert angles == sorted(expected[fx["wall"]] for fx in want_rotated)
+    rotated_msgs = [r.message for r in rep.records
+                    if r.kind == "fixture" and "rotated" in r.message]
+    assert len(rotated_msgs) == len(want_rotated)
 
 
 # --- diagnostics -------------------------------------------------------------

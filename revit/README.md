@@ -101,13 +101,16 @@ model. Use it to shake a plan out against a project template before committing.
 
 | Exchange | Revit |
 |---|---|
+| `plan.orientation` | **Project true north** rotated to the plan's azimuth (`ProjectPosition.Angle` on the active project location) so sun studies and shadows are right. Skipped when 0; recorded as a `project` entry in the report. The sign convention (counterclockwise-positive true-north rotation) needs live-Revit confirmation. |
+| `plan.siding` / `plan.roofing` | **Finish hints select types**: between the named `config.json` override (highest) and the Function auto-pick (fallback), an exterior wall type / roof type whose *name* contains a hint token (case-insensitive; `siding "metal"` → "Exterior - Metal Panel") is preferred. The report notes which path picked the type. |
 | `levels` | Reused if one exists at the same elevation, else a new `Level`. |
 | `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). A **gable-end** wall (flagged `profile: gable`) builds from a vertical pentagon profile so its top rises to the ridge; a profile failure falls back to a flat wall with a note. |
-| `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
+| `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. A door's authored **swing** (`swing_into`/`hinge`) flips the instance's facing/hand so the leaf opens into the named room; **egress** doors are stamped `barndsl egress` in Comments so a schedule can filter them. |
+| `openings` (cased) | A `cased_opening` (the doorless walk-through) cuts a **real wall opening** (`NewOpening`: floor to the opening height, the opening wide) instead of hanging a swinging leaf. If the cut fails it falls back to the sized door family with a note (the old behaviour). Reported as kind `opening`. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named, **numbered** (101, 102, … per level) and given default **finishes** (floor/base/ceiling/wall) by room type — a residential room schedule filled in, ready to refine. |
 | `ceilings` | A flat `Ceiling` per room at its ceiling height above the level — a reflected-ceiling plane to host lighting. A **vaulted** room is skipped (open to the roof). Needs a ceiling type; skipped with a note otherwise. |
-| `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. Posts rise from the floor to the **plate** (a real top level/offset, not a default stub) and bents/ridge are drawn up **at the plate**, not down on the floor. |
-| `fixtures` | A family instance at each fixture/appliance seed — a plumbing family for wet fixtures (toilet/lavatory/tub/shower/sink), a specialty-equipment family for appliances (refrigerator/range). Seeds for the designer to swap/adjust; **only if** the family is loaded, skipped with a note otherwise. |
+| `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. Posts rise from the floor to the **plate** (a real top level/offset, not a default stub) and bents/ridge are drawn up **at the plate**, not down on the floor. Column/beam types are **duplicated and sized** (`barndsl WxD`) from the exchange's nominal section (`Post.size`; beams share the post section in this MVP), trying common section params (`b`/`h`, `Width`/`Depth`, `d`/`bf`); a family with none keeps its default size, with a note. |
+| `fixtures` | A family instance at each fixture/appliance seed — a plumbing family for wet fixtures (toilet/lavatory/tub/shower/sink), a specialty-equipment family for appliances (refrigerator/range) — **rotated to back onto the wall** the seed was laid against (assumes the family default faces north with its back south). Seeds for the designer to swap/adjust; **only if** the family is loaded, skipped with a note otherwise. |
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
 | `foundation` | A **pad footing** (structural-foundation family) under each post of a placed frame; **only if** such a family is loaded, skipped with a note otherwise. The thickened perimeter edge (turndown / grade beam) and the rough concrete takeoff are reported for detailing. |
 | `grids` | Structural grid lines (`Grid.Create`) from a placed `frame`: numbered (`1, 2, …`) along the bents, lettered (`A, B, …`) across the eaves and any interior post line. None without a frame. |
@@ -192,6 +195,7 @@ folder). Unknown keys are ignored, so you can leave comments.
   "door_family": "Single-Flush",
   "window_family": "Fixed",
   "floor_type": "Generic 12\"",
+  "roof_type": "Standing Seam Metal",
   "column_family": "HSS-Hollow Structural Section-Column",
   "beam_family": "W-Wide Flange",
   "plumbing_family": "Toilet-Domestic-3D",
@@ -224,7 +228,27 @@ back to the auto-pick with a note in the report.
 - **Opening sizing needs a flexible family.** Sizing duplicates the loaded
   door/window family and sets its Width/Height type parameters; a fixed-size
   family (no settable Width/Height) falls back to its default, with a note. Load
-  parametric door/window families for best results.
+  parametric door/window families for best results. The same applies to
+  **column/beam sections**: common section parameter names are tried (`b`/`h`,
+  `Width`/`Depth`, `d`/`bf`), and a family exposing none keeps its default size.
+- **Door swing flips assume the family default.** `swing_into` compares the
+  placed instance's `FacingOrientation` against the side of the host wall the
+  named room lies on and flips when they disagree — sound for any family. The
+  `hinge far` hand-flip assumes the family default hinges at the opening's
+  near (south/west) end; a family hinged the other way comes out mirrored.
+  Needs live-Revit confirmation.
+- **Project north's sign convention needs live-Revit confirmation.** The builder
+  sets `ProjectPosition.Angle = +radians(orientation)` (true north rotated
+  counterclockwise from project north by the plan's azimuth); if a live model
+  shows shadows mirrored, the sign is the first thing to check.
+- **Cased-opening cuts (`NewOpening`) need live-Revit confirmation.** The
+  rectangle (floor → opening height, centred, opening-wide) is computed and
+  harness-tested; if Revit rejects the cut, the opening falls back to a sized
+  door family with a note (the previous behaviour).
+- **Fixture rotation assumes the family faces +Y.** Fixtures rotate about their
+  seed point so their back lands on the wall the core laid them against,
+  assuming the loaded family's default faces north (back at −Y) — the common
+  convention, but a family authored otherwise comes out turned.
 - **Stairs are experimental.** The flight layout (straight vs. switchback, riser
   count, run length) is computed deterministically by the core's `plan_stair_runs`
   and *that* is unit-tested; the Revit instantiation of those flights is what a

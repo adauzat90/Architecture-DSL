@@ -18,8 +18,9 @@ STATUSES = (CREATED, SKIPPED, FAILED)
 
 #: The element kinds the builder reports on, in display order.
 KINDS = (
-    "level", "wall", "door", "window", "room", "ceiling", "column", "framing",
-    "slab", "porch", "stair", "grid", "roof", "footing", "fixture",
+    "level", "wall", "door", "window", "opening", "room", "ceiling", "column",
+    "framing", "slab", "porch", "stair", "grid", "roof", "footing", "fixture",
+    "project",
     # documentation (the document() pass)
     "view", "tag", "schedule", "sheet", "dimension", "elevation", "section",
 )
@@ -32,6 +33,7 @@ _OVERRIDE_KEYS = (
     "door_family",
     "window_family",
     "floor_type",
+    "roof_type",
     "column_family",
     "beam_family",
     "plumbing_family",
@@ -83,6 +85,7 @@ class BuildOptions(object):
         door_family=None,
         window_family=None,
         floor_type=None,
+        roof_type=None,
         column_family=None,
         beam_family=None,
         plumbing_family=None,
@@ -115,6 +118,7 @@ class BuildOptions(object):
         self.door_family = door_family
         self.window_family = window_family
         self.floor_type = floor_type
+        self.roof_type = roof_type
         self.column_family = column_family
         self.beam_family = beam_family
         self.plumbing_family = plumbing_family
