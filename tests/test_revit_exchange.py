@@ -133,3 +133,23 @@ def test_validate_flags_unhosted_opening():
     data["openings"][0]["host_wall"] = None
     problems = exchange.validate(data)
     assert any("no host wall" in p for p in problems)
+
+
+def test_optional_swing_fields_are_accepted():
+    # swing_into/hinge are additive barndsl.revit/1 fields: present on the core's
+    # output, harmless when absent, and clean when they name a served room.
+    plan = compile_source(
+        _CEDAR + "door living - kitchen width 2.67 into kitchen hinge far\n"
+    ).plan
+    data = exchange.load(to_revit_model(plan).to_dict())
+    swung = [o for o in data["openings"] if o.get("swing_into")]
+    assert swung and swung[0]["swing_into"] == "kitchen"
+    assert exchange.validate(data) == []
+
+
+def test_validate_flags_swing_into_an_unserved_room():
+    data = exchange.load(_model_dict())
+    door = next(o for o in data["openings"] if o["category"] == "door")
+    door["swing_into"] = "not_a_room_it_serves"
+    problems = exchange.validate(data)
+    assert any("swings into" in p for p in problems)

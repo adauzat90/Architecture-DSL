@@ -41,6 +41,24 @@ statement (e.g. `program 3 bed 2 bath`): the validator then warns
 (`PROGRAM_MISMATCH`) if the rooms you placed don't match — so a dropped bedroom
 can't slip through a clean compile.
 
+`require` extends the same pattern from counts to **spatial** intent — declare
+the brief's constraints in the source and every compile re-checks them:
+
+```barn
+require adjacent kitchen dining        # the two rooms must share a wall
+require separate master_bed garage     # the two rooms must NOT share a wall
+require exterior living south          # living needs an exterior (south) wall
+require area great_room >= 300         # nominal area at least 300 sq ft
+```
+
+Each unmet requirement is a `REQUIRE_UNMET` warning with a concrete fix (a
+relative anchor to abut the rooms, which walls are interior, actual vs required
+area); a requirement naming an unknown room id is a `REQUIRE_REF` error, like
+any dangling reference. `adjacent` is purely geometric — a shared wall, exactly
+what a `door` between the rooms needs; a door alone doesn't satisfy it.
+`separate` is trivially satisfied across levels, and `area` uses the same
+nominal figure `program area` does. Requirements never block a compile.
+
 ## The mental model
 
 - **Units are feet.** Everything is a plain number; no `ft`, no fractions like
@@ -65,10 +83,13 @@ floor <D>                          # optional; inter-floor assembly depth (ft). 
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
 note "free text"                   # optional; repeatable
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
+require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeatable); also:
+require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door
 open <id_a> - <id_b> [width <w>] [offset <o>]     # shorthand for `door <a> - <b> cased ...`
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
@@ -84,6 +105,13 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 - `<offset>` is feet from the wall's **start corner** (its south or west end) to
   the near edge of the opening. The opening must fit: `offset + width <= wall
   length` (and `offset >= 0`).
+- `door <id> <wall> overhead` is a **sectional garage door** on a garage/shop
+  bay's exterior wall. Defaults to the residential 9 × 7 single; `width 16` is a
+  double (stock widths 8/9/10/12/16 ft, heights 7/8 ft — off-standard nudges
+  `DOOR_SIZE`, and wider than 10 ft notes `OVERHEAD_HEADER`). It is never an
+  egress door (no-egress is implied) and doesn't count as a building entrance —
+  the plan still needs a people-door `entry`. On a room that isn't a garage/shop
+  it notes `OVERHEAD_ROOM`.
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
 
@@ -320,6 +348,10 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
   `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
   — it's a contract check, not a code error — so it's a warning.
+- `REQUIRE_UNMET` — the compiled geometry doesn't satisfy a declared `require`
+  (a required adjacency/separation/exterior wall/minimum area). Same contract
+  logic as `PROGRAM_MISMATCH`, so a warning; a `require` naming an unknown room
+  id is a `REQUIRE_REF` **error**, like any dangling reference.
 
 **Info (design quality — heed when you can):**
 - `KITCHEN_FLOW` — open the kitchen to dining/living.
@@ -553,6 +585,10 @@ The builder mirrors the DSL:
   wall, …)` is an `entry`; `add_window(room, wall, …)`; `add_porch(id, …)`.
 - `program(beds, baths=None)` declares the intended counts (the `program`
   statement); omit `baths` to check only bedrooms.
+- `require(kind, a, b=None, *, wall=None, min_area=None)` declares a spatial
+  requirement (the `require` statement): `require("adjacent", "kitchen",
+  "dining")`, `require("separate", "master", "garage")`, `require("exterior",
+  "living", wall="south")`, `require("area", "great_room", min_area=300)`.
 - `type` and `wall` accept the enum **or** a string (`"living"`, `"south"`) and
   are validated immediately (a bad value raises `ValueError`, not a late crash).
 - `level=` must be a whole number ≥ 0, same as the DSL.

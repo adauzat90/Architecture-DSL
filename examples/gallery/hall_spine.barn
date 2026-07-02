@@ -10,6 +10,7 @@ plan "Birch Hollow"
 envelope 69 x 33
 ceiling 10
 program 3 bed 2 bath
+require adjacent kitchen dining
 
 # --- public band (south, y 0..15) ---
 room living:  living  at 0,0   size 27 x 15

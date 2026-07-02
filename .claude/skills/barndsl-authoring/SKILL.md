@@ -51,6 +51,9 @@ the brief — you can score `0/0/0` having dropped a bedroom. The `compile` reca
 program against what was asked. Always reconcile the recap with the brief — or
 make it mechanical: add a `program <n> bed [<m> bath]` line and the validator
 warns (`PROGRAM_MISMATCH`) when the rooms placed don't match the declared counts.
+`require adjacent|separate <a> <b>`, `require exterior <room> [<wall>]` and
+`require area <room> >= <sqft>` do the same for the brief's *spatial* intent
+(`REQUIRE_UNMET` warnings), so it survives every revision.
 
 ## Mental model (the source of most early bugs)
 

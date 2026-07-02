@@ -298,6 +298,10 @@ class XYZ:
         self.Z = float(z)
 
 
+# Revit exposes ``XYZ.Zero`` as a static property (the origin).
+XYZ.Zero = XYZ(0.0, 0.0, 0.0)
+
+
 class UV:
     def __init__(self, u, v):
         self.U = float(u)
@@ -465,6 +469,10 @@ class FamilySymbol(FakeElement):
 
     def Duplicate(self, new_name):
         dup = FamilySymbol(self.Family.Name, new_name, self._category, self._doc)
+        # A duplicated type inherits the source type's parameters (so a family
+        # with e.g. "b"/"h" section params keeps them on the sized duplicate).
+        for key, p in self._params.items():
+            dup._params[key] = FakeParam(p._v, p.StorageType, p.IsReadOnly)
         self._doc.add_symbol(dup, self._category)
         return dup
 
@@ -506,7 +514,68 @@ class Floor(FakeElement):
 
 
 class FamilyInstance(FakeElement):
-    pass
+    """A placed family instance. Doors carry the facing/hand state the builder
+    flips for an authored swing (``FacingOrientation`` + ``flipFacing`` /
+    ``flipHand``, like Revit's ``FamilyInstance``)."""
+
+    def __init__(self, name="", doc=None):
+        super().__init__(name, doc)
+        self.FacingOrientation = XYZ(0.0, 1.0, 0.0)
+        self.FacingFlipped = False
+        self.HandFlipped = False
+
+    def flipFacing(self):
+        f = self.FacingOrientation
+        self.FacingOrientation = XYZ(-f.X, -f.Y, f.Z)
+        self.FacingFlipped = not self.FacingFlipped
+        return True
+
+    def flipHand(self):
+        self.HandFlipped = not self.HandFlipped
+        return True
+
+
+class Opening(FakeElement):
+    """A rectangular wall cut made by ``doc.Create.NewOpening`` (cased openings)."""
+
+    def __init__(self, host, p1, p2, doc=None):
+        super().__init__("opening", doc)
+        self.host = host
+        self.p1 = p1
+        self.p2 = p2
+
+
+class ProjectPosition:
+    def __init__(self, east_west=0.0, north_south=0.0, elevation=0.0, angle=0.0):
+        self.EastWest = east_west
+        self.NorthSouth = north_south
+        self.Elevation = elevation
+        self.Angle = angle
+
+
+class ProjectLocation(FakeElement):
+    """The active project location: hands out / accepts a ProjectPosition, like
+    Revit's ``ProjectLocation`` (enough for the true-north rotation)."""
+
+    def __init__(self, doc=None):
+        super().__init__("project location", doc)
+        self._position = ProjectPosition()
+
+    def GetProjectPosition(self, point):
+        p = self._position
+        return ProjectPosition(p.EastWest, p.NorthSouth, p.Elevation, p.Angle)
+
+    def SetProjectPosition(self, position):
+        self._position = position
+
+
+class ElementTransformUtils:
+    @staticmethod
+    def RotateElement(doc, element_id, axis, angle):
+        elem = doc._by_id.get(element_id.Value)
+        if elem is not None:
+            elem.rotation = getattr(elem, "rotation", 0.0) + float(angle)
+        doc.rotations.append((element_id.Value, float(angle)))
 
 
 class Room(FakeElement):
@@ -715,6 +784,17 @@ class _Creator:
             raise Exception("forced NewFamilyInstance failure")
         inst = FamilyInstance("instance", self.doc)
         inst.set_param(BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM, 0.0)
+        # A wall-hosted instance (a door/window) faces perpendicular to its host:
+        # +Y off an east-west wall, +X off a north-south one — the "default
+        # facing" the builder flips when the authored swing points the other way.
+        host = args[2] if len(args) >= 3 else None
+        curve = getattr(host, "curve", None)
+        if curve is None and getattr(host, "profile", None):
+            curve = host.profile[0]
+        if curve is not None:
+            dx = curve.p2.X - curve.p1.X
+            dy = curve.p2.Y - curve.p1.Y
+            inst.FacingOrientation = XYZ(0.0, 1.0, 0.0) if abs(dx) >= abs(dy) else XYZ(1.0, 0.0, 0.0)
         # Structural-column base/top params (present on a real column instance),
         # so the builder can raise a post to the plate and a test can read it.
         inst.set_param(BuiltInParameter.FAMILY_TOP_LEVEL_PARAM, None, "ElementId")
@@ -731,6 +811,13 @@ class _Creator:
             self.doc.instances.setdefault(cat, []).append(inst)
         self.doc.created.append(("instance", inst, args))
         return inst
+
+    def NewOpening(self, wall, p1, p2):
+        if self.doc.fail_new_opening:
+            raise Exception("forced NewOpening failure")
+        op = Opening(wall, p1, p2, self.doc)
+        self.doc.created.append(("opening", op, (wall, p1, p2)))
+        return op
 
     def NewRoom(self, level, uv):
         if self.doc.room_unplaced:
@@ -840,9 +927,12 @@ class FakeDocument:
         self.rollbacks = []
         self.stair_commits = 0
         self.stair_cancels = 0
+        self.rotations = []  # (element id value, angle) from RotateElement
         self._by_id = {}
+        self.ActiveProjectLocation = ProjectLocation(self)
         # toggles for exercising failure paths
         self.fail_family_instance = False
+        self.fail_new_opening = False
         self.room_unplaced = False
 
     # registration / lookup
@@ -979,7 +1069,8 @@ def _make_db_module():
         Transaction, ViewFamily, ViewFamilyType, ViewPlan, ViewSchedule, ViewSheet,
         Viewport, IndependentTag, TagMode, TagOrientation, ElementId, Reference,
         LinkElementId, ReferenceArray, Dimension, Transform, BoundingBoxXYZ,
-        ViewSection, ElevationMarker, ScheduleSheetInstance,
+        ViewSection, ElevationMarker, ScheduleSheetInstance, Opening,
+        ProjectPosition, ProjectLocation, ElementTransformUtils,
     ):
         setattr(db, obj.__name__, obj)
     db.ExtensibleStorage = ExtensibleStorage

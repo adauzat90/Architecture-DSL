@@ -385,10 +385,19 @@ class _Renderer:
             if level is not None and room.level != level:
                 continue
             x1, y1, x2, y2 = opening_endpoints(room, xdoor.wall, xdoor.offset, xdoor.width)
+            overhead = getattr(xdoor, "kind", "entry") == "overhead"
             if xdoor.wall in (Direction.NORTH, Direction.SOUTH):
-                self._door_symbol(min(x1, x2), y1, "h", xdoor.width)
+                if overhead:
+                    sgn = 1.0 if xdoor.wall is Direction.SOUTH else -1.0
+                    self._overhead_symbol(min(x1, x2), y1, "h", xdoor.width, sgn)
+                else:
+                    self._door_symbol(min(x1, x2), y1, "h", xdoor.width)
             else:
-                self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
+                if overhead:
+                    sgn = 1.0 if xdoor.wall is Direction.WEST else -1.0
+                    self._overhead_symbol(x1, min(y1, y2), "v", xdoor.width, sgn)
+                else:
+                    self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
 
     @staticmethod
     def _swing_sgn(door, a, b, edge) -> float | None:
@@ -499,6 +508,24 @@ class _Renderer:
             s = d if (oy + d) <= self.max_y else -d
             self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
             self._line(self.sx(ox), self.sy(oy + s), self.sx(ox + w), self.sy(oy + s), WALL, 1.6)
+
+    def _overhead_symbol(self, ox: float, oy: float, orientation: str, w: float, sgn: float):
+        """Draw an overhead/sectional garage door: the gap plus a dashed track
+        line set just inside the room (the segmented panel riding its tracks —
+        no leaf, no swing arc). ``sgn`` points into the room (+x/+y is +1)."""
+        d = 0.5 * sgn  # how far the track line sits inside the room, ft
+        if orientation == "v":  # wall runs in +y at x=ox
+            self._line(self.sx(ox), self.sy(oy), self.sx(ox), self.sy(oy + w), "#ffffff", 4.0)
+            self._line(
+                self.sx(ox + d), self.sy(oy), self.sx(ox + d), self.sy(oy + w),
+                WALL, 1.6, dash="5 3",
+            )
+        else:  # wall runs in +x at y=oy
+            self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
+            self._line(
+                self.sx(ox), self.sy(oy + d), self.sx(ox + w), self.sy(oy + d),
+                WALL, 1.6, dash="5 3",
+            )
 
     def _draw_stairs(self, level: int):
         for s in self.plan.stairs:

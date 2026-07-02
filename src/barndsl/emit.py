@@ -7,7 +7,7 @@ the emitted text reproduces an equivalent plan.
 from __future__ import annotations
 
 from .constants import FLOOR_ASSEMBLY_DEPTH
-from .elements import Barndominium
+from .elements import OVERHEAD_DOOR_HEIGHT, Barndominium
 
 
 def _n(value: float) -> str:
@@ -57,6 +57,18 @@ def emit_dsl(plan: Barndominium) -> str:
         if spec.min_area is not None:
             line += f" area {_n(spec.min_area)}"
         out.append(line)
+    for req in getattr(plan, "requirements", None) or []:
+        # Declared spatial intent rides next to `program` — the plan's contract
+        # block, ahead of the geometry it constrains.
+        if req.kind in ("adjacent", "separate"):
+            out.append(f"require {req.kind} {req.a} {req.b}")
+        elif req.kind == "exterior":
+            line = f"require exterior {req.a}"
+            if req.wall is not None:
+                line += f" {req.wall.value}"
+            out.append(line)
+        else:  # area
+            out.append(f"require area {req.a} >= {_n(req.min_area)}")
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")
@@ -106,6 +118,15 @@ def emit_dsl(plan: Barndominium) -> str:
     if plan.exterior_doors:
         out.append("")
         for xd in plan.exterior_doors:
+            if getattr(xd, "kind", "entry") == "overhead":
+                # An overhead door has no egress flag (no-egress is implied);
+                # height is always emitted (7 is the stock default).
+                h = xd.height if xd.height is not None else OVERHEAD_DOOR_HEIGHT
+                out.append(
+                    f"door {xd.room} {xd.wall.value} overhead width {_n(xd.width)} "
+                    f"height {_n(h)} offset {_n(xd.offset)}"
+                )
+                continue
             line = f"entry {xd.room} {xd.wall.value} width {_n(xd.width)} offset {_n(xd.offset)}"
             if not xd.egress:
                 line += " no-egress"

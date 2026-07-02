@@ -26,6 +26,7 @@ Coordinates and units pass straight through — feet (Revit's internal unit), ``
 east / ``y`` north matching world XY.
 """
 
+import math
 import sys
 
 from pyrevit import DB, revit
@@ -300,12 +301,92 @@ def _wall_type_named(doc, name):
     return None
 
 
+def _roof_type_named(doc, name):
+    if not name:
+        return None
+    try:
+        types = _collect(doc, DB.RoofType)
+    except Exception:
+        return None
+    for rt in types:
+        if _name(rt) == name:
+            return rt
+    return None
+
+
+def _hint_tokens(hint):
+    """The words of a finish hint, lowercased ("standing-seam metal" →
+    ["standing", "seam", "metal"]) for a contains-any name match."""
+    if not hint:
+        return []
+    text = str(hint).lower()
+    for sep in ("-", "_", "/", ","):
+        text = text.replace(sep, " ")
+    return [t for t in text.split() if t]
+
+
+def _hinted_wall_type(doc, hint):
+    """An exterior wall type whose name contains a hint token (case-insensitive),
+    e.g. siding "metal" → "Exterior - Metal Panel". Prefers Exterior-function
+    types; falls back to any basic type whose name matches. None if no match."""
+    tokens = _hint_tokens(hint)
+    if not tokens:
+        return None
+    matches = []
+    for wt in _basic_wall_types(doc):
+        nm = _name(wt).lower()
+        if any(t in nm for t in tokens):
+            matches.append(wt)
+    for wt in matches:
+        try:
+            if wt.Function == DB.WallFunction.Exterior:
+                return wt
+        except Exception:
+            pass
+    return matches[0] if matches else None
+
+
+def _hinted_roof_type(doc, hint):
+    """A roof type whose name contains a hint token, e.g. roofing
+    "standing-seam metal" → "Standing Seam Metal". None if no match."""
+    tokens = _hint_tokens(hint)
+    if not tokens:
+        return None
+    try:
+        types = _collect(doc, DB.RoofType)
+    except Exception:
+        return None
+    for rt in types:
+        nm = _name(rt).lower()
+        if any(t in nm for t in tokens):
+            return rt
+    return None
+
+
 def _floor_type_named(doc, name):
     if not name:
         return None
     for ft in _collect(doc, DB.FloorType):
         if _name(ft) == name:
             return ft
+    return None
+
+
+#: Family-name fragments that read as an overhead/sectional garage door.
+_GARAGE_DOOR_HINTS = ("garage", "overhead", "sectional")
+
+
+def _garage_door_symbol(doc):
+    """The first door family whose name reads like a garage door, or None.
+
+    The auto-pick for kind == "overhead" openings: prefer a family named like
+    "Garage-Sectional" / "Overhead Door" over the standard swing-leaf family.
+    """
+    for s in _symbols(doc, DB.BuiltInCategory.OST_Doors):
+        name = (s.Family.Name or "").lower()
+        for hint in _GARAGE_DOOR_HINTS:
+            if hint in name:
+                return s
     return None
 
 
@@ -477,6 +558,7 @@ class _Resources(object):
         self.ext_wall = None
         self.int_wall = None
         self.door = None
+        self.garage_door = None
         self.window = None
         self.floor = None
         self.column = None
@@ -488,14 +570,17 @@ class _Resources(object):
         self.footing = None
 
 
-def _resolve_resources(doc, options, report):
+def _resolve_resources(doc, options, report, data=None):
     """Pick the wall/floor/family types, honouring named overrides.
 
-    A missing named override falls back to an auto-pick and adds a note. The
-    chosen names are recorded in ``report.resources`` for the report header.
+    Precedence per pass: a **named** config override, then (for the exterior
+    wall / roof) a plan **finish hint** match (``siding``/``roofing`` keywords
+    against type names), then the auto-pick. A missing named override falls back
+    with a note. The chosen names are recorded in ``report.resources``.
     """
     res = _Resources()
     auto_ext, auto_int = _pick_wall_types(doc)
+    plan_info = (data or {}).get("plan") or {}
 
     def named_or(name, finder, fallback, label):
         if name:
@@ -505,9 +590,24 @@ def _resolve_resources(doc, options, report):
             report.note("%s '%s' not found in project; using an auto-pick" % (label, name))
         return fallback
 
+    # A finish hint sits between the named override and the auto-pick: honour it
+    # when it matches a type, note which path won.
+    siding = plan_info.get("siding")
+    ext_fallback = auto_ext
+    if siding:
+        hinted = _hinted_wall_type(doc, siding)
+        if hinted is not None:
+            ext_fallback = hinted
+        else:
+            report.note("siding hint '%s' matched no wall type; using an auto-pick" % siding)
+
     res.ext_wall = named_or(
-        options.exterior_wall_type, lambda n: _wall_type_named(doc, n), auto_ext, "exterior wall type"
+        options.exterior_wall_type, lambda n: _wall_type_named(doc, n), ext_fallback, "exterior wall type"
     )
+    if siding and res.ext_wall is ext_fallback and ext_fallback is not auto_ext:
+        report.note(
+            "exterior wall type '%s' picked by siding hint '%s'" % (_name(res.ext_wall), siding)
+        )
     res.int_wall = named_or(
         options.interior_wall_type, lambda n: _wall_type_named(doc, n), auto_int, "interior wall type"
     )
@@ -516,6 +616,15 @@ def _resolve_resources(doc, options, report):
         lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_Doors, n),
         (_symbols(doc, DB.BuiltInCategory.OST_Doors) or [None])[0],
         "door family",
+    )
+    # Overhead (garage) doors get their own pick: a named override, else the
+    # first door family whose name reads garage/overhead/sectional. None means
+    # the standard door family stands in (noted per overhead opening).
+    res.garage_door = named_or(
+        options.garage_door_family,
+        lambda n: _symbol_named(doc, DB.BuiltInCategory.OST_Doors, n),
+        _garage_door_symbol(doc),
+        "garage-door family",
     )
     res.window = named_or(
         options.window_family,
@@ -563,13 +672,35 @@ def _resolve_resources(doc, options, report):
     report.resources["exterior_wall"] = _name(res.ext_wall) if res.ext_wall else "(none)"
     report.resources["interior_wall"] = _name(res.int_wall) if res.int_wall else "(none)"
     report.resources["door_family"] = res.door.Family.Name if res.door else "(none loaded)"
+    report.resources["garage_door_family"] = (
+        res.garage_door.Family.Name if res.garage_door else "(standard door)"
+    )
     report.resources["window_family"] = res.window.Family.Name if res.window else "(none loaded)"
     report.resources["floor_type"] = _name(res.floor) if res.floor else "(none)"
 
+    # Roof type: named override → roofing hint → the first roof type.
     try:
-        res.roof_type = (_collect(doc, DB.RoofType) or [None])[0]
+        auto_roof = (_collect(doc, DB.RoofType) or [None])[0]
     except Exception:
-        res.roof_type = None
+        auto_roof = None
+    roofing = plan_info.get("roofing")
+    roof_fallback = auto_roof
+    if roofing:
+        hinted = _hinted_roof_type(doc, roofing)
+        if hinted is not None:
+            roof_fallback = hinted
+        else:
+            report.note("roofing hint '%s' matched no roof type; using an auto-pick" % roofing)
+    res.roof_type = named_or(
+        getattr(options, "roof_type", None),
+        lambda n: _roof_type_named(doc, n),
+        roof_fallback,
+        "roof type",
+    )
+    if roofing and res.roof_type is roof_fallback and roof_fallback is not auto_roof:
+        report.note(
+            "roof type '%s' picked by roofing hint '%s'" % (_name(res.roof_type), roofing)
+        )
     report.resources["roof_type"] = _name(res.roof_type) if res.roof_type else "(none)"
     try:
         res.ceiling_type = (_collect(doc, DB.CeilingType) or [None])[0]
@@ -580,6 +711,33 @@ def _resolve_resources(doc, options, report):
 
 
 # --- element passes ----------------------------------------------------------
+
+
+def _set_project_north(doc, data, report):
+    """Rotate the project's true north to match the plan's ``orientation``.
+
+    barndsl's ``orientation`` is the compass azimuth (degrees, **clockwise** from
+    true north) that plan-north (+y) points; the model's geometry stays in the
+    plan frame (project north = plan north). Revit's ``ProjectPosition.Angle`` is
+    the rotation of **true north from project north, counterclockwise positive**
+    (radians). Plan-north at azimuth ``A`` puts true north ``A`` degrees
+    counterclockwise of project north, so ``Angle = +radians(A)``. Sign
+    convention needs live-Revit confirmation; a failure is noted, never fatal.
+    """
+    az = float((data.get("plan") or {}).get("orientation") or 0.0)
+    if abs(az) < 1e-9:
+        return
+    try:
+        loc = doc.ActiveProjectLocation
+        pos = loc.GetProjectPosition(DB.XYZ.Zero)
+        pos.Angle = math.radians(az)
+        loc.SetProjectPosition(pos)
+        report.created(
+            "project", "true north", revit_id=_rid(loc),
+            message="rotated to azimuth %.1f deg (plan-north bearing)" % az,
+        )
+    except Exception as exc:
+        report.note("project north not set from orientation %.1f deg: %s" % (az, exc))
 
 
 def _ensure_levels(doc, data, report):
@@ -724,20 +882,141 @@ def _sized_symbol(doc, base, width, height, cache, report):
     return cache[key]
 
 
+def _wall_opening_points(o, wall_d, z):
+    """The two opposite corners of a rectangular wall cut for a cased opening:
+    floor to the opening height, centred at the location, ``width`` wide along
+    the host wall's run direction."""
+    (sx, sy), (ex, ey) = wall_d["start"], wall_d["end"]
+    dx, dy = float(ex) - float(sx), float(ey) - float(sy)
+    run = math.hypot(dx, dy)
+    ux, uy = (dx / run, dy / run) if run > 1e-9 else (1.0, 0.0)
+    cx, cy = float(o["location"][0]), float(o["location"][1])
+    half = float(o.get("width", 0.0)) / 2.0
+    height = float(o.get("height", 0.0))
+    p1 = DB.XYZ(cx - ux * half, cy - uy * half, z)
+    p2 = DB.XYZ(cx + ux * half, cy + uy * half, z + height)
+    return p1, p2
+
+
+def _cased_wall_opening(doc, o, host, wall_d, level, report):
+    """Cut a real rectangular wall opening for a doorless cased opening (the
+    open-concept walk-through), instead of hanging a swinging leaf. Returns True
+    on success; a failure is noted so the caller can fall back to a sized door
+    family (the previous behaviour)."""
+    if wall_d is None:
+        report.note("cased opening %s: host wall not in exchange; door-family fallback" % o["id"])
+        return False
+    try:
+        z = level.Elevation if level else 0.0
+        p1, p2 = _wall_opening_points(o, wall_d, z)
+        op = doc.Create.NewOpening(host, p1, p2)
+        _made(report, "opening", o["id"], op, message="cased opening (wall cut, no leaf)")
+        return True
+    except Exception as exc:
+        _logger.warning("cased opening %s: %s", o["id"], exc)
+        report.note(
+            "cased opening %s: wall opening failed (%s); sized door-family fallback"
+            % (o["id"], exc)
+        )
+        return False
+
+
+def _flip_door_swing(inst, o, rooms_by_id, wall_d, report):
+    """Set a placed door's facing/hand from the authored swing.
+
+    ``swing_into`` names the room the leaf opens into: work out which side of the
+    host wall that room's rectangle lies on and flip the instance's facing when
+    its ``FacingOrientation`` points the other way. ``hinge`` "far" flips the
+    hand (the family default is assumed hinged at the near/south-west end — a
+    judgment call that needs live-Revit confirmation). Best-effort: a family or
+    API that refuses is noted, never fatal. Returns a message fragment."""
+    swing = o.get("swing_into")
+    hinge = o.get("hinge")
+    if not swing and not hinge:
+        return ""
+    parts = []
+    try:
+        if swing:
+            room = rooms_by_id.get(swing)
+            if room is None or wall_d is None:
+                report.note("door %s: swing room/wall unknown; family default kept" % o["id"])
+            else:
+                (sx, sy), (ex, ey) = wall_d["start"], wall_d["end"]
+                lx, ly = float(o["location"][0]), float(o["location"][1])
+                # Which side of the (axis-aligned) host wall is the room's centre?
+                if abs(float(ex) - float(sx)) >= abs(float(ey) - float(sy)):
+                    # Wall runs east-west; the door faces north or south.
+                    room_c = float(room["y"]) + float(room["length"]) / 2.0
+                    want = (0.0, 1.0) if room_c >= ly else (0.0, -1.0)
+                else:
+                    # Wall runs north-south; the door faces east or west.
+                    room_c = float(room["x"]) + float(room["width"]) / 2.0
+                    want = (1.0, 0.0) if room_c >= lx else (-1.0, 0.0)
+                facing = inst.FacingOrientation
+                if facing.X * want[0] + facing.Y * want[1] < 0.0:
+                    inst.flipFacing()
+                    parts.append("flipped to swing into %s" % swing)
+                else:
+                    parts.append("swings into %s" % swing)
+        if hinge == "far":
+            inst.flipHand()
+            parts.append("hinge far")
+    except Exception as exc:
+        report.note("door %s: swing/hand flip not applied (%s)" % (o["id"], exc))
+    return "; ".join(parts)
+
+
+def _stamp_egress(inst, o):
+    """Write the egress flag to the door's Comments ("barndsl egress") so a Revit
+    schedule can filter egress doors. Best-effort — read-only/missing param is
+    fine (the managed marker lives in Extensible Storage, not here)."""
+    if not o.get("egress"):
+        return
+    try:
+        p = _comments_param(inst)
+        if p is not None and not p.IsReadOnly:
+            p.Set("barndsl egress")
+    except Exception:
+        pass
+
+
 def _build_openings(doc, data, levels, walls, res, options, report):
     door_base = _activate(res.door, doc)
+    garage_base = _activate(res.garage_door, doc)
     win_base = _activate(res.window, doc)
     st = DB.Structure.StructuralType.NonStructural
     cache = {}
+    wall_dicts = _exchange.walls_by_id(data)
+    rooms_by_id = dict((r["id"], r) for r in data.get("rooms", []))
 
     for o in data["openings"]:
+        cased = o["category"] == "cased_opening"
         kind = "window" if o["category"] == "window" else "door"
         host = walls.get(o.get("host_wall"))
         if host is None:
-            report.skipped(kind, o["id"], "no host wall")
+            report.skipped("opening" if cased else kind, o["id"], "no host wall")
             continue
         level = levels.get(o["level"])
+        wall_d = wall_dicts.get(o.get("host_wall"))
+        if cased:
+            # A cased opening has no leaf: cut a real wall opening. Only on
+            # failure fall through to the old sized-door-family stand-in.
+            if _cased_wall_opening(doc, o, host, wall_d, level, report):
+                continue
+        overhead = o.get("kind") == "overhead"
         base = win_base if kind == "window" else door_base
+        if overhead:
+            # Prefer the garage-door family for a sectional/overhead door; the
+            # sized standard door family stands in (with a note) when none is
+            # loaded, so the opening still lands at the right size.
+            if garage_base is not None:
+                base = garage_base
+            elif base is not None:
+                report.note(
+                    "overhead door %s: no garage-door family loaded (a name "
+                    "containing garage/overhead/sectional); the sized standard "
+                    "door family stands in" % o["id"]
+                )
         if base is None:
             report.skipped(kind, o["id"], "no %s family loaded" % kind)
             continue
@@ -752,6 +1031,7 @@ def _build_openings(doc, data, levels, walls, res, options, report):
             _logger.warning("opening %s: %s", o["id"], exc)
             report.failed(kind, o["id"], str(exc))
             continue
+        message = ""
         if kind == "window":
             try:
                 p = inst.get_Parameter(DB.BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM)
@@ -759,7 +1039,15 @@ def _build_openings(doc, data, levels, walls, res, options, report):
                     p.Set(float(o.get("sill", 0.0)))
             except Exception:
                 pass
-        _made(report, kind, o["id"], inst)
+        elif overhead:
+            # An overhead door rides up its tracks — no swing to flip, and it
+            # is never egress, so there is no flag to stamp.
+            message = "overhead (garage) door"
+        elif not cased:
+            # Honour the authored swing side/hinge and stamp the egress flag.
+            message = _flip_door_swing(inst, o, rooms_by_id, wall_d, report)
+            _stamp_egress(inst, o)
+        _made(report, kind, o["id"], inst, message=message)
 
 
 #: Default finish schedule by room type — a starting point a residential room
@@ -868,7 +1156,54 @@ def _build_ceilings(doc, data, levels, res, report):
             report.failed("ceiling", r["id"], str(exc))
 
 
-def _build_structure(doc, data, levels, res, report):
+#: Section width/depth parameter names structural families commonly use — steel
+#: (b/d/bf), generic (Width/Depth), timber (b/h). Tried in order, defensively.
+_SECTION_WIDTH_NAMES = ("b", "Width", "bf")
+_SECTION_DEPTH_NAMES = ("h", "Depth", "d")
+
+
+def _sized_section(doc, base, width, depth, cache, report):
+    """A family symbol duplicated per unique section size ("barndsl WxD") with
+    its width/depth type parameters set — the structural mirror of
+    :func:`_sized_symbol`. Column/framing families vary wildly in parameter
+    naming, so common names are tried (b/h, Width/Depth, d/bf); when none takes,
+    the **default** symbol is returned with a note (no half-sized duplicate)."""
+    key = ("section", _id_val(base.Id), round(float(width), 4), round(float(depth), 4))
+    if key in cache:
+        return cache[key]
+    target_name = "barndsl %.2fx%.2f" % (float(width), float(depth))
+    fam = base.Family
+    sym = None
+    try:
+        for sid in fam.GetFamilySymbolIds():
+            s = doc.GetElement(sid)
+            if s is not None and _name(s) == target_name:
+                sym = s
+                break
+    except Exception:
+        sym = None
+    if sym is None:
+        try:
+            sym = base.Duplicate(target_name)
+        except Exception as exc:
+            report.note("could not size section '%s': %s" % (target_name, exc))
+            cache[key] = _activate(base, doc)
+            return cache[key]
+        set_w = _set_double_param(sym, [], _SECTION_WIDTH_NAMES, width)
+        set_d = _set_double_param(sym, [], _SECTION_DEPTH_NAMES, depth)
+        doc.Regenerate()
+        if not (set_w or set_d):
+            report.note(
+                "family '%s' has no settable section (b/h, Width/Depth); using its default size"
+                % fam.Name
+            )
+            cache[key] = _activate(base, doc)
+            return cache[key]
+    cache[key] = _activate(sym, doc)
+    return cache[key]
+
+
+def _build_structure(doc, data, levels, res, options, report):
     structure = data.get("structure", {})
     columns = structure.get("columns", [])
     framing = structure.get("framing", [])
@@ -876,6 +1211,15 @@ def _build_structure(doc, data, levels, res, report):
         return
     col_sym = _activate(res.column, doc)
     beam_sym = _activate(res.beam, doc)
+    cache = {}
+
+    def sized(base, size_ft):
+        # Nominal square section from the exchange (Post.size / the frame's post
+        # size for beams); 0/absent or sizing disabled keeps the default type.
+        size = float(size_ft or 0.0)
+        if base is None or size <= 0.0 or not options.size_families:
+            return base
+        return _sized_section(doc, base, size, size, cache, report)
 
     if columns and col_sym is None:
         report.note("structural columns skipped: no structural-column family loaded")
@@ -887,8 +1231,9 @@ def _build_structure(doc, data, levels, res, report):
             continue
         src = "post %d" % i
         try:
+            sym = sized(col_sym, c.get("size"))
             inst = doc.Create.NewFamilyInstance(
-                _xyz(c["point"], level.Elevation), col_sym, level, DB.Structure.StructuralType.Column
+                _xyz(c["point"], level.Elevation), sym, level, DB.Structure.StructuralType.Column
             )
             # Give the post a real height: rise from the floor to the plate (the
             # beam it carries) rather than the family's default stub. Prefer an
@@ -912,8 +1257,11 @@ def _build_structure(doc, data, levels, res, report):
         src = "%s %d" % (f.get("role", "beam"), i)
         try:
             curve = DB.Line.CreateBound(_xyz(f["start"], z), _xyz(f["end"], z))
+            # ``size`` is the frame's nominal post section (the beams share it in
+            # this MVP); absent on an old exchange → the family default.
+            sym = sized(beam_sym, f.get("size"))
             inst = doc.Create.NewFamilyInstance(
-                curve, beam_sym, level, DB.Structure.StructuralType.Beam
+                curve, sym, level, DB.Structure.StructuralType.Beam
             )
             _made(report, "framing", src, inst)
         except Exception as exc:
@@ -923,12 +1271,36 @@ def _build_structure(doc, data, levels, res, report):
 #: Fixture kinds hosted from a plumbing family vs. an appliance (specialty) family.
 _WET_FIXTURES = ("toilet", "lavatory", "tub", "shower", "sink")
 
+#: Z-rotation (radians, counterclockwise) so a fixture backs onto its wall,
+#: assuming the family default faces +Y/north with its back at -Y: backing the
+#: south wall is the default; north faces south (pi); east faces west (+pi/2 —
+#: rotating +Y counterclockwise 90° points -X); west faces east (-pi/2).
+_FIXTURE_ROTATION = {"S": 0.0, "N": math.pi, "E": math.pi / 2.0, "W": -math.pi / 2.0}
+
+
+def _rotate_fixture(doc, inst, fx, z, report):
+    """Rotate a placed fixture about its own vertical axis so it backs onto the
+    wall the seed was laid against (``fx["wall"]``, S/N/E/W). The seed point
+    stays put — the core already placed the footprint flush to the wall.
+    Best-effort; returns a message fragment for the record."""
+    angle = _FIXTURE_ROTATION.get(fx.get("wall"))
+    if not angle:
+        return ""
+    try:
+        axis = DB.Line.CreateBound(_xyz(fx["point"], z), _xyz(fx["point"], z + 1.0))
+        DB.ElementTransformUtils.RotateElement(doc, inst.Id, axis, angle)
+        return "rotated to back onto %s wall" % fx["wall"]
+    except Exception as exc:
+        report.note("fixture %s: rotation not applied (%s)" % (fx.get("id"), exc))
+        return ""
+
 
 def _build_fixtures(doc, data, levels, res, report):
     """Place a family instance at each fixture/appliance seed — a plumbing family
     for wet fixtures, a specialty-equipment family for appliances. These are
     seeds: the family stands in at the right spot for the designer to swap/adjust.
-    Skips a fixture (with a note) when its family isn't loaded."""
+    Each is rotated to back onto the wall the seed was laid against. Skips a
+    fixture (with a note) when its family isn't loaded."""
     fixtures = data.get("fixtures", [])
     if not fixtures:
         return
@@ -949,7 +1321,11 @@ def _build_fixtures(doc, data, levels, res, report):
         z = level.Elevation if level else 0.0
         try:
             inst = doc.Create.NewFamilyInstance(_xyz(fx["point"], z), sym, level, st)
-            _made(report, "fixture", fx.get("id"), inst, message=fx.get("kind", ""))
+            message = fx.get("kind", "")
+            rotated = _rotate_fixture(doc, inst, fx, z, report)
+            if rotated:
+                message = "%s (%s)" % (message, rotated) if message else rotated
+            _made(report, "fixture", fx.get("id"), inst, message=message)
         except Exception as exc:
             _logger.warning("fixture %s: %s", fx.get("id"), exc)
             report.failed("fixture", fx.get("id"), str(exc))
@@ -1515,7 +1891,7 @@ def build(doc, data, options=None):
     report = _report.BuildReport(dry_run=options.dry_run)
     report.problems = _exchange.validate(data)
 
-    res = _resolve_resources(doc, options, report)
+    res = _resolve_resources(doc, options, report, data)
     if res.ext_wall is None or res.int_wall is None:
         report.note("no basic wall type found in this project; nothing built")
         return report
@@ -1526,6 +1902,7 @@ def build(doc, data, options=None):
     try:
         if options.replace:
             _purge_managed(doc, report)
+        _set_project_north(doc, data, report)
         levels = _ensure_levels(doc, data, report)
         walls = _build_walls(doc, data, levels, res, options, report)
         _build_openings(doc, data, levels, walls, res, options, report)
@@ -1533,7 +1910,7 @@ def build(doc, data, options=None):
         if options.ceilings:
             _build_ceilings(doc, data, levels, res, report)
         if options.structure:
-            _build_structure(doc, data, levels, res, report)
+            _build_structure(doc, data, levels, res, options, report)
         if options.fixtures:
             _build_fixtures(doc, data, levels, res, report)
         if options.slabs:

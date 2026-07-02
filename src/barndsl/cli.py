@@ -7,6 +7,10 @@
         Compile, and if it's valid, render an annotated 2D floor plan. `--frame`
         auto-places a default post-and-beam structural frame if the source has none.
 
+    barndsl score FILE.barn [--json]
+        Compile and print the deterministic 0-100 design score (see score.py)
+        with its per-component deductions — the number an agent hill-climbs on.
+
     barndsl demo [--out FILE.svg]
         Compile and render the bundled example (examples/cedar_ridge.barn).
 
@@ -17,8 +21,10 @@
         is the v1 abutment placer.
 
     barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
-        Run the Claude agent: brief → DSL → compile → critique → refine.
-        Requires `pip install 'barndsl[agent]'` and ANTHROPIC_API_KEY.
+                   [--target-score S]
+        Run the Claude agent: brief → DSL → compile → score → critique → refine,
+        keeping the best-scoring iteration. Requires `pip install 'barndsl[agent]'`
+        and ANTHROPIC_API_KEY.
 
     barndsl revit FILE.barn [--out FILE.json] [--frame]
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
@@ -90,7 +96,11 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         import json
 
-        print(json.dumps(result.to_dict(), indent=2))
+        from .score import design_score
+
+        payload = result.to_dict()
+        payload["score"] = design_score(result).to_dict()
+        print(json.dumps(payload, indent=2))
         return 0 if result.ok else 1
     print(result.report(os.path.basename(args.file)))
     if result.plan is not None:
@@ -142,7 +152,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         import json
 
+        from .score import design_score
+
         payload = result.to_dict()
+        payload["score"] = design_score(result).to_dict()
         if result.plan is not None:
             payload["metrics"] = result.plan.metrics()
             try:
@@ -166,6 +179,27 @@ def _cmd_build(args: argparse.Namespace) -> int:
         return 2
     print(f"\nWrote {out}")
     return 0 if result.ok else 1
+
+
+def _cmd_score(args: argparse.Namespace) -> int:
+    from .score import design_score
+
+    result = compile_file(args.file)
+    report = design_score(result)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(report.to_dict(), indent=2))
+        return 0 if result.plan is not None else 1
+
+    print(result.summary())
+    print(f"\nDesign score: {report.total:g} / 100")
+    print("  Deductions:")
+    for name, points in report.components.items():
+        print(f"    {name:<12} -{points:g}")
+    c = report.counts
+    print(f"  Diagnostics: {c['error']} error(s), {c['warning']} warning(s), {c['info']} info(s)")
+    return 0 if result.plan is not None else 1
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
@@ -243,7 +277,8 @@ def _cmd_design(args: argparse.Namespace) -> int:
         crit = ""
         if step.critique is not None:
             crit = "  (critic: satisfied)" if step.critique.satisfied else "  (critic: needs work)"
-        print(f"  iteration {step.iteration}: {step.result.summary()}{crit}")
+        score = f"  score {step.score.total:g}/100" if step.score is not None else ""
+        print(f"  iteration {step.iteration}: {step.result.summary()}{score}{crit}")
 
     print(f"Designing with {args.model} (up to {args.iterations} iteration(s))...\n")
     agent = BarndoAgent(model=args.model)
@@ -253,12 +288,16 @@ def _cmd_design(args: argparse.Namespace) -> int:
             max_iterations=args.iterations,
             critique=not args.no_critique,
             on_step=on_step,
+            target_score=args.target_score if args.target_score > 0 else None,
         )
     except Exception as exc:  # pragma: no cover - network/runtime errors
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"\n--- final DSL (after {result.iterations} iteration(s)) ---")
+    print(
+        f"\n--- final DSL (best of {result.iterations} iteration(s): "
+        f"iteration {result.best_iteration}, score {result.score.total:g}/100) ---"
+    )
     print(result.source.rstrip())
     print("\n--- compiler report ---")
     print(result.result.report())
@@ -562,6 +601,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_build.set_defaults(func=_cmd_build)
 
+    p_score = sub.add_parser(
+        "score", help="compile and print the 0-100 design score with its components"
+    )
+    p_score.add_argument("file", help="path to a .barn DSL file")
+    p_score.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the score report as machine-readable JSON",
+    )
+    p_score.set_defaults(func=_cmd_score)
+
     p_demo = sub.add_parser("demo", help="compile and render the bundled example")
     p_demo.add_argument("--out", default="barndo.svg", help="output SVG path")
     p_demo.set_defaults(func=_cmd_demo)
@@ -597,6 +647,12 @@ def main(argv: list[str] | None = None) -> int:
     p_design.add_argument("--iterations", type=int, default=3, help="max refine iterations")
     p_design.add_argument("--model", default="claude-opus-4-8", help="Claude model id")
     p_design.add_argument("--no-critique", action="store_true", help="skip the design critic")
+    p_design.add_argument(
+        "--target-score",
+        type=float,
+        default=90.0,
+        help="keep iterating while the design score is below this (0 disables the gate)",
+    )
     p_design.set_defaults(func=_cmd_design)
 
     p_revit = sub.add_parser(

@@ -41,6 +41,7 @@ from .elements import (
 )
 from .geometry import (
     opening_endpoints,
+    point_in_footprint,
     rect_in_footprint,
     shared_edge,
     wall_faces_outside,
@@ -90,6 +91,13 @@ MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
 STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
 STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
 DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
+# Overhead (sectional garage) door stock sizes, in **feet** — garage doors are
+# ordered in feet, unlike leaf doors: singles 8/9/10 wide, doubles 12/16; panels
+# 7 or 8 ft tall. An opening wider than OVERHEAD_HEADER_SPAN outruns a stock
+# header and wants engineering with the frame.
+STD_OVERHEAD_DOOR_WIDTHS_FT = (8, 9, 10, 12, 16)
+STD_OVERHEAD_DOOR_HEIGHTS_FT = (7, 8)
+OVERHEAD_HEADER_SPAN = 10.0
 # --- accessibility / aging-in-place (opt-in; ANSI A117.1) --------------------
 ACCESSIBLE_CLEAR_DOOR = 32 / 12  # 32 in clear opening (A117.1 §404)
 ACCESSIBLE_LEAF_MIN = 34 / 12  # a ~34 in leaf yields the 32 in clear
@@ -347,10 +355,26 @@ def _building_corner(plan: Barndominium, room: Room, wall: Direction, at_end: bo
 
 
 def _stair_against_wall(plan: Barndominium, s) -> bool:
-    """Does a stair sit along a wall (envelope edge or a room partition) rather
+    """Does a stair sit along a wall (footprint edge or a room partition) rather
     than floating free in the middle of a room?"""
     tol = EPSILON
-    if (
+    if plan.wings:
+        # L/T/U footprint: every outline edge is an exterior wall, not just the
+        # four primary-envelope edges. Probe just outside each stair edge's
+        # midpoint — leaving the footprint union means that edge lies on the
+        # outline (mirrors ``wall_faces_outside`` for rooms).
+        secs = plan.footprint_sections()
+        eps = 0.05
+        mx, my = (s.x + s.x2) / 2.0, (s.y + s.y2) / 2.0
+        probes = (
+            (mx, s.y - eps),
+            (mx, s.y2 + eps),
+            (s.x - eps, my),
+            (s.x2 + eps, my),
+        )
+        if any(not point_in_footprint(secs, px, py) for px, py in probes):
+            return True
+    elif (
         abs(s.x) <= tol
         or abs(s.y) <= tol
         or abs(s.x2 - plan.envelope_width) <= tol
@@ -653,6 +677,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_design_quality(plan, add)
     _validate_accessibility(plan, add)
     _validate_program(plan, add)
+    _validate_requirements(plan, add)
     _validate_structure(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
@@ -1351,6 +1376,9 @@ def _validate_doors(plan: Barndominium, add) -> None:
             )
             continue
         room = plan.room(xdoor.room)
+        if xdoor.overhead:
+            _check_overhead_door(xdoor, room, add)
+            continue
         if room is not None and room.type in (RoomType.GARAGE, RoomType.SHOP):
             continue  # a garage/shop opening is an overhead door, not a leaf size
         nearest = _nearest_std(xdoor.width * 12, STD_EXTERIOR_DOOR_WIDTHS_IN)
@@ -1367,6 +1395,58 @@ def _validate_doors(plan: Barndominium, add) -> None:
                     **_door_loc(xdoor),
                 )
             )
+
+
+def _check_overhead_door(xdoor, room, add) -> None:
+    """Overhead (sectional garage) door checks: an unusual host room, a
+    non-stock sectional size, and a double-width opening's header reality."""
+    loc = _door_loc(xdoor)
+    if room is not None and room.type not in GARAGE_TYPES:
+        add(
+            Issue(
+                Severity.INFO,
+                "OVERHEAD_ROOM",
+                f"Overhead door on '{xdoor.room}' ({room.type.value}) — an "
+                "overhead door in a living space is unusual; is this a "
+                "garage/shop?",
+                room=xdoor.room,
+                hint="Put it on a garage/shop bay, or use `entry` for a "
+                "people door.",
+                **loc,
+            )
+        )
+    h = xdoor.height if xdoor.height is not None else float(STD_OVERHEAD_DOOR_HEIGHTS_FT[0])
+    near_w = _nearest_std(xdoor.width, STD_OVERHEAD_DOOR_WIDTHS_FT)
+    near_h = _nearest_std(h, STD_OVERHEAD_DOOR_HEIGHTS_FT)
+    tol = DOOR_SIZE_TOL_IN / 12
+    if abs(near_w - xdoor.width) > tol or abs(near_h - h) > tol:
+        add(
+            Issue(
+                Severity.INFO,
+                "DOOR_SIZE",
+                f"Overhead door on '{xdoor.room}' is {_f(xdoor.width)} x {_f(h)} "
+                "ft, not a standard sectional size.",
+                room=xdoor.room,
+                hint=f"Use a stock size, e.g. `width {near_w:g} height {near_h:g}` "
+                "— widths 8/9/10/12/16 ft, heights 7/8 ft (16 x 7 is the usual "
+                "double).",
+                **loc,
+            )
+        )
+    if xdoor.width > OVERHEAD_HEADER_SPAN + EPSILON:
+        add(
+            Issue(
+                Severity.INFO,
+                "OVERHEAD_HEADER",
+                f"A {_f(xdoor.width)} ft opening needs an engineered header — "
+                "coordinate with the frame.",
+                room=xdoor.room,
+                hint="Have the header and jamb posts over this opening engineered "
+                f"(a stock header tops out around {OVERHEAD_HEADER_SPAN:g} ft), or "
+                "split it into two singles.",
+                **loc,
+            )
+        )
 
 
 def _validate_openings(plan: Barndominium, add) -> None:
@@ -1515,13 +1595,31 @@ def _validate_stairs(plan: Barndominium, add) -> None:
             add(Issue(Severity.ERROR, "STAIR_LEVELS",
                       f"Stair '{s.id}' must connect two different levels >= 0.",
                       room=s.id, hint="e.g. `from 0 to 1`."))
-        over_x = max(0.0, s.x2 - plan.envelope_width)
-        over_y = max(0.0, s.y2 - plan.envelope_length)
-        if s.x < -EPSILON or s.y < -EPSILON or over_x > EPSILON or over_y > EPSILON:
-            add(Issue(Severity.ERROR, "STAIR_OOB",
-                      f"Stair '{s.id}' extends outside the "
-                      f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
-                      room=s.id, hint="Keep its footprint inside the envelope."))
+        if plan.wings:
+            # Rectilinear footprint: a stair may legitimately sit in a wing (or
+            # straddle a seam), so test the footprint union rather than the
+            # primary rectangle — same treatment as room OUT_OF_BOUNDS.
+            if (
+                s.width > 0
+                and s.length > 0
+                and not rect_in_footprint(
+                    plan.footprint_sections(), s.x, s.y, s.width, s.length
+                )
+            ):
+                add(Issue(Severity.ERROR, "STAIR_OOB",
+                          f"Stair '{s.id}' extends outside the building footprint "
+                          f"({_f(s.x)},{_f(s.y)} → {_f(s.x2)},{_f(s.y2)}); it isn't "
+                          "covered by the envelope or any wing.",
+                          room=s.id,
+                          hint="Keep its footprint inside the envelope or a wing."))
+        else:
+            over_x = max(0.0, s.x2 - plan.envelope_width)
+            over_y = max(0.0, s.y2 - plan.envelope_length)
+            if s.x < -EPSILON or s.y < -EPSILON or over_x > EPSILON or over_y > EPSILON:
+                add(Issue(Severity.ERROR, "STAIR_OOB",
+                          f"Stair '{s.id}' extends outside the "
+                          f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
+                          room=s.id, hint="Keep its footprint inside the envelope."))
         # Does the footprint hold the run one storey demands? A straight flight
         # needs (risers-1)·tread of horizontal run; a switchback halves that but
         # needs a footprint wide enough for two flights side by side. Only flag
@@ -1677,20 +1775,30 @@ def _validate_access(plan: Barndominium, add) -> None:
                 adjacency[b].add(a)
 
     entries = {d.room for d in plan.exterior_doors if d.room in interior_rooms}
-    if not entries:
+    # An overhead garage door is vehicle access, not a building entrance: it
+    # still makes its garage/shop reachable (the BFS below), but only a
+    # people-door satisfies NO_ENTRY.
+    people_doors = [d for d in plan.exterior_doors if not d.overhead]
+    if not people_doors:
         # Don't also cry NO_ENTRY when entries exist but reference unknown rooms
-        # (DOOR_REF already explains that); only when there are no entries at all.
-        if not plan.exterior_doors:
-            first = next(iter(plan.rooms)).id
-            add(
-                Issue(
-                    Severity.ERROR,
-                    "NO_ENTRY",
-                    "Plan has no exterior door — no way to enter the building.",
-                    hint=f"Add an entrance on an exterior wall, e.g. "
-                    f"`entry {first} south width 3 offset 4`.",
-                )
+        # (DOOR_REF already explains that); only when there are none at all.
+        first = next(iter(plan.rooms)).id
+        message = (
+            "Plan has no entry door — an overhead door is vehicle access, "
+            "not a way to enter on foot."
+            if plan.exterior_doors
+            else "Plan has no exterior door — no way to enter the building."
+        )
+        add(
+            Issue(
+                Severity.ERROR,
+                "NO_ENTRY",
+                message,
+                hint=f"Add an entrance on an exterior wall, e.g. "
+                f"`entry {first} south width 3 offset 4`.",
             )
+        )
+    if not entries:
         return
 
     reached: set[str] = set()
@@ -2057,11 +2165,14 @@ def _dq_hall_tight(plan: Barndominium, graph, by_id, add) -> None:
 def _dq_no_back_door(plan: Barndominium, graph, by_id, add) -> None:
     # 8e. Front *and* back door: a home wants a second exterior door (a back/side
     #     door off the kitchen, mudroom or laundry) — for daily flow and a second
-    #     way out. Garage/porch doors don't count as the house's back door.
+    #     way out. Garage/porch doors don't count as the house's back door, and
+    #     neither does an overhead garage door (vehicle access, wherever it is).
     people_doors = [
         d
         for d in plan.exterior_doors
-        if d.room in by_id and by_id[d.room].type not in (RoomType.GARAGE, RoomType.PORCH)
+        if not d.overhead
+        and d.room in by_id
+        and by_id[d.room].type not in (RoomType.GARAGE, RoomType.PORCH)
     ]
     if plan.rooms and plan.exterior_doors and len(people_doors) < 2:
         where = (
@@ -2636,6 +2747,163 @@ def _validate_program(plan: Barndominium, add) -> None:
     )
 
 
+def _suggest_anchor(a: Room, b: Room) -> str:
+    """The relative-placement direction that would abut ``b`` against ``a``,
+    picked from where ``b`` already sits — so the hint moves it the short way."""
+    ax, ay = a.center
+    bx, by = b.center
+    if abs(bx - ax) >= abs(by - ay):
+        return "east-of" if bx >= ax else "west-of"
+    return "north-of" if by >= ay else "south-of"
+
+
+def _validate_requirements(plan: Barndominium, add) -> None:
+    """Check declared ``require`` statements against the compiled plan.
+
+    The ``program`` pattern extended to space: declared intent, mechanically
+    checked. Requirements never block a compile — each unmet one is a
+    ``REQUIRE_UNMET`` warning with a concrete fix — except a requirement naming
+    an unknown room id, which is a ``REQUIRE_REF`` error like every dangling
+    reference (a mistyped id would otherwise silently check nothing).
+
+    Semantics (see :class:`~barndsl.elements.Requirement`):
+
+    * ``adjacent`` is purely geometric — a positive-length shared wall on the
+      same level (:func:`shared_edge`). A door or cased opening alone does NOT
+      satisfy it: adjacency is the precondition a ``door`` needs, so the two
+      checks agree rather than one excusing the other.
+    * ``separate`` fails only on a shared wall; rooms on different levels never
+      share a wall, so a cross-level pair is trivially separate.
+    * ``exterior`` uses the same footprint-aware :func:`exterior_walls` the
+      window/entry checks use, so seam walls between wings count as interior.
+    * ``area`` checks the room's **nominal** area (the same figure
+      ``program area`` uses), not the clear finish-face area.
+    """
+    room_ids = {r.id for r in plan.rooms}
+    for req in plan.requirements:
+        loc: dict = {}
+        if req.line is not None:
+            loc = {"line": req.line, "col": req.col, "end_col": req.end_col}
+        missing = [
+            rid for rid in (req.a, req.b) if rid is not None and rid not in room_ids
+        ]
+        if missing:
+            for rid in missing:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "REQUIRE_REF",
+                        f"Requirement references unknown room '{rid}'.",
+                        room=rid,
+                        hint="Reference an existing room id, or declare the room.",
+                        **loc,
+                    )
+                )
+            continue
+        a = plan.room(req.a)
+        assert a is not None  # checked above
+        if req.kind == "adjacent":
+            b = plan.room(req.b)
+            assert b is not None
+            if shared_edge(a, b) is None:
+                detail = (
+                    f"they sit on different levels ({a.level} and {b.level})"
+                    if a.level != b.level
+                    else "they don't share a wall (a corner touch isn't enough)"
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required adjacency unmet: '{a.id}' and '{b.id}' — {detail}.",
+                        room=a.id,
+                        hint=f"Abut them along a wall — e.g. re-place '{b.id}' with a "
+                        f"relative anchor: `room {b.id}: {b.type.value} "
+                        f"{_suggest_anchor(a, b)} {a.id} size {_f(b.width)} x "
+                        f"{_f(b.length)}`.",
+                        **loc,
+                    )
+                )
+        elif req.kind == "separate":
+            b = plan.room(req.b)
+            assert b is not None
+            edge = shared_edge(a, b)  # None across levels: trivially separate
+            if edge is not None:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required separation unmet: '{a.id}' and '{b.id}' share a "
+                        f"{_f(edge.length)} ft wall.",
+                        room=a.id,
+                        hint=f"Reposition '{b.id}' so it doesn't touch '{a.id}', or "
+                        "put a buffer room (hall, closet) between them.",
+                        **loc,
+                    )
+                )
+        elif req.kind == "exterior":
+            ext = exterior_walls(plan, a)
+            interior = ", ".join(
+                w.value
+                for w in (
+                    Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST
+                )
+                if w not in ext
+            )
+            if req.wall is not None and req.wall not in ext:
+                have = (
+                    f"its exterior wall(s): {', '.join(w.value for w in ext)}"
+                    if ext
+                    else "it has no exterior wall at all"
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required exterior wall unmet: '{a.id}'s {req.wall.value} "
+                        f"wall is interior (interior walls: {interior}).",
+                        room=a.id,
+                        hint=f"Move '{a.id}' so its {req.wall.value} wall lies on the "
+                        f"footprint edge — {have}.",
+                        **loc,
+                    )
+                )
+            elif req.wall is None and not ext:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required exterior wall unmet: '{a.id}' has no exterior wall "
+                        f"(interior walls: {interior}).",
+                        room=a.id,
+                        hint=f"Move '{a.id}' to the building perimeter so at least "
+                        "one wall lies on the footprint edge.",
+                        **loc,
+                    )
+                )
+        elif req.kind == "area":
+            assert req.min_area is not None  # the builder guarantees it
+            if a.area + EPSILON < req.min_area:
+                need_len = _suggest_int(req.min_area / max(a.width, EPSILON))
+                sizing = (
+                    f" — e.g. `size {_f(a.width)} x {need_len}`"
+                    if need_len is not None
+                    else ""
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required area unmet: '{a.id}' is {_f(a.area)} sq ft; the "
+                        f"requirement is >= {_f(req.min_area)} sq ft.",
+                        room=a.id,
+                        hint=f"Enlarge '{a.id}' to at least {_f(req.min_area)} sq ft"
+                        f"{sizing}.",
+                        **loc,
+                    )
+                )
+
+
 #: An interior support post sitting at least this far (ft) from every wall of the
 #: room it lands in is out in the open floor — awkward to live around.
 POST_CLEAR_MARGIN = 1.5
@@ -2809,8 +3077,11 @@ def _validate_load_path(plan: Barndominium, add) -> None:
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:
+    # An overhead door never counts as egress (`entrance` forces egress=False
+    # for it; the kind check guards a hand-built ExteriorDoor too).
     has_egress_door = any(
-        d.egress and d.width + EPSILON >= MIN_EGRESS_DOOR_WIDTH for d in plan.exterior_doors
+        d.egress and not d.overhead and d.width + EPSILON >= MIN_EGRESS_DOOR_WIDTH
+        for d in plan.exterior_doors
     )
     if plan.exterior_doors and not has_egress_door:
         add(

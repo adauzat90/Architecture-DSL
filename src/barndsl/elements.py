@@ -199,6 +199,17 @@ class Room:
 #: circulation graph; they differ in how they render and which checks apply.
 DOOR_KINDS = ("swing", "cased", "pocket", "sliding")
 
+#: The exterior-door kinds. ``entry`` is a hinged people-door (the default);
+#: ``overhead`` is a sectional/overhead garage door — vehicle access on a
+#: garage/shop bay. An overhead door has no swing, is never an egress door, and
+#: doesn't count as a building entrance (the plan still needs an ``entry``).
+EXTERIOR_DOOR_KINDS = ("entry", "overhead")
+
+#: Overhead (sectional garage) door defaults: the residential 9 x 7 single.
+#: A double is ``width 16``; stock heights are 7 or 8 ft.
+OVERHEAD_DOOR_WIDTH = 9.0
+OVERHEAD_DOOR_HEIGHT = 7.0
+
 
 @dataclass
 class InteriorDoor:
@@ -246,10 +257,22 @@ class ExteriorDoor:
     #: near edge of the opening.
     offset: float = 1.0
     egress: bool = True
+    #: One of :data:`EXTERIOR_DOOR_KINDS`. ``overhead`` is a sectional garage
+    #: door (a 9 x 7 single; 16 wide for a double) — it rides up its tracks, so
+    #: it has no swing and never counts as an egress door or a people-entry.
+    kind: str = "entry"
+    #: Opening height (ft). ``None`` means the standard 6'-8" leaf; an overhead
+    #: door defaults to 7 ft (set by :meth:`Barndominium.entrance`).
+    height: float | None = None
     #: Source location of the `entry` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
+
+    @property
+    def overhead(self) -> bool:
+        """True for a sectional/overhead (garage) door — no leaf, no egress."""
+        return self.kind == "overhead"
 
 
 @dataclass
@@ -461,6 +484,46 @@ class ProgramSpec:
     end_col: int | None = None
 
 
+#: The requirement kinds a plan can declare (see :meth:`Barndominium.require`).
+REQUIRE_KINDS = ("adjacent", "separate", "exterior", "area")
+
+
+@dataclass
+class Requirement:
+    """A declared spatial requirement (design *intent*), one `require` statement.
+
+    Optional, like :class:`ProgramSpec` — the same pattern extended from counts
+    to space: when present, validation checks the compiled plan against it and
+    warns (``REQUIRE_UNMET``) on any requirement the geometry doesn't satisfy.
+    A requirement naming an unknown room id is an error (``REQUIRE_REF``), like
+    any dangling reference. Requirements never block a compile.
+
+    ``kind`` is one of :data:`REQUIRE_KINDS`; the other fields apply per kind:
+
+    * ``adjacent`` — rooms ``a`` and ``b`` must share a wall (a positive-length
+      shared edge on the same level). Purely geometric: a door or cased opening
+      between non-abutting rooms doesn't satisfy it — adjacency is what a
+      ``door`` *needs*, so the two checks agree.
+    * ``separate`` — ``a`` and ``b`` must NOT share a wall. Rooms on different
+      levels never share a wall, so a cross-level pair is trivially separate.
+    * ``exterior`` — room ``a`` needs an exterior wall; ``wall`` optionally
+      pins which side (north/south/east/west) must face outside.
+    * ``area`` — room ``a``'s nominal area must be at least ``min_area`` sq ft
+      (the same nominal figure ``program area`` uses).
+
+    Multiple requirements are allowed; duplicates are harmless.
+    """
+
+    kind: str
+    a: str
+    b: str | None = None
+    wall: Direction | None = None
+    min_area: float | None = None
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
 @dataclass
 class Barndominium:
     """A complete barndominium floor plan.
@@ -498,6 +561,9 @@ class Barndominium:
     #: Optional declared program (intent). When set, validation checks the actual
     #: room counts against it. See :class:`ProgramSpec`.
     program_spec: ProgramSpec | None = None
+    #: Optional declared spatial requirements (intent). Each one is checked
+    #: against the compiled geometry. See :class:`Requirement`.
+    requirements: list[Requirement] = field(default_factory=list)
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
     #: true north. Used for solar/setback reasoning and to set Project North when
@@ -683,6 +749,55 @@ class Barndominium:
         if ma is not None and ma < 0:
             raise ValueError("program area must be non-negative.")
         self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma)
+        return self
+
+    def require(
+        self,
+        kind: str,
+        a: str,
+        b: str | None = None,
+        *,
+        wall: Direction | str | None = None,
+        min_area: float | None = None,
+    ) -> "Barndominium":
+        """Declare a spatial requirement (the ``require`` statement).
+
+        Like :meth:`program`, this records *intent* the validator checks
+        mechanically against the compiled plan: an unmet requirement is a
+        ``REQUIRE_UNMET`` warning (never blocking — the plan stays buildable),
+        and a requirement naming an unknown room id is a ``REQUIRE_REF`` error.
+
+        Forms — ``require("adjacent", a, b)`` (the rooms must share a wall);
+        ``require("separate", a, b)`` (they must NOT share a wall; rooms on
+        different levels are trivially separate); ``require("exterior", room,
+        wall=...)`` (the room needs an exterior wall, optionally that specific
+        side); ``require("area", room, min_area=sqft)`` (nominal area at least
+        ``sqft`` — the same figure ``program area`` uses). See
+        :class:`Requirement` for the exact semantics. Duplicates are harmless.
+        """
+        kind = str(kind).lower()
+        if kind not in REQUIRE_KINDS:
+            raise ValueError(
+                f"require kind must be one of {REQUIRE_KINDS}, got {kind!r}."
+            )
+        if kind in ("adjacent", "separate"):
+            if not b:
+                raise ValueError(f"require {kind} names two rooms.")
+            self.requirements.append(Requirement(kind, str(a), str(b)))
+            return self
+        if b is not None:
+            raise ValueError(f"require {kind} names a single room.")
+        if kind == "exterior":
+            w = None if wall is None else Direction(wall)
+            self.requirements.append(Requirement(kind, str(a), wall=w))
+            return self
+        # area
+        if min_area is None:
+            raise ValueError("require area needs min_area (sq ft).")
+        ma = float(min_area)
+        if ma < 0:
+            raise ValueError("require area must be non-negative.")
+        self.requirements.append(Requirement(kind, str(a), min_area=ma))
         return self
 
     def frame(
@@ -984,10 +1099,24 @@ class Barndominium:
         width: float = feet(3),
         offset: float = 1.0,
         egress: bool = True,
+        kind: str = "entry",
+        height: float | None = None,
     ) -> "Barndominium":
-        """Add an exterior door on ``wall`` of ``room``."""
+        """Add an exterior door on ``wall`` of ``room``.
+
+        ``kind="overhead"`` makes it a sectional garage door: ``egress`` is
+        forced False (vehicle access, never an escape route) and ``height``
+        defaults to the stock 7 ft panel.
+        """
+        if kind == "overhead":
+            egress = False
+            if height is None:
+                height = OVERHEAD_DOOR_HEIGHT
         self.exterior_doors.append(
-            ExteriorDoor(room, Direction(wall), float(width), float(offset), egress)
+            ExteriorDoor(
+                room, Direction(wall), float(width), float(offset), egress,
+                kind=kind, height=None if height is None else float(height),
+            )
         )
         return self
 
@@ -1066,19 +1195,27 @@ class Barndominium:
 
     def metrics(self) -> dict[str, float]:
         """Rough material / area takeoff for summaries and estimating."""
-        perimeter = 2.0 * (self.envelope_width + self.envelope_length)
+        from .geometry import footprint_boundary
+
+        # The footprint outline doubles as the slab turndown edge, and for an
+        # L/T/U plan (wings) its total length *is* the exterior perimeter — the
+        # primary rectangle alone would understate an L/T/U takeoff. A plain
+        # rectangle keeps the closed form 2(W+L).
+        boundary = footprint_boundary(self.footprint_sections())
+        turndown_len = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
+        if self.wings:
+            perimeter = turndown_len
+        else:
+            perimeter = 2.0 * (self.envelope_width + self.envelope_length)
         exterior_wall_area = perimeter * self.ceiling_height
         # Gable roof over the footprint: the sloped area is the plan area divided
         # by the cosine of the roof slope (both planes share the pitch), so the
         # factor follows the actual pitch instead of a fixed guess.
-        slope_factor = math.hypot(1.0, DEFAULT_ROOF_PITCH)  # sec(atan(pitch))
+        pitch = self.roof_pitch if self.roof_pitch is not None else DEFAULT_ROOF_PITCH
+        slope_factor = math.hypot(1.0, pitch)  # sec(atan(pitch))
         roof_area = self.footprint_area * slope_factor
         # Monolithic slab-on-grade concrete: the slab, its thickened perimeter
         # edge (turndown), and a pad footing under each post. Rough takeoff (yd³).
-        from .geometry import footprint_boundary
-
-        boundary = footprint_boundary(self.footprint_sections())
-        turndown_len = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
         concrete_ft3 = (
             self.footprint_area * SLAB_THICKNESS
             + turndown_len * TURNDOWN_WIDTH * TURNDOWN_DEPTH

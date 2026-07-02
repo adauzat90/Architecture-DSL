@@ -49,12 +49,15 @@ floor <D>                          # optional; inter-floor assembly depth (ft). 
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
 note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
+require adjacent|separate <room_a> <room_b>   # optional; spatial intent, checked vs the plan
+require exterior <room> [<wall>]              #   (also: require area <room> >= <sqft>)
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
 roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
 orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
 finish [siding "<name>"] [roof "<name>"]  # optional; exterior material hints (metal siding, standing-seam)
 door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door (9 x 7 default; width 16 = double)
 open <id_a> - <id_b> [width <w>] [offset <o>]   # shorthand for `door <a> - <b> cased ...`
 entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
 window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
@@ -76,6 +79,15 @@ circulation graph exactly like a door, but renders as a plain gap (no swing
 arc), defaults to a wide opening, and is exempt from the narrow-door warning.
 An `open` into a **bathroom** is a privacy defect (a bath needs a door), so it
 warns (`OPEN_BATH`).
+`door <id> <wall> overhead` is an **overhead/sectional garage door** on a
+garage/shop bay's exterior wall — 9 × 7 by default (`width 16` for a double); it
+renders as a gap with a dashed track (no swing arc) and is never an egress door
+or a building entrance, so the plan still needs a people-door `entry`.
+`program` declares the intended counts and `require` the brief's **spatial**
+intent (a required adjacency, separation, exterior wall, or minimum room area);
+both are re-checked mechanically on every compile (`PROGRAM_MISMATCH` /
+`REQUIRE_UNMET` warnings), so the brief lives in the source and survives every
+revision.
 The footprint is one rectangle by default. For an **L/T/U-shaped building**, add
 `wing <W> x <L> at <x>,<y>` blocks: the footprint becomes the union of the
 `envelope` (the primary block at the origin) and every wing. Containment,
@@ -411,9 +423,14 @@ print(result.source)        # the DSL the model wrote
 print(result.result.report())
 ```
 
-Each round: **write DSL → compile → critique (design quality) → revise**, until
-it compiles clean and the critic is satisfied (or the cap is hit). Uses Claude
-(`claude-opus-4-8`) — the compiler's diagnostics are the steering signal.
+Each round: **write DSL → compile → score → critique (design quality) →
+revise**, until it compiles clean, the critic is satisfied AND the
+deterministic 0-100 design score clears `target_score` (default 90; `None`
+disables the gate) — or the cap is hit. Every iteration is scored and the
+**best-scoring one wins** (`result.best_iteration` says which), so a
+regression on the last round is never returned. Uses Claude
+(`claude-opus-4-8`) — the compiler's structured diagnostics plus the score's
+per-component deductions are the steering signal.
 
 ## Two front-ends, one core
 
@@ -441,6 +458,7 @@ barndsl new "Cedar Ridge" --out cedar.barn         # scaffold a clean starter pl
 barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl compile examples/cedar_ridge.barn --strict # warnings also fail (CI gate)
+barndsl score   examples/cedar_ridge.barn          # deterministic 0-100 design score
 barndsl fmt -w examples/cedar_ridge.barn           # canonically reformat in place
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl build   examples/cedar_ridge.barn --format png  # PNG/PDF (needs [raster])
@@ -465,6 +483,20 @@ coordinates pass straight through (feet, x-east/y-north). `barndsl build
 --format png|pdf` rasterises the SVG (optional `cairosvg`).
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
+
+## The design score
+
+`barndsl score plan.barn` compiles a plan and prints a **deterministic 0–100
+design score** — the "how good is it?" number to go with the compiler's "what's
+wrong?". A plan with errors scores 0 (unbuildable); warnings and info nudges
+deduct fixed points (8 and 2 each, capped); four continuous terms then refine —
+unassigned footprint, hallway share of interior area, habitable-room elongation
+past 1.6:1, and glazing shortfall below the 8% daylight floor. Same plan in,
+same score out (no randomness, no LLM), and `--json` breaks the total into its
+per-component deductions, so an agent can hill-climb it: compare candidates,
+keep the best, catch a regression. The full formula is the module docstring in
+`barndsl/score.py` — the score is a contract, not a vibe. `compile --json` and
+`build --json` include the same report under a `"score"` key.
 
 ## Install
 

@@ -14,8 +14,11 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     wing <W> x <L> at <x>,<y>          # optional — L/T/U footprint extensions
     ceiling <H>
     note "free text"
+    require adjacent|separate <a> <b>  # declared spatial intent, checked vs the plan
+    require exterior <room> [<wall>]   # (also: require area <room> >= <sqft>)
     room <id>: <type> <placement> size <W> x <L> [level <n>]
     door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]
+    door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # sectional garage door
     open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no leaf)
     entry <id> <wall> [width <w>] [offset <o>] [no-egress]
     window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
@@ -37,13 +40,21 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .elements import Barndominium, Direction, FrameSpec, RoomType, inches
+from .elements import (
+    OVERHEAD_DOOR_HEIGHT,
+    OVERHEAD_DOOR_WIDTH,
+    Barndominium,
+    Direction,
+    FrameSpec,
+    RoomType,
+    inches,
+)
 from .validation import Issue, Severity, ValidationReport, validate
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
-    "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "room",
-    "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
+    "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
+    "room", "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
     "orientation", "finish", "accessible"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
@@ -92,6 +103,12 @@ Statements:
   note "free text"                # optional design note
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
+  require adjacent <room_a> <room_b>    # the two rooms must share a wall
+  require separate <room_a> <room_b>    # the two rooms must NOT share a wall
+  require exterior <room> [<wall>]      # the room needs an exterior wall (optionally that side)
+  require area <room> >= <sqft>         # the room's nominal area must be at least sqft
+        # declared spatial intent, like `program`: each unmet requirement is a
+        # REQUIRE_UNMET warning (never blocking); an unknown room id is an error.
   room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
         # `ceiling <h>` overrides the plan ceiling for this room (a tray or a
         # taller great room); `vaulted` makes it open to the roof (no flat ceiling).
@@ -100,6 +117,10 @@ Statements:
         # walk-through (no leaf); pocket/sliding slide. offset = ft from the wall's
         # S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
   door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door, on an exterior wall
+  door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]
+        # overhead/sectional garage door on a garage/shop's exterior wall. Defaults
+        # 9 x 7 (the residential single); `width 16` is a double. Never an egress
+        # door and not a building entrance — the plan still needs a people-door.
   open <id_a> - <id_b> [width <w>] [offset <o>]            # shorthand for `door <a> - <b> cased ...`
   entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
   window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]  # window; sill/head are ft above the floor
@@ -629,6 +650,51 @@ def _parse_statement(
         plan.program_spec.line = lineno
         plan.program_spec.col = kw.col
         plan.program_spec.end_col = kw.end_col
+    elif key == "require":
+        # `require adjacent|separate <a> <b>` / `require exterior <room> [<wall>]`
+        # / `require area <room> >= <sqft>` — declared spatial intent, checked
+        # against the compiled plan by the validator (see REQUIRE_UNMET).
+        kind_tok = c.take("a requirement kind (adjacent|separate|exterior|area)")
+        kind = kind_tok.text.lower()
+        if kind in ("adjacent", "separate"):
+            a = c.ident("the first room id").text
+            b = c.ident("the second room id").text
+            c.expect_end()
+            plan.require(kind, a, b)
+        elif kind == "exterior":
+            rid = c.ident("a room id").text
+            wall = c.wall() if c.peek() is not None else None
+            c.expect_end()
+            plan.require("exterior", rid, wall=wall)
+        elif kind == "area":
+            rid = c.ident("a room id").text
+            c.keyword(">=")
+            sqft_tok = c.peek()
+            sqft = c.number("the minimum area")
+            if sqft < 0:
+                assert sqft_tok is not None  # number() consumed a token
+                raise _ParseError(
+                    "BAD_NUMBER",
+                    "require area must be non-negative.",
+                    sqft_tok.col,
+                    end_col=sqft_tok.end_col,
+                    hint="Give the minimum in square feet, e.g. `require area "
+                    f"{rid} >= 300`.",
+                )
+            c.expect_end()
+            plan.require("area", rid, min_area=sqft)
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown requirement kind '{kind_tok.text}'.",
+                kind_tok.col,
+                end_col=kind_tok.end_col,
+                hint="Use `require adjacent <a> <b>`, `require separate <a> <b>`, "
+                "`require exterior <room> [<wall>]`, or `require area <room> >= "
+                "<sqft>`.",
+            )
+        req = plan.requirements[-1]
+        req.line, req.col, req.end_col = lineno, kw.col, kw.end_col
     elif key == "room":
         rid_tok = c.ident("a room id")
         rid = rid_tok.text
@@ -724,28 +790,65 @@ def _parse_statement(
             d = plan.interior_doors[-1]
             d.line, d.col, d.end_col = lineno, a_tok.col, a_tok.end_col
         else:
-            # Exterior form: door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]
+            # Exterior forms, told apart by the keyword after the wall:
+            #   door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]
+            #   door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]
             wall = c.wall()
-            c.keyword("exterior")
-            width, offset, egress = 3.0, 1.0, True
-            while c.peek() is not None:
-                opt = c.take("an option").text.lower()
-                if opt == "width":
-                    width = c.number("door width")
-                elif opt == "offset":
-                    offset = c.number("offset")
-                elif opt in ("no-egress", "nonegress"):
-                    egress = False
-                else:
-                    raise _ParseError(
-                        "BAD_OPTION",
-                        f"Unknown exterior-door option '{opt}'.",
-                        c.toks[c.i - 1].col,
-                        hint="Options: width <n>, offset <n>, no-egress.",
-                        end_col=c.toks[c.i - 1].end_col,
-                    )
-            c.expect_end()
-            plan.entrance(a, wall, width=width, offset=offset, egress=egress)
+            kind_tok = c.take("'exterior' or 'overhead'")
+            if kind_tok.text.lower() not in ("exterior", "overhead"):
+                raise _ParseError(
+                    "SYNTAX",
+                    f"Expected 'exterior' or 'overhead', got '{kind_tok.text}'.",
+                    kind_tok.col,
+                    end_col=kind_tok.end_col,
+                )
+            if kind_tok.text.lower() == "overhead":
+                # A sectional garage door: 9 x 7 (the residential single) by
+                # default, 16 wide for a double. Never an egress door — there is
+                # no no-egress option because it's implied.
+                width, height, offset = OVERHEAD_DOOR_WIDTH, OVERHEAD_DOOR_HEIGHT, 1.0
+                while c.peek() is not None:
+                    opt = c.take("an option").text.lower()
+                    if opt == "width":
+                        width = c.number("door width")
+                    elif opt == "height":
+                        height = c.number("door height")
+                    elif opt == "offset":
+                        offset = c.number("offset")
+                    else:
+                        raise _ParseError(
+                            "BAD_OPTION",
+                            f"Unknown overhead-door option '{opt}'.",
+                            c.toks[c.i - 1].col,
+                            hint="Options: width <n>, height <n>, offset <n> "
+                            "(no-egress is implied — an overhead door never "
+                            "counts as egress).",
+                            end_col=c.toks[c.i - 1].end_col,
+                        )
+                c.expect_end()
+                plan.entrance(
+                    a, wall, width=width, offset=offset, kind="overhead", height=height
+                )
+            else:
+                width, offset, egress = 3.0, 1.0, True
+                while c.peek() is not None:
+                    opt = c.take("an option").text.lower()
+                    if opt == "width":
+                        width = c.number("door width")
+                    elif opt == "offset":
+                        offset = c.number("offset")
+                    elif opt in ("no-egress", "nonegress"):
+                        egress = False
+                    else:
+                        raise _ParseError(
+                            "BAD_OPTION",
+                            f"Unknown exterior-door option '{opt}'.",
+                            c.toks[c.i - 1].col,
+                            hint="Options: width <n>, offset <n>, no-egress.",
+                            end_col=c.toks[c.i - 1].end_col,
+                        )
+                c.expect_end()
+                plan.entrance(a, wall, width=width, offset=offset, egress=egress)
             ed = plan.exterior_doors[-1]
             ed.line, ed.col, ed.end_col = lineno, a_tok.col, a_tok.end_col
     elif key == "open":
