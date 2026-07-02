@@ -331,6 +331,32 @@ class RevitModel:
     #: no site is declared, so undeclared documents stay byte-identical and the
     #: builder can place the model relative to a survey point when it is present.
     site: dict | None = None
+    # --- exchange v2 round-trip intent (all optional/additive) ----------------
+    # These carry declared *intent* that the geometry alone can't reconstruct, so
+    # a plan that went through Revit and back still knows what it was meant to be
+    # (the declared program in particular keeps ``PROGRAM_MISMATCH`` guarding
+    # edits made after a round-trip). Each rides in the ``plan`` block and is
+    # emitted **only when non-default**, so a plan that declares none of them
+    # produces a byte-identical ``plan`` block to before.
+    #: Roof form (``"gable"``/``"shed"``/``"monitor"``); the JSON key is absent
+    #: for the default gable so old documents stay byte-identical.
+    roof_style: str = "gable"
+    #: Authored roof pitch override (rise:run); ``None`` — key absent — uses the
+    #: default. Distinct from the *effective* pitch in the geometric ``roof``
+    #: block, so a plan with no override round-trips back to ``None`` (a fixed
+    #: point under emit).
+    roof_pitch: float | None = None
+    #: Free-text plan notes; empty string — key absent — when none authored.
+    notes: str = ""
+    #: Accessibility / aging-in-place opt-in; ``False`` — key absent — by default.
+    accessible: bool = False
+    #: Declared program ``{"beds", "baths"?, "required"?, "min_area"?}`` from a
+    #: ``program`` statement; ``None`` — key absent — when none declared.
+    program: dict | None = None
+    #: Declared frame spec ``{"bay", "span", "post", "ridge"}`` (the *request*,
+    #: not the placed members — those ride ``structure``); ``None`` — key absent
+    #: — when no frame is declared.
+    frame: dict | None = None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -348,6 +374,16 @@ class RevitModel:
                 "orientation": self.orientation,
                 "siding": self.siding,
                 "roofing": self.roofing,
+                # Exchange v2 declared intent — each key present only when it is
+                # non-default, so a plan declaring none of them keeps a
+                # byte-identical `plan` block (and none of these fields is
+                # fingerprinted, so element rebuild diffs are unaffected).
+                **({"roof_style": self.roof_style} if self.roof_style != "gable" else {}),
+                **({"roof_pitch": self.roof_pitch} if self.roof_pitch is not None else {}),
+                **({"notes": self.notes} if self.notes else {}),
+                **({"accessible": True} if self.accessible else {}),
+                **({"program": self.program} if self.program is not None else {}),
+                **({"frame": self.frame} if self.frame is not None else {}),
             },
             "levels": [asdict(l) for l in self.levels],
             "walls": [
@@ -783,24 +819,19 @@ def plan_stair_runs(x: float, y: float, width: float, length: float, rise: float
 # --- roof & structural grids -------------------------------------------------
 
 
-def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PITCH) -> dict:
-    """A gable-roof plan over the building's bounding box (pure, no Revit).
+def _roof_over_rect(
+    minx: float, miny: float, maxx: float, maxy: float, style: str, pitch: float
+) -> dict:
+    """The gable/shed roof geometry over one rectangle (pure, no Revit).
 
-    The ridge runs the **long** axis at the centre; the two eaves are the long
-    edges. ``rise`` is the ridge height above the eaves for the given ``pitch``
-    (rise:run) over half the short span. The outline is the bounding rectangle —
-    a simplification for L/T/U footprints (a gable over the bounds), which the
-    builder can refine. ``slope_angle`` is the eave-edge slope in **radians**, and
-    ``outline_slopes`` is a bool per outline segment flagging the eave edges (the
-    ones the builder makes slope-defining). Returns ``{top_level, pitch, rise,
-    slope_angle, ridge, eaves, outline, outline_slopes, gable_axis}``; coordinates
-    are ``[x, y]`` in feet.
+    Factored out of :func:`roof_plan` so it serves both the whole-building
+    bounding roof *and* each per-footprint-section roof (and each monitor
+    strip). Returns ``{style, pitch, rise, slope_angle, ridge, eaves, outline,
+    outline_slopes, gable_axis}`` — the same keys the single roof always
+    carried, so a plain rectangular plan's roof block is byte-identical to
+    before. The ridge runs the rectangle's **long** axis; ``outline_slopes``
+    flags the eave (slope-defining) edges.
     """
-    style = getattr(plan, "roof_style", "gable")
-    override = getattr(plan, "roof_pitch", None)
-    if override:
-        pitch = float(override)
-    minx, miny, maxx, maxy = plan.bounds()
     w, l = maxx - minx, maxy - miny
     long_is_y = l >= w
     span = min(w, l)
@@ -848,7 +879,6 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
             elif is_eave:
                 outline_slopes[i] = False
     return {
-        "top_level": top_level,
         "style": style,
         "pitch": pitch,
         "rise": rise,
@@ -859,6 +889,105 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
         "outline_slopes": outline_slopes,
         "gable_axis": gable_axis,
     }
+
+
+def _monitor_sections(
+    minx: float, miny: float, maxx: float, maxy: float, pitch: float, top_level: int
+) -> list[dict]:
+    """The three roof planes of a **monitor** (raised-centre-aisle) barn.
+
+    A monitor silhouette is a low side shed on each flank rising to a raised
+    central gable (the clerestory aisle). The short span is split into quarters:
+    the outer quarters are shed roofs (low eave outside, rising inward), and the
+    central half is a gable **raised** by the side sheds' rise so it sits atop
+    the clerestory. Each section carries ``role`` (``monitor_side`` /
+    ``monitor_center``) and ``base_height`` (feet the plane's eave sits above the
+    plate) so the builder can lift the centre plane. The clerestory *stub walls*
+    that close the gap under the raised gable are a manual refinement — not built
+    here (documented in the extension README).
+    """
+    w, l = maxx - minx, maxy - miny
+    long_is_y = l >= w
+    span = min(w, l)
+    quarter = span / 4.0
+    side_rise = quarter * pitch  # the side sheds' rise = the clerestory height
+    out: list[dict] = []
+    if long_is_y:
+        strips = [
+            (minx, minx + quarter, "monitor_side", "shed", 0.0),
+            (minx + quarter, maxx - quarter, "monitor_center", "gable", side_rise),
+            (maxx - quarter, maxx, "monitor_side", "shed", 0.0),
+        ]
+        for a, b, role, st, base in strips:
+            sec = _roof_over_rect(a, miny, b, maxy, st, pitch)
+            sec.update({"role": role, "base_height": base, "top_level": top_level})
+            out.append(sec)
+    else:
+        strips = [
+            (miny, miny + quarter, "monitor_side", "shed", 0.0),
+            (miny + quarter, maxy - quarter, "monitor_center", "gable", side_rise),
+            (maxy - quarter, maxy, "monitor_side", "shed", 0.0),
+        ]
+        for a, b, role, st, base in strips:
+            sec = _roof_over_rect(minx, a, maxx, b, st, pitch)
+            sec.update({"role": role, "base_height": base, "top_level": top_level})
+            out.append(sec)
+    return out
+
+
+def _roof_sections(plan: Barndominium, style: str, pitch: float, top_level: int):
+    """Per-plane roof sections, or ``None`` when a single bounding roof suffices.
+
+    * A **monitor** plan decomposes into three planes (see
+      :func:`_monitor_sections`), so the namesake barn form reaches Revit as real
+      roof planes instead of a plain gable over the bounds.
+    * An **L/T/U** plan (more than one footprint section) roofs *each footprint
+      rectangle* — mirroring the slab/foundation pass — so the roof covers the
+      wing and no longer spans the notch.
+    * A plain rectangular gable/shed plan returns ``None``: the single bounding
+      roof stays exactly as before, so its emitted roof data (and its
+      fingerprint) is byte-identical and it is never needlessly recreated.
+    """
+    if style == "monitor":
+        minx, miny, maxx, maxy = plan.bounds()
+        return _monitor_sections(minx, miny, maxx, maxy, pitch, top_level)
+    sections = plan.footprint_sections()
+    if len(sections) <= 1:
+        return None
+    out = []
+    for sx, sy, sw, sl in sections:
+        sec = _roof_over_rect(sx, sy, sx + sw, sy + sl, style, pitch)
+        sec.update({"role": "field", "base_height": 0.0, "top_level": top_level})
+        out.append(sec)
+    return out
+
+
+def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PITCH) -> dict:
+    """A roof plan over the building (pure, no Revit).
+
+    The top-level block is the roof over the building's **bounding box** — the
+    ridge on the long axis, eaves on the long edges, ``outline``/
+    ``outline_slopes`` for a footprint roof — kept as the backward-compatible
+    single-roof shape (and the fallback for a consumer that ignores sections).
+    Coordinates are ``[x, y]`` in feet; ``slope_angle`` is in radians.
+
+    When the form needs more than one plane the block additionally carries a
+    **``sections``** list (see :func:`_roof_sections`): one richer roof per
+    footprint rectangle for an L/T/U plan (so the wing is covered, not the
+    notch), or the three planes of a monitor. The key is **absent** for a plain
+    rectangular gable/shed plan, so those documents stay byte-identical.
+    """
+    style = getattr(plan, "roof_style", "gable")
+    override = getattr(plan, "roof_pitch", None)
+    if override:
+        pitch = float(override)
+    minx, miny, maxx, maxy = plan.bounds()
+    roof = {"top_level": top_level}
+    roof.update(_roof_over_rect(minx, miny, maxx, maxy, style, pitch))
+    sections = _roof_sections(plan, style, pitch, top_level)
+    if sections:
+        roof["sections"] = sections
+    return roof
 
 
 def foundation_plan(plan: Barndominium) -> dict:
@@ -1280,7 +1409,55 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         siding=getattr(plan, "siding", None),
         roofing=getattr(plan, "roofing", None),
         site=_site_block(plan),
+        roof_style=getattr(plan, "roof_style", "gable"),
+        roof_pitch=getattr(plan, "roof_pitch", None),
+        notes=getattr(plan, "notes", "") or "",
+        accessible=bool(getattr(plan, "accessible", False)),
+        program=_program_block(plan),
+        frame=_frame_block(plan),
     )
+
+
+def _program_block(plan: Barndominium) -> dict | None:
+    """The exchange's optional ``program`` block from a declared ``program``.
+
+    Mirrors :class:`~barndsl.elements.ProgramSpec` so ``exchange_to_plan`` can
+    call :meth:`Barndominium.program` and restore the declared intent (the
+    reason ``PROGRAM_MISMATCH`` still guards edits made after a round-trip).
+    ``None`` — key absent — when no program is declared.
+    """
+    ps = getattr(plan, "program_spec", None)
+    if ps is None:
+        return None
+    block: dict = {"beds": int(ps.beds)}
+    if ps.baths is not None:
+        block["baths"] = int(ps.baths)
+    if ps.required:
+        # RoomType keys → their string values, which ``program(requires=...)``
+        # feeds back through ``RoomType(...)`` on restore.
+        block["required"] = {t.value: int(n) for t, n in ps.required.items()}
+    if ps.min_area is not None:
+        block["min_area"] = float(ps.min_area)
+    return block
+
+
+def _frame_block(plan: Barndominium) -> dict | None:
+    """The exchange's optional ``frame`` block from a declared ``frame``.
+
+    Carries the frame *request* (:class:`~barndsl.elements.FrameSpec`), not the
+    placed posts/beams (those ride ``structure``), so re-placing on import
+    regenerates the skeleton deterministically. ``None`` — key absent — when no
+    frame is declared.
+    """
+    fs = getattr(plan, "frame_spec", None)
+    if fs is None:
+        return None
+    return {
+        "bay": float(fs.bay),
+        "span": float(fs.span),
+        "post": float(fs.post),
+        "ridge": bool(fs.ridge),
+    }
 
 
 def _site_block(plan: Barndominium) -> dict | None:
@@ -1358,8 +1535,11 @@ def exchange_to_plan(data: dict) -> Barndominium:
 
     The inverse of :func:`to_revit_model`. Rebuilds the envelope/wings, rooms,
     interior and exterior doors, windows, porches and stairs by re-deriving each
-    opening's wall and offset from its geometry. Frame/program/notes aren't
-    carried in the exchange, so they aren't restored. Raises
+    opening's wall and offset from its geometry. The exchange-v2 declared intent
+    — roof style/pitch, notes, the accessibility opt-in, the ``program`` and the
+    ``frame`` request — round-trips too when present (each is an optional key, so
+    an older document without it still loads). The declared program surviving the
+    trip is what keeps ``PROGRAM_MISMATCH`` guarding edits made in Revit. Raises
     :class:`RevitImportError` on a document that isn't this schema.
     """
     if not isinstance(data, dict) or data.get("schema") != EXCHANGE_SCHEMA:
@@ -1398,9 +1578,42 @@ def exchange_to_plan(data: dict) -> Barndominium:
                 side=setbacks.get("side"),
                 rear=setbacks.get("rear"),
             )
+    # Roof form/pitch intent. The *effective* pitch lives in the geometric roof
+    # block, but the authored **override** rides `plan.roof_pitch` — carry it so
+    # a plan with no override round-trips back to the default (a fixed point),
+    # rather than freezing the default number as an override.
+    roof_style = pinfo.get("roof_style")
+    roof_pitch = pinfo.get("roof_pitch")
+    if roof_style is not None or roof_pitch is not None:
+        plan.roof(roof_style or "gable", pitch=roof_pitch)
+    if pinfo.get("notes"):
+        plan.note(str(pinfo["notes"]))
+    if pinfo.get("accessible"):
+        plan.mark_accessible(True)
+    prog = pinfo.get("program")
+    if isinstance(prog, dict) and prog.get("beds") is not None:
+        plan.program(
+            int(prog["beds"]),
+            prog.get("baths"),
+            requires={k: int(v) for k, v in (prog.get("required") or {}).items()},
+            min_area=prog.get("min_area"),
+        )
+
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))
+
+    # The frame *request* re-places the post-and-beam skeleton (posts/beams
+    # aren't stored directly). Placed after the footprint (envelope + wings) is
+    # complete so the placer sees the whole building.
+    frame = pinfo.get("frame")
+    if isinstance(frame, dict):
+        plan.frame(
+            bay=float(frame.get("bay", 12.0)),
+            span=float(frame.get("span", 40.0)),
+            post=float(frame.get("post", feet(0.5))),
+            ridge=bool(frame.get("ridge", True)),
+        )
 
     # Rooms first — openings resolve against them.
     plan_ceiling = float(pinfo.get("ceiling_height", feet(9)))

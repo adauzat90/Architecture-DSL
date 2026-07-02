@@ -329,10 +329,23 @@ def identities(data, context=None):
 
     roof = data.get("roof")
     if roof:
-        out.append((
-            "roof", "roof", ROOF_IDENTITY,
-            fp_of("roof", roof, lvl_extra(roof.get("top_level", 0))),
-        ))
+        sections = roof.get("sections")
+        if sections:
+            # One managed roof per plane (per footprint rectangle, or the three
+            # monitor planes). Keyed by index so the diff tracks each separately;
+            # each plane's fingerprint hashes only its own section dict.
+            for i, sec in enumerate(sections):
+                out.append((
+                    "roof", "roof %d" % i, "%s|%d" % (ROOF_IDENTITY, i),
+                    fp_of("roof", sec, lvl_extra(sec.get("top_level", roof.get("top_level", 0)))),
+                ))
+        else:
+            # A single bounding roof keeps the pre-sections identity + fingerprint
+            # byte-for-byte, so an unchanged rectangular plan never recreates it.
+            out.append((
+                "roof", "roof", ROOF_IDENTITY,
+                fp_of("roof", roof, lvl_extra(roof.get("top_level", 0))),
+            ))
 
     foundation = data.get("foundation") or {}
     for i, f in enumerate(foundation.get("footings", []) or []):

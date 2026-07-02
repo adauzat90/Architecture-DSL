@@ -519,6 +519,88 @@ def test_roof_slopes_its_eave_edges():
     assert all(a == pytest.approx(angle) for a in roofs[0].slopes.values())
 
 
+#: An L-shaped plan — a primary block plus a wing — so the roof splits into one
+#: footprint-following plane per section instead of one box over the notch.
+_LSHAPE = """\
+plan "L Barn"
+envelope 40 x 24
+ceiling 9
+wing 16 x 20 at 40,0
+room living: living at 0,0 size 40 x 24
+room shop: shop at 40,0 size 16 x 20
+"""
+
+#: A monitor-roof plan (raised centre aisle) — the namesake barn silhouette.
+_MONITOR = """\
+plan "Monitor Barn"
+envelope 40 x 60
+ceiling 9
+roof monitor pitch 0.5
+room living: living at 0,0 size 40 x 60
+"""
+
+
+def _rect_of(section):
+    """(minx, miny, maxx, maxy) of a roof section's outline rectangle."""
+    xs = [pt[0] for seg in section["outline"] for pt in seg]
+    ys = [pt[1] for seg in section["outline"] for pt in seg]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def test_lshape_roof_covers_each_footprint_section():
+    # Mirroring the slab/foundation pass: one roof plane per footprint rectangle,
+    # so the roof follows the L (the wing is covered) instead of one bounding box
+    # that also roofs the empty concave notch.
+    data = _exchange(_LSHAPE)
+    sections = data["roof"]["sections"]
+    assert len(sections) == 2
+    rects = sorted(_rect_of(s) for s in sections)
+    assert rects == [(0.0, 0.0, 40.0, 24.0), (40.0, 0.0, 56.0, 20.0)]
+    # The wing rectangle is roofed; the concave notch (48, 22) — outside the
+    # footprint — is covered by no section (the old bounding box would have).
+    def covered(px, py):
+        return any(x0 <= px <= x1 and y0 <= py <= y1 for x0, y0, x1, y1 in rects)
+
+    assert covered(48.0, 10.0)  # inside the wing
+    assert not covered(48.0, 22.0)  # the notch — correctly left uncovered
+
+    doc = _ready_doc()
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="roof") == 2
+    roofs = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "roof"]
+    assert len(roofs) == 2
+    assert all(r.slopes for r in roofs)  # every plane sloped its eaves
+
+
+def test_monitor_roof_builds_three_planes():
+    # The monitor barn form reaches Revit as three real roof planes: two low side
+    # sheds + a raised centre gable (built as center gable + two shed roofs).
+    data = _exchange(_MONITOR)
+    sections = data["roof"]["sections"]
+    assert [s["role"] for s in sections] == [
+        "monitor_side", "monitor_center", "monitor_side"
+    ]
+    assert [s["style"] for s in sections] == ["shed", "gable", "shed"]
+    # The centre gable is raised on the clerestory (base_height > 0); the side
+    # sheds sit at the plate.
+    center = next(s for s in sections if s["role"] == "monitor_center")
+    assert center["base_height"] > 0
+    assert all(s["base_height"] == 0 for s in sections if s["role"] == "monitor_side")
+
+    doc = _ready_doc()
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="roof") == 3
+    roofs = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "roof"]
+    assert len(roofs) == 3 and all(r.slopes for r in roofs)
+
+
+def test_monitor_roof_skipped_without_roof_type_reports_each_plane():
+    doc = _ready_doc(roof=False)
+    rep = builder.build(doc, _exchange(_MONITOR))
+    assert rep.count(status="created", kind="roof") == 0
+    assert rep.count(status="skipped", kind="roof") == 3
+
+
 def test_gable_walls_build_from_a_profile():
     doc = _ready_doc()
     data = _example_exchange("cedar_ridge.barn")
@@ -723,6 +805,40 @@ def test_unchanged_dry_run_rebuild_reports_kept_and_rolls_back():
     assert rep.count(status="kept") == len(ids1)
     assert doc.rollbacks  # nothing committed
     assert _managed_ids(doc) == ids1
+
+
+def test_unchanged_rebuild_keeps_non_roof_elements():
+    # The core idempotency guarantee: rebuilding an unchanged plan keeps every
+    # managed element (walls/doors/rooms/slabs/…) — no needless recreation.
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    ids1 = _managed_ids(doc)
+    assert ids1
+    rep2 = builder.build(doc, data)
+    assert _managed_ids(doc) == ids1
+    assert rep2.count(status="kept") == len(ids1)
+    # Nothing managed was recreated (only the non-element "project" pass re-runs).
+    created = [r for r in rep2.records if r.status == "created"]
+    assert all(r.kind == "project" for r in created)
+
+
+def test_unchanged_lshape_rebuild_keeps_every_element_including_section_roofs():
+    # An L-shaped plan now emits a multi-plane (per-section) roof. Rebuilding it
+    # unchanged must keep BOTH roof planes and every wall/door/room — proving the
+    # richer roof records are as stable under the diff as the single-roof shape.
+    doc = _ready_doc()
+    data = _exchange(_LSHAPE)
+    assert len(data["roof"]["sections"]) == 2
+    builder.build(doc, data)
+    ids1 = _managed_ids(doc)
+    assert sum(1 for k in ids1 if k.startswith("roof")) == 2  # both planes stamped
+    rep2 = builder.build(doc, data)
+    assert _managed_ids(doc) == ids1
+    assert rep2.count(status="kept") == len(ids1)
+    assert rep2.count(status="kept", kind="roof") == 2
+    created = [r for r in rep2.records if r.status == "created"]
+    assert all(r.kind == "project" for r in created)
 
 
 def test_rebuild_keeps_room_numbers():

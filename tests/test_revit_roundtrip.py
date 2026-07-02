@@ -184,3 +184,136 @@ def test_emit_is_stable_under_double_round_trip():
     once = _round_trip(plan)
     twice = _round_trip(once)
     assert emit_dsl(once) == emit_dsl(twice)
+
+
+# --- exchange v2: declared-intent round-trip ---------------------------------
+#
+# The geometry alone can't reconstruct declared *intent* (program, frame,
+# roof form/pitch, notes, the accessibility opt-in). These carry as optional
+# keys in the `plan` block and restore via the builder methods, so a plan that
+# went through Revit and back still knows what it was meant to be.
+
+_INTENT = """\
+plan "Intent"
+envelope 50 x 40
+ceiling 10
+roof monitor pitch 0.5
+accessible
+note "client wants a wraparound porch"
+program 2 beds 1 baths
+frame bay 10 span 40
+room living: living at 0,0 size 30 x 40
+room bed1: bedroom at 30,0 size 20 x 20
+room bed2: bedroom at 30,20 size 20 x 20
+"""
+
+
+def _intent_plan():
+    plan = compile_source(_INTENT).plan
+    assert plan is not None
+    return plan
+
+
+def test_roof_style_and_pitch_round_trip():
+    back = _round_trip(_intent_plan())
+    assert back.roof_style == "monitor"
+    assert back.roof_pitch == pytest.approx(0.5)
+
+
+def test_default_roof_stays_a_fixed_point():
+    # A plan with no roof override must NOT freeze the default pitch as an
+    # override — roof_pitch stays None, so emit is a fixed point.
+    plan = _plan("cottage.barn")
+    back = _round_trip(plan)
+    assert back.roof_style == "gable"
+    assert back.roof_pitch is None
+    # No roof intent keys leak into the plan block for a default plan.
+    pinfo = to_revit_model(plan).to_dict()["plan"]
+    assert "roof_style" not in pinfo and "roof_pitch" not in pinfo
+
+
+def test_notes_and_accessible_round_trip():
+    back = _round_trip(_intent_plan())
+    assert back.notes == "client wants a wraparound porch"
+    assert back.accessible is True
+
+
+def test_program_round_trips_with_counts_and_requires():
+    src = _INTENT.replace(
+        "program 2 beds 1 baths",
+        "program 2 bed 1 bath 1 laundry area 900",
+    )
+    plan = compile_source(src).plan
+    assert plan is not None
+    back = _round_trip(plan)
+    assert back.program_spec is not None
+    assert back.program_spec.beds == 2
+    assert back.program_spec.baths == 1
+    assert back.program_spec.min_area == pytest.approx(900.0)
+    # the `requires` map survives (keyed by RoomType)
+    from barndsl.elements import RoomType
+
+    assert back.program_spec.required.get(RoomType.LAUNDRY) == 1
+
+
+def test_frame_spec_round_trips_and_replaces_the_skeleton():
+    plan = _intent_plan()
+    back = _round_trip(plan)
+    assert back.frame_spec is not None
+    assert back.frame_spec.bay == pytest.approx(10.0)
+    assert back.frame_spec.span == pytest.approx(40.0)
+    # Restoring the frame *request* re-places posts/beams (they aren't stored).
+    assert len(back.posts) == len(plan.posts) > 0
+    assert len(back.beams) == len(plan.beams) > 0
+
+
+_NO_INTENT = """\
+plan "Bare"
+envelope 40 x 30
+ceiling 9
+room living: living at 0,0 size 24 x 30
+room bed: bedroom at 24,0 size 16 x 30
+"""
+
+
+def test_absent_intent_keys_are_harmless():
+    # A plan declaring none of the v2 intent still round-trips cleanly, and the
+    # optional keys are simply absent (an older document loads the same way).
+    plan = compile_source(_NO_INTENT).plan
+    data = to_revit_model(plan).to_dict()
+    for key in ("roof_style", "roof_pitch", "notes", "accessible", "program", "frame"):
+        assert key not in data["plan"]
+    back = exchange_to_plan(data)
+    assert back.program_spec is None and back.frame_spec is None
+    assert back.notes == "" and back.accessible is False
+
+
+def test_partial_intent_program_without_frame():
+    src = """\
+plan "PartInt"
+envelope 40 x 30
+ceiling 9
+program 1 beds
+room living: living at 0,0 size 24 x 30
+room bed: bedroom at 24,0 size 16 x 30
+"""
+    plan = compile_source(src).plan
+    data = to_revit_model(plan).to_dict()
+    assert "program" in data["plan"] and "frame" not in data["plan"]
+    back = exchange_to_plan(data)
+    assert back.program_spec is not None and back.program_spec.beds == 1
+    assert back.frame_spec is None
+
+
+def test_program_mismatch_guards_a_revit_edit_after_round_trip():
+    # The declared program surviving the round-trip is what lets PROGRAM_MISMATCH
+    # catch a bedroom deleted in Revit: round-trip to DSL, drop a bedroom from
+    # the reconstructed source, recompile — the guard fires.
+    plan = _intent_plan()
+    src = exchange_to_dsl(to_revit_model(plan).to_dict())
+    assert "program 2 bed" in src  # the declared intent survived to source
+    edited = src.replace("room bed2: bedroom at 30,20 size 20 x 20\n", "")
+    assert edited != src
+    result = compile_source(edited, name=plan.name)
+    codes = [d.code for d in result.diagnostics]
+    assert "PROGRAM_MISMATCH" in codes, codes

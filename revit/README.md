@@ -116,7 +116,7 @@ model. Use it to shake a plan out against a project template before committing.
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
 | `foundation` | A **pad footing** (structural-foundation family) under each post of a placed frame; **only if** such a family is loaded, skipped with a note otherwise. The thickened perimeter edge (turndown / grade beam) and the rough concrete takeoff are reported for detailing. |
 | `grids` | Structural grid lines (`Grid.Create`) from a placed `frame`: numbered (`1, 2, …`) along the bents, lettered (`A, B, …`) across the eaves and any interior post line. None without a frame. |
-| `roof` | A footprint roof (`NewFootPrintRoof`) over the building outline, with its **eave edges made slope-defining** at the plan's pitch so it comes out as a gable (the gable ends stay vertical). Falls back to a flat roof if the slope can't be applied (**experimental** — the slope call needs live-Revit validation). |
+| `roof` | A footprint roof (`NewFootPrintRoof`), with its **eave edges made slope-defining** at the plan's pitch (gable ends stay vertical); a flat-roof fallback if the slope can't be applied (**experimental** — the slope call needs live-Revit validation). A plain gable/shed plan builds **one** roof over the building outline (the historic shape). A richer plan carries `roof.sections` and builds **one plane per section**: for an **L/T/U** plan, one footprint roof per footprint rectangle (so the roof follows the wing instead of one box over the concave notch — mirrors the slab pass); for a **monitor** plan, three planes — two low side sheds plus a **raised centre gable** lifted by its `base_height` onto the clerestory (built as *center gable + two shed roofs*). The clerestory stub walls that close the gap under the raised centre are **not built** — a manual refinement. Each plane is stamped separately, so an unchanged plan keeps them all. |
 | `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
 | `areas` (stairs) | The flights the core planned for the footprint — a single **straight** run, or a **switchback** (two flights + an automatic landing) when the straight run won't fit — built via the Stairs component API. An overrun (neither fits) is built straight and flagged. Experimental: falls back to a note if the Stairs API rejects the geometry. |
 
@@ -288,11 +288,20 @@ back to the auto-pick with a note in the report.
   real Revit is still needed to confirm. If the Stairs API rejects the geometry,
   the stair is left for you to model (the rest of the build is fine).
 - **The roof slopes its eaves (experimental).** The outline/ridge/pitch/slope are
-  computed by the core's `roof_plan` (tested), and the builder now makes the eave
+  computed by the core's `roof_plan` (tested), and the builder makes the eave
   edges slope-defining via the model-curve mapping `NewFootPrintRoof` returns — so
   the roof builds as a gable. The mapping and slope calls still need live-Revit
-  confirmation; a failure falls back to a flat roof with a note. For an L/T/U
-  footprint the outline is the bounding rectangle.
+  confirmation; a failure falls back to a flat roof with a note.
+- **L/T/U and monitor roofs build per section (experimental).** An L/T/U plan now
+  roofs each footprint rectangle separately (the roof follows the footprint, no
+  longer spanning the concave notch); a **monitor** plan builds three planes (two
+  side sheds + a raised centre gable). The per-plane outlines/pitches/base heights
+  are computed by `roof_plan`'s `sections` (tested); the raised centre is lifted by
+  building its footprint at the clerestory elevation, which — like the eave slopes —
+  needs live-Revit confirmation. The **clerestory stub walls** under the raised
+  centre are not generated (model them by hand). A monitor's *gable-end* walls are
+  still marked to the full bounding apex (the true low-high-low monitor end
+  silhouette is a manual refinement).
 - **Gable-end walls build from a profile (experimental).** They're flagged in the
   exchange with a ridge apex and built via the vertical-profile overload of
   `Wall.Create`; if that overload rejects the geometry the wall falls back to a
@@ -337,6 +346,26 @@ Caveats to review in the output before trusting it:
 - **Walls and structure aren't read back** — the reconstruction is room- and
   opening-driven, and the DSL re-derives walls. Non-rectangular rooms collapse to
   their bounding box.
+
+### Declared intent round-trips (exchange v2)
+
+Some of a plan's declared **intent** can't be reconstructed from geometry, so the
+exchange carries it as optional keys in the `plan` block, and `exchange_to_plan`
+restores each via the matching builder method. A plan that went through Revit and
+back therefore still knows what it was meant to be — in particular the declared
+**program** survives, so `PROGRAM_MISMATCH` keeps guarding a bedroom deleted after
+a round-trip. Each key is present only when non-default, so a plan declaring none
+of them (and any older `barndsl.revit/1` document) is byte-identical to before and
+loads unchanged. None of these keys is fingerprinted, so they never affect the
+diff rebuild.
+
+| `plan` key | Restores |
+|---|---|
+| `roof_style` / `roof_pitch` | The roof form (`gable`/`shed`/`monitor`) and the authored pitch override. The *override* is carried (not the effective pitch, which stays in the geometric `roof` block), so a plan with no override round-trips back to the default — a fixed point under `emit_dsl`. |
+| `notes` | Free-text plan notes (`plan.note`). |
+| `accessible` | The accessibility / aging-in-place opt-in (`plan.mark_accessible`). |
+| `program` | The declared program `{beds, baths?, required?, min_area?}` (`plan.program`) — `required` keyed by room-type name. |
+| `frame` | The frame *request* `{bay, span, post, ridge}` (`plan.frame`); the posts/beams themselves ride `structure` and are re-placed from the request on import. |
 
 The pure reconstruction (`exchange_to_plan`) and the name heuristics are covered
 by the repo suite (`tests/test_revit_roundtrip.py`, `tests/test_revit_naming.py`);

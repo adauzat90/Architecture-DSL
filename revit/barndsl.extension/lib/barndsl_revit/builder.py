@@ -1975,49 +1975,80 @@ def _slope_eaves(roof_el, mapping, roof, report):
 
 
 def _build_roof(doc, data, levels, res, report, rebuild):
-    """A gable footprint roof over the building (experimental).
+    """Build the roof(s) from the exchange (experimental).
 
-    Builds the footprint roof and makes its **eave edges slope-defining** at the
-    plan's pitch (the gable ends stay vertical), so the roof comes out as a gable
-    rather than flat. Falls back to a flat roof if the slope can't be applied.
+    A plain gable/shed plan carries a single ``roof`` block and builds one
+    footprint roof over the bounding box (as before). A richer plan carries
+    ``roof["sections"]`` — one plane per footprint rectangle for an L/T/U plan
+    (so the roof covers the wing, not the notch), or the three planes of a
+    **monitor** (two low side sheds + a raised centre gable). Each plane builds
+    as its own footprint roof with its eave edges made slope-defining; a monitor
+    centre is lifted by its ``base_height`` so it sits on the clerestory. The
+    clerestory stub walls that would close the gap under the raised gable are a
+    manual refinement (see the extension README).
     """
     roof = data.get("roof")
     if not roof:
         return
-    kept = rebuild.take(_exchange.ROOF_IDENTITY)
+    sections = roof.get("sections")
+    if sections:
+        for i, sec in enumerate(sections):
+            _build_one_roof(
+                doc, sec, levels, res, report, rebuild,
+                identity="%s|%d" % (_exchange.ROOF_IDENTITY, i),
+                source="roof %d" % i,
+                base_height=float(sec.get("base_height", 0.0)),
+            )
+        return
+    _build_one_roof(
+        doc, roof, levels, res, report, rebuild,
+        identity=_exchange.ROOF_IDENTITY, source="roof", base_height=0.0,
+    )
+
+
+def _build_one_roof(doc, roof, levels, res, report, rebuild, identity, source, base_height):
+    """Build one footprint-roof plane and slope its eaves (see :func:`_build_roof`).
+
+    ``base_height`` lifts the plane above its level (a monitor centre sits on the
+    clerestory); the single-roof and field-section cases pass ``0.0``, so their
+    sketch elevation is unchanged.
+    """
+    kept = rebuild.take(identity)
     if kept is not None:
-        report.kept("roof", "roof", revit_id=_rid(kept))
+        report.kept("roof", source, revit_id=_rid(kept))
         return
     if res.roof_type is None:
         report.note("roof skipped: no roof type in project")
-        report.skipped("roof", "roof", "no roof type")
+        report.skipped("roof", source, "no roof type")
         return
     level = levels.get(roof.get("top_level", 0))
     if level is None:
-        report.skipped("roof", "roof", "no top level")
+        report.skipped("roof", source, "no top level")
         return
+    z = level.Elevation + float(base_height)
     try:
         arr = DB.CurveArray()
         for seg in roof.get("outline", []):
             (x1, y1), (x2, y2) = seg
             arr.Append(
                 DB.Line.CreateBound(
-                    DB.XYZ(float(x1), float(y1), level.Elevation),
-                    DB.XYZ(float(x2), float(y2), level.Elevation),
+                    DB.XYZ(float(x1), float(y1), z),
+                    DB.XYZ(float(x2), float(y2), z),
                 )
             )
         result = doc.Create.NewFootPrintRoof(arr, level, res.roof_type)
         roof_el = result[0] if isinstance(result, tuple) else result
         mapping = result[1] if isinstance(result, tuple) and len(result) > 1 else None
         sloped = _slope_eaves(roof_el, mapping, roof, report) if mapping is not None else 0
-        msg = "gable roof; %d eave edge(s) sloped" % sloped if sloped else (
-            "flat footprint roof; gable pitch is a manual refinement"
+        role = roof.get("role") or "gable"
+        msg = "%s roof; %d eave edge(s) sloped" % (role, sloped) if sloped else (
+            "flat footprint roof; %s pitch is a manual refinement" % role
         )
-        _made(report, "roof", "roof", roof_el, message=msg,
-              key=_exchange.ROOF_IDENTITY, fingerprint=rebuild.fp(_exchange.ROOF_IDENTITY))
+        _made(report, "roof", source, roof_el, message=msg,
+              key=identity, fingerprint=rebuild.fp(identity))
     except Exception as exc:
         _logger.warning("roof: %s", exc)
-        report.failed("roof", "roof", "experimental: %s" % exc)
+        report.failed("roof", source, "experimental: %s" % exc)
 
 
 def _build_stairs(doc, data, levels, report, dry_run):

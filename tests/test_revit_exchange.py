@@ -153,3 +153,60 @@ def test_validate_flags_swing_into_an_unserved_room():
     door["swing_into"] = "not_a_room_it_serves"
     problems = exchange.validate(data)
     assert any("swings into" in p for p in problems)
+
+
+# --- sectioned (L/T/U + monitor) roofs ---------------------------------------
+
+
+_LSHAPE = """\
+plan "L Barn"
+envelope 40 x 24
+ceiling 9
+wing 16 x 20 at 40,0
+room living: living at 0,0 size 40 x 24
+room shop: shop at 40,0 size 16 x 20
+"""
+
+_MONITOR = """\
+plan "Monitor Barn"
+envelope 40 x 60
+ceiling 9
+roof monitor pitch 0.5
+room living: living at 0,0 size 40 x 60
+"""
+
+
+def _exchange_of(src):
+    return to_revit_model(compile_source(src).plan).to_dict()
+
+
+def test_single_rectangle_roof_carries_no_sections():
+    # A plain rectangular plan keeps the pre-sections roof shape byte-for-byte,
+    # so its roof identity/fingerprint is unchanged (never a needless recreate).
+    roof = _model_dict()["roof"]
+    assert "sections" not in roof
+    idents = [i for i in exchange.identities(_model_dict()) if i[0] == "roof"]
+    assert idents == [("roof", "roof", exchange.ROOF_IDENTITY, idents[0][3])]
+
+
+def test_lshape_roof_has_one_section_per_footprint_and_unique_identities():
+    data = exchange.load(_exchange_of(_LSHAPE))
+    assert len(data["roof"]["sections"]) == 2
+    assert exchange.validate(data) == []
+    roof_idents = [i for i in exchange.identities(data) if i[0] == "roof"]
+    assert len(roof_idents) == 2
+    keys = [k for _kind, _src, k, _fp in roof_idents]
+    assert keys == ["%s|0" % exchange.ROOF_IDENTITY, "%s|1" % exchange.ROOF_IDENTITY]
+    assert len(set(keys)) == 2  # distinct so the diff tracks each plane
+
+
+def test_monitor_roof_emits_three_plane_identities():
+    data = exchange.load(_exchange_of(_MONITOR))
+    sections = data["roof"]["sections"]
+    assert [s["role"] for s in sections] == [
+        "monitor_side", "monitor_center", "monitor_side"
+    ]
+    roof_idents = [i for i in exchange.identities(data) if i[0] == "roof"]
+    assert len(roof_idents) == 3
+    # Deterministic across re-exports (or an unchanged monitor would recreate).
+    assert exchange.identities(data) == exchange.identities(_exchange_of(_MONITOR))
