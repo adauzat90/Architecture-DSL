@@ -399,6 +399,42 @@ The round-trip is verified in the test suite: every gallery plan lowered to the
 exchange and reconstructed recovers the same rooms, door/window connections and
 envelope, and re-emits DSL that still compiles clean.
 
+### Seeing the drift: `revit-diff`
+
+Once a plan is in Revit the architect *nudges* it — slides a wall, widens a door,
+deletes a window. `revit-diff` makes that drift visible: export the edited model
+back out (the extension's **Model to DSL** / an exchange `.json`) and diff it
+against the authored source.
+
+```bash
+barndsl revit-diff model.json plan.barn                 # what changed in Revit
+barndsl revit-diff model.json plan.barn --json          # machine-readable
+barndsl revit-diff model.json plan.barn --tolerance 0.25  # tighter move threshold
+```
+
+```
+Drift: model.json vs plan.barn  (tolerance 0.5 ft)
+1 moved, 1 added, 0 removed, 1 changed across 4 rooms / 5 doors / 2 windows / 7 walls
+Score: authored 52 → model 58  (Δ +6)
+Rooms:
+  changed  D: kind office→bedroom
+Doors:
+  added    o4 at (40,2.5)
+```
+
+Either argument may be a `.barn` source **or** a `barndsl.revit/1` `.json`
+exchange (sniffed by extension, then content). Both sides are lowered the same
+way — `to_revit_model → to_dict` — so the model side (which came back from Revit,
+where rooms collapse to bounding boxes and types are guessed) compares
+apples-to-apples with the authored side. Elements are matched by **stable id
+first**, then by **nearest position** when ids differ (Revit-drawn elements
+rarely carry barndsl ids); each side reports `added` / `removed` / `moved` /
+`resized` / `changed` per kind, with before→after numbers, plus the design-score
+delta. Exit code: `0` no drift, `1` drift found, `2` unreadable input (a `.barn`
+that doesn't compile cleanly is refused — a diff against a half-parsed plan is
+meaningless). The API is `diff_plans(model, authored) -> dict` and
+`diff_text(d) -> str`.
+
 ### The pyRevit extension
 
 The Revit front-end that consumes the exchange lives in
@@ -502,6 +538,7 @@ barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
+barndsl revit-diff model.json plan.barn            # drift: what changed in Revit vs the authored plan
 barndsl revit-log plan.buildlog.json               # what the Revit build couldn't do, as diagnostics
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg

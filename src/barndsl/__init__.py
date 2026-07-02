@@ -81,6 +81,7 @@ from .revit import (
 )
 from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
 from .compare import compare_plans, comparison_text
+from .revitdiff import diff_plans, diff_text
 from .cost import cost_text, estimate_cost
 from .packet import build_packet, save_packet
 from .introspect import plan_summary, summary_text
@@ -137,6 +138,9 @@ __all__ = [
     "buildlog_issues",
     "compare_plans",
     "comparison_text",
+    # revit-diff: drift between a Revit model export and the authored plan
+    "diff_plans",
+    "diff_text",
     "plan_summary",
     "summary_text",
     # construction cost estimate (assembly takeoff → budget)

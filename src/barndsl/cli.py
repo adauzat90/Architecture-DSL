@@ -40,6 +40,12 @@
     barndsl revit-import FILE.json [--out FILE.barn]
         The reverse: reconstruct DSL source from a `barndsl.revit/1` exchange
         (e.g. one read back out of Revit). Prints the DSL, or writes it with --out.
+
+    barndsl revit-diff MODEL PLAN [--json] [--tolerance FT]
+        Report the drift between a Revit model export and the authored plan:
+        added/moved/removed/changed rooms, doors, windows and walls. Either
+        argument may be a `.barn` source or a `barndsl.revit/1` `.json` exchange.
+        Exit 0 = no drift, 1 = drift found, 2 = unreadable/uncompilable input.
 """
 
 from __future__ import annotations
@@ -570,6 +576,41 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0 if result_a.plan is not None and result_b.plan is not None else 1
 
 
+def _cmd_revit_diff(args: argparse.Namespace) -> int:
+    """Report drift between a Revit model export and the authored plan.
+
+    Either argument may be a ``.barn`` source or a ``barndsl.revit/1`` ``.json``
+    exchange (sniffed by extension/content). Exit 0 = no drift, 1 = drift found,
+    2 = unreadable input or a ``.barn`` that doesn't compile cleanly (a diff
+    against a half-parsed plan is meaningless — same contract as `compare`).
+    """
+    from .revitdiff import (
+        DEFAULT_TOLERANCE,
+        DiffInputError,
+        diff_plans,
+        diff_text,
+        load_diff_input,
+    )
+
+    try:
+        model = load_diff_input(args.model)
+        authored = load_diff_input(args.plan)
+    except DiffInputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    tol = args.tolerance if args.tolerance is not None else DEFAULT_TOLERANCE
+    names = (os.path.basename(args.model), os.path.basename(args.plan))
+    d = diff_plans(model, authored, names=names, tolerance=tol)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(d, indent=2))
+    else:
+        print(diff_text(d))
+    return 1 if d["drift"] else 0
+
+
 def _cmd_cost(args: argparse.Namespace) -> int:
     """Assembly-based construction cost estimate from the plan's takeoff."""
     from .cost import cost_text, estimate_cost
@@ -920,6 +961,29 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("file_b", help="path to scheme B (.barn)")
     p_compare.add_argument("--json", action="store_true", help="emit the comparison as JSON")
     p_compare.set_defaults(func=_cmd_compare)
+
+    p_revit_diff = sub.add_parser(
+        "revit-diff",
+        help="report drift (moved/added/removed/changed) between a Revit model "
+        "export and the authored plan",
+    )
+    p_revit_diff.add_argument(
+        "model", help="the (edited) Revit side: a .json exchange or a .barn source"
+    )
+    p_revit_diff.add_argument(
+        "plan", help="the authored side: a .barn source or a .json exchange"
+    )
+    p_revit_diff.add_argument(
+        "--json", action="store_true", help="emit the diff as machine-readable JSON"
+    )
+    p_revit_diff.add_argument(
+        "--tolerance",
+        type=float,
+        default=None,
+        help="geometry tolerance in feet for detecting a move/resize "
+        "(default 0.5)",
+    )
+    p_revit_diff.set_defaults(func=_cmd_revit_diff)
 
     p_cost = sub.add_parser(
         "cost",
