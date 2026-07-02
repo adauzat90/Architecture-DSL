@@ -41,6 +41,7 @@ from .elements import (
 )
 from .geometry import (
     opening_endpoints,
+    point_in_footprint,
     rect_in_footprint,
     shared_edge,
     wall_faces_outside,
@@ -347,10 +348,26 @@ def _building_corner(plan: Barndominium, room: Room, wall: Direction, at_end: bo
 
 
 def _stair_against_wall(plan: Barndominium, s) -> bool:
-    """Does a stair sit along a wall (envelope edge or a room partition) rather
+    """Does a stair sit along a wall (footprint edge or a room partition) rather
     than floating free in the middle of a room?"""
     tol = EPSILON
-    if (
+    if plan.wings:
+        # L/T/U footprint: every outline edge is an exterior wall, not just the
+        # four primary-envelope edges. Probe just outside each stair edge's
+        # midpoint — leaving the footprint union means that edge lies on the
+        # outline (mirrors ``wall_faces_outside`` for rooms).
+        secs = plan.footprint_sections()
+        eps = 0.05
+        mx, my = (s.x + s.x2) / 2.0, (s.y + s.y2) / 2.0
+        probes = (
+            (mx, s.y - eps),
+            (mx, s.y2 + eps),
+            (s.x - eps, my),
+            (s.x2 + eps, my),
+        )
+        if any(not point_in_footprint(secs, px, py) for px, py in probes):
+            return True
+    elif (
         abs(s.x) <= tol
         or abs(s.y) <= tol
         or abs(s.x2 - plan.envelope_width) <= tol
@@ -1515,13 +1532,31 @@ def _validate_stairs(plan: Barndominium, add) -> None:
             add(Issue(Severity.ERROR, "STAIR_LEVELS",
                       f"Stair '{s.id}' must connect two different levels >= 0.",
                       room=s.id, hint="e.g. `from 0 to 1`."))
-        over_x = max(0.0, s.x2 - plan.envelope_width)
-        over_y = max(0.0, s.y2 - plan.envelope_length)
-        if s.x < -EPSILON or s.y < -EPSILON or over_x > EPSILON or over_y > EPSILON:
-            add(Issue(Severity.ERROR, "STAIR_OOB",
-                      f"Stair '{s.id}' extends outside the "
-                      f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
-                      room=s.id, hint="Keep its footprint inside the envelope."))
+        if plan.wings:
+            # Rectilinear footprint: a stair may legitimately sit in a wing (or
+            # straddle a seam), so test the footprint union rather than the
+            # primary rectangle — same treatment as room OUT_OF_BOUNDS.
+            if (
+                s.width > 0
+                and s.length > 0
+                and not rect_in_footprint(
+                    plan.footprint_sections(), s.x, s.y, s.width, s.length
+                )
+            ):
+                add(Issue(Severity.ERROR, "STAIR_OOB",
+                          f"Stair '{s.id}' extends outside the building footprint "
+                          f"({_f(s.x)},{_f(s.y)} → {_f(s.x2)},{_f(s.y2)}); it isn't "
+                          "covered by the envelope or any wing.",
+                          room=s.id,
+                          hint="Keep its footprint inside the envelope or a wing."))
+        else:
+            over_x = max(0.0, s.x2 - plan.envelope_width)
+            over_y = max(0.0, s.y2 - plan.envelope_length)
+            if s.x < -EPSILON or s.y < -EPSILON or over_x > EPSILON or over_y > EPSILON:
+                add(Issue(Severity.ERROR, "STAIR_OOB",
+                          f"Stair '{s.id}' extends outside the "
+                          f"{_f(plan.envelope_width)}×{_f(plan.envelope_length)} ft envelope.",
+                          room=s.id, hint="Keep its footprint inside the envelope."))
         # Does the footprint hold the run one storey demands? A straight flight
         # needs (risers-1)·tread of horizontal run; a switchback halves that but
         # needs a footprint wide enough for two flights side by side. Only flag

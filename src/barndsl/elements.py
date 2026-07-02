@@ -1066,19 +1066,27 @@ class Barndominium:
 
     def metrics(self) -> dict[str, float]:
         """Rough material / area takeoff for summaries and estimating."""
-        perimeter = 2.0 * (self.envelope_width + self.envelope_length)
+        from .geometry import footprint_boundary
+
+        # The footprint outline doubles as the slab turndown edge, and for an
+        # L/T/U plan (wings) its total length *is* the exterior perimeter — the
+        # primary rectangle alone would understate an L/T/U takeoff. A plain
+        # rectangle keeps the closed form 2(W+L).
+        boundary = footprint_boundary(self.footprint_sections())
+        turndown_len = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
+        if self.wings:
+            perimeter = turndown_len
+        else:
+            perimeter = 2.0 * (self.envelope_width + self.envelope_length)
         exterior_wall_area = perimeter * self.ceiling_height
         # Gable roof over the footprint: the sloped area is the plan area divided
         # by the cosine of the roof slope (both planes share the pitch), so the
         # factor follows the actual pitch instead of a fixed guess.
-        slope_factor = math.hypot(1.0, DEFAULT_ROOF_PITCH)  # sec(atan(pitch))
+        pitch = self.roof_pitch if self.roof_pitch is not None else DEFAULT_ROOF_PITCH
+        slope_factor = math.hypot(1.0, pitch)  # sec(atan(pitch))
         roof_area = self.footprint_area * slope_factor
         # Monolithic slab-on-grade concrete: the slab, its thickened perimeter
         # edge (turndown), and a pad footing under each post. Rough takeoff (yd³).
-        from .geometry import footprint_boundary
-
-        boundary = footprint_boundary(self.footprint_sections())
-        turndown_len = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in boundary)
         concrete_ft3 = (
             self.footprint_area * SLAB_THICKNESS
             + turndown_len * TURNDOWN_WIDTH * TURNDOWN_DEPTH
