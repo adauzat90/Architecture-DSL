@@ -3,8 +3,9 @@
 
 Kept Revit-free (like :mod:`barndsl_revit.exchange`) so it unit-tests under
 ordinary CPython and the builder's bookkeeping/formatting can be verified without
-a running Revit. The builder records every element it creates / skips / fails
-here; the report then renders to **markdown** (for the pyRevit output panel) and
+a running Revit. The builder records every element it creates / keeps (diff
+re-build) / skips / fails here; the report then renders to **markdown** (for the
+pyRevit output panel) and
 to **JSON** (for a build-log file you can attach when debugging a real run).
 
 Written for broad interpreter compatibility (no f-strings, no dataclasses) so it
@@ -12,9 +13,12 @@ also runs on the CPython engines older pyRevit builds ship.
 """
 
 CREATED = "created"
+#: A diff rebuild left the element from the previous build untouched (same
+#: exchange record → same Revit element id, so user annotations survive).
+KEPT = "kept"
 SKIPPED = "skipped"
 FAILED = "failed"
-STATUSES = (CREATED, SKIPPED, FAILED)
+STATUSES = (CREATED, KEPT, SKIPPED, FAILED)
 
 #: The element kinds the builder reports on, in display order.
 KINDS = (
@@ -47,6 +51,12 @@ _OVERRIDE_KEYS = (
     #: centrelines) or "finish_face_exterior" (lands the outside finish on the
     #: footprint line so the building's overall dimension is exact).
     "location_line",
+    #: How a ``replace`` re-build treats the previous barndsl build: "diff"
+    #: (default — keep elements whose exchange record is unchanged, preserving
+    #: their Revit ids and any user annotations on them; delete/recreate only
+    #: what changed) or "full" (purge everything managed and recreate — the old
+    #: behaviour). Ignored when ``replace`` is false.
+    "rebuild",
 )
 _FLAG_KEYS = (
     "structure", "size_families", "porches", "stairs", "slabs", "grids", "roof",
@@ -97,6 +107,7 @@ class BuildOptions(object):
         appliance_family=None,
         foundation_family=None,
         location_line=None,
+        rebuild="diff",
     ):
         self.structure = bool(structure)
         self.size_families = bool(size_families)
@@ -131,6 +142,8 @@ class BuildOptions(object):
         self.appliance_family = appliance_family
         self.foundation_family = foundation_family
         self.location_line = location_line
+        rebuild = str(rebuild or "diff").strip().lower()
+        self.rebuild = rebuild if rebuild in ("diff", "full") else "diff"
 
     @classmethod
     def from_dict(cls, data):
@@ -204,6 +217,9 @@ class BuildReport(object):
     def created(self, kind, source, revit_id=None, message=""):
         return self.record(kind, source, CREATED, revit_id, message)
 
+    def kept(self, kind, source, revit_id=None, message=""):
+        return self.record(kind, source, KEPT, revit_id, message)
+
     def skipped(self, kind, source, message=""):
         return self.record(kind, source, SKIPPED, message=message)
 
@@ -245,11 +261,15 @@ class BuildReport(object):
             if c:
                 parts.append("%d %s" % (c, kind))
         made = ", ".join(parts) if parts else "nothing"
-        tail = ""
+        bits = []
+        nkept = self.count(status=KEPT)
+        if nkept:
+            bits.append("%d kept" % nkept)
         nfail = self.count(status=FAILED)
         nskip = self.count(status=SKIPPED)
         if nfail or nskip:
-            tail = " (%d failed, %d skipped)" % (nfail, nskip)
+            bits.append("%d failed, %d skipped" % (nfail, nskip))
+        tail = " (%s)" % "; ".join(bits) if bits else ""
         prefix = "[dry run] " if self.dry_run else ""
         return "%s%s %s%s" % (prefix, verb, made, tail)
 
@@ -286,15 +306,16 @@ class BuildReport(object):
         counts = self.counts_by_kind()
         if counts:
             lines.append("")
-            lines.append("| element | created | skipped | failed |")
-            lines.append("|---|---:|---:|---:|")
+            lines.append("| element | created | kept | skipped | failed |")
+            lines.append("|---|---:|---:|---:|---:|")
             for kind in KINDS:
                 row = counts.get(kind)
                 if not row:
                     continue
                 lines.append(
-                    "| %s | %d | %d | %d |"
-                    % (kind, row.get(CREATED, 0), row.get(SKIPPED, 0), row.get(FAILED, 0))
+                    "| %s | %d | %d | %d | %d |"
+                    % (kind, row.get(CREATED, 0), row.get(KEPT, 0),
+                       row.get(SKIPPED, 0), row.get(FAILED, 0))
                 )
 
         if self.resources:

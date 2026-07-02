@@ -64,7 +64,7 @@ class FakeElement:
         self.Id = _Id()
         self._name = name
         self.Document = doc
-        self._entity = None
+        self._entities = {}  # schema guid -> Entity (Revit stores one per schema)
         self._params = {}
         # Every Revit element carries instance Comments — the managed marker lives here.
         self._params[BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS] = FakeParam("", "String")
@@ -89,12 +89,16 @@ class FakeElement:
     def LookupParameter(self, name):
         return self._params.get(name)
 
-    # Extensible Storage: the managed marker lives here (not in Comments).
+    # Extensible Storage: the managed marker/identity stamp lives here (not in
+    # Comments). Real Revit keys one entity per schema on an element — the
+    # builder reads both its legacy (marker-only) and current (identity) schemas.
     def SetEntity(self, entity):
-        self._entity = entity
+        guid = getattr(getattr(entity, "Schema", None), "guid", None)
+        self._entities[guid] = entity
 
     def GetEntity(self, schema):
-        return self._entity if self._entity is not None else Entity(None)
+        ent = self._entities.get(getattr(schema, "guid", None))
+        return ent if ent is not None else Entity(None)
 
 
 # --- enums / namespaces (string values: hashable + comparable) ---------------
@@ -788,6 +792,10 @@ class _Creator:
         # +Y off an east-west wall, +X off a north-south one — the "default
         # facing" the builder flips when the authored swing points the other way.
         host = args[2] if len(args) >= 3 else None
+        if isinstance(host, Wall):
+            # A wall-hosted instance (door/window) remembers its host, so a
+            # wall deletion can cascade to it like real Revit's does.
+            inst.Host = host
         curve = getattr(host, "curve", None)
         if curve is None and getattr(host, "profile", None):
             curve = host.profile[0]
@@ -943,7 +951,7 @@ class FakeDocument:
         return self._by_id.get(eid.Value)
 
     def Delete(self, eid):
-        self._by_id.pop(eid.Value, None)
+        elem = self._by_id.pop(eid.Value, None)
         for lst in (
             self.views, self.schedules, self.sheets, self.levels, self.wall_types,
             self.floor_types, self.roof_types, self.view_family_types, self.placed_rooms,
@@ -951,6 +959,21 @@ class FakeDocument:
             for x in list(lst):
                 if x.Id.Value == eid.Value:
                     lst.remove(x)
+        for insts in self.instances.values():
+            for x in list(insts):
+                if x.Id.Value == eid.Value:
+                    insts.remove(x)
+        # Revit cascade: deleting a wall deletes everything hosted on it — the
+        # door/window instances and the wall-cut Openings. Mirrored here so the
+        # diff-rebuild keep/recreate logic can be tested (the builder assumes
+        # this cascade; the exact real-Revit behaviour needs live validation).
+        if isinstance(elem, Wall):
+            for e in list(self._by_id.values()):
+                host = getattr(e, "Host", None)
+                if host is None:
+                    host = getattr(e, "host", None)
+                if host is elem:
+                    self.Delete(e.Id)
 
     def Regenerate(self):
         pass

@@ -11,9 +11,13 @@ APIs current in 2025 (``Floor.Create``; ``ElementId.Value`` over the deprecated
 
 Built for debugging a real run:
 
-* Every element's outcome (created / skipped / failed, with the Revit id and a
-  reason) is recorded in a :class:`barndsl_revit.report.BuildReport`, which
+* Every element's outcome (created / kept / skipped / failed, with the Revit id
+  and a reason) is recorded in a :class:`barndsl_revit.report.BuildReport`, which
   renders to markdown for the pyRevit panel and JSON for a build-log file.
+* Re-builds are **diff-based** by default: every element is stamped with its
+  exchange identity + record fingerprint (Extensible Storage), and a ``replace``
+  re-build keeps whatever is unchanged — preserving Revit element ids so user
+  annotations survive iteration. ``rebuild: "full"`` restores purge-and-recreate.
 * :func:`build` honours a :class:`~barndsl_revit.report.BuildOptions` — toggle
   passes, sizing, and map any pass to a **named** wall/floor/family type from the
   project template instead of auto-picking.
@@ -46,9 +50,21 @@ MIN_STAIR_WIDTH = 3.0
 #: (so an old build is still recognised), but new builds no longer *write* it.
 MANAGED_MARK = "barndsl-managed"
 
-#: A fixed GUID for the private Extensible-Storage schema that carries the marker.
-_MANAGED_SCHEMA_GUID = "b47d9a1e-6f3c-4c2a-9d18-2a1f0c7e5b64"
+#: The v1 schema (marker only). ES schemas are **immutable once created in a
+#: document**, so the extended identity stamp lives in a new schema under a new
+#: GUID; this one is still *read* so elements from a v1 build are recognised as
+#: managed (they carry no identity, so a diff rebuild purges them — the old
+#: behaviour). Never written by new builds.
+_LEGACY_SCHEMA_GUID = "b47d9a1e-6f3c-4c2a-9d18-2a1f0c7e5b64"
+#: The current schema: the marker plus the element's **exchange identity key**
+#: and the **fingerprint** of the exchange record that produced it, so a diff
+#: rebuild can keep unchanged elements in place (preserving their Revit ids).
+#: That two-schema dance (read old, write new) needs live-Revit confirmation on
+#: a document that carries v1 stamps.
+_IDENTITY_SCHEMA_GUID = "3f8c5d2a-9b41-4e7f-8c06-5d2e9a7b1c43"
 _MANAGED_FIELD = "marker"
+_KEY_FIELD = "key"
+_FINGERPRINT_FIELD = "fingerprint"
 
 
 def _es():
@@ -63,34 +79,49 @@ def _es():
         return None
 
 
-def _managed_schema(create=False):
-    """Look up (or, when ``create``, build) the private managed-element schema."""
+def _legacy_schema():
+    """The v1 marker-only schema, looked up read-only (never created/written)."""
+    bits = _es()
+    if bits is None:
+        return None
+    ES, Guid, _String = bits
+    try:
+        return ES.Schema.Lookup(Guid(_LEGACY_SCHEMA_GUID))
+    except Exception:
+        return None
+
+
+def _identity_schema(create=False):
+    """Look up (or, when ``create``, build) the identity-stamp schema."""
     bits = _es()
     if bits is None:
         return None
     ES, Guid, String = bits
     try:
-        guid = Guid(_MANAGED_SCHEMA_GUID)
+        guid = Guid(_IDENTITY_SCHEMA_GUID)
         schema = ES.Schema.Lookup(guid)
         if schema is not None or not create:
             return schema
         b = ES.SchemaBuilder(guid)
-        b.SetSchemaName("BarndslManaged")
+        b.SetSchemaName("BarndslManagedV2")
         b.SetReadAccessLevel(ES.AccessLevel.Public)
         b.SetWriteAccessLevel(ES.AccessLevel.Public)
         b.AddSimpleField(_MANAGED_FIELD, String)
+        b.AddSimpleField(_KEY_FIELD, String)
+        b.AddSimpleField(_FINGERPRINT_FIELD, String)
         return b.Finish()
     except Exception:
         return None
 
 
-def _es_mark(elem):
-    """Stamp the managed marker into Extensible Storage. Returns True on success."""
+def _es_mark(elem, key=None, fingerprint=None):
+    """Stamp the managed marker (+ identity, when known) into Extensible
+    Storage. Returns True on success."""
     bits = _es()
     if bits is None:
         return False
     _ES, _Guid, String = bits
-    schema = _managed_schema(create=True)
+    schema = _identity_schema(create=True)
     if schema is None:
         return False
     try:
@@ -98,10 +129,25 @@ def _es_mark(elem):
 
         ent = ES.Entity(schema)
         ent.Set[String](_MANAGED_FIELD, MANAGED_MARK)
+        ent.Set[String](_KEY_FIELD, key or "")
+        ent.Set[String](_FINGERPRINT_FIELD, fingerprint or "")
         elem.SetEntity(ent)
         return True
     except Exception:
         return False
+
+
+def _es_entity(elem, schema):
+    """The element's valid entity for ``schema``, or None."""
+    if schema is None:
+        return None
+    try:
+        ent = elem.GetEntity(schema)
+        if ent is None or not ent.IsValid():
+            return None
+        return ent
+    except Exception:
+        return None
 
 
 def _es_is_managed(elem):
@@ -109,16 +155,39 @@ def _es_is_managed(elem):
     if bits is None:
         return False
     _ES, _Guid, String = bits
-    schema = _managed_schema(create=False)
-    if schema is None:
-        return False
+    for schema in (_identity_schema(create=False), _legacy_schema()):
+        ent = _es_entity(elem, schema)
+        if ent is None:
+            continue
+        try:
+            if ent.Get[String](_MANAGED_FIELD) == MANAGED_MARK:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _es_identity(elem):
+    """The ``(identity_key, fingerprint)`` stamped on a managed element, or
+    ``None`` when it carries no identity (a legacy/v1 build, a mark written
+    without a key, or no Extensible Storage engine)."""
+    bits = _es()
+    if bits is None:
+        return None
+    _ES, _Guid, String = bits
+    ent = _es_entity(elem, _identity_schema(create=False))
+    if ent is None:
+        return None
     try:
-        ent = elem.GetEntity(schema)
-        if ent is None or not ent.IsValid():
-            return False
-        return ent.Get[String](_MANAGED_FIELD) == MANAGED_MARK
+        if ent.Get[String](_MANAGED_FIELD) != MANAGED_MARK:
+            return None
+        key = ent.Get[String](_KEY_FIELD) or ""
+        fp = ent.Get[String](_FINGERPRINT_FIELD) or ""
     except Exception:
-        return False
+        return None
+    if not key:
+        return None
+    return (key, fp)
 
 try:
     from pyrevit import script as _script
@@ -200,11 +269,13 @@ def _is_managed(elem):
         return False
 
 
-def _mark(elem):
-    """Stamp an element as barndsl-managed. Prefers Extensible Storage (private,
-    out of the way); only if that engine is unavailable does it fall back to the
-    Comments field."""
-    if _es_mark(elem):
+def _mark(elem, key=None, fingerprint=None):
+    """Stamp an element as barndsl-managed (with its exchange identity, when
+    known). Prefers Extensible Storage (private, out of the way); only if that
+    engine is unavailable does it fall back to the Comments field — a Comments
+    mark carries no identity, so such elements are treated as legacy (purged,
+    never kept) on a diff rebuild."""
+    if _es_mark(elem, key=key, fingerprint=fingerprint):
         return elem
     p = _comments_param(elem)
     if p is not None and not p.IsReadOnly:
@@ -215,15 +286,53 @@ def _mark(elem):
     return elem
 
 
-def _made(report, kind, source, elem, message=""):
-    """Mark a freshly-created element and record it as created."""
-    _mark(elem)
+def _made(report, kind, source, elem, message="", key=None, fingerprint=None):
+    """Mark a freshly-created element (stamping its identity) and record it."""
+    _mark(elem, key=key, fingerprint=fingerprint)
     return report.created(kind, source, revit_id=_rid(elem), message=message)
 
 
+class _Rebuild(object):
+    """Diff-rebuild bookkeeping threaded through the build passes.
+
+    ``fps`` maps every incoming record's identity key to its fingerprint (from
+    :func:`exchange.identities`) so passes stamp exactly what the diff will
+    compare next time. ``kept`` maps identity keys to the existing elements a
+    diff decided to keep; a pass *takes* its element (so it is claimed once),
+    reports it ``kept`` and skips creation.
+    """
+
+    def __init__(self, fps=None, kept=None):
+        self.fps = fps or {}
+        self.kept = kept or {}
+
+    def fp(self, key):
+        return self.fps.get(key, "")
+
+    def take(self, key):
+        return self.kept.pop(key, None)
+
+
+#: Which options flag turns each managed element kind's pass off. A disabled
+#: pass builds nothing, so a diff rebuild must not *keep* those kinds either —
+#: mirroring the full purge, which deletes them.
+_KIND_FLAGS = {
+    "ceiling": "ceilings",
+    "column": "structure",
+    "framing": "structure",
+    "fixture": "fixtures",
+    "slab": "slabs",
+    "footing": "foundation",
+    "porch": "porches",
+    "grid": "grids",
+    "roof": "roof",
+}
+
+
 def _purge_managed(doc, report):
-    """Delete elements a previous barndsl build created, so a re-build replaces
-    rather than duplicates. Identifies them by the managed mark in Comments;
+    """Delete every element a previous barndsl build created, so a re-build
+    replaces rather than duplicates (the ``rebuild: "full"`` path). Identifies
+    them by the managed mark (Extensible Storage, or the legacy Comments mark);
     never touches anything the user drew. Runs inside the build transaction."""
     try:
         elems = DB.FilteredElementCollector(doc).WhereElementIsNotElementType().ToElements()
@@ -240,6 +349,67 @@ def _purge_managed(doc, report):
     if removed:
         report.note("replaced %d element(s) from a previous barndsl build" % removed)
     return removed
+
+
+def _diff_managed(doc, idents, options, report):
+    """The diff arm of a replace re-build: keep managed elements whose stamped
+    identity+fingerprint match an incoming record, delete the rest.
+
+    Returns ``{identity_key: element}`` for the keeps — the passes then report
+    those as ``kept`` instead of recreating them, so their Revit element ids
+    (and any user dimensions/tags attached to them) survive the iteration.
+
+    Deleted: elements whose record changed (recreated by their pass), whose
+    identity is stale (no incoming record — removed from the plan), whose kind's
+    pass is now disabled, and legacy managed elements with no identity stamp (a
+    v1 or Comments-marked build — old behaviour). Deleting a wall makes Revit
+    cascade-delete its hosted doors/windows/cuts; the fingerprint scheme folds
+    each host wall's fingerprint into its openings', so any opening whose host
+    is deleted was never a keep — a later ``Delete`` on the already-gone element
+    is swallowed. Runs inside the build transaction.
+    """
+    incoming = {}
+    for kind, _source, key, fp in idents:
+        flag = _KIND_FLAGS.get(kind)
+        if flag is not None and not getattr(options, flag, True):
+            continue
+        incoming[key] = fp
+    try:
+        elems = DB.FilteredElementCollector(doc).WhereElementIsNotElementType().ToElements()
+    except Exception:
+        return {}
+    kept = {}
+    removed = 0
+    legacy = 0
+    for e in list(elems):
+        ident = _es_identity(e)
+        if ident is not None:
+            key, fp = ident
+            if incoming.get(key) == fp and key not in kept:
+                kept[key] = e
+                continue
+            try:
+                doc.Delete(e.Id)
+                removed += 1
+            except Exception:
+                pass
+        elif _is_managed(e):
+            legacy += 1
+            try:
+                doc.Delete(e.Id)
+            except Exception:
+                pass
+    if removed:
+        report.note(
+            "replaced %d changed/removed element(s) from the previous barndsl build"
+            % removed
+        )
+    if legacy:
+        report.note(
+            "purged %d element(s) from an older barndsl build (no identity stamp)"
+            % legacy
+        )
+    return kept
 
 
 def _name(elem):
@@ -796,11 +966,19 @@ def _is_gable(w):
     )
 
 
-def _build_walls(doc, data, levels, res, options, report):
+def _build_walls(doc, data, levels, res, options, report, rebuild):
     made = {}
     loc_line = _wall_location_line_value(getattr(options, "location_line", None))
     constrained = 0
     for w in data["walls"]:
+        key = _exchange.wall_identity(w)
+        kept = rebuild.take(key)
+        if kept is not None:
+            # Unchanged since the last build: the existing wall (and any user
+            # dimensions/tags on it) stays. Hosted openings still index it.
+            report.kept("wall", w["id"], revit_id=_rid(kept))
+            made[w["id"]] = kept
+            continue
         level = levels.get(w["level"])
         if level is None:
             report.skipped("wall", w["id"], "no level %r" % w["level"])
@@ -817,7 +995,8 @@ def _build_walls(doc, data, levels, res, options, report):
         if gable:
             try:
                 wall = _gable_wall(doc, w, wtype, level)
-                _made(report, "wall", w["id"], wall, message="gable-end profile")
+                _made(report, "wall", w["id"], wall, message="gable-end profile",
+                      key=key, fingerprint=rebuild.fp(key))
             except Exception as exc:
                 report.note(
                     "gable wall %s: profile build failed (%s); flat fallback"
@@ -829,7 +1008,7 @@ def _build_walls(doc, data, levels, res, options, report):
                 wall = DB.Wall.Create(
                     doc, curve, wtype.Id, level.Id, float(w["height"]), 0.0, False, False
                 )
-                _made(report, "wall", w["id"], wall)
+                _made(report, "wall", w["id"], wall, key=key, fingerprint=rebuild.fp(key))
             except Exception as exc:
                 _logger.warning("wall %s: %s", w["id"], exc)
                 report.failed("wall", w["id"], str(exc))
@@ -898,7 +1077,7 @@ def _wall_opening_points(o, wall_d, z):
     return p1, p2
 
 
-def _cased_wall_opening(doc, o, host, wall_d, level, report):
+def _cased_wall_opening(doc, o, host, wall_d, level, report, key=None, fp=None):
     """Cut a real rectangular wall opening for a doorless cased opening (the
     open-concept walk-through), instead of hanging a swinging leaf. Returns True
     on success; a failure is noted so the caller can fall back to a sized door
@@ -910,7 +1089,8 @@ def _cased_wall_opening(doc, o, host, wall_d, level, report):
         z = level.Elevation if level else 0.0
         p1, p2 = _wall_opening_points(o, wall_d, z)
         op = doc.Create.NewOpening(host, p1, p2)
-        _made(report, "opening", o["id"], op, message="cased opening (wall cut, no leaf)")
+        _made(report, "opening", o["id"], op, message="cased opening (wall cut, no leaf)",
+              key=key, fingerprint=fp)
         return True
     except Exception as exc:
         _logger.warning("cased opening %s: %s", o["id"], exc)
@@ -980,7 +1160,7 @@ def _stamp_egress(inst, o):
         pass
 
 
-def _build_openings(doc, data, levels, walls, res, options, report):
+def _build_openings(doc, data, levels, walls, res, options, report, rebuild):
     door_base = _activate(res.door, doc)
     garage_base = _activate(res.garage_door, doc)
     win_base = _activate(res.window, doc)
@@ -992,6 +1172,14 @@ def _build_openings(doc, data, levels, walls, res, options, report):
     for o in data["openings"]:
         cased = o["category"] == "cased_opening"
         kind = "window" if o["category"] == "window" else "door"
+        key = _exchange.opening_identity(o)
+        kept = rebuild.take(key)
+        if kept is not None:
+            # Unchanged opening on an unchanged (kept) host wall — the
+            # fingerprint folds the host wall's in, so a recreated wall can
+            # never leave a stale hosted instance behind.
+            report.kept("opening" if cased else kind, o["id"], revit_id=_rid(kept))
+            continue
         host = walls.get(o.get("host_wall"))
         if host is None:
             report.skipped("opening" if cased else kind, o["id"], "no host wall")
@@ -1001,7 +1189,8 @@ def _build_openings(doc, data, levels, walls, res, options, report):
         if cased:
             # A cased opening has no leaf: cut a real wall opening. Only on
             # failure fall through to the old sized-door-family stand-in.
-            if _cased_wall_opening(doc, o, host, wall_d, level, report):
+            if _cased_wall_opening(doc, o, host, wall_d, level, report,
+                                   key=key, fp=rebuild.fp(key)):
                 continue
         overhead = o.get("kind") == "overhead"
         base = win_base if kind == "window" else door_base
@@ -1047,7 +1236,8 @@ def _build_openings(doc, data, levels, walls, res, options, report):
             # Honour the authored swing side/hinge and stamp the egress flag.
             message = _flip_door_swing(inst, o, rooms_by_id, wall_d, report)
             _stamp_egress(inst, o)
-        _made(report, kind, o["id"], inst, message=message)
+        _made(report, kind, o["id"], inst, message=message,
+              key=key, fingerprint=rebuild.fp(key))
 
 
 #: Default finish schedule by room type — a starting point a residential room
@@ -1085,11 +1275,23 @@ def _set_string_param(elem, bip, value):
     return False
 
 
-def _build_rooms(doc, data, levels, report):
+def _build_rooms(doc, data, levels, report, rebuild):
     # Number rooms sequentially per level: 101.., 201.. — the residential
     # convention (floor number × 100 + running count).
     counters = {}
     for r in data["rooms"]:
+        key = _exchange.room_identity(r)
+        kept = rebuild.take(key)
+        if kept is not None:
+            # A kept room keeps its number (and any user edits to its
+            # parameters) — but it still consumes its slot in the numbering so
+            # a recreated neighbour lands back on its old number. Rooms are
+            # placed at seeds independent of walls; a kept room whose bounding
+            # walls were recreated in the same transaction should re-bound to
+            # the new walls (needs live-Revit confirmation).
+            counters[r.get("level", 0)] = counters.get(r.get("level", 0), 0) + 1
+            report.kept("room", r["id"], revit_id=_rid(kept))
+            continue
         level = levels.get(r["level"])
         if level is None:
             report.skipped("room", r["id"], "no level %r" % r["level"])
@@ -1114,10 +1316,10 @@ def _build_rooms(doc, data, levels, report):
         _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_BASE, base)
         _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_CEILING, ceil)
         _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_WALL, wall)
-        _made(report, "room", r["id"], room)
+        _made(report, "room", r["id"], room, key=key, fingerprint=rebuild.fp(key))
 
 
-def _build_ceilings(doc, data, levels, res, report):
+def _build_ceilings(doc, data, levels, res, report, rebuild):
     """A flat ceiling per room, hosted at the room's ceiling height above its
     level — so the model has a reflected-ceiling plane and somewhere to host
     lighting. Uses each room's rectangle; skipped (with a note) when the project
@@ -1132,6 +1334,11 @@ def _build_ceilings(doc, data, levels, res, report):
     from System.Collections.Generic import List
 
     for r in rooms:
+        key = _exchange.ceiling_identity(r)
+        kept = rebuild.take(key)
+        if kept is not None:
+            report.kept("ceiling", r["id"], revit_id=_rid(kept))
+            continue
         level = levels.get(r["level"])
         if level is None:
             continue
@@ -1151,7 +1358,7 @@ def _build_ceilings(doc, data, levels, res, report):
             _set_double_param(
                 ceil, [DB.BuiltInParameter.CEILING_HEIGHTABOVELEVEL_PARAM], [], height
             )
-            _made(report, "ceiling", r["id"], ceil)
+            _made(report, "ceiling", r["id"], ceil, key=key, fingerprint=rebuild.fp(key))
         except Exception as exc:
             report.failed("ceiling", r["id"], str(exc))
 
@@ -1203,7 +1410,7 @@ def _sized_section(doc, base, width, depth, cache, report):
     return cache[key]
 
 
-def _build_structure(doc, data, levels, res, options, report):
+def _build_structure(doc, data, levels, res, options, report, rebuild):
     structure = data.get("structure", {})
     columns = structure.get("columns", [])
     framing = structure.get("framing", [])
@@ -1224,12 +1431,17 @@ def _build_structure(doc, data, levels, res, options, report):
     if columns and col_sym is None:
         report.note("structural columns skipped: no structural-column family loaded")
     for i, c in enumerate(columns):
+        src = "post %d" % i
+        key = _exchange.column_identity(c)
+        kept = rebuild.take(key)
+        if kept is not None:
+            report.kept("column", src, revit_id=_rid(kept))
+            continue
         if col_sym is None:
-            break
+            continue
         level = levels.get(c["level"])
         if level is None:
             continue
-        src = "post %d" % i
         try:
             sym = sized(col_sym, c.get("size"))
             inst = doc.Create.NewFamilyInstance(
@@ -1240,21 +1452,26 @@ def _build_structure(doc, data, levels, res, options, report):
             # existing level at the plate elevation; otherwise offset the top above
             # this level.
             _raise_column(doc, inst, level, c, levels, report)
-            _made(report, "column", src, inst)
+            _made(report, "column", src, inst, key=key, fingerprint=rebuild.fp(key))
         except Exception as exc:
             report.failed("column", src, str(exc))
 
     if framing and beam_sym is None:
         report.note("structural framing skipped: no structural-framing family loaded")
     for i, f in enumerate(framing):
+        src = "%s %d" % (f.get("role", "beam"), i)
+        key = _exchange.framing_identity(f)
+        kept = rebuild.take(key)
+        if kept is not None:
+            report.kept("framing", src, revit_id=_rid(kept))
+            continue
         if beam_sym is None:
-            break
+            continue
         level = levels.get(f["level"])
         # The bent/ridge sits at the plate (top of the posts), carried on the
         # exchange as ``z`` — not down at the floor level. Fall back to the level
         # elevation only for an old exchange without ``z``.
         z = float(f.get("z", level.Elevation if level else 0.0))
-        src = "%s %d" % (f.get("role", "beam"), i)
         try:
             curve = DB.Line.CreateBound(_xyz(f["start"], z), _xyz(f["end"], z))
             # ``size`` is the frame's nominal post section (the beams share it in
@@ -1263,7 +1480,7 @@ def _build_structure(doc, data, levels, res, options, report):
             inst = doc.Create.NewFamilyInstance(
                 curve, sym, level, DB.Structure.StructuralType.Beam
             )
-            _made(report, "framing", src, inst)
+            _made(report, "framing", src, inst, key=key, fingerprint=rebuild.fp(key))
         except Exception as exc:
             report.failed("framing", src, str(exc))
 
@@ -1295,7 +1512,7 @@ def _rotate_fixture(doc, inst, fx, z, report):
         return ""
 
 
-def _build_fixtures(doc, data, levels, res, report):
+def _build_fixtures(doc, data, levels, res, report, rebuild):
     """Place a family instance at each fixture/appliance seed — a plumbing family
     for wet fixtures, a specialty-equipment family for appliances. These are
     seeds: the family stands in at the right spot for the designer to swap/adjust.
@@ -1312,6 +1529,11 @@ def _build_fixtures(doc, data, levels, res, report):
         report.note("appliances skipped: no specialty-equipment family loaded")
     st = DB.Structure.StructuralType.NonStructural
     for fx in fixtures:
+        key = _exchange.fixture_identity(fx)
+        kept = rebuild.take(key)
+        if kept is not None:
+            report.kept("fixture", fx.get("id"), revit_id=_rid(kept))
+            continue
         wet = fx.get("kind") in _WET_FIXTURES
         sym = plumb if wet else appl
         if sym is None:
@@ -1325,13 +1547,14 @@ def _build_fixtures(doc, data, levels, res, report):
             rotated = _rotate_fixture(doc, inst, fx, z, report)
             if rotated:
                 message = "%s (%s)" % (message, rotated) if message else rotated
-            _made(report, "fixture", fx.get("id"), inst, message=message)
+            _made(report, "fixture", fx.get("id"), inst, message=message,
+                  key=key, fingerprint=rebuild.fp(key))
         except Exception as exc:
             _logger.warning("fixture %s: %s", fx.get("id"), exc)
             report.failed("fixture", fx.get("id"), str(exc))
 
 
-def _build_porches(doc, data, levels, res, report):
+def _build_porches(doc, data, levels, res, report, rebuild):
     porches = [a for a in data.get("areas", []) if a.get("kind") == "porch"]
     if not porches:
         return
@@ -1347,6 +1570,11 @@ def _build_porches(doc, data, levels, res, report):
     from System.Collections.Generic import List
 
     for p in porches:
+        key = _exchange.porch_identity(p)
+        kept = rebuild.take(key)
+        if kept is not None:
+            report.kept("porch", p.get("id"), revit_id=_rid(kept))
+            continue
         try:
             loop = _rect_loop(
                 float(p["x"]), float(p["y"]), float(p["width"]), float(p["length"]), level0.Elevation
@@ -1354,7 +1582,7 @@ def _build_porches(doc, data, levels, res, report):
             loops = List[DB.CurveLoop]()
             loops.Add(loop)
             floor = DB.Floor.Create(doc, loops, res.floor.Id, level0.Id)
-            _made(report, "porch", p.get("id"), floor)
+            _made(report, "porch", p.get("id"), floor, key=key, fingerprint=rebuild.fp(key))
         except Exception as exc:
             report.failed("porch", p.get("id"), str(exc))
 
@@ -1375,7 +1603,7 @@ def _stair_runs_for(s):
     return [run], "straight", True
 
 
-def _build_slabs(doc, data, levels, res, report):
+def _build_slabs(doc, data, levels, res, report, rebuild):
     slabs = data.get("slabs", [])
     if not slabs:
         return
@@ -1388,6 +1616,11 @@ def _build_slabs(doc, data, levels, res, report):
 
     for s in slabs:
         src = "level %s" % s.get("level")
+        key = _exchange.slab_identity(s)
+        kept = rebuild.take(key)
+        if kept is not None:
+            report.kept("slab", src, revit_id=_rid(kept))
+            continue
         level = levels.get(s["level"])
         if level is None:
             report.skipped("slab", src, "no level")
@@ -1399,12 +1632,12 @@ def _build_slabs(doc, data, levels, res, report):
             loops = List[DB.CurveLoop]()
             loops.Add(loop)
             floor = DB.Floor.Create(doc, loops, res.floor.Id, level.Id)
-            _made(report, "slab", src, floor)
+            _made(report, "slab", src, floor, key=key, fingerprint=rebuild.fp(key))
         except Exception as exc:
             report.failed("slab", src, str(exc))
 
 
-def _build_foundation(doc, data, levels, res, report):
+def _build_foundation(doc, data, levels, res, report, rebuild):
     """Build the slab-on-grade foundation: a **pad footing** under each post, plus
     a note carrying the thickened-edge (turndown) run for manual detailing.
 
@@ -1426,18 +1659,24 @@ def _build_foundation(doc, data, levels, res, report):
         sym = _activate(res.footing, doc)
         if sym is None:
             report.note("pad footings skipped: no structural-foundation family loaded")
-            for i, f in enumerate(footings):
-                report.skipped("footing", "post %d" % i, "no foundation family")
-        else:
-            for i, f in enumerate(footings):
-                try:
-                    inst = doc.Create.NewFamilyInstance(
-                        _xyz(f["point"], level0.Elevation), sym, level0,
-                        DB.Structure.StructuralType.Footing,
-                    )
-                    _made(report, "footing", "post %d" % i, inst)
-                except Exception as exc:
-                    report.failed("footing", "post %d" % i, str(exc))
+        for i, f in enumerate(footings):
+            src = "post %d" % i
+            key = _exchange.footing_identity(f)
+            kept = rebuild.take(key)
+            if kept is not None:
+                report.kept("footing", src, revit_id=_rid(kept))
+                continue
+            if sym is None:
+                report.skipped("footing", src, "no foundation family")
+                continue
+            try:
+                inst = doc.Create.NewFamilyInstance(
+                    _xyz(f["point"], level0.Elevation), sym, level0,
+                    DB.Structure.StructuralType.Footing,
+                )
+                _made(report, "footing", src, inst, key=key, fingerprint=rebuild.fp(key))
+            except Exception as exc:
+                report.failed("footing", src, str(exc))
 
     edge = foundation.get("edge") or {}
     segs = edge.get("segments") or []
@@ -1452,12 +1691,17 @@ def _build_foundation(doc, data, levels, res, report):
         report.note("foundation concrete (rough): %.1f cu yd" % yd3)
 
 
-def _build_grids(doc, data, report):
+def _build_grids(doc, data, report, rebuild):
     grids = data.get("grids", [])
     if not grids:
         return
     for g in grids:
         label = str(g.get("label", "?"))
+        key = _exchange.grid_identity(g)
+        kept = rebuild.take(key)
+        if kept is not None:
+            report.kept("grid", label, revit_id=_rid(kept))
+            continue
         try:
             line = DB.Line.CreateBound(
                 DB.XYZ(float(g["start"][0]), float(g["start"][1]), 0.0),
@@ -1468,7 +1712,7 @@ def _build_grids(doc, data, report):
                 grid.Name = label
             except Exception:
                 pass
-            _made(report, "grid", label, grid)
+            _made(report, "grid", label, grid, key=key, fingerprint=rebuild.fp(key))
         except Exception as exc:
             report.failed("grid", label, str(exc))
 
@@ -1507,7 +1751,7 @@ def _slope_eaves(roof_el, mapping, roof, report):
     return made
 
 
-def _build_roof(doc, data, levels, res, report):
+def _build_roof(doc, data, levels, res, report, rebuild):
     """A gable footprint roof over the building (experimental).
 
     Builds the footprint roof and makes its **eave edges slope-defining** at the
@@ -1516,6 +1760,10 @@ def _build_roof(doc, data, levels, res, report):
     """
     roof = data.get("roof")
     if not roof:
+        return
+    kept = rebuild.take(_exchange.ROOF_IDENTITY)
+    if kept is not None:
+        report.kept("roof", "roof", revit_id=_rid(kept))
         return
     if res.roof_type is None:
         report.note("roof skipped: no roof type in project")
@@ -1542,7 +1790,8 @@ def _build_roof(doc, data, levels, res, report):
         msg = "gable roof; %d eave edge(s) sloped" % sloped if sloped else (
             "flat footprint roof; gable pitch is a manual refinement"
         )
-        _made(report, "roof", "roof", roof_el, message=msg)
+        _made(report, "roof", "roof", roof_el, message=msg,
+              key=_exchange.ROOF_IDENTITY, fingerprint=rebuild.fp(_exchange.ROOF_IDENTITY))
     except Exception as exc:
         _logger.warning("roof: %s", exc)
         report.failed("roof", "roof", "experimental: %s" % exc)
@@ -1881,6 +2130,12 @@ def build(doc, data, options=None):
     is a :class:`~barndsl_revit.report.BuildOptions` (defaults if omitted).
     Returns a :class:`~barndsl_revit.report.BuildReport`.
 
+    A ``replace`` re-build is **diff-based** by default (``rebuild: "diff"``):
+    elements from the previous barndsl build whose exchange record is unchanged
+    are *kept* — same Revit element ids, so user dimensions/tags on them
+    survive — and only changed/removed elements are deleted (and changed ones
+    recreated). ``rebuild: "full"`` restores the old purge-everything path.
+
     Walls, openings, rooms, structure and porches run in one transaction;
     **for a dry run that transaction is rolled back** (so the preview is real but
     nothing persists). Stairs run afterward in their own edit scopes.
@@ -1896,33 +2151,42 @@ def build(doc, data, options=None):
         report.note("no basic wall type found in this project; nothing built")
         return report
 
+    # Every incoming record's identity key + fingerprint — stamped onto what
+    # this build creates (so the *next* build can diff), and diffed against the
+    # previous build's stamps below (when replacing in "diff" mode).
+    idents = _exchange.identities(data)
+    rebuild = _Rebuild(fps=dict((k, f) for _kind, _src, k, f in idents))
+
     label = "Preview barndsl plan" if options.dry_run else "Build barndsl plan"
     t = DB.Transaction(doc, label)
     t.Start()
     try:
         if options.replace:
-            _purge_managed(doc, report)
+            if getattr(options, "rebuild", "diff") == "full":
+                _purge_managed(doc, report)
+            else:
+                rebuild.kept = _diff_managed(doc, idents, options, report)
         _set_project_north(doc, data, report)
         levels = _ensure_levels(doc, data, report)
-        walls = _build_walls(doc, data, levels, res, options, report)
-        _build_openings(doc, data, levels, walls, res, options, report)
-        _build_rooms(doc, data, levels, report)
+        walls = _build_walls(doc, data, levels, res, options, report, rebuild)
+        _build_openings(doc, data, levels, walls, res, options, report, rebuild)
+        _build_rooms(doc, data, levels, report, rebuild)
         if options.ceilings:
-            _build_ceilings(doc, data, levels, res, report)
+            _build_ceilings(doc, data, levels, res, report, rebuild)
         if options.structure:
-            _build_structure(doc, data, levels, res, options, report)
+            _build_structure(doc, data, levels, res, options, report, rebuild)
         if options.fixtures:
-            _build_fixtures(doc, data, levels, res, report)
+            _build_fixtures(doc, data, levels, res, report, rebuild)
         if options.slabs:
-            _build_slabs(doc, data, levels, res, report)
+            _build_slabs(doc, data, levels, res, report, rebuild)
         if options.foundation:
-            _build_foundation(doc, data, levels, res, report)
+            _build_foundation(doc, data, levels, res, report, rebuild)
         if options.porches:
-            _build_porches(doc, data, levels, res, report)
+            _build_porches(doc, data, levels, res, report, rebuild)
         if options.grids:
-            _build_grids(doc, data, report)
+            _build_grids(doc, data, report, rebuild)
         if options.roof:
-            _build_roof(doc, data, levels, res, report)
+            _build_roof(doc, data, levels, res, report, rebuild)
     except Exception:
         if t.HasStarted() and not t.HasEnded():
             t.RollBack()

@@ -124,16 +124,35 @@ build afterward in their own edit scopes (the Stairs API manages its own
 transactions). Every element is created defensively: if one fails (e.g. a missing
 family), it's recorded in the report and the rest still build.
 
-**Re-building is idempotent.** Every element a build creates is stamped
+**Re-building updates in place.** Every element a build creates is stamped
 barndsl-managed in a private **Extensible Storage** schema — not the user-facing
 Comments field, so the mark never clobbers your annotations and you can't
-accidentally match it. (A legacy Comments mark from an older build is still
-*read*, so an old build is still recognised and replaced.) By default a re-build
-first **removes the previous barndsl build** and lays down the current one — so
-iterating on the `.barn` and rebuilding *replaces* the model instead of stacking
-duplicates, and never touches anything you drew by hand. It's all one undo step.
-Set `"replace": false` in the config to append instead (levels are always reused,
-and stairs aren't purged).
+accidentally match it. The stamp also carries the element's **exchange identity**
+and a **fingerprint** of the exchange record that produced it, so a re-build can
+*diff* instead of starting over: an element whose record is unchanged is **kept**
+— same Revit element id, so your dimensions, tags and keynotes on it stay live
+across the agent's iterations — while changed elements are deleted and recreated,
+and removed ones purged. Dependencies cascade correctly: an opening's fingerprint
+folds in its host wall's, so a recreated wall always recreates the doors/windows
+hosted on it (Revit deletes hosted instances with their host); kept rooms keep
+their room numbers. The per-run outcome shows in the report as **kept** alongside
+created/skipped/failed.
+
+Set `"rebuild": "full"` in the config to restore the old purge-everything-and-
+recreate behaviour (every re-build then hands out fresh element ids). Set
+`"replace": false` to append instead of replacing at all. Levels are always
+reused, and stairs aren't purged either way. A build from an **older extension
+version** is still recognised: its elements carry only the managed marker (the
+legacy Comments mark or the v1 marker-only storage schema, both still read) with
+no identity, so they are purged and rebuilt once — after which diffing kicks in.
+Everything runs in the one build transaction (one undo step).
+
+Needs live-Revit confirmation: the two-schema Extensible Storage dance (schemas
+are immutable once created, so the identity stamp lives under a new GUID while
+the v1 schema is still read); that a kept room whose bounding walls are deleted
+and recreated inside the same transaction stays placed and re-bounds; and the
+exact reach of Revit's host-delete cascade (the fakes mirror the documented
+behaviour: hosted instances and wall cuts die with the wall).
 
 ## Documentation (the Document button)
 
@@ -164,7 +183,7 @@ load a title block family). Each sub-pass can be turned off with the `views`,
 ## Debugging a run
 
 Each build prints a **report** to the pyRevit output panel — a per-kind
-created/skipped/failed table, the types/families it used, and a list of every
+created/kept/skipped/failed table, the types/families it used, and a list of every
 element that needs attention with the reason (e.g. `room bath — skipped: point
 not in an enclosed region`). It also writes the full report as
 `<source>.buildlog.json` next to the file you picked, so you can attach it when
@@ -212,6 +231,7 @@ folder). Unknown keys are ignored, so you can leave comments.
   "grids": true,
   "roof": true,
   "replace": true,
+  "rebuild": "diff",
   "views": true,
   "tags": true,
   "schedules": true,
@@ -319,11 +339,15 @@ config round-trip), `tests/test_revit_naming.py` (the name→type/id heuristics)
 `tests/test_revit_model_extras.py` (floor slabs, structural grids, gable roof).
 
 `builder.py` itself is exercised against a **fake Revit API** (`tests/revit_fakes.py`
-supplies the DB/pyRevit/Stairs/views/`System` shapes). `tests/test_revit_builder.py`
+supplies the DB/pyRevit/Stairs/views/`System` shapes, including multi-schema
+Extensible Storage and the wall→hosted-instance delete cascade). `tests/test_revit_builder.py`
 covers the wall-type pick, opening hosting, family **sizing** (duplicate-per-size),
 the **dry-run rollback**, **named overrides**, structure/slab/porch/grid/roof/stair
-passes (including the switchback → two runs + landing), the **idempotent re-build**,
-`diagnose`, and `read_model`'s round-trip; `tests/test_revit_document.py` covers
+passes (including the switchback → two runs + landing), the **diff re-build**
+(unchanged plans keep every element id; a moved room recreates only its own
+elements; a changed wall recreates its hosted openings; removed/legacy elements
+are purged; `"rebuild": "full"` still purges everything), `diagnose`, and
+`read_model`'s round-trip; `tests/test_revit_document.py` covers
 the **Document** pass (views, tags, schedules, sheets, and its idempotent
 re-document). These verify the builder *drives the API correctly* —
 only a running Revit confirms Revit does the right thing with the calls, so still
