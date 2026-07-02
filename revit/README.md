@@ -218,7 +218,11 @@ instead.
 
    `label` is what you pick from the list (and what namespaces the build);
    `exchange` is the candidate's `barndsl.revit/1` JSON, resolved relative to the
-   manifest.
+   manifest. **One label = one Design Option = one identity namespace**: labels
+   must be unique and non-blank — the command refuses a manifest with a
+   duplicate or blank label, because two candidates sharing a label would share
+   a namespace and the second build would diff against (and purge) the first's
+   elements.
 
 3. **Create the option set in Revit, once (UI).** **Manage → Design Options → New**
    an option set (e.g. "Schemes"), **New** an option per candidate under it, then

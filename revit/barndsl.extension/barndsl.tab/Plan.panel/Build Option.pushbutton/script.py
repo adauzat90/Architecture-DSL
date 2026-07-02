@@ -65,8 +65,31 @@ def _load_manifest(path):
         return []
     base = os.path.dirname(path)
     out = []
+    seen = set()
     for i, c in enumerate(data.get("candidates", []) or []):
+        if not isinstance(c, dict):
+            forms.alert(
+                "Candidate entry %d is not an object (expected "
+                '{"label": ..., "exchange": ...}).' % i,
+                exitscript=True,
+            )
+            return []
         label = (c.get("label") or "candidate %d" % i).strip()
+        if not label:
+            # A blank label would fall back to a PLAIN build, whose purge scope
+            # is the whole non-candidate model — refuse it outright.
+            forms.alert("Candidate entry %d has a blank label." % i, exitscript=True)
+            return []
+        if label in seen:
+            # One label = one identity namespace: a duplicate would make the
+            # second build diff against (and purge) the first's elements.
+            forms.alert(
+                "Duplicate candidate label %r — every candidate needs its own "
+                "label (one label = one Design Option = one namespace)." % label,
+                exitscript=True,
+            )
+            return []
+        seen.add(label)
         rel = c.get("exchange")
         if not rel:
             forms.alert("Candidate %r has no 'exchange' file." % label, exitscript=True)

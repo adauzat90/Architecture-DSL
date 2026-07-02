@@ -1760,3 +1760,20 @@ def test_default_kinds_do_not_perturb_fingerprints():
     # per-sub-kind context keys appear and every fingerprint matches the
     # pre-kind era.
     assert not any("/" in k for k in ctx)
+
+
+def test_plain_build_after_two_candidates_disturbs_neither():
+    """Review gap: the plain-vs-candidate isolation was only tested with ONE
+    candidate in the document — pin the two-candidate sequence too."""
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="scheme-A"))
+    builder.build(doc, _exchange(CEDAR_SPLIT), report.BuildOptions(candidate="scheme-B"))
+    a_ids = _candidate_ids(doc, "scheme-A")
+    b_ids = _candidate_ids(doc, "scheme-B")
+    assert a_ids and b_ids
+
+    builder.build(doc, _exchange(CEDAR))  # plain build into the same document
+    assert _candidate_ids(doc, "scheme-A") == a_ids
+    assert _candidate_ids(doc, "scheme-B") == b_ids
+    # And the plain namespace exists alongside both.
+    assert {k for k in _managed_ids(doc) if not bx.is_candidate_key(k)}
