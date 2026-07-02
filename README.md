@@ -49,6 +49,8 @@ floor <D>                          # optional; inter-floor assembly depth (ft). 
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
 note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
+require adjacent|separate <room_a> <room_b>   # optional; spatial intent, checked vs the plan
+require exterior <room> [<wall>]              #   (also: require area <room> >= <sqft>)
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
 roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
 orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
@@ -76,6 +78,11 @@ circulation graph exactly like a door, but renders as a plain gap (no swing
 arc), defaults to a wide opening, and is exempt from the narrow-door warning.
 An `open` into a **bathroom** is a privacy defect (a bath needs a door), so it
 warns (`OPEN_BATH`).
+`program` declares the intended counts and `require` the brief's **spatial**
+intent (a required adjacency, separation, exterior wall, or minimum room area);
+both are re-checked mechanically on every compile (`PROGRAM_MISMATCH` /
+`REQUIRE_UNMET` warnings), so the brief lives in the source and survives every
+revision.
 The footprint is one rectangle by default. For an **L/T/U-shaped building**, add
 `wing <W> x <L> at <x>,<y>` blocks: the footprint becomes the union of the
 `envelope` (the primary block at the origin) and every wing. Containment,

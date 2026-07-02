@@ -461,6 +461,46 @@ class ProgramSpec:
     end_col: int | None = None
 
 
+#: The requirement kinds a plan can declare (see :meth:`Barndominium.require`).
+REQUIRE_KINDS = ("adjacent", "separate", "exterior", "area")
+
+
+@dataclass
+class Requirement:
+    """A declared spatial requirement (design *intent*), one `require` statement.
+
+    Optional, like :class:`ProgramSpec` — the same pattern extended from counts
+    to space: when present, validation checks the compiled plan against it and
+    warns (``REQUIRE_UNMET``) on any requirement the geometry doesn't satisfy.
+    A requirement naming an unknown room id is an error (``REQUIRE_REF``), like
+    any dangling reference. Requirements never block a compile.
+
+    ``kind`` is one of :data:`REQUIRE_KINDS`; the other fields apply per kind:
+
+    * ``adjacent`` — rooms ``a`` and ``b`` must share a wall (a positive-length
+      shared edge on the same level). Purely geometric: a door or cased opening
+      between non-abutting rooms doesn't satisfy it — adjacency is what a
+      ``door`` *needs*, so the two checks agree.
+    * ``separate`` — ``a`` and ``b`` must NOT share a wall. Rooms on different
+      levels never share a wall, so a cross-level pair is trivially separate.
+    * ``exterior`` — room ``a`` needs an exterior wall; ``wall`` optionally
+      pins which side (north/south/east/west) must face outside.
+    * ``area`` — room ``a``'s nominal area must be at least ``min_area`` sq ft
+      (the same nominal figure ``program area`` uses).
+
+    Multiple requirements are allowed; duplicates are harmless.
+    """
+
+    kind: str
+    a: str
+    b: str | None = None
+    wall: Direction | None = None
+    min_area: float | None = None
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
 @dataclass
 class Barndominium:
     """A complete barndominium floor plan.
@@ -498,6 +538,9 @@ class Barndominium:
     #: Optional declared program (intent). When set, validation checks the actual
     #: room counts against it. See :class:`ProgramSpec`.
     program_spec: ProgramSpec | None = None
+    #: Optional declared spatial requirements (intent). Each one is checked
+    #: against the compiled geometry. See :class:`Requirement`.
+    requirements: list[Requirement] = field(default_factory=list)
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
     #: true north. Used for solar/setback reasoning and to set Project North when
@@ -683,6 +726,55 @@ class Barndominium:
         if ma is not None and ma < 0:
             raise ValueError("program area must be non-negative.")
         self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma)
+        return self
+
+    def require(
+        self,
+        kind: str,
+        a: str,
+        b: str | None = None,
+        *,
+        wall: Direction | str | None = None,
+        min_area: float | None = None,
+    ) -> "Barndominium":
+        """Declare a spatial requirement (the ``require`` statement).
+
+        Like :meth:`program`, this records *intent* the validator checks
+        mechanically against the compiled plan: an unmet requirement is a
+        ``REQUIRE_UNMET`` warning (never blocking — the plan stays buildable),
+        and a requirement naming an unknown room id is a ``REQUIRE_REF`` error.
+
+        Forms — ``require("adjacent", a, b)`` (the rooms must share a wall);
+        ``require("separate", a, b)`` (they must NOT share a wall; rooms on
+        different levels are trivially separate); ``require("exterior", room,
+        wall=...)`` (the room needs an exterior wall, optionally that specific
+        side); ``require("area", room, min_area=sqft)`` (nominal area at least
+        ``sqft`` — the same figure ``program area`` uses). See
+        :class:`Requirement` for the exact semantics. Duplicates are harmless.
+        """
+        kind = str(kind).lower()
+        if kind not in REQUIRE_KINDS:
+            raise ValueError(
+                f"require kind must be one of {REQUIRE_KINDS}, got {kind!r}."
+            )
+        if kind in ("adjacent", "separate"):
+            if not b:
+                raise ValueError(f"require {kind} names two rooms.")
+            self.requirements.append(Requirement(kind, str(a), str(b)))
+            return self
+        if b is not None:
+            raise ValueError(f"require {kind} names a single room.")
+        if kind == "exterior":
+            w = None if wall is None else Direction(wall)
+            self.requirements.append(Requirement(kind, str(a), wall=w))
+            return self
+        # area
+        if min_area is None:
+            raise ValueError("require area needs min_area (sq ft).")
+        ma = float(min_area)
+        if ma < 0:
+            raise ValueError("require area must be non-negative.")
+        self.requirements.append(Requirement(kind, str(a), min_area=ma))
         return self
 
     def frame(

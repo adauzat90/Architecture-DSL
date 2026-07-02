@@ -351,6 +351,19 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "The rooms placed don't match the declared `program`: exact bed/bath "
            "counts, an at-least requirement for another room type (e.g. "
            "`1 laundry`), or a minimum conditioned `area`."),
+        _c("REQUIRE_UNMET", W, "Plan doesn't satisfy a `require` statement",
+           "The compiled geometry doesn't satisfy a declared spatial requirement: "
+           "`adjacent` needs a shared wall on the same level (purely geometric — "
+           "a door or cased opening alone doesn't count; adjacency is what a "
+           "`door` needs, so the checks agree), `separate` forbids one (rooms on "
+           "different levels are trivially separate), `exterior` needs a wall on "
+           "the footprint edge (optionally a specific side), and `area` sets a "
+           "minimum nominal room area (the figure `program area` uses). Like "
+           "PROGRAM_MISMATCH it's a contract check on intent, not a code "
+           "violation, so it warns rather than blocks."),
+        _c("REQUIRE_REF", E, "Requirement references unknown room",
+           "A `require` statement names a room id that doesn't exist — a mistyped "
+           "id would otherwise silently check nothing."),
         # --- structural frame (the `frame` directive) -----------------------
         _c("POST_OBSTRUCT", I, "Support post in open floor",
            "An auto-placed interior support post (needed where the beam span "

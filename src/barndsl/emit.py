@@ -57,6 +57,18 @@ def emit_dsl(plan: Barndominium) -> str:
         if spec.min_area is not None:
             line += f" area {_n(spec.min_area)}"
         out.append(line)
+    for req in getattr(plan, "requirements", None) or []:
+        # Declared spatial intent rides next to `program` — the plan's contract
+        # block, ahead of the geometry it constrains.
+        if req.kind in ("adjacent", "separate"):
+            out.append(f"require {req.kind} {req.a} {req.b}")
+        elif req.kind == "exterior":
+            line = f"require exterior {req.a}"
+            if req.wall is not None:
+                line += f" {req.wall.value}"
+            out.append(line)
+        else:  # area
+            out.append(f"require area {req.a} >= {_n(req.min_area)}")
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")

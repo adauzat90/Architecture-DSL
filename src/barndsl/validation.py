@@ -670,6 +670,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_design_quality(plan, add)
     _validate_accessibility(plan, add)
     _validate_program(plan, add)
+    _validate_requirements(plan, add)
     _validate_structure(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
@@ -2669,6 +2670,163 @@ def _validate_program(plan: Barndominium, add) -> None:
             **loc,
         )
     )
+
+
+def _suggest_anchor(a: Room, b: Room) -> str:
+    """The relative-placement direction that would abut ``b`` against ``a``,
+    picked from where ``b`` already sits — so the hint moves it the short way."""
+    ax, ay = a.center
+    bx, by = b.center
+    if abs(bx - ax) >= abs(by - ay):
+        return "east-of" if bx >= ax else "west-of"
+    return "north-of" if by >= ay else "south-of"
+
+
+def _validate_requirements(plan: Barndominium, add) -> None:
+    """Check declared ``require`` statements against the compiled plan.
+
+    The ``program`` pattern extended to space: declared intent, mechanically
+    checked. Requirements never block a compile — each unmet one is a
+    ``REQUIRE_UNMET`` warning with a concrete fix — except a requirement naming
+    an unknown room id, which is a ``REQUIRE_REF`` error like every dangling
+    reference (a mistyped id would otherwise silently check nothing).
+
+    Semantics (see :class:`~barndsl.elements.Requirement`):
+
+    * ``adjacent`` is purely geometric — a positive-length shared wall on the
+      same level (:func:`shared_edge`). A door or cased opening alone does NOT
+      satisfy it: adjacency is the precondition a ``door`` needs, so the two
+      checks agree rather than one excusing the other.
+    * ``separate`` fails only on a shared wall; rooms on different levels never
+      share a wall, so a cross-level pair is trivially separate.
+    * ``exterior`` uses the same footprint-aware :func:`exterior_walls` the
+      window/entry checks use, so seam walls between wings count as interior.
+    * ``area`` checks the room's **nominal** area (the same figure
+      ``program area`` uses), not the clear finish-face area.
+    """
+    room_ids = {r.id for r in plan.rooms}
+    for req in plan.requirements:
+        loc: dict = {}
+        if req.line is not None:
+            loc = {"line": req.line, "col": req.col, "end_col": req.end_col}
+        missing = [
+            rid for rid in (req.a, req.b) if rid is not None and rid not in room_ids
+        ]
+        if missing:
+            for rid in missing:
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "REQUIRE_REF",
+                        f"Requirement references unknown room '{rid}'.",
+                        room=rid,
+                        hint="Reference an existing room id, or declare the room.",
+                        **loc,
+                    )
+                )
+            continue
+        a = plan.room(req.a)
+        assert a is not None  # checked above
+        if req.kind == "adjacent":
+            b = plan.room(req.b)
+            assert b is not None
+            if shared_edge(a, b) is None:
+                detail = (
+                    f"they sit on different levels ({a.level} and {b.level})"
+                    if a.level != b.level
+                    else "they don't share a wall (a corner touch isn't enough)"
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required adjacency unmet: '{a.id}' and '{b.id}' — {detail}.",
+                        room=a.id,
+                        hint=f"Abut them along a wall — e.g. re-place '{b.id}' with a "
+                        f"relative anchor: `room {b.id}: {b.type.value} "
+                        f"{_suggest_anchor(a, b)} {a.id} size {_f(b.width)} x "
+                        f"{_f(b.length)}`.",
+                        **loc,
+                    )
+                )
+        elif req.kind == "separate":
+            b = plan.room(req.b)
+            assert b is not None
+            edge = shared_edge(a, b)  # None across levels: trivially separate
+            if edge is not None:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required separation unmet: '{a.id}' and '{b.id}' share a "
+                        f"{_f(edge.length)} ft wall.",
+                        room=a.id,
+                        hint=f"Reposition '{b.id}' so it doesn't touch '{a.id}', or "
+                        "put a buffer room (hall, closet) between them.",
+                        **loc,
+                    )
+                )
+        elif req.kind == "exterior":
+            ext = exterior_walls(plan, a)
+            interior = ", ".join(
+                w.value
+                for w in (
+                    Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST
+                )
+                if w not in ext
+            )
+            if req.wall is not None and req.wall not in ext:
+                have = (
+                    f"its exterior wall(s): {', '.join(w.value for w in ext)}"
+                    if ext
+                    else "it has no exterior wall at all"
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required exterior wall unmet: '{a.id}'s {req.wall.value} "
+                        f"wall is interior (interior walls: {interior}).",
+                        room=a.id,
+                        hint=f"Move '{a.id}' so its {req.wall.value} wall lies on the "
+                        f"footprint edge — {have}.",
+                        **loc,
+                    )
+                )
+            elif req.wall is None and not ext:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required exterior wall unmet: '{a.id}' has no exterior wall "
+                        f"(interior walls: {interior}).",
+                        room=a.id,
+                        hint=f"Move '{a.id}' to the building perimeter so at least "
+                        "one wall lies on the footprint edge.",
+                        **loc,
+                    )
+                )
+        elif req.kind == "area":
+            assert req.min_area is not None  # the builder guarantees it
+            if a.area + EPSILON < req.min_area:
+                need_len = _suggest_int(req.min_area / max(a.width, EPSILON))
+                sizing = (
+                    f" — e.g. `size {_f(a.width)} x {need_len}`"
+                    if need_len is not None
+                    else ""
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "REQUIRE_UNMET",
+                        f"Required area unmet: '{a.id}' is {_f(a.area)} sq ft; the "
+                        f"requirement is >= {_f(req.min_area)} sq ft.",
+                        room=a.id,
+                        hint=f"Enlarge '{a.id}' to at least {_f(req.min_area)} sq ft"
+                        f"{sizing}.",
+                        **loc,
+                    )
+                )
 
 
 #: An interior support post sitting at least this far (ft) from every wall of the

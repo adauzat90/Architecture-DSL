@@ -14,6 +14,8 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     wing <W> x <L> at <x>,<y>          # optional — L/T/U footprint extensions
     ceiling <H>
     note "free text"
+    require adjacent|separate <a> <b>  # declared spatial intent, checked vs the plan
+    require exterior <room> [<wall>]   # (also: require area <room> >= <sqft>)
     room <id>: <type> <placement> size <W> x <L> [level <n>]
     door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]
     open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no leaf)
@@ -42,8 +44,8 @@ from .validation import Issue, Severity, ValidationReport, validate
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
-    "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "room",
-    "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
+    "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
+    "room", "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
     "orientation", "finish", "accessible"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
@@ -92,6 +94,12 @@ Statements:
   note "free text"                # optional design note
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
+  require adjacent <room_a> <room_b>    # the two rooms must share a wall
+  require separate <room_a> <room_b>    # the two rooms must NOT share a wall
+  require exterior <room> [<wall>]      # the room needs an exterior wall (optionally that side)
+  require area <room> >= <sqft>         # the room's nominal area must be at least sqft
+        # declared spatial intent, like `program`: each unmet requirement is a
+        # REQUIRE_UNMET warning (never blocking); an unknown room id is an error.
   room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
         # `ceiling <h>` overrides the plan ceiling for this room (a tray or a
         # taller great room); `vaulted` makes it open to the roof (no flat ceiling).
@@ -629,6 +637,51 @@ def _parse_statement(
         plan.program_spec.line = lineno
         plan.program_spec.col = kw.col
         plan.program_spec.end_col = kw.end_col
+    elif key == "require":
+        # `require adjacent|separate <a> <b>` / `require exterior <room> [<wall>]`
+        # / `require area <room> >= <sqft>` — declared spatial intent, checked
+        # against the compiled plan by the validator (see REQUIRE_UNMET).
+        kind_tok = c.take("a requirement kind (adjacent|separate|exterior|area)")
+        kind = kind_tok.text.lower()
+        if kind in ("adjacent", "separate"):
+            a = c.ident("the first room id").text
+            b = c.ident("the second room id").text
+            c.expect_end()
+            plan.require(kind, a, b)
+        elif kind == "exterior":
+            rid = c.ident("a room id").text
+            wall = c.wall() if c.peek() is not None else None
+            c.expect_end()
+            plan.require("exterior", rid, wall=wall)
+        elif kind == "area":
+            rid = c.ident("a room id").text
+            c.keyword(">=")
+            sqft_tok = c.peek()
+            sqft = c.number("the minimum area")
+            if sqft < 0:
+                assert sqft_tok is not None  # number() consumed a token
+                raise _ParseError(
+                    "BAD_NUMBER",
+                    "require area must be non-negative.",
+                    sqft_tok.col,
+                    end_col=sqft_tok.end_col,
+                    hint="Give the minimum in square feet, e.g. `require area "
+                    f"{rid} >= 300`.",
+                )
+            c.expect_end()
+            plan.require("area", rid, min_area=sqft)
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown requirement kind '{kind_tok.text}'.",
+                kind_tok.col,
+                end_col=kind_tok.end_col,
+                hint="Use `require adjacent <a> <b>`, `require separate <a> <b>`, "
+                "`require exterior <room> [<wall>]`, or `require area <room> >= "
+                "<sqft>`.",
+            )
+        req = plan.requirements[-1]
+        req.line, req.col, req.end_col = lineno, kw.col, kw.end_col
     elif key == "room":
         rid_tok = c.ident("a room id")
         rid = rid_tok.text
