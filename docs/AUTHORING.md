@@ -148,13 +148,20 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
     **warning**; a room in two zones (directly, or via a suite one zone lists)
     is a `ZONE_OVERLAP` warning — groups are meant to be mutually exclusive.
   - A **declared suite sharpens the design checks** that otherwise *infer*
-    membership: a bedroom grouped with a full bath satisfies `MASTER_ENSUITE`
-    exactly (whatever the door graph looks like); two bedrooms in one suite
-    (a bunk room) don't fire `BED_SOUND`; a public room inside a bedroom's own
-    suite doesn't fire `BED_PRIVACY`; and a patio-door `entry` into a suited
-    bedroom doesn't fire `ENTRY_PRIVATE`. With **nothing declared the behaviour
-    is unchanged** — the sharpening only ever suppresses a nudge the declaration
-    explains.
+    membership — but a declaration never overrides geometry, it only relaxes
+    the inference where the plan backs it up: a bedroom satisfies
+    `MASTER_ENSUITE` when a full bath in its suite is **reachable from it by
+    doors that stay inside the suite** (bed → bath, or bed → wic → bath — a
+    bath across the plan doesn't become an ensuite by declaration); two
+    bedrooms whose suite contains **exactly that pair** (a bunk room) don't
+    fire `BED_SOUND` (one giant all-bedroom "suite" doesn't mute the check);
+    a public room inside a bedroom's own suite doesn't fire `BED_PRIVACY`;
+    and a patio-door `entry` into a bedroom that is the **only bedroom of its
+    suite** (the primary suite) doesn't fire `ENTRY_PRIVATE`. With **nothing
+    declared the behaviour is unchanged** — the sharpening only ever
+    suppresses a nudge the declaration *and the geometry* explain. Naming a
+    suite like an existing room is a `SUITE_SHADOW` warning (a zone member
+    with that name resolves to the room, not the suite).
   - A `zone` enables `ZONE_CROSS` (**info**): a clearly public room
     (living/kitchen/dining) whose only zone otherwise holds just private rooms
     (bed/bath) — or the reverse — is a public room stranded in the private band.

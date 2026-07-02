@@ -434,6 +434,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "frame ignored the declaration; declare a wall running the long way, "
            "or leave the span to the auto interior supports."),
         # --- suites / zones (the `suite` / `zone` statements) ---------------
+        _c("SUITE_SHADOW", W, "Suite id shadows a room id",
+           "A suite is named like an existing room, so a zone member with that "
+           "name resolves to the room and the suite silently never expands. "
+           "Rename the suite."),
         _c("SUITE_REF", E, "Suite references unknown room",
            "A `suite` statement lists a member room id that doesn't exist — a "
            "mistyped id would otherwise group nothing. Reference a real room, or "

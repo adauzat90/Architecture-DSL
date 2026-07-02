@@ -130,9 +130,10 @@ Statements:
         # garage/dwelling separation reminder). The rooms must share a wall.
   suite <id>: <room> ...          # group rooms that read as one unit
         # e.g. `suite primary: master_bed master_bath master_wic`. Members are
-        # room ids. Declared membership, not geometry: it makes the suite/zone
-        # design checks exact (MASTER_ENSUITE, BED_PRIVACY, BED_SOUND, an entry
-        # into a suited bedroom) instead of inferred. An unknown member is a
+        # room ids. Declared membership sharpens the design checks where the
+        # geometry backs it up: MASTER_ENSUITE (suite bath reachable via suite
+        # doors), BED_SOUND (a suite of exactly the two beds), BED_PRIVACY, and
+        # ENTRY_PRIVATE (sole-bedroom suite = primary). An unknown member is a
         # SUITE_REF error; a room in two suites a SUITE_OVERLAP warning.
   zone <id>: <member> ...         # group rooms/suites into a band (private wing, public core)
         # e.g. `zone private: primary bed_2 bed_3 hall_beds`. Members are room

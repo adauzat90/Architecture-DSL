@@ -367,17 +367,78 @@ def _suites_of(plan: Barndominium, room_id: str) -> list[str]:
     return [s.id for s in (getattr(plan, "suites", None) or []) if room_id in s.members]
 
 
-def _suite_contains_type(
-    plan: Barndominium, room_id: str, types: set[RoomType], by_id: dict[str, Room]
+def _sole_bedroom_suite(
+    plan: Barndominium, room_id: str, by_id: dict[str, Room]
 ) -> bool:
-    """True if ``room_id`` shares a declared suite with a room of one of ``types``."""
+    """True if ``room_id`` is in a declared suite where it is the ONLY bedroom.
+
+    That is the primary-suite shape (bed + bath + closet). A suite holding
+    several bedrooms is a shared grouping, not a primary suite — a declaration
+    must not silence checks whose concern is exactly the shared case.
+    """
     for s in getattr(plan, "suites", None) or []:
         if room_id not in s.members:
             continue
-        for m in s.members:
-            other = by_id.get(m)
-            if other is not None and other.id != room_id and other.type in types:
-                return True
+        if not any(
+            m != room_id
+            and (r := by_id.get(m)) is not None
+            and r.type is RoomType.BEDROOM
+            for m in s.members
+        ):
+            return True
+    return False
+
+
+def _suite_pair_intentional(
+    plan: Barndominium, a_id: str, b_id: str, by_id: dict[str, Room]
+) -> bool:
+    """True when two bedrooms share a suite whose bedrooms are EXACTLY this pair.
+
+    A bunk pairing or a nursery off the master is a deliberate two-bed suite;
+    dumping every bedroom into one giant "suite" is not — the size guard stops
+    a single declaration from silencing a check plan-wide.
+    """
+    for s in getattr(plan, "suites", None) or []:
+        if a_id not in s.members or b_id not in s.members:
+            continue
+        n_beds = sum(
+            1
+            for m in s.members
+            if (r := by_id.get(m)) is not None and r.type is RoomType.BEDROOM
+        )
+        if n_beds <= 2:
+            return True
+    return False
+
+
+def _suite_ensuite(
+    plan: Barndominium,
+    bed_id: str,
+    by_id: dict[str, Room],
+    graph: dict[str, set[str]],
+) -> bool:
+    """True if a full bath in ``bed_id``'s suite is reachable from it by doors
+    that stay inside the suite (bed → bath, or bed → wic → bath).
+
+    Declared membership names the grouping, but an ensuite is a spatial fact —
+    a bath at the other end of the plan doesn't become private by declaration.
+    """
+    for s in getattr(plan, "suites", None) or []:
+        if bed_id not in s.members:
+            continue
+        members = set(s.members)
+        seen = {bed_id}
+        stack = [bed_id]
+        while stack:
+            cur = stack.pop()
+            for n in sorted(graph.get(cur, ())):
+                if n not in members or n in seen:
+                    continue
+                r = by_id.get(n)
+                if r is not None and r.type is RoomType.BATHROOM:
+                    return True
+                seen.add(n)
+                stack.append(n)
     return False
 
 
@@ -2256,11 +2317,13 @@ def _dq_entry_private(plan: Barndominium, graph, by_id, add) -> None:
                     hint="Land the entry in a mudroom, hall or living space, not a bath.",
                 )
             )
-        elif rt is RoomType.BEDROOM and not _suites_of(plan, d.room):
+        elif rt is RoomType.BEDROOM and not _sole_bedroom_suite(plan, d.room, by_id):
             # An entry into a bedroom is normally the "maybe a patio door" info.
-            # A bedroom declared as its own `suite` is the primary suite, where a
-            # private patio/deck door is expected — so the declaration confirms
-            # the benign reading and the info is suppressed. Undeclared → fires.
+            # A bedroom that is the ONLY bedroom of a declared suite is the
+            # primary suite, where a private patio/deck door is expected — that
+            # declaration confirms the benign reading and the info is
+            # suppressed. A shared multi-bed suite doesn't (an entry straight
+            # into a kids' room is exactly the concern); undeclared → fires.
             add(
                 Issue(
                     Severity.INFO,
@@ -2387,11 +2450,12 @@ def _dq_master_ensuite(plan: Barndominium, graph, by_id, add) -> None:
         # Satisfied as long as *any* bedroom has a private ensuite — don't depend
         # on an arbitrary "largest bedroom" tiebreak (two equal-area bedrooms used
         # to flip a false positive). The largest just names where to add one. A
-        # declared suite makes this exact: a bedroom grouped with a full bath in a
-        # `suite` *is* the primary suite, whatever the door graph looks like.
+        # declared suite relaxes the strictly-private rule to "reachable through
+        # the suite" (bed → wic → bath), but the bath must still be reachable —
+        # a declaration alone doesn't conjure an ensuite across the plan.
         if any(
             _bedroom_ensuite(b.id)
-            or _suite_contains_type(plan, b.id, {RoomType.BATHROOM}, by_id)
+            or _suite_ensuite(plan, b.id, by_id, graph)
             for b in beds
         ):
             continue
@@ -2419,9 +2483,11 @@ def _dq_bed_sound(plan: Barndominium, graph, by_id, add) -> None:
         for bb in beds[i + 1 :]:
             # Two bedrooms declared in one `suite` (a bunk room, a nursery off
             # the master) are *meant* to adjoin — the acoustic separation is
-            # intentional, so a declared shared suite silences the buffer nudge.
-            # No suite declared → unchanged.
-            if _same_suite(plan, ba.id, bb.id):
+            # intentional, so a declared shared suite silences the buffer nudge
+            # ONLY when that suite's bedrooms are exactly this pair: one giant
+            # all-bedroom "suite" must not mute the check plan-wide. No suite
+            # declared → unchanged.
+            if _suite_pair_intentional(plan, ba.id, bb.id, by_id):
                 continue
             edge = shared_edge(ba, bb)
             if edge is not None and edge.length + EPSILON >= MIN_SOUND_BUFFER_WALL:
@@ -3387,6 +3453,23 @@ def _validate_suites_zones(plan: Barndominium, add) -> None:
     by_id = {r.id: r for r in plan.rooms}
     room_ids = set(by_id)
     suite_ids = {s.id for s in suites}
+
+    # SUITE_SHADOW: a suite named like a room is ambiguous as a zone member —
+    # resolution picks the room, so the suite silently never expands.
+    for s in suites:
+        if s.id in room_ids:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "SUITE_SHADOW",
+                    f"Suite '{s.id}' has the same id as a room; a zone member "
+                    f"named '{s.id}' resolves to the ROOM, not the suite.",
+                    room=s.id,
+                    hint="Rename the suite so zone members can reference it "
+                    "unambiguously.",
+                    **_spec_loc(s),
+                )
+            )
 
     # SUITE_REF: a suite member must be a real room.
     for s in suites:

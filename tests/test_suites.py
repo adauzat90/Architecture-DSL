@@ -308,8 +308,9 @@ def test_zone_cross_ignores_neutral_rooms():
 
 
 def test_master_ensuite_satisfied_by_a_declared_suite():
-    # Both baths open off the hall (inference would flag MASTER_ENSUITE), but a
-    # declared suite pairs master_bed with master_bath → satisfied, silent.
+    # master_bath opens to BOTH master_bed and the hall, so strict inference
+    # calls it shared and flags MASTER_ENSUITE — but the declared suite relaxes
+    # that to "reachable through the suite", and the direct door satisfies it.
     two_baths = _BASE.replace(
         "room bed_3:       bedroom  at 40,18 size 12 x 14",
         "room bed_3:       bedroom  at 40,18 size 6 x 14\n"
@@ -320,8 +321,6 @@ def test_master_ensuite_satisfied_by_a_declared_suite():
         "door hall_beds - master_bath width 2.67\n"
         "door hall_beds - bath_2 width 2.67",
     ).replace(
-        "door master_bed - master_bath width 2.67\n", ""
-    ).replace(
         "window bed_3 north width 4 offset 4",
         "window bed_3 north width 4 offset 4\nwindow bath_2 north width 3 offset 1",
     )
@@ -329,9 +328,16 @@ def test_master_ensuite_satisfied_by_a_declared_suite():
     assert "MASTER_ENSUITE" in _codes(
         compile_source(two_baths.format(decl="")), "info"
     )
-    # With the suite declared, it's exact and silent.
+    # With the suite declared, the in-suite door path makes it exact and silent.
     assert "MASTER_ENSUITE" not in _codes(
         compile_source(two_baths.format(decl="suite primary: master_bed master_bath")),
+        "info",
+    )
+    # But declaration alone is not geometry: a suite naming a bath the bedroom
+    # can't reach through the suite (hall-only access) does NOT suppress it.
+    no_direct = two_baths.replace("door master_bed - master_bath width 2.67\n", "")
+    assert "MASTER_ENSUITE" in _codes(
+        compile_source(no_direct.format(decl="suite primary: master_bed master_bath")),
         "info",
     )
 
@@ -503,3 +509,39 @@ def test_new_codes_are_registered_and_explained():
     ):
         assert code in REGISTRY
         assert "Unknown" not in explain(code)
+
+
+# --- suppression guardrails (review findings) ---------------------------------
+
+
+def test_entry_private_not_suppressed_for_a_shared_multi_bed_suite():
+    """Only a sole-bedroom (primary) suite reads as 'expected patio door' — an
+    exterior entry straight into a kids'-suite bedroom is exactly the concern."""
+    shared = _ENTRY.replace(
+        "room bed:    bedroom at 0,14 size 30 x 14",
+        "room bed:    bedroom at 0,14 size 15 x 14\n"
+        "room bed2:   bedroom at 15,14 size 15 x 14",
+    ).replace(
+        "door living - bed width 3",
+        "door living - bed width 3\ndoor living - bed2 width 3",
+    ).replace(
+        "window bed west width 5 offset 4",
+        "window bed west width 5 offset 4\nwindow bed2 east width 5 offset 4",
+    )
+    r = compile_source(shared.format(decl="suite kids: bed bed2"))
+    assert "ENTRY_PRIVATE" in _codes(r, "info")
+
+
+def test_bed_sound_not_silenced_by_one_giant_suite():
+    """A suite whose bedrooms are exactly the adjoining pair is intentional; a
+    plan-wide all-bedroom 'suite' must not mute the check."""
+    r = _compile("suite everything: master_bed bed_2 bed_3")
+    assert "BED_SOUND" in _codes(r, "info")
+
+
+def test_suite_shadowing_a_room_id_warns():
+    r = _compile("suite bed_2: master_bed")
+    assert "SUITE_SHADOW" in _codes(r, "warning")
+    # Distinct ids: no shadow warning.
+    r2 = _compile("suite primary: master_bed")
+    assert "SUITE_SHADOW" not in _codes(r2, "warning")
