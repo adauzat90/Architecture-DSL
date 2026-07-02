@@ -457,6 +457,13 @@ def test_solver_seed_is_iteration_0_and_wins_when_the_llm_never_beats_it():
 
     seed = _solver_seed_step(_solver_brief())
     assert seed is not None and seed.iteration == 0 and seed.result.ok
+    # The seed declares the program its plan delivers, so the floor is not
+    # depressed by a self-inflicted missing-program deduction.
+    assert any(l.strip().startswith("program ") for l in seed.source.splitlines())
+    assert not any(d.code == "NO_PROGRAM" for d in seed.result.infos)
+    assert not any(
+        d.code == "PROGRAM_MISMATCH" for d in seed.result.warnings
+    )
 
     client = FakeClient(sources=[BROKEN, BROKEN])  # LLM never produces a plan
     result = _agent(client).design(
@@ -529,18 +536,28 @@ def test_seed_falsy_is_todays_behaviour():
 # -- regression legibility in the feedback header -----------------------------
 
 
-def test_feedback_flags_a_regression_after_a_failed_iteration():
-    """CLEAN → BROKEN → CLEAN: the revision prompt after the broken round must
-    name the best prior valid score as a regression to recover from."""
+def test_feedback_stays_coherent_after_a_failed_iteration():
+    """CLEAN → BROKEN → CLEAN: after the broken round the prompt shows the best
+    valid source paired with ITS OWN feedback, names the discarded attempt, and
+    quotes the fatal diagnostics only under an attribution that says they belong
+    to the discarded source — never captioned as feedback on the shown DSL."""
     client = FakeClient(
         sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
     )
     _agent(client).design("a cottage", max_iterations=3, target_score=None)
 
     revision = client.stream_prompts[2]  # the prompt after the broken round 2
-    assert "REGRESSION" in revision
-    assert "iteration 1" in revision
-    assert "does not compile" in revision
+    assert "did not compile and was DISCARDED" in revision
+    assert "best valid iteration (1" in revision
+    # The fatal diagnostics appear, but only AFTER the attribution line.
+    attribution = "Fatal diagnostics from the discarded attempt"
+    assert attribution in revision
+    assert revision.index("BAD_NUMBER") > revision.index(attribution)
+    # The feedback block above the attribution describes the CLEAN source: no
+    # NO_PROGRAM info (CLEAN declares a program) and no fatal-error score.
+    described = revision[: revision.index(attribution)]
+    assert "BAD_NUMBER" not in described
+    assert "NO_PROGRAM" not in described
 
 
 def test_regression_line_absent_when_render_feedback_has_no_best_prior():
@@ -567,5 +584,7 @@ def test_revision_reverts_to_the_best_valid_source_after_a_broken_round():
     _agent(client).design("a cottage", max_iterations=3, target_score=None)
 
     revision = client.stream_prompts[2]
-    assert "envelope banana" not in revision  # the broken source is NOT the prior
+    assert "banana" not in revision.split("Fatal diagnostics")[0]
     assert 'plan "Stillwater Cottage"' in revision  # CLEAN is carried forward
+    # Nothing above the attribution claims the shown (valid) source failed.
+    assert "does not compile" not in revision.split("Fatal diagnostics")[0]

@@ -451,12 +451,33 @@ class BarndoAgent:
             )
             # When the latest attempt failed to compile, revise from the best
             # valid source instead of stranding the model on non-compiling code.
-            # (Behaviour change: previously the loop always revised from the
-            # latest source, even when it was broken.)
+            # The feedback must stay coherent with the source it is shown
+            # against: the prompt captions it as "feedback on it", so pair the
+            # best valid source with ITS OWN diagnostics and quote the broken
+            # attempt's fatal lines separately, clearly attributed.
             if result.plan is None or result.errors:
                 best_valid = _best_valid_step(history)
                 if best_valid is not None:
                     source = best_valid.source
+                    fatal = []
+                    for d in result.to_dict()["diagnostics"]:
+                        if d["severity"] != "error":
+                            continue
+                        loc = f" line {d['line']}" if d["line"] else ""
+                        fatal.append(f"error {d['code']}{loc}: {d['message']}")
+                    feedback = (
+                        f"NOTE: your newest attempt (iteration {i}) did not "
+                        f"compile and was DISCARDED. The DSL shown above is "
+                        f"your best valid iteration ({best_valid.iteration}, "
+                        f"scored {best_valid.score.total:g}); the feedback "
+                        f"below describes THAT source. Improve it — and do "
+                        f"not repeat the discarded attempt's mistakes.\n"
+                        + render_feedback(best_valid.result, best_valid.score)
+                        + "\n\nFatal diagnostics from the discarded attempt "
+                        "(these describe the discarded source, NOT the DSL "
+                        "shown above):\n"
+                        + "\n".join(fatal)
+                    )
 
         best = _best_step(history)
         return DesignResult(best.source, best.result, history)
@@ -545,9 +566,26 @@ def _solver_candidate_sources(spec) -> list[str]:
     sources: list[str] = []
     for out in results:
         try:
-            sources.append(emit_dsl(out.plan))
+            src = emit_dsl(out.plan)
         except Exception:
             continue
+        # The emitter writes no `program` statement, which would dock the seed
+        # the missing-program nudge and depress the floor below what its
+        # geometry earns. Declare the intent the plan itself delivers — the
+        # counts come from the same metrics() PROGRAM_MISMATCH checks against,
+        # so the derived line is guaranteed consistent.
+        if not any(
+            line.strip().startswith("program ")
+            for line in src.splitlines()
+        ):
+            m = out.plan.metrics()
+            beds, baths = int(m["bedroom_count"]), int(m["bathroom_count"])
+            if beds:
+                stmt = f"program {beds} bed"
+                if baths:
+                    stmt += f" {baths} bath"
+                src = stmt + "\n" + src
+        sources.append(src)
     return sources
 
 
