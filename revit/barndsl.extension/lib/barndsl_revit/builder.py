@@ -37,9 +37,87 @@ from . import report as _report
 #: Code-minimum flight width (ft), used only as a fallback run width.
 MIN_STAIR_WIDTH = 3.0
 
-#: Stamped into each created element's Comments so a re-build can find and
-#: replace exactly what a previous barndsl build made (and nothing the user drew).
+#: Marker value stamped on every element a build creates, so a re-build can find
+#: and replace exactly what a previous barndsl build made (and nothing the user
+#: drew). Stored in **Extensible Storage** (a private schema) rather than the
+#: user-facing Comments field, so it doesn't clobber a designer's annotations and
+#: a user can't accidentally match it. A legacy Comments marker is still *read*
+#: (so an old build is still recognised), but new builds no longer *write* it.
 MANAGED_MARK = "barndsl-managed"
+
+#: A fixed GUID for the private Extensible-Storage schema that carries the marker.
+_MANAGED_SCHEMA_GUID = "b47d9a1e-6f3c-4c2a-9d18-2a1f0c7e5b64"
+_MANAGED_FIELD = "marker"
+
+
+def _es():
+    """The ExtensibleStorage namespace + the System bits, or ``None`` if the
+    running engine can't provide them (then the Comments fallback is used)."""
+    try:
+        from Autodesk.Revit.DB import ExtensibleStorage as ES
+        from System import Guid, String
+
+        return ES, Guid, String
+    except Exception:
+        return None
+
+
+def _managed_schema(create=False):
+    """Look up (or, when ``create``, build) the private managed-element schema."""
+    bits = _es()
+    if bits is None:
+        return None
+    ES, Guid, String = bits
+    try:
+        guid = Guid(_MANAGED_SCHEMA_GUID)
+        schema = ES.Schema.Lookup(guid)
+        if schema is not None or not create:
+            return schema
+        b = ES.SchemaBuilder(guid)
+        b.SetSchemaName("BarndslManaged")
+        b.SetReadAccessLevel(ES.AccessLevel.Public)
+        b.SetWriteAccessLevel(ES.AccessLevel.Public)
+        b.AddSimpleField(_MANAGED_FIELD, String)
+        return b.Finish()
+    except Exception:
+        return None
+
+
+def _es_mark(elem):
+    """Stamp the managed marker into Extensible Storage. Returns True on success."""
+    bits = _es()
+    if bits is None:
+        return False
+    _ES, _Guid, String = bits
+    schema = _managed_schema(create=True)
+    if schema is None:
+        return False
+    try:
+        from Autodesk.Revit.DB import ExtensibleStorage as ES
+
+        ent = ES.Entity(schema)
+        ent.Set[String](_MANAGED_FIELD, MANAGED_MARK)
+        elem.SetEntity(ent)
+        return True
+    except Exception:
+        return False
+
+
+def _es_is_managed(elem):
+    bits = _es()
+    if bits is None:
+        return False
+    _ES, _Guid, String = bits
+    schema = _managed_schema(create=False)
+    if schema is None:
+        return False
+    try:
+        ent = elem.GetEntity(schema)
+        if ent is None or not ent.IsValid():
+            return False
+        return ent.Get[String](_MANAGED_FIELD) == MANAGED_MARK
+    except Exception:
+        return False
 
 try:
     from pyrevit import script as _script
@@ -108,8 +186,25 @@ def _comments_param(elem):
     return p
 
 
+def _is_managed(elem):
+    """Is this element one a previous barndsl build created? Reads the Extensible
+    Storage marker, then falls back to the legacy Comments marker so an older
+    build is still recognised and cleaned."""
+    if _es_is_managed(elem):
+        return True
+    p = _comments_param(elem)
+    try:
+        return p is not None and p.AsString() == MANAGED_MARK
+    except Exception:
+        return False
+
+
 def _mark(elem):
-    """Stamp an element as barndsl-managed (via its Comments), best effort."""
+    """Stamp an element as barndsl-managed. Prefers Extensible Storage (private,
+    out of the way); only if that engine is unavailable does it fall back to the
+    Comments field."""
+    if _es_mark(elem):
+        return elem
     p = _comments_param(elem)
     if p is not None and not p.IsReadOnly:
         try:
@@ -135,12 +230,7 @@ def _purge_managed(doc, report):
         return 0
     removed = 0
     for e in list(elems):
-        p = _comments_param(e)
-        try:
-            val = p.AsString() if p is not None else None
-        except Exception:
-            val = None
-        if val == MANAGED_MARK:
+        if _is_managed(e):
             try:
                 doc.Delete(e.Id)
                 removed += 1
@@ -256,6 +346,116 @@ def _set_double_param(elem, bips, names, value):
     return False
 
 
+def _set_id_param(elem, bips, value):
+    """Set the first writable ElementId parameter found by built-in id."""
+    for bip in bips:
+        try:
+            p = elem.get_Parameter(bip)
+        except Exception:
+            p = None
+        if p is not None and not p.IsReadOnly:
+            try:
+                p.Set(value)
+                return True
+            except Exception:
+                pass
+    return False
+
+
+def _level_at(levels, elevation, tol=1e-3):
+    """A level element whose elevation matches ``elevation`` (or None)."""
+    for lv in levels.values():
+        try:
+            if abs(lv.Elevation - float(elevation)) <= tol:
+                return lv
+        except Exception:
+            pass
+    return None
+
+
+def _raise_column(doc, inst, base_level, col, levels, report):
+    """Give a structural column a top at the plate elevation.
+
+    Prefer an existing level at the plate (``col["top"]``); otherwise pin the top
+    to the base level and offset it up by the storey height. Best-effort — a
+    family without these parameters keeps its default height (noted once)."""
+    top_elev = float(col.get("top", 0.0))
+    base_elev = float(col.get("base", base_level.Elevation))
+    if top_elev <= base_elev + 1e-6:
+        return
+    top_level = _level_at(levels, top_elev)
+    set_top = False
+    if top_level is not None:
+        set_top = _set_id_param(
+            inst, [DB.BuiltInParameter.FAMILY_TOP_LEVEL_PARAM], top_level.Id
+        )
+        if set_top:
+            _set_double_param(
+                inst, [DB.BuiltInParameter.FAMILY_TOP_LEVEL_OFFSET_PARAM], [], 0.0
+            )
+    if not set_top:
+        # No level at the plate (a single-storey post rising to the eave): keep the
+        # base level as the top level and offset the top up to the plate.
+        _set_id_param(inst, [DB.BuiltInParameter.FAMILY_TOP_LEVEL_PARAM], base_level.Id)
+        set_top = _set_double_param(
+            inst,
+            [DB.BuiltInParameter.FAMILY_TOP_LEVEL_OFFSET_PARAM],
+            ["Top Offset"],
+            top_elev - base_elev,
+        )
+    if not set_top:
+        report.note("column height: family has no settable top level/offset; default kept")
+
+
+def _level_above(levels, base_level, tol=1e-3):
+    """The nearest level strictly above ``base_level`` (or None)."""
+    best = None
+    for lv in levels.values():
+        try:
+            if lv.Elevation > base_level.Elevation + tol and (
+                best is None or lv.Elevation < best.Elevation
+            ):
+                best = lv
+        except Exception:
+            pass
+    return best
+
+
+def _constrain_wall_top(wall, base_level, height, levels, report):
+    """Constrain a wall's top to the level above so it stays parametric.
+
+    A wall built with an explicit height won't follow a level edit. When a storey
+    exists above, pin the wall's Top Constraint to that level and carry the
+    difference as a top **offset** — the level above sits a floor-assembly depth
+    above the wall's plate, so the offset (usually a small negative) keeps the
+    built top exactly at the plate while remaining level-driven. With no level
+    above (top storey), the explicit height stands. Best-effort."""
+    top_level = _level_above(levels, base_level)
+    if top_level is None:
+        return False
+    if _set_id_param(wall, [DB.BuiltInParameter.WALL_HEIGHT_TYPE], top_level.Id):
+        offset = (base_level.Elevation + float(height)) - top_level.Elevation
+        _set_double_param(wall, [DB.BuiltInParameter.WALL_TOP_OFFSET], [], offset)
+        return True
+    return False
+
+
+#: Location-line options the config may name → the Revit ``WallLocationLine`` value.
+#: The default keeps barndsl's centreline placement (rooms tile on centrelines);
+#: "finish_face_exterior" lands the outside finish on the footprint line so the
+#: building's overall dimension is exact (at the cost of shifting interior faces).
+def _wall_location_line_value(name):
+    table = {
+        "centerline": 0,          # WallCenterline
+        "core_centerline": 1,     # CoreCenterline
+        "finish_face_exterior": 2,  # FinishFaceExterior
+        "finish_face_interior": 3,  # FinishFaceInterior
+        "core_exterior": 4,       # CoreExterior
+        "core_interior": 5,       # CoreInterior
+    }
+    return table.get((name or "").strip().lower())
+
+
 def _rect_loop(x, y, w, l, z):
     pts = [
         DB.XYZ(x, y, z),
@@ -282,6 +482,7 @@ class _Resources(object):
         self.column = None
         self.beam = None
         self.roof_type = None
+        self.ceiling_type = None
         self.plumbing = None
         self.appliance = None
         self.footing = None
@@ -370,6 +571,11 @@ def _resolve_resources(doc, options, report):
     except Exception:
         res.roof_type = None
     report.resources["roof_type"] = _name(res.roof_type) if res.roof_type else "(none)"
+    try:
+        res.ceiling_type = (_collect(doc, DB.CeilingType) or [None])[0]
+    except Exception:
+        res.ceiling_type = None
+    report.resources["ceiling_type"] = _name(res.ceiling_type) if res.ceiling_type else "(none)"
     return res
 
 
@@ -432,8 +638,10 @@ def _is_gable(w):
     )
 
 
-def _build_walls(doc, data, levels, res, report):
+def _build_walls(doc, data, levels, res, options, report):
     made = {}
+    loc_line = _wall_location_line_value(getattr(options, "location_line", None))
+    constrained = 0
     for w in data["walls"]:
         level = levels.get(w["level"])
         if level is None:
@@ -447,7 +655,8 @@ def _build_walls(doc, data, levels, res, report):
             continue
         wtype = res.ext_wall if w.get("exterior") else res.int_wall
         wall = None
-        if _is_gable(w):
+        gable = _is_gable(w)
+        if gable:
             try:
                 wall = _gable_wall(doc, w, wtype, level)
                 _made(report, "wall", w["id"], wall, message="gable-end profile")
@@ -467,7 +676,18 @@ def _build_walls(doc, data, levels, res, report):
                 _logger.warning("wall %s: %s", w["id"], exc)
                 report.failed("wall", w["id"], str(exc))
                 continue
+            # A flat wall built to an explicit height isn't parametric; pin its top
+            # to the level above when there is one so it follows level edits. (A
+            # gable wall's top is its ridge profile, so leave it be.)
+            if not gable and _constrain_wall_top(wall, level, w["height"], levels, report):
+                constrained += 1
+        # Optional: land the exterior finish face on the footprint line so the
+        # building's overall dimension is exact. Off by default (centreline).
+        if loc_line is not None and (loc_line == 0 or w.get("exterior")):
+            _set_id_param(wall, [DB.BuiltInParameter.WALL_KEY_REF_PARAM], loc_line)
         made[w["id"]] = wall
+    if constrained:
+        report.note("constrained %d wall top(s) to the level above" % constrained)
     return made
 
 
@@ -542,7 +762,45 @@ def _build_openings(doc, data, levels, walls, res, options, report):
         _made(report, kind, o["id"], inst)
 
 
+#: Default finish schedule by room type — a starting point a residential room
+#: schedule expects (the designer refines it). Wet rooms get tile, living areas
+#: wood, service rooms sealed concrete; everything falls back to the generic set.
+_ROOM_FINISHES = {
+    "bathroom": ("Tile", "Tile", "Paint - Ceiling", "Tile"),
+    "half_bath": ("Tile", "Tile", "Paint - Ceiling", "Paint"),
+    "kitchen": ("Tile", "Wood Base", "Paint - Ceiling", "Paint"),
+    "laundry": ("Tile", "Tile", "Paint - Ceiling", "Paint"),
+    "utility": ("Sealed Concrete", "Rubber Base", "Exposed", "Paint"),
+    "mudroom": ("Tile", "Tile", "Paint - Ceiling", "Paint"),
+    "garage": ("Sealed Concrete", "None", "Exposed", "None"),
+    "shop": ("Sealed Concrete", "None", "Exposed", "None"),
+    "living": ("Wood", "Wood Base", "Paint - Ceiling", "Paint"),
+    "dining": ("Wood", "Wood Base", "Paint - Ceiling", "Paint"),
+    "bedroom": ("Carpet", "Wood Base", "Paint - Ceiling", "Paint"),
+    "office": ("Carpet", "Wood Base", "Paint - Ceiling", "Paint"),
+    "loft": ("Carpet", "Wood Base", "Paint - Ceiling", "Paint"),
+}
+_ROOM_FINISH_DEFAULT = ("Finish", "Base", "Paint - Ceiling", "Paint")
+
+
+def _set_string_param(elem, bip, value):
+    try:
+        p = elem.get_Parameter(bip)
+    except Exception:
+        p = None
+    if p is not None and not p.IsReadOnly:
+        try:
+            p.Set(str(value))
+            return True
+        except Exception:
+            pass
+    return False
+
+
 def _build_rooms(doc, data, levels, report):
+    # Number rooms sequentially per level: 101.., 201.. — the residential
+    # convention (floor number × 100 + running count).
+    counters = {}
     for r in data["rooms"]:
         level = levels.get(r["level"])
         if level is None:
@@ -557,13 +815,57 @@ def _build_rooms(doc, data, levels, report):
         if room is None:
             report.skipped("room", r["id"], "point not in an enclosed region")
             continue
-        try:
-            p = room.get_Parameter(DB.BuiltInParameter.ROOM_NAME)
-            if p is not None and not p.IsReadOnly:
-                p.Set(r.get("name", r["id"]))
-        except Exception:
-            pass
+        _set_string_param(room, DB.BuiltInParameter.ROOM_NAME, r.get("name", r["id"]))
+        lvl = r.get("level", 0)
+        counters[lvl] = counters.get(lvl, 0) + 1
+        _set_string_param(
+            room, DB.BuiltInParameter.ROOM_NUMBER, "%d%02d" % (lvl + 1, counters[lvl])
+        )
+        floor, base, ceil, wall = _ROOM_FINISHES.get(r.get("type", ""), _ROOM_FINISH_DEFAULT)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_FLOOR, floor)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_BASE, base)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_CEILING, ceil)
+        _set_string_param(room, DB.BuiltInParameter.ROOM_FINISH_WALL, wall)
         _made(report, "room", r["id"], room)
+
+
+def _build_ceilings(doc, data, levels, res, report):
+    """A flat ceiling per room, hosted at the room's ceiling height above its
+    level — so the model has a reflected-ceiling plane and somewhere to host
+    lighting. Uses each room's rectangle; skipped (with a note) when the project
+    has no ceiling type. A per-room ceiling height (vaulted rooms) is honoured."""
+    rooms = data.get("rooms", [])
+    if not rooms:
+        return
+    if res.ceiling_type is None:
+        report.note("ceilings skipped: no ceiling type in project")
+        return
+    plan_h = float(data.get("plan", {}).get("ceiling_height", 8.0))
+    from System.Collections.Generic import List
+
+    for r in rooms:
+        level = levels.get(r["level"])
+        if level is None:
+            continue
+        # A vaulted/cathedral room has no flat ceiling plane — skip it.
+        if r.get("vaulted"):
+            report.skipped("ceiling", r["id"], "vaulted — open to the roof")
+            continue
+        height = float(r.get("ceiling_height", plan_h))
+        try:
+            loop = _rect_loop(
+                float(r["x"]), float(r["y"]), float(r["width"]), float(r["length"]),
+                level.Elevation,
+            )
+            loops = List[DB.CurveLoop]()
+            loops.Add(loop)
+            ceil = DB.Ceiling.Create(doc, loops, res.ceiling_type.Id, level.Id)
+            _set_double_param(
+                ceil, [DB.BuiltInParameter.CEILING_HEIGHTABOVELEVEL_PARAM], [], height
+            )
+            _made(report, "ceiling", r["id"], ceil)
+        except Exception as exc:
+            report.failed("ceiling", r["id"], str(exc))
 
 
 def _build_structure(doc, data, levels, res, report):
@@ -588,6 +890,11 @@ def _build_structure(doc, data, levels, res, report):
             inst = doc.Create.NewFamilyInstance(
                 _xyz(c["point"], level.Elevation), col_sym, level, DB.Structure.StructuralType.Column
             )
+            # Give the post a real height: rise from the floor to the plate (the
+            # beam it carries) rather than the family's default stub. Prefer an
+            # existing level at the plate elevation; otherwise offset the top above
+            # this level.
+            _raise_column(doc, inst, level, c, levels, report)
             _made(report, "column", src, inst)
         except Exception as exc:
             report.failed("column", src, str(exc))
@@ -598,7 +905,10 @@ def _build_structure(doc, data, levels, res, report):
         if beam_sym is None:
             break
         level = levels.get(f["level"])
-        z = level.Elevation if level else 0.0
+        # The bent/ridge sits at the plate (top of the posts), carried on the
+        # exchange as ``z`` — not down at the floor level. Fall back to the level
+        # elevation only for an old exchange without ``z``.
+        z = float(f.get("z", level.Elevation if level else 0.0))
         src = "%s %d" % (f.get("role", "beam"), i)
         try:
             curve = DB.Line.CreateBound(_xyz(f["start"], z), _xyz(f["end"], z))
@@ -1217,9 +1527,11 @@ def build(doc, data, options=None):
         if options.replace:
             _purge_managed(doc, report)
         levels = _ensure_levels(doc, data, report)
-        walls = _build_walls(doc, data, levels, res, report)
+        walls = _build_walls(doc, data, levels, res, options, report)
         _build_openings(doc, data, levels, walls, res, options, report)
         _build_rooms(doc, data, levels, report)
+        if options.ceilings:
+            _build_ceilings(doc, data, levels, res, report)
         if options.structure:
             _build_structure(doc, data, levels, res, report)
         if options.fixtures:
@@ -1283,19 +1595,16 @@ def _managed_in_category(doc, bic):
     except Exception:
         return out
     for e in elems:
-        p = _comments_param(e)
-        try:
-            if p is not None and p.AsString() == MANAGED_MARK:
-                out.append(e)
-        except Exception:
-            pass
+        if _is_managed(e):
+            out.append(e)
     return out
 
 
 def _purge_documents(doc, report):
-    """Delete barndsl-named sheets, schedules and views from a prior run."""
+    """Delete barndsl-named sheets, schedules and views (plans, elevations,
+    sections) plus managed dimensions/markers from a prior run."""
     removed = 0
-    for cls in (DB.ViewSheet, DB.ViewSchedule, DB.ViewPlan):
+    for cls in (DB.ViewSheet, DB.ViewSchedule, DB.ViewPlan, DB.ViewSection):
         try:
             views = _collect(doc, cls)
         except Exception:
@@ -1307,8 +1616,21 @@ def _purge_documents(doc, report):
                     removed += 1
             except Exception:
                 pass
+    # Managed dimensions and elevation markers aren't name-prefixed.
+    for cls in (DB.Dimension, DB.ElevationMarker):
+        try:
+            elems = _collect(doc, cls)
+        except Exception:
+            elems = []
+        for e in list(elems):
+            if _is_managed(e):
+                try:
+                    doc.Delete(e.Id)
+                    removed += 1
+                except Exception:
+                    pass
     if removed:
-        report.note("replaced %d view/sheet/schedule(s) from a previous run" % removed)
+        report.note("replaced %d view/sheet/schedule/dimension(s) from a previous run" % removed)
     return removed
 
 
@@ -1375,6 +1697,7 @@ def _make_schedules(doc, report):
         (DB.BuiltInCategory.OST_Windows, "Windows"),
         (DB.BuiltInCategory.OST_Rooms, "Rooms"),
     ]
+    made = []
     for bic, label in specs:
         try:
             sched = DB.ViewSchedule.CreateSchedule(doc, DB.ElementId(bic))
@@ -1382,12 +1705,185 @@ def _make_schedules(doc, report):
                 sched.Name = DOC_PREFIX + label
             except Exception:
                 pass
+            made.append(sched)
             report.created("schedule", label, revit_id=_rid(sched))
         except Exception as exc:
             report.failed("schedule", label, str(exc))
+    return made
 
 
-def _make_sheets(doc, levels, views, title_block, report):
+def _wall_endpoints(w):
+    """The two plan endpoints of a wall — from a real ``Location.Curve`` or the
+    fake's stored line — as ``((x1, y1), (x2, y2))``, or None."""
+    loc = getattr(w, "Location", None)
+    curve = getattr(loc, "Curve", None) if loc is not None else getattr(w, "curve", None)
+    if curve is None:
+        return None
+    try:
+        a, b = curve.GetEndPoint(0), curve.GetEndPoint(1)
+    except Exception:
+        a, b = getattr(curve, "p1", None), getattr(curve, "p2", None)
+    if a is None or b is None:
+        return None
+    return ((a.X, a.Y), (b.X, b.Y))
+
+
+def _model_bounds(doc):
+    """Plan bounds ``(minx, miny, maxx, maxy)`` of the barndsl-built walls, for
+    placing elevation markers and a section. None if there are no managed walls."""
+    xs, ys = [], []
+    for w in _collect(doc, DB.Wall):
+        if not _is_managed(w):
+            continue
+        ends = _wall_endpoints(w)
+        if ends is None:
+            continue
+        (x1, y1), (x2, y2) = ends
+        xs.extend([x1, x2])
+        ys.extend([y1, y2])
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _dimension_ground_plan(doc, view, report):
+    """Overall grid-to-grid dimension strings on the ground plan.
+
+    Dimensions reference the structural grids a frame produced (Revit needs
+    referenceable geometry; grids are the clean choice). One string per grid
+    direction, on a dimension line just outside the building. Skipped with a note
+    when there are no grids to dimension."""
+    grids = [g for g in _collect(doc, DB.Grid) if _is_managed(g)]
+    if not grids:
+        report.note("plan dimensions skipped: no grids to dimension (place a frame)")
+        return
+    bounds = _model_bounds(doc)
+    if bounds is None:
+        return
+    minx, miny, maxx, maxy = bounds
+    vert, horiz = [], []  # grids running N-S (constant x) vs E-W (constant y)
+    for g in grids:
+        curve = getattr(g, "Curve", None) or getattr(g, "line", None)
+        if curve is None:
+            continue
+        try:
+            a, b = curve.GetEndPoint(0), curve.GetEndPoint(1)
+        except Exception:
+            a, b = getattr(curve, "p1", None), getattr(curve, "p2", None)
+        if a is None or b is None:
+            continue
+        (vert if abs(a.X - b.X) <= abs(a.Y - b.Y) else horiz).append((g, a, b))
+
+    made = 0
+    for group, along_x in ((vert, True), (horiz, False)):
+        if len(group) < 2:
+            continue
+        refs = DB.ReferenceArray()
+        for g, _a, _b in group:
+            try:
+                refs.Append(DB.Reference(g))
+            except Exception:
+                pass
+        try:
+            if along_x:  # vertical grids → a horizontal dimension line below the plan
+                p1 = DB.XYZ(minx, miny - 5.0, 0.0)
+                p2 = DB.XYZ(maxx, miny - 5.0, 0.0)
+            else:  # horizontal grids → a vertical dimension line left of the plan
+                p1 = DB.XYZ(minx - 5.0, miny, 0.0)
+                p2 = DB.XYZ(minx - 5.0, maxy, 0.0)
+            line = DB.Line.CreateBound(p1, p2)
+            dim = DB.Dimension.Create(doc, view, line, refs)
+            _mark(dim)
+            report.created("dimension", "grid line", revit_id=_rid(dim))
+            made += 1
+        except Exception as exc:
+            report.failed("dimension", "grid line", str(exc))
+    if not made:
+        report.note("plan dimensions: no dimension string could be placed")
+
+
+def _make_elevations(doc, plan_view, report):
+    """Four exterior elevations (North/South/East/West) from one marker centred on
+    the building — a residential set's exterior elevations. Needs an elevation
+    view type and a plan view to host them."""
+    vft = _view_family_type(doc, DB.ViewFamily.Elevation)
+    if vft is None:
+        report.note("elevations skipped: no elevation view type in project")
+        return
+    if plan_view is None:
+        report.note("elevations skipped: no plan view to host them")
+        return
+    bounds = _model_bounds(doc)
+    if bounds is None:
+        report.note("elevations skipped: no built walls to bound the building")
+        return
+    minx, miny, maxx, maxy = bounds
+    cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+    try:
+        if not vft.IsActive:
+            vft.Activate()
+            doc.Regenerate()
+    except Exception:
+        pass
+    try:
+        marker = DB.ElevationMarker.CreateElevationMarker(
+            doc, vft.Id, DB.XYZ(cx, cy, 0.0), 96
+        )
+    except Exception as exc:
+        report.failed("elevation", "marker", str(exc))
+        return
+    _mark(marker)
+    for i, name in enumerate(("North", "East", "South", "West")):
+        try:
+            elev = marker.CreateElevation(doc, plan_view.Id, i)
+            try:
+                elev.Name = DOC_PREFIX + name + " Elevation"
+            except Exception:
+                pass
+            report.created("elevation", name, revit_id=_rid(elev))
+        except Exception as exc:
+            report.failed("elevation", name, str(exc))
+
+
+def _make_section(doc, levels, report):
+    """One transverse building section cutting across the plan — the section a
+    residential set needs to show wall/roof heights. Experimental: the section's
+    orientation transform needs live-Revit confirmation, so a failure is noted."""
+    vft = _view_family_type(doc, DB.ViewFamily.Section)
+    if vft is None:
+        report.note("section skipped: no section view type in project")
+        return
+    bounds = _model_bounds(doc)
+    if bounds is None:
+        report.note("section skipped: no built walls to bound the building")
+        return
+    minx, miny, maxx, maxy = bounds
+    top = max((lv.Elevation for lv in levels), default=0.0) + 12.0
+    try:
+        bbox = DB.BoundingBoxXYZ()
+        # Look north across the middle of the building: the section box's local
+        # X spans east-west, Y spans elevation, Z is the view depth (northward).
+        cy = (miny + maxy) / 2.0
+        t = DB.Transform.Identity
+        t.Origin = DB.XYZ((minx + maxx) / 2.0, cy, 0.0)
+        t.BasisX = DB.XYZ(1.0, 0.0, 0.0)
+        t.BasisY = DB.XYZ(0.0, 0.0, 1.0)
+        t.BasisZ = DB.XYZ(0.0, -1.0, 0.0)
+        bbox.Transform = t
+        half_w = (maxx - minx) / 2.0 + 2.0
+        bbox.Min = DB.XYZ(-half_w, -2.0, -(maxy - miny) / 2.0 - 2.0)
+        bbox.Max = DB.XYZ(half_w, top, (maxy - miny) / 2.0 + 2.0)
+        section = DB.ViewSection.CreateSection(doc, vft.Id, bbox)
+        try:
+            section.Name = DOC_PREFIX + "Building Section"
+        except Exception:
+            pass
+        report.created("section", "building", revit_id=_rid(section))
+    except Exception as exc:
+        report.failed("section", "building", "experimental: %s" % exc)
+
+
+def _make_sheets(doc, levels, views, title_block, report, schedules=None):
     if title_block is None:
         report.note("sheets skipped: no title block loaded")
         return
@@ -1411,6 +1907,27 @@ def _make_sheets(doc, levels, views, title_block, report):
             report.created("sheet", _name(lv), revit_id=_rid(sheet))
         except Exception as exc:
             report.failed("sheet", _name(lv), str(exc))
+    # A dedicated schedule sheet so the door/window/room schedules land on a
+    # drawing rather than only living in the browser.
+    if schedules:
+        try:
+            sheet = DB.ViewSheet.Create(doc, title_block.Id)
+            try:
+                sheet.Name = DOC_PREFIX + "Schedules"
+            except Exception:
+                pass
+            y = 1.0
+            for sched in schedules:
+                try:
+                    DB.ScheduleSheetInstance.Create(
+                        doc, sheet.Id, sched.Id, DB.XYZ(0.5, y, 0.0)
+                    )
+                    y -= 0.5
+                except Exception as exc:
+                    report.failed("sheet", "schedule placement", str(exc))
+            report.created("sheet", "Schedules", revit_id=_rid(sheet))
+        except Exception as exc:
+            report.failed("sheet", "Schedules", str(exc))
 
 
 def document(doc, options=None):
@@ -1439,10 +1956,17 @@ def document(doc, options=None):
         if options.tags:
             for view in views.values():
                 _tag_in_view(doc, view, report)
-        if options.schedules:
-            _make_schedules(doc, report)
+        # The ground plan hosts dimensions and the elevation marker.
+        ground = views.get(_id_val(levels[0].Id)) if (views and levels) else None
+        if getattr(options, "dimensions", True) and ground is not None:
+            _dimension_ground_plan(doc, ground, report)
+        if getattr(options, "elevations", True):
+            _make_elevations(doc, ground, report)
+        if getattr(options, "sections", True):
+            _make_section(doc, levels, report)
+        schedules = _make_schedules(doc, report) if options.schedules else []
         if options.sheets:
-            _make_sheets(doc, levels, views, title_block, report)
+            _make_sheets(doc, levels, views, title_block, report, schedules)
         t.Commit()
     except Exception:
         if t.HasStarted() and not t.HasEnded():

@@ -220,6 +220,21 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A stair's footprint is too short to physically hold the run the "
            "ceiling height requires (R311.7: ~7.75 in max riser, 10 in min "
            "tread). Lengthen its footprint or model a switchback."),
+        _c("STAIR_HEADROOM", W, "Stair headroom can't develop",
+           "A stair's footprint is too short for a floor opening (stairwell) that "
+           "keeps 6 ft 8 in of headroom under the upper floor (IRC R311.7.2). "
+           "Lengthen the run/opening or reduce the floor-to-floor height."),
+        # --- guards & life safety -------------------------------------------
+        _c("LOFT_GUARD", I, "Open loft edge needs a guard",
+           "An upper-level room only partially covers a room below, so it "
+           "overlooks a double-height void. Its open edge is a walking surface "
+           "more than 30 in up and needs a 36 in guard with balusters that block a "
+           "4 in sphere (IRC R312)."),
+        _c("ALARM_CO", I, "Smoke/CO alarms required",
+           "The plan has an attached garage/shop, so a carbon-monoxide alarm is "
+           "required outside each sleeping area (IRC R315), plus smoke alarms in "
+           "each bedroom, outside sleeping areas, and on every level (IRC R314). "
+           "The DSL can't place alarms — confirm them on the electrical plan."),
         # --- access ---------------------------------------------------------
         _c("NO_ENTRY", E, "No exterior door",
            "The plan has no exterior door — no way to enter the building."),
@@ -348,6 +363,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "opening along its wall into a clear bay (between posts), or change the "
            "`frame bay` spacing so no post lands on it. A post at the opening's "
            "jamb is fine (that's how it's framed); only a post inside it flags."),
+        _c("LOAD_PATH", I, "Upper partition unsupported below",
+           "An interior wall on an upper level lands over the open floor of a room "
+           "below, with no wall, beam, or post beneath it — the floor framing must "
+           "carry it (IRC R502). Fine for a light partition on adequate joists; a "
+           "bearing wall wants direct support below."),
         _c("BAY_WIDE", I, "Wide frame bay spacing",
            "The frame's bay spacing is wider than typical residential post-frame "
            "(~12 ft on centre). Legal with adequately sized members, but it asks "

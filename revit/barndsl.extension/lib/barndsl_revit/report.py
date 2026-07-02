@@ -18,10 +18,10 @@ STATUSES = (CREATED, SKIPPED, FAILED)
 
 #: The element kinds the builder reports on, in display order.
 KINDS = (
-    "level", "wall", "door", "window", "room", "column", "framing",
-    "slab", "porch", "stair", "grid", "roof",
+    "level", "wall", "door", "window", "room", "ceiling", "column", "framing",
+    "slab", "porch", "stair", "grid", "roof", "footing", "fixture",
     # documentation (the document() pass)
-    "view", "tag", "schedule", "sheet",
+    "view", "tag", "schedule", "sheet", "dimension", "elevation", "section",
 )
 
 #: Names of the optional type/family overrides a build can specify, so the same
@@ -37,13 +37,17 @@ _OVERRIDE_KEYS = (
     "plumbing_family",
     "appliance_family",
     "foundation_family",
+    #: How walls sit on the barndsl edge: "centerline" (default — rooms tile on
+    #: centrelines) or "finish_face_exterior" (lands the outside finish on the
+    #: footprint line so the building's overall dimension is exact).
+    "location_line",
 )
 _FLAG_KEYS = (
     "structure", "size_families", "porches", "stairs", "slabs", "grids", "roof",
-    "fixtures", "foundation",
+    "fixtures", "foundation", "ceilings",
     "replace", "dry_run", "verbose",
     # document() pass
-    "views", "tags", "schedules", "sheets",
+    "views", "tags", "schedules", "sheets", "dimensions", "elevations", "sections",
 )
 
 
@@ -63,6 +67,7 @@ class BuildOptions(object):
         roof=True,
         fixtures=True,
         foundation=True,
+        ceilings=True,
         replace=True,
         dry_run=False,
         verbose=False,
@@ -70,6 +75,9 @@ class BuildOptions(object):
         tags=True,
         schedules=True,
         sheets=True,
+        dimensions=True,
+        elevations=True,
+        sections=True,
         exterior_wall_type=None,
         interior_wall_type=None,
         door_family=None,
@@ -80,6 +88,7 @@ class BuildOptions(object):
         plumbing_family=None,
         appliance_family=None,
         foundation_family=None,
+        location_line=None,
     ):
         self.structure = bool(structure)
         self.size_families = bool(size_families)
@@ -90,6 +99,7 @@ class BuildOptions(object):
         self.roof = bool(roof)
         self.fixtures = bool(fixtures)
         self.foundation = bool(foundation)
+        self.ceilings = bool(ceilings)
         self.replace = bool(replace)
         self.dry_run = bool(dry_run)
         self.verbose = bool(verbose)
@@ -97,6 +107,9 @@ class BuildOptions(object):
         self.tags = bool(tags)
         self.schedules = bool(schedules)
         self.sheets = bool(sheets)
+        self.dimensions = bool(dimensions)
+        self.elevations = bool(elevations)
+        self.sections = bool(sections)
         self.exterior_wall_type = exterior_wall_type
         self.interior_wall_type = interior_wall_type
         self.door_family = door_family
@@ -107,6 +120,7 @@ class BuildOptions(object):
         self.plumbing_family = plumbing_family
         self.appliance_family = appliance_family
         self.foundation_family = foundation_family
+        self.location_line = location_line
 
     @classmethod
     def from_dict(cls, data):

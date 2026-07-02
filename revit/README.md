@@ -104,8 +104,9 @@ model. Use it to shake a plan out against a project template before committing.
 | `levels` | Reused if one exists at the same elevation, else a new `Level`. |
 | `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). A **gable-end** wall (flagged `profile: gable`) builds from a vertical pentagon profile so its top rises to the ridge; a profile failure falls back to a flat wall with a note. |
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. |
-| `rooms` | A `Room` placed at each seed point once walls enclose it, then named. |
-| `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. |
+| `rooms` | A `Room` placed at each seed point once walls enclose it, then named, **numbered** (101, 102, … per level) and given default **finishes** (floor/base/ceiling/wall) by room type — a residential room schedule filled in, ready to refine. |
+| `ceilings` | A flat `Ceiling` per room at its ceiling height above the level — a reflected-ceiling plane to host lighting. A **vaulted** room is skipped (open to the roof). Needs a ceiling type; skipped with a note otherwise. |
+| `structure` | Structural columns at posts and framing along beams — **only if** structural-column / structural-framing families are loaded; skipped with a note otherwise. Posts rise from the floor to the **plate** (a real top level/offset, not a default stub) and bents/ridge are drawn up **at the plate**, not down on the floor. |
 | `fixtures` | A family instance at each fixture/appliance seed — a plumbing family for wet fixtures (toilet/lavatory/tub/shower/sink), a specialty-equipment family for appliances (refrigerator/range). Seeds for the designer to swap/adjust; **only if** the family is loaded, skipped with a note otherwise. |
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
 | `foundation` | A **pad footing** (structural-foundation family) under each post of a placed frame; **only if** such a family is loaded, skipped with a note otherwise. The thickened perimeter edge (turndown / grade beam) and the rough concrete takeoff are reported for detailing. |
@@ -121,12 +122,15 @@ transactions). Every element is created defensively: if one fails (e.g. a missin
 family), it's recorded in the report and the rest still build.
 
 **Re-building is idempotent.** Every element a build creates is stamped
-barndsl-managed (in its Comments). By default a re-build first **removes the
-previous barndsl build** and lays down the current one — so iterating on the
-`.barn` and rebuilding *replaces* the model instead of stacking duplicates, and
-never touches anything you drew by hand. It's all one undo step. Set
-`"replace": false` in the config to append instead (levels are always reused, and
-stairs aren't purged).
+barndsl-managed in a private **Extensible Storage** schema — not the user-facing
+Comments field, so the mark never clobbers your annotations and you can't
+accidentally match it. (A legacy Comments mark from an older build is still
+*read*, so an old build is still recognised and replaced.) By default a re-build
+first **removes the previous barndsl build** and lays down the current one — so
+iterating on the `.barn` and rebuilding *replaces* the model instead of stacking
+duplicates, and never touches anything you drew by hand. It's all one undo step.
+Set `"replace": false` in the config to append instead (levels are always reused,
+and stairs aren't purged).
 
 ## Documentation (the Document button)
 
@@ -135,8 +139,17 @@ after a build and it creates, in one transaction:
 
 - a floor-plan **view** per level,
 - room / door / window **tags** in those views (only barndsl-managed elements),
+- overall **dimension** strings on the ground plan, referencing the structural
+  grids (needs a `frame`; noted and skipped when there are no grids),
+- four exterior **elevations** (N/E/S/W) from one marker, and one transverse
+  building **section** (both need their view types loaded; the section's
+  orientation is experimental and noted if it can't be placed),
 - native door / window / room **schedules**,
-- a **sheet** per level with the plan placed in a viewport.
+- a **sheet** per level with the plan placed in a viewport, plus a dedicated
+  **Schedules** sheet with the schedules placed on it.
+
+Each sub-pass can be turned off with the `dimensions`, `elevations`, `sections`,
+`views`, `tags`, `schedules`, `sheets` config flags.
 
 Views, sheets and schedules are named with a `barndsl - ` prefix and the pass is
 **idempotent** — re-documenting replaces the ones a previous run made (set
@@ -184,6 +197,7 @@ folder). Unknown keys are ignored, so you can leave comments.
   "plumbing_family": "Toilet-Domestic-3D",
   "appliance_family": "Refrigerator",
   "foundation_family": "Footing-Rectangular",
+  "location_line": "centerline",
   "size_families": true,
   "structure": true,
   "fixtures": true,
@@ -232,9 +246,16 @@ back to the auto-pick with a note in the report.
   exchange now carries each room's `clear_width`/`clear_length`/`clear_area` (the
   figure Revit computes for a placed room), and the core's `ROOM_CLEAR` check
   flags any room that meets a code minimum nominally but not once built — so the
-  DSL and the Revit room schedule tell the same story. For exact *nominal*
-  interior dimensions instead, set the wall **Location Line** to a finish face, or
-  model with thin types.
+  DSL and the Revit room schedule tell the same story. To make the building's
+  **overall dimension** land exactly on the barndsl footprint instead, set
+  `"location_line": "finish_face_exterior"` in the config — the exterior walls'
+  outside finish then sits on the footprint line (Revit uses each wall type's real
+  thickness). The default is `"centerline"` (unchanged), because moving the
+  exterior finish out also shifts the interior face inward by a full wall.
+- **Walls stay parametric.** On a multi-storey plan, each lower wall's **Top
+  Constraint** is pinned to the level above (with a top offset for the
+  floor-assembly depth), so editing a level moves the walls with it rather than
+  leaving them at a baked-in height. The top storey keeps an explicit height.
 - Rooms only place where walls actually enclose the seed point. A plan whose
   rooms don't fully tile the footprint may leave some seeds unplaced (reported).
 

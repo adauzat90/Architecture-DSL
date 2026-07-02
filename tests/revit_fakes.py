@@ -55,11 +55,16 @@ class FakeParam:
     def AsString(self):
         return self._v
 
+    def AsElementId(self):
+        return self._v
+
 
 class FakeElement:
     def __init__(self, name="", doc=None):
         self.Id = _Id()
         self._name = name
+        self.Document = doc
+        self._entity = None
         self._params = {}
         # Every Revit element carries instance Comments — the managed marker lives here.
         self._params[BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS] = FakeParam("", "String")
@@ -84,6 +89,13 @@ class FakeElement:
     def LookupParameter(self, name):
         return self._params.get(name)
 
+    # Extensible Storage: the managed marker lives here (not in Comments).
+    def SetEntity(self, entity):
+        self._entity = entity
+
+    def GetEntity(self, schema):
+        return self._entity if self._entity is not None else Entity(None)
+
 
 # --- enums / namespaces (string values: hashable + comparable) ---------------
 
@@ -93,7 +105,22 @@ class BuiltInParameter:
     FAMILY_HEIGHT_PARAM = "FAMILY_HEIGHT_PARAM"
     INSTANCE_SILL_HEIGHT_PARAM = "INSTANCE_SILL_HEIGHT_PARAM"
     ROOM_NAME = "ROOM_NAME"
+    ROOM_NUMBER = "ROOM_NUMBER"
+    ROOM_FINISH_FLOOR = "ROOM_FINISH_FLOOR"
+    ROOM_FINISH_BASE = "ROOM_FINISH_BASE"
+    ROOM_FINISH_CEILING = "ROOM_FINISH_CEILING"
+    ROOM_FINISH_WALL = "ROOM_FINISH_WALL"
+    CEILING_HEIGHTABOVELEVEL_PARAM = "CEILING_HEIGHTABOVELEVEL_PARAM"
     ALL_MODEL_INSTANCE_COMMENTS = "ALL_MODEL_INSTANCE_COMMENTS"
+    # wall top constraint / location line
+    WALL_HEIGHT_TYPE = "WALL_HEIGHT_TYPE"
+    WALL_TOP_OFFSET = "WALL_TOP_OFFSET"
+    WALL_KEY_REF_PARAM = "WALL_KEY_REF_PARAM"
+    # structural-column base/top
+    FAMILY_TOP_LEVEL_PARAM = "FAMILY_TOP_LEVEL_PARAM"
+    FAMILY_TOP_LEVEL_OFFSET_PARAM = "FAMILY_TOP_LEVEL_OFFSET_PARAM"
+    FAMILY_BASE_LEVEL_PARAM = "FAMILY_BASE_LEVEL_PARAM"
+    FAMILY_BASE_LEVEL_OFFSET_PARAM = "FAMILY_BASE_LEVEL_OFFSET_PARAM"
 
 
 class BuiltInCategory:
@@ -111,6 +138,8 @@ class BuiltInCategory:
 
 class ViewFamily:
     FloorPlan = "FloorPlan"
+    Elevation = "Elevation"
+    Section = "Section"
 
 
 class TagMode:
@@ -172,6 +201,93 @@ class Structure:
     StructuralType = _StructuralType
 
 
+# --- extensible storage (the managed marker) --------------------------------
+
+
+class _AccessLevel:
+    Public = "Public"
+
+
+class _Schema:
+    _registry = {}  # guid string -> _Schema
+
+    def __init__(self, guid, name):
+        self.guid = str(guid)
+        self._name = name
+
+    @staticmethod
+    def Lookup(guid):
+        return _Schema._registry.get(str(guid))
+
+    def GetField(self, name):
+        return name
+
+
+class _SchemaBuilder:
+    def __init__(self, guid):
+        self.guid = guid
+        self.name = "schema"
+
+    def SetSchemaName(self, n):
+        self.name = n
+
+    def SetReadAccessLevel(self, a):
+        pass
+
+    def SetWriteAccessLevel(self, a):
+        pass
+
+    def AddSimpleField(self, name, dotnet_type):
+        return object()  # a real FieldBuilder; we don't need it
+
+    def Finish(self):
+        s = _Schema(self.guid, self.name)
+        _Schema._registry[str(self.guid)] = s
+        return s
+
+
+class _EntityAccessor:
+    """Backs ``entity.Set[T](field, value)`` / ``entity.Get[T](field)`` — the
+    generic call shape Revit uses — and a plain callable form for convenience."""
+
+    def __init__(self, entity, write):
+        self._entity = entity
+        self._write = write
+
+    def __getitem__(self, dotnet_type):
+        return self._op
+
+    def __call__(self, *args):
+        return self._op(*args)
+
+    def _op(self, *args):
+        if self._write:
+            field, value = args
+            self._entity._data[field] = value
+            return None
+        (field,) = args
+        return self._entity._data.get(field)
+
+
+class Entity:
+    def __init__(self, schema=None):
+        self.Schema = schema
+        self._data = {}
+        self._valid = schema is not None
+        self.Set = _EntityAccessor(self, write=True)
+        self.Get = _EntityAccessor(self, write=False)
+
+    def IsValid(self):
+        return self._valid
+
+
+class ExtensibleStorage:
+    AccessLevel = _AccessLevel
+    Schema = _Schema
+    SchemaBuilder = _SchemaBuilder
+    Entity = Entity
+
+
 # --- geometry ----------------------------------------------------------------
 
 
@@ -203,6 +319,9 @@ class Line(Curve):
         if abs(p1.X - p2.X) < 1e-9 and abs(p1.Y - p2.Y) < 1e-9 and abs(p1.Z - p2.Z) < 1e-9:
             raise Exception("degenerate curve")
         return Line(p1, p2)
+
+    def GetEndPoint(self, i):
+        return self.p1 if i == 0 else self.p2
 
 
 class CurveLoop:
@@ -258,6 +377,19 @@ class RoofType(FakeElement):
     pass
 
 
+class CeilingType(FakeElement):
+    pass
+
+
+class Ceiling(FakeElement):
+    @staticmethod
+    def Create(doc, loops, ctype_id, level_id):
+        c = Ceiling("ceiling", doc)
+        c.set_param(BuiltInParameter.CEILING_HEIGHTABOVELEVEL_PARAM, 0.0, "Double")
+        doc.created.append(("ceiling", c))
+        return c
+
+
 class _ModelCurveArray:
     """Stand-in for the ``ModelCurveArray`` ``NewFootPrintRoof`` returns — one
     model curve per footprint edge, queried by ``Size`` / ``get_Item`` like Revit's."""
@@ -296,6 +428,7 @@ class Grid(FakeElement):
     def Create(doc, line):
         g = Grid("grid", doc)
         g.line = line
+        g.Curve = line
         doc.created.append(("grid", g))
         return g
 
@@ -355,6 +488,11 @@ class Wall(FakeElement):
             w.profile = None
             w.curve = first
             w.wtype_id, w.level_id, w.height = rest[0], rest[1], rest[2]
+        # Top constraint / location line params a real wall carries, so the
+        # builder can constrain the top and (optionally) set the location line.
+        w.set_param(BuiltInParameter.WALL_HEIGHT_TYPE, None, "ElementId")
+        w.set_param(BuiltInParameter.WALL_TOP_OFFSET, 0.0, "Double")
+        w.set_param(BuiltInParameter.WALL_KEY_REF_PARAM, 0, "Integer")
         doc.created.append(("wall", w))
         return w
 
@@ -438,6 +576,85 @@ class IndependentTag(FakeElement):
         return t
 
 
+class ReferenceArray:
+    def __init__(self):
+        self.refs = []
+
+    def Append(self, r):
+        self.refs.append(r)
+
+    @property
+    def Size(self):
+        return len(self.refs)
+
+
+class Dimension(FakeElement):
+    @staticmethod
+    def Create(doc, view, line, refs):
+        if getattr(refs, "Size", 0) < 2:
+            raise Exception("a dimension needs at least two references")
+        d = Dimension("dimension", doc)
+        d.line = line
+        d.refs = refs
+        doc.created.append(("dimension", d))
+        return d
+
+
+class _Transform:
+    def __init__(self):
+        self.Origin = XYZ(0, 0, 0)
+        self.BasisX = XYZ(1, 0, 0)
+        self.BasisY = XYZ(0, 1, 0)
+        self.BasisZ = XYZ(0, 0, 1)
+
+
+# ``DB.Transform.Identity`` yields a fresh identity transform each access, like Revit.
+class _TransformMeta(type):
+    @property
+    def Identity(cls):
+        return _Transform()
+
+
+class Transform(metaclass=_TransformMeta):
+    pass
+
+
+class BoundingBoxXYZ:
+    def __init__(self):
+        self.Min = XYZ(0, 0, 0)
+        self.Max = XYZ(0, 0, 0)
+        self.Transform = _Transform()
+
+
+class ViewSection(FakeElement):
+    @staticmethod
+    def CreateSection(doc, vft_id, bbox):
+        v = ViewSection("section", doc)
+        doc.created.append(("section", v))
+        return v
+
+
+class ElevationMarker(FakeElement):
+    @staticmethod
+    def CreateElevationMarker(doc, vft_id, point, scale):
+        m = ElevationMarker("elevation-marker", doc)
+        doc.created.append(("elevation_marker", m))
+        return m
+
+    def CreateElevation(self, doc, plan_view_id, index):
+        v = ViewSection("elevation", doc)
+        doc.created.append(("elevation", v))
+        return v
+
+
+class ScheduleSheetInstance(FakeElement):
+    @staticmethod
+    def Create(doc, sheet_id, schedule_id, point):
+        s = ScheduleSheetInstance("schedule-on-sheet", doc)
+        doc.created.append(("schedule_instance", s))
+        return s
+
+
 # --- collector / transaction / creator ---------------------------------------
 
 
@@ -498,6 +715,12 @@ class _Creator:
             raise Exception("forced NewFamilyInstance failure")
         inst = FamilyInstance("instance", self.doc)
         inst.set_param(BuiltInParameter.INSTANCE_SILL_HEIGHT_PARAM, 0.0)
+        # Structural-column base/top params (present on a real column instance),
+        # so the builder can raise a post to the plate and a test can read it.
+        inst.set_param(BuiltInParameter.FAMILY_TOP_LEVEL_PARAM, None, "ElementId")
+        inst.set_param(BuiltInParameter.FAMILY_TOP_LEVEL_OFFSET_PARAM, 0.0, "Double")
+        inst.set_param(BuiltInParameter.FAMILY_BASE_LEVEL_PARAM, None, "ElementId")
+        inst.set_param(BuiltInParameter.FAMILY_BASE_LEVEL_OFFSET_PARAM, 0.0, "Double")
         # A placed instance is queryable by its symbol's category and carries a
         # location point — as a real Revit instance would, so tags can find it.
         sym = args[1] if len(args) >= 2 else None
@@ -514,6 +737,12 @@ class _Creator:
             return None
         rm = FakeElement("placed-room", self.doc)
         rm.set_param(BuiltInParameter.ROOM_NAME, "", "String")
+        for _p in (
+            BuiltInParameter.ROOM_NUMBER, BuiltInParameter.ROOM_FINISH_FLOOR,
+            BuiltInParameter.ROOM_FINISH_BASE, BuiltInParameter.ROOM_FINISH_CEILING,
+            BuiltInParameter.ROOM_FINISH_WALL,
+        ):
+            rm.set_param(_p, "", "String")
         rm.Area = 1.0
         rm.Location = types.SimpleNamespace(Point=XYZ(uv.U, uv.V, 0.0))
         rm.LevelId = level.Id
@@ -598,6 +827,7 @@ class FakeDocument:
         self.wall_types = []
         self.floor_types = []
         self.roof_types = []
+        self.ceiling_types = []
         self.symbols = {}  # category -> [FamilySymbol]
         self.placed_rooms = []
         self.instances = {}  # category -> [FamilyInstance-ish]
@@ -664,6 +894,11 @@ class FakeDocument:
         self.roof_types.append(rt)
         return rt
 
+    def add_ceiling_type(self, name):
+        ct = CeilingType(name, self)
+        self.ceiling_types.append(ct)
+        return ct
+
     def add_view_family_type(self, name, view_family=ViewFamily.FloorPlan):
         vft = ViewFamilyType(name, view_family, self)
         self.view_family_types.append(vft)
@@ -709,6 +944,8 @@ class FakeDocument:
             return list(self.floor_types)
         if cls is RoofType:
             return list(self.roof_types)
+        if cls is CeilingType:
+            return list(self.ceiling_types)
         if cls is ViewFamilyType:
             return list(self.view_family_types)
         if cls is ViewPlan:
@@ -717,6 +954,8 @@ class FakeDocument:
             return list(self.schedules)
         if cls is ViewSheet:
             return list(self.sheets)
+        if cls in (Wall, Grid, ViewSection, Dimension, ElevationMarker):
+            return [e for e in self._by_id.values() if isinstance(e, cls)]
         if cls is FamilySymbol:
             return list(self.symbols.get(cat, []))
         if cat == BuiltInCategory.OST_Rooms:
@@ -734,13 +973,16 @@ def _make_db_module():
     for obj in (
         BuiltInParameter, BuiltInCategory, WallKind, WallFunction, StorageType,
         FailureProcessingResult, IFailuresPreprocessor, Structure, XYZ, UV, Curve, Line,
-        CurveLoop, CurveArray, Element, Level, WallType, FloorType, RoofType, Grid,
+        CurveLoop, CurveArray, Element, Level, WallType, FloorType, RoofType,
+        CeilingType, Ceiling, Grid,
         Family, FamilySymbol, Wall, Floor, FamilyInstance, FilteredElementCollector,
         Transaction, ViewFamily, ViewFamilyType, ViewPlan, ViewSchedule, ViewSheet,
         Viewport, IndependentTag, TagMode, TagOrientation, ElementId, Reference,
-        LinkElementId,
+        LinkElementId, ReferenceArray, Dimension, Transform, BoundingBoxXYZ,
+        ViewSection, ElevationMarker, ScheduleSheetInstance,
     ):
         setattr(db, obj.__name__, obj)
+    db.ExtensibleStorage = ExtensibleStorage
     return db
 
 
@@ -780,6 +1022,18 @@ def install():
     sysgen = types.ModuleType("System.Collections.Generic")
     sysgen.List = _ListFactory()
 
+    system = types.ModuleType("System")
+
+    class _Guid:
+        def __init__(self, s):
+            self.s = str(s)
+
+        def __str__(self):
+            return self.s
+
+    system.Guid = _Guid
+    system.String = str
+
     mods = {
         "pyrevit": pyrevit,
         "pyrevit.script": script_mod,
@@ -787,7 +1041,7 @@ def install():
         "Autodesk.Revit": types.ModuleType("Autodesk.Revit"),
         "Autodesk.Revit.DB": db,
         "Autodesk.Revit.DB.Architecture": arch,
-        "System": types.ModuleType("System"),
+        "System": system,
         "System.Collections": types.ModuleType("System.Collections"),
         "System.Collections.Generic": sysgen,
     }

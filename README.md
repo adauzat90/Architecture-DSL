@@ -49,7 +49,10 @@ floor <D>                          # optional; inter-floor assembly depth (ft). 
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
 note "free text"
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
-room <id>: <type> <placement> size <W> x <L> [level <n>]
+room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
+roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
+orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
+finish [siding "<name>"] [roof "<name>"]  # optional; exterior material hints (metal siding, standing-seam)
 door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
 open <id_a> - <id_b> [width <w>] [offset <o>]   # shorthand for `door <a> - <b> cased ...`
@@ -81,6 +84,13 @@ notch is *exterior*), daylight/egress, area and the drawn outline all follow the
 rectilinear shape — see [`examples/lshape.barn`](examples/lshape.barn). (The
 auto-layout solver still targets a single rectangle; wings are for authored or
 builder plans.)
+
+A room can override the plan ceiling with `ceiling <h>` (a tray, a dropped
+soffit, or a taller great room) and be marked `vaulted` — open to the roof, so no
+flat ceiling plane is built for it and the low-ceiling minimum doesn't apply. The
+`roof` directive picks the building's roof form: `gable` (default, ridge down the
+long axis), `shed` (a single slope), or `monitor` (a raised centre clerestory
+aisle — the classic barn form), with an optional `pitch`.
 
 `level <n>` (default 0) puts a room on an upper floor; a `loft` on `level 1` sits
 above a ground room without overlapping it. A `stair` connects floors (the upper

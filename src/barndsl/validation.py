@@ -21,11 +21,14 @@ from typing import Protocol
 from .constants import (
     EPSILON,
     EXTERIOR_WALL_THICKNESS,
+    GUARD_DROP_TRIGGER,
+    GUARD_HEIGHT,
     INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
+    STAIR_HEADROOM,
 )
 from .elements import (
     GARAGE_TYPES,
@@ -598,6 +601,21 @@ def validate(plan: Barndominium) -> ValidationReport:
                 hint=f"Set `ceiling {MIN_CEILING:.0f}` or greater (9–12 is typical).",
             )
         )
+    for room in plan.rooms:
+        rc = getattr(room, "ceiling_height", None)
+        if rc is not None and not getattr(room, "vaulted", False) and rc < MIN_CEILING:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "CEILING",
+                    f"Room '{room.id}' sets a {_f(rc)} ft ceiling, below the "
+                    f"{MIN_CEILING:.0f} ft minimum for habitable space.",
+                    room=room.id,
+                    hint=f"Raise its `ceiling` to >= {MIN_CEILING:.0f}, or drop the "
+                    "override to inherit the plan ceiling.",
+                )
+            )
+
     if not plan.rooms:
         add(
             Issue(
@@ -627,6 +645,9 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_stairs(plan, add)
+    _validate_guards(plan, add)
+    _validate_life_safety(plan, add)
+    _validate_load_path(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
@@ -1528,6 +1549,25 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                     room=s.id,
                     hint=f"Lengthen its footprint to >= {_f(run_needed)} ft, or make it "
                     f">= {_f(2 * MIN_STAIR_WIDTH)} ft wide to fit a switchback."))
+            else:
+                # Headroom (R311.7.2): a person descending under the upper floor
+                # needs 6'-8" clear until they pass the stairwell opening's edge.
+                # The opening must run at least the horizontal distance over which
+                # the treads drop that 6'-8" below the floor above. Approximate the
+                # opening by the run's long footprint dimension — if even the whole
+                # footprint is shorter than that, no cut can develop headroom.
+                riser_h = rise / risers
+                open_needed = STAIR_HEADROOM * (MIN_TREAD_DEPTH / max(riser_h, EPSILON))
+                if long_dim + EPSILON < open_needed:
+                    add(Issue(
+                        Severity.WARNING, "STAIR_HEADROOM",
+                        f"Stair '{s.id}' is {_f(long_dim)} ft long — too short for a "
+                        f"floor opening that keeps {_f(STAIR_HEADROOM)} ft (6'-8\") "
+                        f"headroom under the upper floor (IRC R311.7.2): the opening "
+                        f"needs about {_f(open_needed)} ft of run to clear.",
+                        room=s.id,
+                        hint=f"Lengthen the run/stairwell opening to >= {_f(open_needed)} "
+                        "ft, or lower the floor-to-floor so fewer risers are needed."))
         lower = _stair_rooms(plan, s, s.from_level)
         upper = _stair_rooms(plan, s, s.to_level)
         if not lower or not upper:
@@ -1540,6 +1580,79 @@ def _validate_stairs(plan: Barndominium, add) -> None:
                       f"Stair '{s.id}' doesn't land in a room on {', '.join(missing)}.",
                       room=s.id,
                       hint="Position it so its footprint overlaps a room on each level."))
+
+
+def _validate_guards(plan: Barndominium, add) -> None:
+    """Flag an open loft/balcony edge that overlooks a double-height space and
+    needs a guard (IRC R312).
+
+    An upper-level room that only *partially* covers a room below leaves the
+    uncovered part of that lower room open to the floor above — a double-height
+    void. The upper room's edge along that void is a walking surface more than a
+    storey up, so it needs a 36 in guard. (An upper room that fully covers the one
+    below has a solid floor to its edge — no void — so it isn't flagged; that's
+    why a loft sized to its great room below doesn't nag.)
+    """
+    if len(plan.levels()) < 2:
+        return
+    by_level: dict[int, list[Room]] = {}
+    for r in plan.rooms:
+        by_level.setdefault(r.level, []).append(r)
+
+    flagged: set[str] = set()
+    for upper in plan.rooms:
+        if upper.level < 1 or upper.id in flagged:
+            continue
+        drop = plan.level_elevation(upper.level) - plan.level_elevation(upper.level - 1)
+        if drop <= GUARD_DROP_TRIGGER + EPSILON:
+            continue
+        for lower in by_level.get(upper.level - 1, []):
+            cov = upper.overlaps(lower)
+            if cov <= 0.5:
+                continue  # not above this room at all
+            # Partially above it → the rest of `lower` is open to `upper`'s floor.
+            if cov + 0.5 < lower.area:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "LOFT_GUARD",
+                        f"'{upper.id}' (level {upper.level}) overlooks the "
+                        f"double-height space of '{lower.id}' below; its open edge is "
+                        f"~{_f(drop)} ft up and needs a {GUARD_HEIGHT * 12:.0f} in guard "
+                        "(IRC R312).",
+                        room=upper.id,
+                        hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard/railing along the "
+                        "open edge (with balusters spaced so a 4 in sphere can't pass).",
+                    )
+                )
+                flagged.add(upper.id)
+                break
+
+
+def _validate_life_safety(plan: Barndominium, add) -> None:
+    """Smoke/CO-alarm reminders the geometry can't place but code requires.
+
+    Kept conditional so it doesn't nag every plan: a carbon-monoxide alarm (IRC
+    R315) is required where a fuel-fired appliance or an **attached garage** is
+    present — a barndominium's attached garage/shop is the classic trigger — and
+    the same reminder carries the smoke-alarm placement (R314). Fires once when the
+    plan has an attached garage/shop.
+    """
+    garage = next((r for r in plan.rooms if r.type in GARAGE_TYPES), None)
+    if garage is None:
+        return
+    add(
+        Issue(
+            Severity.INFO,
+            "ALARM_CO",
+            f"The plan has an attached garage/shop ('{garage.id}'), so a "
+            "carbon-monoxide alarm is required outside each sleeping area (IRC "
+            "R315), along with smoke alarms in each bedroom, outside each sleeping "
+            "area, and on every level (IRC R314).",
+            hint="Provide interconnected smoke/CO alarms — the DSL can't place them, "
+            "so confirm them on the electrical plan.",
+        )
+    )
 
 
 def _validate_access(plan: Barndominium, add) -> None:
@@ -2620,6 +2733,79 @@ def _validate_structure(plan: Barndominium, add) -> None:
                     )
                 )
                 break  # one note per opening
+
+
+def _partition_supported_below(plan: Barndominium, lower_level: int, edge) -> bool:
+    """Is an upper partition on ``edge`` carried by a wall or beam on the level
+    below? A lower-level room edge on the same grid line (overlapping the span) is
+    a wall; a beam on that line counts too. The footprint boundary is a wall."""
+    lo, hi = edge.lo, edge.lo + edge.length
+    pos, vertical = edge.pos, (edge.orientation == "v")
+
+    def overlaps(a_lo, a_hi) -> bool:
+        return min(hi, a_hi) - max(lo, a_lo) > EPSILON
+
+    for r in plan.rooms:
+        if getattr(r, "level", 0) != lower_level:
+            continue
+        if vertical:
+            if (abs(r.x - pos) <= EPSILON or abs(r.x2 - pos) <= EPSILON) and overlaps(r.y, r.y2):
+                return True
+        else:
+            if (abs(r.y - pos) <= EPSILON or abs(r.y2 - pos) <= EPSILON) and overlaps(r.x, r.x2):
+                return True
+    # A beam (bent/ridge) running under the partition line supports it too.
+    for b in plan.beams:
+        if getattr(b, "level", 0) != lower_level:
+            continue
+        if vertical and b.orientation == "v" and abs(b.x1 - pos) <= EPSILON:
+            if overlaps(min(b.y1, b.y2), max(b.y1, b.y2)):
+                return True
+        if not vertical and b.orientation == "h" and abs(b.y1 - pos) <= EPSILON:
+            if overlaps(min(b.x1, b.x2), max(b.x1, b.x2)):
+                return True
+    return False
+
+
+def _validate_load_path(plan: Barndominium, add) -> None:
+    """Flag an upper-floor partition with no wall or beam beneath it (IRC R502).
+
+    An interior wall on an upper level that lands over the open middle of a room
+    below has no direct load path — the floor framing must carry it. That's fine
+    for a light partition on adequately sized joists, but a bearing wall wants a
+    wall, beam, or post below. INFO, so it nudges rather than blocks; only runs on
+    multi-storey plans.
+    """
+    if len(plan.levels()) < 2:
+        return
+    seen: set[frozenset] = set()
+    for i, a in enumerate(plan.rooms):
+        lvl = getattr(a, "level", 0)
+        if lvl < 1:
+            continue
+        for b in plan.rooms[i + 1:]:
+            if getattr(b, "level", 0) != lvl:
+                continue
+            edge = shared_edge(a, b)
+            if edge is None or edge.length < MIN_SOUND_BUFFER_WALL:
+                continue  # ignore very short partitions
+            key = frozenset((a.id, b.id))
+            if key in seen:
+                continue
+            seen.add(key)
+            if not _partition_supported_below(plan, lvl - 1, edge):
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "LOAD_PATH",
+                        f"The partition between '{a.id}' and '{b.id}' (level {lvl}) has "
+                        "no wall or beam directly beneath it — the floor framing must "
+                        "carry it (IRC R502).",
+                        room=a.id,
+                        hint="Align a wall, beam, or post on the level below with this "
+                        "partition, or size the floor framing to carry a bearing wall.",
+                    )
+                )
 
 
 def _validate_egress_and_light(plan: Barndominium, add) -> None:
