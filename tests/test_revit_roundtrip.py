@@ -317,3 +317,51 @@ def test_program_mismatch_guards_a_revit_edit_after_round_trip():
     result = compile_source(edited, name=plan.name)
     codes = [d.code for d in result.diagnostics]
     assert "PROGRAM_MISMATCH" in codes, codes
+
+
+_ZONED = """\
+plan "Zoned"
+envelope 40 x 28
+ceiling 9
+room living: living at 0,0 size 24 x 28
+room bed: bedroom at 24,0 size 16 x 14
+room bath: bathroom at 24,14 size 16 x 14
+door living - bed width 3
+door bed - bath width 2.67
+entry living south width 3 offset 4
+window living south width 8 offset 8
+window bed east width 5 offset 4
+suite primary: bed bath
+zone private: primary
+zone public: living
+"""
+
+
+def test_zones_ride_the_exchange_and_round_trip():
+    from barndsl import compile_source, to_revit_model
+    from barndsl.revit import exchange_to_plan
+
+    data = to_revit_model(compile_source(_ZONED).plan).to_dict()
+    # Rooms carry their zone (suite members inherit via the suite).
+    zones = {r["id"]: r.get("zone") for r in data["rooms"]}
+    assert zones == {"living": "public", "bed": "private", "bath": "private"}
+    # The declarations themselves ride the plan block and restore exactly.
+    assert data["plan"]["suites"] == [{"id": "primary", "members": ["bed", "bath"]}]
+    assert data["plan"]["zones"] == [
+        {"id": "private", "members": ["primary"]},
+        {"id": "public", "members": ["living"]},
+    ]
+    back = exchange_to_plan(data)
+    assert [(s.id, s.members) for s in back.suites] == [("primary", ("bed", "bath"))]
+    assert [(z.id, z.members) for z in back.zones] == [
+        ("private", ("primary",)), ("public", ("living",))
+    ]
+
+
+def test_undeclared_plans_carry_no_zone_keys():
+    from barndsl import compile_source, to_revit_model
+
+    src = _ZONED.split("suite primary")[0]
+    data = to_revit_model(compile_source(src).plan).to_dict()
+    assert "suites" not in data["plan"] and "zones" not in data["plan"]
+    assert all("zone" not in r for r in data["rooms"])

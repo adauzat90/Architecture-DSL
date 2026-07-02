@@ -27,8 +27,18 @@ feedback, and output commands refuse `recovered` partials), **`site` +
 `setback`** (§2.4 — a verifiable `SETBACK` check, carried through the
 exchange), and **`barndsl cost` + `barndsl packet`** (§4 head, §4.2 — an
 assembly budget with honest line math, and the one-file HTML client packet).
-Everything else below remains open; the notes are kept as the original
-review.
+
+Batch 6 added: **suites/zones** (§2.3 — `suite`/`zone` statements; declared
+membership sharpens MASTER_ENSUITE / BED_SOUND / BED_PRIVACY / ENTRY_PRIVATE
+only where the geometry backs it up; zones ride the exchange to the room's
+Department parameter), **per-section and monitor roofs + exchange v2**
+(round-1 §3.4/§3.5/§3.6 — L/T/U wings get their own roof planes, the monitor
+form builds as two sheds rising to a raised centre gable, and program / frame
+/ roof style-pitch / notes / accessible survive the round-trip so
+PROGRAM_MISMATCH guards Revit-side edits), and **`barndsl revit-diff`**
+(§3.4 — the model-vs-authored drift report with position-first matching for
+positional-id kinds). Everything else below remains open; the notes are kept
+as the original review.
 
 A second full-app review with the same three questions as
 `docs/REVIEW_DSL_REVIT.md`: what would let **AI agents design better plans**,

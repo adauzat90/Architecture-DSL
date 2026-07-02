@@ -366,6 +366,7 @@ diff rebuild.
 | `accessible` | The accessibility / aging-in-place opt-in (`plan.mark_accessible`). |
 | `program` | The declared program `{beds, baths?, required?, min_area?}` (`plan.program`) — `required` keyed by room-type name. |
 | `frame` | The frame *request* `{bay, span, post, ridge}` (`plan.frame`); the posts/beams themselves ride `structure` and are re-placed from the request on import. |
+| `suites` / `zones` | The declared `suite`/`zone` groupings, `[{id, members}, ...]` in declaration order (`plan.suite` / `plan.zone`). Each room record also carries its resolved `zone` (suite members inherit the zone that lists their suite; first-declared wins), which the builder writes to the room's **Department** parameter — so native room schedules group by zone with no shared-parameter setup. The per-room `zone` key IS part of the room's fingerprint, so changing a room's zone re-places that room (and re-applies its parameters). |
 
 The pure reconstruction (`exchange_to_plan`) and the name heuristics are covered
 by the repo suite (`tests/test_revit_roundtrip.py`, `tests/test_revit_naming.py`);

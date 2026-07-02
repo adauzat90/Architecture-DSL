@@ -210,3 +210,51 @@ def test_monitor_roof_emits_three_plane_identities():
     assert len(roof_idents) == 3
     # Deterministic across re-exports (or an unchanged monitor would recreate).
     assert exchange.identities(data) == exchange.identities(_exchange_of(_MONITOR))
+
+
+def test_monitor_side_sheds_both_rise_toward_the_centre():
+    """Review fix: each side shed's LOW (slope-defining) eave is its OUTER
+    edge, so both planes rise to the raised clerestory — previously the
+    second shed inverted (a base_height discontinuity at the seam)."""
+    data = exchange.load(_exchange_of(_MONITOR))
+    lo_side, centre, hi_side = data["roof"]["sections"]
+    # 40 x 60 envelope: long axis y, strips split along x; outline order is
+    # [south, east, north, west] — the strip eaves are west(3)/east(1).
+    assert lo_side["outline_slopes"] == [False, False, False, True]   # west = outer
+    assert hi_side["outline_slopes"] == [False, True, False, False]   # east = outer
+    # The centre gable keeps both eaves slope-defining and sits on the sheds.
+    assert centre["outline_slopes"].count(True) == 2
+    assert lo_side["base_height"] == 0.0 and hi_side["base_height"] == 0.0
+    assert centre["base_height"] > 0.0
+
+
+def test_monitor_on_an_lshape_roofs_the_envelope_not_the_bounds():
+    """Review fix: the monitor form belongs to the primary envelope block;
+    the wing gets its own gable field and the concave notch stays uncovered."""
+    src = _LSHAPE.replace("ceiling 9", "ceiling 9\nroof monitor pitch 0.5")
+    data = exchange.load(_exchange_of(src))
+    sections = data["roof"]["sections"]
+    roles = [s["role"] for s in sections]
+    assert roles == ["monitor_side", "monitor_center", "monitor_side", "field"]
+    # Monitor strips confined to the 40 x 24 envelope...
+    for s in sections[:3]:
+        xs = [p for seg in s["outline"] for p in (seg[0][0], seg[1][0])]
+        ys = [p for seg in s["outline"] for p in (seg[0][1], seg[1][1])]
+        assert max(xs) <= 40 + 1e-9 and max(ys) <= 24 + 1e-9
+    # ...and the wing field covers exactly the wing (16 x 20 at 40,0).
+    wing = sections[3]
+    xs = [p for seg in wing["outline"] for p in (seg[0][0], seg[1][0])]
+    ys = [p for seg in wing["outline"] for p in (seg[0][1], seg[1][1])]
+    assert min(xs) == 40 and max(xs) == 56 and min(ys) == 0 and max(ys) == 20
+    # The notch (x < 40, y > 24 is outside; but e.g. x=45, y=22 IS wing) — the
+    # point above the envelope's north edge on the wing side of nothing:
+    # (10, 26) lies outside every section.
+    def covered(px, py):
+        for s in sections:
+            xs = [p for seg in s["outline"] for p in (seg[0][0], seg[1][0])]
+            ys = [p for seg in s["outline"] for p in (seg[0][1], seg[1][1])]
+            if min(xs) <= px <= max(xs) and min(ys) <= py <= max(ys):
+                return True
+        return False
+    assert not covered(10, 26)
+    assert covered(45, 10)

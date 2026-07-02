@@ -1518,6 +1518,11 @@ def _build_rooms(doc, data, levels, report, rebuild):
             report.skipped("room", r["id"], "point not in an enclosed region")
             continue
         _set_string_param(room, DB.BuiltInParameter.ROOM_NAME, r.get("name", r["id"]))
+        if r.get("zone"):
+            # The declared `zone` lands in the room's Department parameter — a
+            # built-in every Room has and every room schedule can group by, so
+            # zoned schedules need no shared-parameter setup.
+            _set_string_param(room, DB.BuiltInParameter.ROOM_DEPARTMENT, r["zone"])
         lvl = r.get("level", 0)
         lvl_taken = taken.setdefault(lvl, set())
         counters[lvl] = counters.get(lvl, 0) + 1

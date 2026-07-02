@@ -213,6 +213,11 @@ class RevitRoom:
     #: carrying it lets the exchange and the Revit room schedule report one number.
     clear_width: float = 0.0
     clear_length: float = 0.0
+    #: The declared ``zone`` this room belongs to (directly or via a suite one
+    #: zone lists) — the builder writes it to the room's "barndsl zone"
+    #: parameter so native schedules can group by zone. ``None`` — key absent —
+    #: when the plan declares no zones (older documents stay byte-identical).
+    zone: "str | None" = None
     clear_area: float = 0.0
     #: Finished ceiling height (ft) for this room — its own override or the plan
     #: default — and whether it's vaulted (open to the roof, no flat ceiling).
@@ -357,6 +362,10 @@ class RevitModel:
     #: not the placed members — those ride ``structure``); ``None`` — key absent
     #: — when no frame is declared.
     frame: dict | None = None
+    #: Declared ``suite`` / ``zone`` groupings, each ``[{"id", "members"}, ...]``
+    #: in declaration order; ``None`` — key absent — when none declared.
+    suites: list | None = None
+    zones: list | None = None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -384,6 +393,8 @@ class RevitModel:
                 **({"accessible": True} if self.accessible else {}),
                 **({"program": self.program} if self.program is not None else {}),
                 **({"frame": self.frame} if self.frame is not None else {}),
+                **({"suites": self.suites} if self.suites else {}),
+                **({"zones": self.zones} if self.zones else {}),
             },
             "levels": [asdict(l) for l in self.levels],
             "walls": [
@@ -440,6 +451,7 @@ class RevitModel:
                     "clear_area": r.clear_area,
                     "ceiling_height": r.ceiling_height,
                     "vaulted": r.vaulted,
+                    **({"zone": r.zone} if r.zone is not None else {}),
                 }
                 for r in self.rooms
             ],
@@ -820,7 +832,13 @@ def plan_stair_runs(x: float, y: float, width: float, length: float, rise: float
 
 
 def _roof_over_rect(
-    minx: float, miny: float, maxx: float, maxy: float, style: str, pitch: float
+    minx: float,
+    miny: float,
+    maxx: float,
+    maxy: float,
+    style: str,
+    pitch: float,
+    low_edge: "str | None" = None,
 ) -> dict:
     """The gable/shed roof geometry over one rectangle (pure, no Revit).
 
@@ -872,12 +890,25 @@ def _roof_over_rect(
     if style == "shed":
         # A shed slopes as one plane from a low eave up to a high eave; only the
         # low eave is slope-defining (the other long edge is the high wall).
-        seen_eave = False
-        for i, is_eave in enumerate(outline_slopes):
-            if is_eave and not seen_eave:
-                seen_eave = True  # keep the first eave slope-defining
-            elif is_eave:
-                outline_slopes[i] = False
+        # ``low_edge`` pins WHICH side is low ("min"/"max" of the short axis) —
+        # a monitor's side sheds must both rise toward the raised centre, so
+        # the caller names the outer edge. None keeps the historical pick (the
+        # first eave in outline order) so plain shed plans stay byte-identical.
+        if low_edge is None:
+            seen_eave = False
+            for i, is_eave in enumerate(outline_slopes):
+                if is_eave and not seen_eave:
+                    seen_eave = True  # keep the first eave slope-defining
+                elif is_eave:
+                    outline_slopes[i] = False
+        else:
+            # Outline order: [south(0), east(1), north(2), west(3)]. The eaves
+            # for gable_axis "x" are south/north; for "y" they are west/east.
+            want = {
+                ("x", "min"): 0, ("x", "max"): 2,
+                ("y", "min"): 3, ("y", "max"): 1,
+            }[(gable_axis, low_edge)]
+            outline_slopes = [i == want for i in range(4)]
     return {
         "style": style,
         "pitch": pitch,
@@ -912,24 +943,26 @@ def _monitor_sections(
     quarter = span / 4.0
     side_rise = quarter * pitch  # the side sheds' rise = the clerestory height
     out: list[dict] = []
+    # Both side sheds must rise TOWARD the raised centre: each shed's low eave
+    # is its OUTER edge ("min" for the first strip, "max" for the last).
     if long_is_y:
         strips = [
-            (minx, minx + quarter, "monitor_side", "shed", 0.0),
-            (minx + quarter, maxx - quarter, "monitor_center", "gable", side_rise),
-            (maxx - quarter, maxx, "monitor_side", "shed", 0.0),
+            (minx, minx + quarter, "monitor_side", "shed", 0.0, "min"),
+            (minx + quarter, maxx - quarter, "monitor_center", "gable", side_rise, None),
+            (maxx - quarter, maxx, "monitor_side", "shed", 0.0, "max"),
         ]
-        for a, b, role, st, base in strips:
-            sec = _roof_over_rect(a, miny, b, maxy, st, pitch)
+        for a, b, role, st, base, low in strips:
+            sec = _roof_over_rect(a, miny, b, maxy, st, pitch, low_edge=low)
             sec.update({"role": role, "base_height": base, "top_level": top_level})
             out.append(sec)
     else:
         strips = [
-            (miny, miny + quarter, "monitor_side", "shed", 0.0),
-            (miny + quarter, maxy - quarter, "monitor_center", "gable", side_rise),
-            (maxy - quarter, maxy, "monitor_side", "shed", 0.0),
+            (miny, miny + quarter, "monitor_side", "shed", 0.0, "min"),
+            (miny + quarter, maxy - quarter, "monitor_center", "gable", side_rise, None),
+            (maxy - quarter, maxy, "monitor_side", "shed", 0.0, "max"),
         ]
-        for a, b, role, st, base in strips:
-            sec = _roof_over_rect(minx, a, maxx, b, st, pitch)
+        for a, b, role, st, base, low in strips:
+            sec = _roof_over_rect(minx, a, maxx, b, st, pitch, low_edge=low)
             sec.update({"role": role, "base_height": base, "top_level": top_level})
             out.append(sec)
     return out
@@ -949,8 +982,17 @@ def _roof_sections(plan: Barndominium, style: str, pitch: float, top_level: int)
       fingerprint) is byte-identical and it is never needlessly recreated.
     """
     if style == "monitor":
-        minx, miny, maxx, maxy = plan.bounds()
-        return _monitor_sections(minx, miny, maxx, maxy, pitch, top_level)
+        # The monitor form belongs to the PRIMARY envelope block — spanning the
+        # bounding box would roof the concave notch of an L/T/U plan, the exact
+        # defect per-section roofs exist to fix. Wings get plain gable fields.
+        sections = plan.footprint_sections()
+        ex, ey, ew, el = sections[0]
+        out = _monitor_sections(ex, ey, ex + ew, ey + el, pitch, top_level)
+        for sx, sy, sw, sl in sections[1:]:
+            sec = _roof_over_rect(sx, sy, sx + sw, sy + sl, "gable", pitch)
+            sec.update({"role": "field", "base_height": 0.0, "top_level": top_level})
+            out.append(sec)
+        return out
     sections = plan.footprint_sections()
     if len(sections) <= 1:
         return None
@@ -1243,6 +1285,17 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             )
         )
 
+    # Map each room to its declared zone (first-declared wins; suite members
+    # inherit the zone that lists their suite). Empty when no zones declared.
+    suite_members = {
+        s.id: s.members for s in (getattr(plan, "suites", None) or [])
+    }
+    zone_of: dict[str, str] = {}
+    for z in getattr(plan, "zones", None) or []:
+        for m in z.members:
+            for rid in suite_members.get(m, (m,)):
+                zone_of.setdefault(rid, z.id)
+
     rooms = []
     for r in plan.rooms:
         clear_w, clear_l = clear_dimensions(plan, r)
@@ -1266,6 +1319,7 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                     else height
                 ),
                 vaulted=bool(getattr(r, "vaulted", False)),
+                zone=zone_of.get(r.id),
             )
         )
 
@@ -1415,6 +1469,14 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         accessible=bool(getattr(plan, "accessible", False)),
         program=_program_block(plan),
         frame=_frame_block(plan),
+        suites=[
+            {"id": st.id, "members": list(st.members)}
+            for st in (getattr(plan, "suites", None) or [])
+        ] or None,
+        zones=[
+            {"id": z.id, "members": list(z.members)}
+            for z in (getattr(plan, "zones", None) or [])
+        ] or None,
     )
 
 
@@ -1598,6 +1660,13 @@ def exchange_to_plan(data: dict) -> Barndominium:
             requires={k: int(v) for k, v in (prog.get("required") or {}).items()},
             min_area=prog.get("min_area"),
         )
+
+    for st in pinfo.get("suites", []) or []:
+        if st.get("members"):
+            plan.suite(st["id"], *st["members"])
+    for z in pinfo.get("zones", []) or []:
+        if z.get("members"):
+            plan.zone(z["id"], *z["members"])
 
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
