@@ -84,10 +84,39 @@ def test_multiplier_scales_the_whole_sheet():
     one = _est()
     two = _est(multiplier=2.0)
     assert abs(two["total"]["expected"] - 2.0 * one["total"]["expected"]) < 1e-6
-    # unit_cost is reported as the base; multiplier is carried separately.
-    assert _line(two, "slab_sqft")["unit_cost"] == _line(one, "slab_sqft")["unit_cost"]
+    # unit_cost is the EFFECTIVE rate (base x multiplier) so every printed
+    # line still reads qty x unit = cost; the multiplier is also carried.
+    assert _line(two, "slab_sqft")["unit_cost"] == 2.0 * _line(one, "slab_sqft")["unit_cost"]
     assert _line(two, "slab_sqft")["cost"] == 2.0 * _line(one, "slab_sqft")["cost"]
     assert two["multiplier"] == 2.0
+
+
+def test_lines_reconcile_at_a_fractional_multiplier():
+    # The review's failure case: at x1.5 the shown columns must still multiply
+    # out exactly — the unit cost shown is the effective (multiplied) rate.
+    est = _est(multiplier=1.5)
+    for ln in est["assemblies"]:
+        assert abs(ln["cost"] - ln["quantity"] * ln["unit_cost"]) < 1e-6
+    slab = _line(est, "slab_sqft")
+    assert slab["unit_cost"] == round(DEFAULT_UNIT_COSTS["slab_sqft"] * 1.5, 2)
+
+
+def test_unknown_override_key_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError, match="slab_sqftt"):
+        _est(overrides={"slab_sqftt": 100.0})
+
+
+def test_interior_double_doors_priced_as_a_pair():
+    src = SRC + "door bed - bath double width 5\n"
+    est = estimate_cost(compile_source(src))
+    assert _line(est, "door_interior_double")["quantity"] == 1
+    assert _line(est, "door_interior")["quantity"] == 3  # singles unchanged
+    assert (
+        _line(est, "door_interior_double")["unit_cost"]
+        == DEFAULT_UNIT_COSTS["door_interior_double"]
+    )
 
 
 def test_estimate_is_json_safe_and_deterministic():
@@ -138,6 +167,21 @@ def test_cli_cost_human_json_and_exit_codes(tmp_path, capsys):
     assert main(["cost", str(tmp_path / "nope.barn")]) == 2
 
 
+def test_cli_cost_refuses_a_partial_recovery_with_errors(tmp_path, capsys):
+    """Parser recovery can yield a plan alongside ERRORS; a deliverable must
+    not price a half-parsed building — exit 2, report on stderr."""
+    from barndsl import compile_source as _cs
+
+    src = SRC + "window bogus north width 4\n"
+    partial = _cs(src)
+    if partial.plan is None or not partial.errors:  # fixture sanity
+        raise AssertionError("fixture no longer yields a partial plan with errors")
+    f = tmp_path / "partial.barn"
+    f.write_text(src, encoding="utf-8")
+    assert main(["cost", str(f)]) == 2
+    assert "error" in capsys.readouterr().err.lower()
+
+
 def test_cli_cost_overrides_and_multiplier(tmp_path, capsys):
     good = tmp_path / "good.barn"
     good.write_text(SRC, encoding="utf-8")
@@ -146,7 +190,7 @@ def test_cli_cost_overrides_and_multiplier(tmp_path, capsys):
     assert main(["cost", str(good), "--json", "--costs", str(costs), "--multiplier", "1.5"]) == 0
     parsed = json.loads(capsys.readouterr().out)
     slab = next(l for l in parsed["assemblies"] if l["cost_key"] == "slab_sqft")
-    assert slab["unit_cost"] == 50.0
+    assert slab["unit_cost"] == 75.0  # effective: 50 override x 1.5 multiplier
     assert slab["cost"] == 1200 * 50.0 * 1.5
     assert parsed["multiplier"] == 1.5
 

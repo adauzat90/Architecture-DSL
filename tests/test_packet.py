@@ -107,7 +107,7 @@ def test_packet_is_self_contained_and_paginated():
 def test_multiplier_and_overrides_flow_into_the_cost_section():
     html = build_packet(compile_source(SRC), costs={"slab_sqft": 999.0}, multiplier=2.0)
     assert "regional multiplier x2" in html
-    assert "$999" in html
+    assert "$1,998" in html  # effective rate: 999 override x 2 multiplier
 
 
 def test_build_packet_rejects_planless_result():
@@ -138,3 +138,9 @@ def test_cli_packet_writes_html_and_exit_codes(tmp_path):
 
     # Missing file → exit 2.
     assert main(["packet", str(tmp_path / "nope.barn")]) == 2
+
+    # A partial recovery with ERRORS must not ship as a client deliverable.
+    partial = tmp_path / "partial.barn"
+    partial.write_text(SRC + "window bogus north width 4\n", encoding="utf-8")
+    assert main(["packet", str(partial), "-o", str(tmp_path / "y.html")]) == 2
+    assert not (tmp_path / "y.html").exists()

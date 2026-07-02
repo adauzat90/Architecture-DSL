@@ -51,6 +51,7 @@ DEFAULT_UNIT_COSTS: dict[str, float] = {
     "window_double_hung": 700.0,
     "window_fixed": 520.0,
     "door_interior": 360.0,
+    "door_interior_double": 620.0,  # double / french interior pair
     "door_exterior": 1500.0,  # single entry/exterior leaf
     "door_exterior_double": 2800.0,  # double / french pair
     "garage_door": 1600.0,  # overhead sectional
@@ -122,14 +123,16 @@ def _line(
     group: str, item: str, quantity: float, unit: str, key: str, source: str,
     unit_costs: dict[str, float], multiplier: float,
 ) -> dict[str, Any]:
-    """Build one assembly line: ``cost = quantity × unit_cost × multiplier``.
+    """Build one assembly line: ``cost = quantity × unit_cost``.
 
-    Quantity and unit cost are rounded to what the table shows *before* the
-    product, so the printed line reads exactly (shown qty × shown unit = cost).
+    ``unit_cost`` is the *effective* rate — base rate × regional multiplier —
+    and both quantity and unit cost are rounded to what the table shows
+    *before* the product, so the printed line reads exactly (shown qty ×
+    shown unit = cost) at any multiplier.
     """
     qty = round(quantity, 2)
-    unit_cost = round(float(unit_costs[key]), 2)
-    cost = round(qty * unit_cost * multiplier, 2)
+    unit_cost = round(float(unit_costs[key]) * multiplier, 2)
+    cost = round(qty * unit_cost, 2)
     return {
         "group": group,
         "item": item,
@@ -161,6 +164,12 @@ def estimate_cost(
         raise ValueError("multiplier must be positive")
     unit_costs = dict(DEFAULT_UNIT_COSTS)
     if overrides:
+        unknown = sorted(set(overrides) - set(unit_costs))
+        if unknown:
+            raise ValueError(
+                "unknown unit-cost key(s): %s — valid keys are the "
+                "DEFAULT_UNIT_COSTS entries" % ", ".join(unknown)
+            )
         unit_costs.update({k: float(v) for k, v in overrides.items()})
 
     m = plan.metrics()
@@ -200,9 +209,14 @@ def estimate_cost(
         "door_exterior_double", "plan.exterior_doors (double/french)")
     add("Openings", "Overhead (garage) doors", n_garage, "each", "garage_door",
         "plan.exterior_doors (overhead)")
-    n_int = sum(1 for d in plan.interior_doors if getattr(d, "kind", "swing") != "cased")
-    add("Openings", "Interior doors", n_int, "each", "door_interior",
-        "plan.interior_doors (excl. cased openings)")
+    ints = [d for d in plan.interior_doors if getattr(d, "kind", "swing") != "cased"]
+    n_int_double = sum(
+        1 for d in ints if getattr(d, "kind", "swing") in ("double", "french")
+    )
+    add("Openings", "Interior doors", len(ints) - n_int_double, "each",
+        "door_interior", "plan.interior_doors (excl. cased openings)")
+    add("Openings", "Interior doors (double/french)", n_int_double, "each",
+        "door_interior_double", "plan.interior_doors (double/french)")
 
     # -- Plumbing & fixtures --
     fc = _fixture_counts(plan)

@@ -571,9 +571,11 @@ def _cmd_cost(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if result.plan is None:
-        # A cost estimate is meaningless without a plan — fail like an unreadable
-        # file (exit 2), unlike score/compare which still show partial signal.
+    if result.plan is None or result.errors:
+        # A cost estimate is a deliverable, not a diagnostic: pricing a plan
+        # that failed to compile (including the parser's partial recoveries)
+        # is misleading — fail like an unreadable file (exit 2), unlike
+        # score/compare which still show partial signal.
         print(result.report(os.path.basename(args.file)), file=sys.stderr)
         return 2
 
@@ -612,7 +614,9 @@ def _cmd_packet(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if result.plan is None:
+    if result.plan is None or result.errors:
+        # Same contract as `cost`: the packet is a client deliverable, and a
+        # plan with errors (or a partial recovery) must not ship as one.
         print(result.report(os.path.basename(args.file)), file=sys.stderr)
         return 2
 
