@@ -1,0 +1,131 @@
+# Cypress Courtyard — U-shaped courtyard compound
+# Massing: two gabled wings project SOUTH (front) and embrace a central open-air
+# COURTYARD; a back spine/breezeway runs across the NORTH tying them together.
+#   - WEST LEG  (envelope 64x64)      : the conditioned living/bedroom residence
+#   - NORTH SPINE (wing 36x10 @ 64,54): breezeway gallery + gym-view lounge
+#   - EAST LEG  (wing 36x48 @ 100,16) : the gym / boat-garage block
+# The courtyard is real negative space: the notch [64..100] x [0..54] is NOT built.
+# The footprint union (west leg + north spine + east leg) is one connected U.
+plan "Cypress Courtyard"
+envelope 64 x 64                     # west leg: the residence, full depth to the front
+wing 36 x 10 at 64,54                # north spine/breezeway bridging the courtyard
+wing 36 x 48 at 100,16               # east leg: the gym, top-aligned to meet the spine
+ceiling 11
+orientation 0
+program 3 bed 3 bath
+finish siding "board-and-batten" roof "standing-seam metal"
+roof gable pitch 0.5
+note "U-shaped courtyard compound. Two gabled wings reach south around an open-air courtyard, joined by a north breezeway spine. Air-lock vestibule buffers the boat garage from the gym per IRC R302.5.1; interconnected smoke + CO alarms; garage/dwelling separation. Modern-farmhouse: board-and-batten, black windows, standing-seam metal roof."
+
+# ============================= RESIDENCE — WEST LEG =============================
+# ---- south public core (y 0..20) ----
+room living:  living   at 0,0    size 28 x 20 vaulted   # great room, SW corner, W+S glass
+room kitchen: kitchen  at 28,0   size 16 x 16           # big central-island kitchen
+room pantry:  pantry   at 28,16  size 8 x 4
+room mud:     mudroom  at 36,16  size 8 x 4
+room store:   closet   at 52,10  size 12 x 10           # bulk / storm-supply storage (off the hall)
+
+# ---- main hall spine (y 20..24) ----
+room hall:    hallway  at 0,20   size 64 x 4
+
+# ---- primary suite (west, y 24..64) ----
+room mbath:   bathroom at 0,28   size 10 x 16
+room mcloset: closet   at 10,28  size 10 x 16
+room mbed:    bedroom  at 0,44   size 20 x 20           # W + N exterior egress
+
+# ---- north/south circulation links ----
+room hall2:   hallway  at 20,24  size 4 x 28            # N-S link, x 20..24, y 24..52
+room hallB:   hallway  at 24,48  size 34 x 4            # E-W bedroom gallery, y 48..52
+room hall_ne: hallway  at 58,48  size 6 x 16            # NE elbow up to the breezeway
+
+# ---- service band (y 24..48) ----
+room laundry: laundry   at 24,24 size 18 x 10
+room half:    half_bath at 42,24 size 6 x 10
+room bath2:   bathroom  at 24,38 size 12 x 10           # full hall bath
+room safe:    other      at 36,38 size 12 x 10          # FEMA safe room — windowless, central
+
+# ---- secondary bedrooms (north wall, y 52..64) ----
+room bed2:    bedroom at 24,52  size 12 x 12            # N egress
+room closet2: closet  at 36,52  size 6 x 12
+room bed3:    bedroom at 42,52  size 10 x 12            # N egress
+room closet3: closet  at 52,52  size 6 x 12
+
+# ============================ NORTH SPINE / BREEZEWAY ===========================
+room breezeway: hallway at 64,54 size 16 x 10           # gallery bridging the courtyard
+room lounge:    living  at 80,54 size 20 x 10           # gym-view lounge (east wall on turf)
+
+# ================================ GYM — EAST LEG ================================
+room turf:    other   at 100,40 size 18 x 24 ceiling 14 # artificial-turf bay (NW, on lounge)
+room tumble:  other   at 100,16 size 18 x 24 ceiling 14 # rubber-matted tumbling bay
+room airlock: mudroom at 118,16 size 6 x 48             # air-lock / gear vestibule
+room boat:    garage  at 124,16 size 12 x 48 ceiling 14 # boat / trailer garage (outer edge)
+
+# ================================== PORCHES ====================================
+porch front_porch at 0,-8 size 44 x 8 covered           # full front porch (residence)
+porch court_porch at 64,44 size 36 x 10 covered         # courtyard-facing covered porch
+
+# ================================ CONNECTIONS ==================================
+# open conditioned core
+open living - kitchen width 8 offset 4
+door kitchen - pantry width 2.5 offset 0.5
+door kitchen - mud width 2.5 offset 0.5
+open living - hall width 4 offset 12
+door hall - store width 2.5 offset 2
+
+# hall -> suite / service
+open hall - hall2 width 3 offset 0.5
+door hall2 - mbed width 3 offset 0.5
+door mbed - mbath width 2.5 offset 0.5
+door mbed - mcloset width 2.5 offset 0.5
+door hall - laundry width 2.5 offset 2
+door hall - half width 2.5 offset 0.5
+
+# hall2 -> bedroom gallery -> service + beds
+open hall2 - hallB width 3 offset 0.5
+door hallB - bath2 width 2.5 offset 0.5
+door hallB - safe width 3 offset 0.5
+door hallB - bed2 width 3 offset 0.5
+door hallB - bed3 width 3 offset 0.5
+door bed2 - closet2 width 2.5 offset 0.5
+door bed3 - closet3 width 2.5 offset 0.5
+
+# gallery -> breezeway -> lounge -> gym (residence-to-gym safety door)
+open hallB - hall_ne width 3 offset 0.5
+door hall_ne - breezeway width 3 offset 0.5
+open breezeway - lounge width 4 offset 3
+door lounge - turf swing width 3 offset 3
+
+# gym interior + air-lock buffer to the garage (turf/tumble -> airlock -> boat, staggered)
+door turf - tumble width 3 offset 2
+door turf - airlock width 3 offset 2
+door tumble - airlock width 3 offset 12
+door airlock - boat swing width 3 offset 30
+
+# ================================ EXTERIOR DOORS ===============================
+entry living south width 3 offset 20
+entry lounge south width 3 offset 12                    # back/courtyard door
+entry tumble south width 3 offset 14
+entry boat east width 3 offset 6                        # boat man-door
+door boat north exterior width 10 offset 1 no-egress    # boat overhead door
+
+# =================================== WINDOWS ===================================
+# residence daylight / egress
+window living west width 8 offset 6
+window living south width 10 offset 8
+window kitchen south width 8 offset 4
+window mbed north width 6 offset 7
+window mbed west width 6 offset 6
+window mbath west width 3 offset 6
+window bed2 north width 5 offset 3
+window bed3 north width 5 offset 2
+window lounge south width 6 offset 4
+window lounge north width 6 offset 10
+
+# gym exterior daylight
+window turf north width 8 offset 5
+window tumble south width 8 offset 5
+
+# tempered interior vision panels — parent supervision sightlines
+window lounge east width 4 offset 3      # lounge -> turf
+window turf south width 6 offset 6       # turf -> tumble
+window airlock east width 4 offset 20    # airlock -> boat

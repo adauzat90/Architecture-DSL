@@ -1,0 +1,128 @@
+# Pinwheel Court — a rotating cross/pinwheel massing (NOT a rectangle).
+# A central hub (envelope) with four gabled wings radiating in four directions,
+# each wing slid toward one END of its hub edge so the whole composition spins
+# clockwise: the North wing rides the EAST corner, the East (gym) wing rides the
+# SOUTH corner, the South wing rides the WEST corner, the West wing rides the
+# NORTH corner. That offset leaves a deep re-entrant NOTCH at every corner; the
+# south-east notch is roofed as the covered entry court. Board-and-batten +
+# standing-seam metal, steep 6:12 gables — modern farmhouse.
+plan "Pinwheel Court"
+envelope 64 x 40
+wing 34 x 28 at -34,12        # WEST wing  — primary suite (offset NORTH)
+wing 24 x 14 at 0,-14         # SOUTH wing — laundry / bulk storage (offset WEST)
+wing 44 x 18 at 20,40         # NORTH wing — secondary bedrooms (offset EAST)
+wing 48 x 36 at 64,0          # EAST wing  — attached gym (offset SOUTH)
+ceiling 11
+floor 1
+orientation 0
+program 3 bed 3 bath
+finish siding "board-and-batten" roof "standing-seam metal"
+roof gable pitch 0.5
+note "Interconnected smoke + CO alarms per IRC R314/R315 (attached garage). Garage-to-dwelling wall = fire separation; garage doors self-closing 20-min rated. Air-lock vestibule buffers the gym bays from the garage (no direct gym->garage door). Tempered interior vision panels give parent sightlines lounge->turf, turf->tumble, airlock->boat."
+
+# ============================ CENTRAL HUB (x 0..64, y 0..40) ===================
+# ---- south public band (y 0..20) ----
+room kitchen: kitchen  at 0,0    size 16 x 16                 # opens to the great room
+room pantry:  pantry   at 0,16   size 8 x 4
+room mud:     mudroom  at 8,16   size 8 x 4
+room living:  living   at 16,0   size 28 x 20 vaulted        # great room, faces the entry court
+room lounge:  living   at 44,0   size 20 x 20                # gym-view lounge (east wall on the turf bay)
+
+# ---- central spine (y 20..24) ----
+room hall:    hallway  at 0,20   size 64 x 4
+
+# ---- hub north band (y 24..40): powder, safe room, N-S link to the north wing ----
+room half:    half_bath at 0,24  size 6 x 8
+room safe:    other    at 18,24  size 12 x 10                # FEMA-rated safe room (hardened, windowless, central)
+room hallC:   hallway  at 30,24  size 4 x 16                 # N-S connector, spine -> north wing
+
+# ============================ WEST WING — PRIMARY SUITE ========================
+room shall:   hallway  at -8,12  size 8 x 28                 # suite corridor off the spine
+room mbed:    bedroom  at -34,24 size 26 x 16                # egress on the west wall
+room mbath:   bathroom at -34,12 size 13 x 12
+room mcloset: closet   at -21,12 size 13 x 12                # walk-in
+
+# ============================ SOUTH WING — SERVICE ============================
+room laundry: laundry  at 0,-14  size 16 x 14
+room store:   closet   at 16,-14 size 8 x 14                 # bulk / storm-supply storage
+
+# ============================ NORTH WING — SECONDARY BEDROOMS =================
+room nhall:   hallway  at 20,40  size 44 x 4
+room bed2:    bedroom  at 20,44  size 12 x 14                # egress north
+room closet2: closet   at 32,44  size 6 x 14
+room bath2:   bathroom at 38,44  size 12 x 14                # full hall bath
+room closet3: closet   at 50,44  size 6 x 14
+room bed3:    bedroom  at 56,44  size 8 x 14                 # egress north (corner also gets an east wall)
+
+# ============================ EAST WING — ATTACHED GYM ========================
+room turf:    other   at 64,0    size 24 x 18 ceiling 14     # artificial-turf training bay (borders lounge)
+room tumble:  other   at 64,18   size 24 x 18 ceiling 14     # rubber-matted tumbling bay
+room airlock: mudroom at 88,0    size 6 x 36                 # air-lock / gear vestibule buffering the garage
+room boat:    garage  at 94,0    size 18 x 36 ceiling 14     # boat / trailer garage (outer edge)
+
+# ------------------------------- covered entry court --------------------------
+porch court at 24,-8 size 40 x 8 covered                     # roofed south-east notch, fronts living + lounge
+
+# ------------------------------- connections ---------------------------------
+# open conditioned core
+open living - kitchen width 10
+open living - lounge width 8
+open living - hall width 4
+door kitchen - pantry width 2.67 offset 0.5
+door kitchen - mud width 2.67 offset 0.5
+door kitchen - laundry width 3 offset 0.5
+door laundry - store width 2.5 offset 0.5
+
+# spine -> hub rooms + north wing
+door hall - half width 2.5 offset 0.5
+door hall - safe swing width 3 offset 3
+open hall - hallC width 3.5 offset 0.25
+door hallC - nhall width 3 offset 0.5
+door nhall - bed2 width 3 offset 1
+door nhall - bath2 width 2.67 offset 1
+door nhall - bed3 width 3 offset 1
+door bed2 - closet2 width 2.5 offset 1
+door bed3 - closet3 width 2.5 offset 1
+
+# spine -> primary suite (west wing)
+door hall - shall width 3 offset 0.5
+door shall - mbed width 3 offset 1
+door mbed - mbath width 2.67 offset 1
+door mbed - mcloset width 2.5 offset 1
+
+# conditioned -> gym (safety door)
+door lounge - turf swing width 3 offset 4
+
+# gym interior + air-lock buffer to the garage (staggered, no direct gym->garage)
+door turf - tumble width 3 offset 2
+door turf - airlock width 3 offset 2
+door tumble - airlock width 3 offset 2
+door airlock - boat swing width 3 offset 30
+
+# ------------------------------- exterior doors ------------------------------
+entry living south width 3 offset 12
+entry laundry south width 3 offset 6
+entry turf south width 3 offset 4
+entry tumble north width 3 offset 4
+entry boat east width 3 offset 6
+door boat north exterior width 10 offset 4 no-egress        # boat overhead door (rear)
+
+# ------------------------------- windows -------------------------------------
+# residence exterior daylight / egress
+window living south width 12 offset 15.5
+window living south width 3.5 offset 8
+window kitchen west width 6 offset 3
+window lounge south width 9 offset 8
+window mbed west width 10 offset 4
+window mbath west width 3 offset 4
+window bed2 north width 6 offset 3
+window bed3 north width 5 offset 1.5
+
+# gym exterior daylight
+window turf south width 8 offset 8
+window tumble north width 8 offset 8
+
+# tempered interior vision panels — parent supervision sightlines
+window lounge east width 6 offset 4      # lounge -> turf
+window turf north width 8 offset 8       # turf -> tumble
+window airlock east width 4 offset 16    # airlock -> boat bay

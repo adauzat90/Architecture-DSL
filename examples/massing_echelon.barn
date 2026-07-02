@@ -1,0 +1,163 @@
+# Echelon Ridge — a staggered dog-trot cluster barndominium.
+# Five distinct gabled volumes MARCH west->east at alternating north/south
+# baselines, linked by narrow breezeway connectors, so the roofline reads as a
+# cluster of farmhouse gables of different sizes stepping across the site (NOT a
+# rectangle). Re-entrant notches open between every stepped volume.
+#   A  PRIMARY SUITE      x  0.. 30   y  0..44   (envelope, tall west gable)
+#   B  SECONDARY BEDROOMS x 34.. 60   y  0..28   (steps DOWN north, dips south)
+#   C  GREAT-ROOM CORE    x 64.. 96   y 16..48   (steps UP north, lifts off y=16)
+#   D  KITCHEN / LOUNGE   x100..126   y  0..30   (drops back to y=0)
+#   E  GYM CLUSTER        x126..168   y  0..44   (big end gable, off the lounge)
+# Breezeway links at y16..20: A-B (x30..34), B-C (x60..64), C-D (x96..100).
+plan "Echelon Ridge"
+envelope 30 x 44                    # A: primary-suite gable at the origin
+wing 4 x 4 at 30,16                 # breezeway A -> B
+wing 26 x 28 at 34,0                # B: secondary-bedroom gable (steps down, dips south)
+wing 4 x 4 at 60,16                 # breezeway B -> C
+wing 32 x 32 at 64,16              # C: great-room gable (lifts north to y=16)
+wing 4 x 4 at 96,16                 # breezeway C -> D
+wing 26 x 30 at 100,0              # D: kitchen/lounge gable (drops to y=0)
+wing 42 x 44 at 126,0             # E: gym cluster (large end gable)
+ceiling 11
+orientation 0
+program 3 bed 3 bath
+finish siding "board-and-batten" roof "standing-seam metal"
+roof gable pitch 0.5
+note "Staggered echelon / dog-trot massing: five gabled volumes step diagonally in x and y, joined by narrow breezeways, leaving real re-entrant notches. Interconnected smoke + CO alarms per IRC R314/R315 (attached garage); garage-to-dwelling wall = fire separation, self-closing 20-min doors; air-lock vestibule buffers the boat garage. Board-and-batten siding, black windows, standing-seam metal, steep 6:12 gables."
+
+# ============ VOLUME A — PRIMARY SUITE (envelope, x 0..30, y 0..44) ============
+room hallA:   hallway  at 0,16   size 30 x 4          # spine segment (breezeway datum y16..20)
+room mbed:    bedroom  at 0,20   size 18 x 24         # primary bedroom (NW gable end)
+room mbath:   bathroom at 18,20  size 12 x 12         # ensuite
+room mcloset: closet   at 18,32  size 12 x 12         # walk-in
+room util:    utility  at 0,0    size 16 x 16         # mechanical / storage (south of spine)
+room gearcl:  closet   at 16,0   size 14 x 16         # bulk storage
+
+# ---- breezeway A -> B ----
+room connBA:  hallway  at 30,16  size 4 x 4
+
+# ============ VOLUME B — SECONDARY BEDROOMS (x 34..60, y 0..28) ===============
+room hallB:   hallway  at 34,16  size 26 x 4          # spine segment
+room bed2:    bedroom  at 34,0   size 10 x 16
+room closet2: closet   at 44,0   size 6 x 8
+room closet3: closet   at 44,8   size 6 x 8
+room bed3:    bedroom  at 50,0   size 10 x 16
+room bath2:   bathroom at 34,20  size 10 x 8          # full hall bath
+room half:    half_bath at 44,20 size 6 x 8
+room store:   closet   at 50,20  size 10 x 8          # bulk / storm-supply storage
+
+# ---- breezeway B -> C ----
+room connCB:  hallway  at 60,16  size 4 x 4
+
+# ============ VOLUME C — GREAT-ROOM CORE (x 64..96, y 16..48) =================
+room hallC:   hallway  at 64,16  size 32 x 4          # spine segment, front entry
+room living:  living   at 64,32  size 32 x 16 vaulted # great room (tall central gable)
+room pantry:  pantry   at 64,20  size 8 x 12
+room safe:    other    at 72,20  size 12 x 12         # FEMA safe room (windowless, buried interior)
+room hallC2:  hallway  at 84,20  size 4 x 12          # stub linking spine up to the great room
+room laundry: laundry  at 88,20  size 8 x 12
+
+# ---- breezeway C -> D ----
+room connCD:  hallway  at 96,16  size 4 x 4
+
+# ============ VOLUME D — KITCHEN / LOUNGE (x 100..126, y 0..30) ===============
+room hallD:   hallway  at 100,16 size 14 x 4          # spine segment
+room kitchen: kitchen  at 100,0  size 14 x 16         # big central-island kitchen
+room lounge:  living   at 114,0  size 12 x 20         # gym-view lounge (east wall on turf)
+room mud:     mudroom  at 100,20 size 14 x 10         # back entry
+room store2:  closet   at 114,20 size 12 x 10         # more storage
+
+# ============ VOLUME E — GYM CLUSTER (x 126..168, y 0..44) ceiling 14 =========
+room turf:    other    at 126,0  size 20 x 22 ceiling 14   # artificial-turf training bay
+room tumble:  other    at 126,22 size 20 x 22 ceiling 14   # rubber-matted tumbling bay
+room airlock: mudroom  at 146,0  size 6 x 44               # air-lock / gear vestibule
+room boat:    garage   at 152,0  size 16 x 44 ceiling 14   # boat / trailer garage
+
+# ------------------------------- covered porch --------------------------------
+porch front_porch at 64,8 size 32 x 8 covered
+
+# ============================== spine circulation ============================
+open hallA - connBA width 3 offset 0.5
+open connBA - hallB width 3 offset 0.5
+open hallB - connCB width 3 offset 0.5
+open connCB - hallC width 3 offset 0.5
+open hallC - connCD width 3 offset 0.5
+open connCD - hallD width 3 offset 0.5
+open hallC - hallC2 width 3 offset 0.5
+door hallC2 - living width 3 offset 0.5
+
+# ---- volume A doors ----
+door hallA - mbed width 3 offset 6
+door mbed - mbath width 2.67 offset 1
+door mbed - mcloset width 2.5 offset 1
+door hallA - util width 2.5 offset 6
+door hallA - gearcl width 2.5 offset 6
+
+# ---- volume B doors ----
+door hallB - bed2 width 3 offset 3
+door hallB - bed3 width 3 offset 3.5
+door bed2 - closet2 width 2.5 offset 0.5
+door bed3 - closet3 width 2.5 offset 1
+door hallB - bath2 width 2.5 offset 3
+door hallB - half width 2.5 offset 1.5
+door hallB - store width 2.5 offset 3.5
+
+# ---- volume C doors ----
+door hallC - pantry width 2.5 offset 2
+door hallC - safe width 3 offset 4
+door hallC - laundry width 2.5 offset 2.5
+
+# ---- volume D doors ----
+door hallD - kitchen width 3 offset 5
+open kitchen - lounge width 6 offset 3
+door hallD - lounge width 3 offset 0.5
+door hallD - mud width 2.67 offset 5
+door lounge - store2 width 2.5 offset 5
+
+# ---- conditioned -> gym (self-closing safety door) ----
+door lounge - turf swing width 3 offset 8
+
+# ---- gym interior circulation + air-lock buffer to the garage ----
+# turf/tumble -> airlock -> boat; the single staggered airlock->boat door is the
+# ONLY opening into the garage (no direct gym->garage door).
+door turf - tumble width 3 offset 2
+door turf - airlock width 3 offset 2
+door tumble - airlock width 3 offset 2
+door airlock - boat swing width 3 offset 36
+
+# ------------------------------- exterior doors -------------------------------
+entry hallC south width 3 offset 14        # front door (off the covered porch)
+entry mud north width 3 offset 5           # back / mud entry
+entry turf south width 3 offset 1
+entry tumble north width 3 offset 1
+entry boat east width 3 offset 6           # boat man-door
+door boat north exterior width 10 offset 3 no-egress   # boat overhead door
+
+# ------------------------------- windows --------------------------------------
+# residence exterior daylight / egress
+window mbed west width 8 offset 4
+window mbed north width 6 offset 4
+window mbath east width 3 offset 3
+window living north width 16 offset 8
+window living west width 10 offset 3
+window living east width 8 offset 4
+window kitchen south width 8 offset 3
+window kitchen west width 5 offset 3
+window lounge south width 8 offset 2
+window bed2 south width 5 offset 2
+window bed2 west width 4 offset 4
+window bed3 south width 5 offset 3
+window bed3 east width 4 offset 4
+window bath2 north width 3 offset 3
+window half north width 2 offset 2
+window pantry west width 2.5 offset 4
+window laundry east width 3 offset 4
+
+# gym exterior daylight
+window turf south width 8 offset 8
+window tumble north width 8 offset 8
+
+# tempered interior vision panels — parent supervision sightlines
+window lounge east width 4 offset 14       # lounge -> turf
+window turf north width 8 offset 6         # turf -> tumble
+window airlock east width 3 offset 20      # airlock -> boat

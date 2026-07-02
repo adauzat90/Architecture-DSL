@@ -1,0 +1,122 @@
+# Cypress Retreat — Montgomery County, TX modern-farmhouse barndominium
+# Broken massing (not a plain rectangle): the conditioned house is a deep 60 ft
+# bar on the west; the gym is a shallower 48 ft bar on the east, so the footprint
+# steps back at the north-east (an L). A full-width covered porch fronts the house.
+# Board-and-batten + standing-seam metal, steep 6:12 gables — modern farmhouse.
+plan "Cypress Retreat"
+envelope 90 x 48
+wing 54 x 12 at 0,48            # house runs 12 ft deeper than the gym -> L footprint
+ceiling 11
+orientation 0
+program 3 bed 3 bath
+finish siding "board-and-batten" roof "standing-seam metal"
+roof gable pitch 0.5
+note "Interconnected smoke + CO alarms per IRC R314/R315 (attached garage). Garage-to-dwelling wall = fire separation; garage doors = self-closing 20-min rated. Modern-farmhouse exterior: board-and-batten siding, black-framed windows, standing-seam metal roof, covered porch."
+
+# ======================= CONDITIONED RESIDENCE (x 0..54) =======================
+# ---- public core (south band, y 0..20) ----
+room living:  living   at 0,0    size 28 x 20 vaulted
+room kitchen: kitchen  at 28,0   size 16 x 16
+room pantry:  pantry   at 28,16  size 8 x 4
+room mud:     mudroom  at 36,16  size 8 x 4
+room lounge:  living   at 44,0   size 10 x 20        # gym-view lounge (east wall on the turf bay)
+
+# ---- main spine (y 20..24) ----
+room hall:    hallway  at 0,20   size 54 x 4
+
+# ---- primary suite (west, y 24..60) ----
+room mbed:    bedroom  at 0,24   size 20 x 20
+room mcloset: closet   at 0,44   size 10 x 16
+room mbath:   bathroom at 10,44  size 10 x 16
+
+# ---- secondary circulation ----
+room hall2:   hallway  at 20,24  size 4 x 24         # N-S link, x 20..24, y 24..48
+room hall3:   hallway  at 24,44  size 30 x 4         # E-W gallery, x 24..54, y 44..48
+
+# ---- service band (y 24..44, x 24..54) ----
+room safe:    other    at 24,24  size 12 x 10        # FEMA-rated safe room (hardened, windowless)
+room half:    half_bath at 36,24 size 6 x 10
+room store:   closet    at 42,24 size 12 x 10        # bulk / storm-supply storage
+room bath2:   bathroom  at 24,34 size 12 x 10
+room laundry: laundry   at 36,34 size 18 x 10
+
+# ---- secondary bedrooms (north wing, y 48..60) ----
+room bed2:    bedroom  at 20,48  size 12 x 12
+room closet2: closet   at 32,48  size 6 x 12
+room closet3: closet   at 38,48  size 6 x 12
+room bed3:    bedroom  at 44,48  size 10 x 12        # NE corner now on the L step -> east window
+
+# ============================ ATTACHED GYM (x 54..90, y 0..48) =================
+room turf:    other  at 54,0   size 18 x 24 ceiling 14   # artificial-turf training bay
+room tumble:  other  at 54,24  size 18 x 24 ceiling 14   # rubber-matted tumbling bay
+room airlock: mudroom at 72,0  size 6 x 48              # air-lock / gear vestibule buffering the garage
+room boat:    garage at 78,0   size 12 x 48 ceiling 14   # boat / trailer garage (outer edge)
+
+# ------------------------------- covered porch --------------------------------
+porch front_porch at 0,-8 size 54 x 8 covered
+
+# ------------------------------- connections ----------------------------------
+# open conditioned core
+open living - kitchen width 10
+open kitchen - lounge width 8
+open living - hall width 4
+door kitchen - pantry width 2.67 offset 0.5
+door kitchen - mud width 2.67 offset 0.5
+
+# spine -> suite / secondary
+open hall - hall2 width 4
+open hall2 - hall3 width 4
+door hall2 - mbed width 3 offset 0.5
+door mbed - mcloset width 2.5 offset 0.5
+door mbed - mbath width 2.67 offset 0.5
+door hall2 - safe swing width 3 offset 0.5
+door hall - half width 2.5 offset 1.5
+door hall - store width 2.5 offset 9
+door hall3 - bath2 width 2.67 offset 0.5
+door hall3 - laundry width 2.5 offset 1
+door hall3 - bed2 width 3 offset 4
+door hall3 - bed3 width 3 offset 6
+door bed2 - closet2 width 2.5 offset 0.5
+door bed3 - closet3 width 2.5 offset 0.5
+
+# conditioned -> gym (safety door, self-closing)
+door lounge - turf swing width 3 offset 14
+
+# gym interior circulation + air-lock buffer to the garage
+# (turf/tumble -> airlock -> boat: two doors in series, staggered so it works
+#  as a vestibule/air-lock rather than a straight-through path)
+door turf - tumble width 3 offset 1
+door turf - airlock width 3 offset 1
+door tumble - airlock width 3 offset 1
+door airlock - boat swing width 3 offset 33
+
+# ------------------------------- exterior doors -------------------------------
+entry living south width 3 offset 20
+entry hall west width 3 offset 0.5
+entry turf south width 3 offset 1
+entry tumble north width 3 offset 1
+entry boat east width 3 offset 6                        # boat man-door
+door boat north exterior width 10 offset 1 no-egress   # boat overhead door (rear, pulls in lengthwise)
+
+# ------------------------------- windows --------------------------------------
+# residence exterior daylight / egress
+window living south width 10 offset 3
+window living west width 8 offset 6
+window kitchen south width 8 offset 4
+window lounge south width 6 offset 2
+window mbed west width 10 offset 5
+window mbath north width 3 offset 3
+window bed2 north width 5 offset 4
+window bed3 north width 5 offset 3
+window bed3 east width 4 offset 3        # new east window on the L step
+
+# gym exterior daylight
+window turf south width 8 offset 5
+window tumble north width 8 offset 5
+
+# tempered interior vision panels — parent supervision sightlines
+window lounge east width 6 offset 6      # lounge -> turf
+window turf north width 8 offset 5       # turf -> tumble
+window turf east width 6 offset 8        # turf -> airlock
+window tumble east width 6 offset 8      # tumble -> airlock
+window airlock east width 4 offset 20    # airlock -> boat bay
