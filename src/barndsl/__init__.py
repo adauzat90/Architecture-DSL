@@ -81,6 +81,8 @@ from .revit import (
 )
 from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
 from .compare import compare_plans, comparison_text
+from .cost import cost_text, estimate_cost
+from .packet import build_packet, save_packet
 from .introspect import plan_summary, summary_text
 from .revitlog import buildlog_issues
 from .score import ScoreReport, design_score
@@ -137,6 +139,12 @@ __all__ = [
     "comparison_text",
     "plan_summary",
     "summary_text",
+    # construction cost estimate (assembly takeoff → budget)
+    "estimate_cost",
+    "cost_text",
+    # permit-sketch packet (one HTML deliverable binding the above)
+    "build_packet",
+    "save_packet",
     # fixtures / appliances (seeds + clearance)
     "Fixture",
     "fixtures_for",

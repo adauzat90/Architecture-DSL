@@ -562,6 +562,82 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0 if result_a.plan is not None and result_b.plan is not None else 1
 
 
+def _cmd_cost(args: argparse.Namespace) -> int:
+    """Assembly-based construction cost estimate from the plan's takeoff."""
+    from .cost import cost_text, estimate_cost
+
+    try:
+        result = compile_file(args.file)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if result.plan is None:
+        # A cost estimate is meaningless without a plan — fail like an unreadable
+        # file (exit 2), unlike score/compare which still show partial signal.
+        print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 2
+
+    overrides = None
+    if args.costs:
+        import json
+
+        try:
+            with open(args.costs, encoding="utf-8") as fh:
+                overrides = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"error: reading --costs: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        est = estimate_cost(result, overrides=overrides, multiplier=args.multiplier)
+    except (ValueError, TypeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(est, indent=2))
+    else:
+        print(cost_text(est))
+    return 0
+
+
+def _cmd_packet(args: argparse.Namespace) -> int:
+    """Bind score, plan, schedules, cost and diagnostics into one HTML deliverable."""
+    from .packet import save_packet
+
+    try:
+        result = compile_file(args.file)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if result.plan is None:
+        print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 2
+
+    overrides = None
+    if args.costs:
+        import json
+
+        try:
+            with open(args.costs, encoding="utf-8") as fh:
+                overrides = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"error: reading --costs: {exc}", file=sys.stderr)
+            return 2
+
+    out = args.out or "packet.html"
+    try:
+        save_packet(result, out, costs=overrides, multiplier=args.multiplier)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Wrote {out}")
+    print("Open it in a browser and Print → Save as PDF for a paginated packet.")
+    return 0
+
+
 def _cmd_revit_log(args: argparse.Namespace) -> int:
     """Translate a *.buildlog.json into compile-style diagnostics."""
     from .revitlog import buildlog_issues, issues_to_dict, load_buildlog
@@ -832,6 +908,42 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("file_b", help="path to scheme B (.barn)")
     p_compare.add_argument("--json", action="store_true", help="emit the comparison as JSON")
     p_compare.set_defaults(func=_cmd_compare)
+
+    p_cost = sub.add_parser(
+        "cost",
+        help="assembly-based construction cost estimate from the plan's takeoff",
+    )
+    p_cost.add_argument("file", help="path to a .barn DSL file")
+    p_cost.add_argument("--json", action="store_true", help="emit the estimate as JSON")
+    p_cost.add_argument(
+        "--costs",
+        default=None,
+        help="path to a JSON file overriding any subset of the default unit costs",
+    )
+    p_cost.add_argument(
+        "--multiplier",
+        type=float,
+        default=1.0,
+        help="regional cost factor scaling every unit cost (e.g. 1.15)",
+    )
+    p_cost.set_defaults(func=_cmd_cost)
+
+    p_packet = sub.add_parser(
+        "packet",
+        help="bind score, dimensioned plan, schedules, cost and diagnostics into "
+        "one print-ready HTML deliverable",
+    )
+    p_packet.add_argument("file", help="path to a .barn DSL file")
+    p_packet.add_argument(
+        "-o", "--out", default=None, help="output HTML path (default packet.html)"
+    )
+    p_packet.add_argument(
+        "--costs", default=None, help="JSON file overriding unit costs (see `cost`)"
+    )
+    p_packet.add_argument(
+        "--multiplier", type=float, default=1.0, help="regional cost factor for the estimate"
+    )
+    p_packet.set_defaults(func=_cmd_packet)
 
     p_rlog = sub.add_parser(
         "revit-log",

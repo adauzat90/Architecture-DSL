@@ -488,6 +488,9 @@ barndsl compile examples/cedar_ridge.barn --strict # warnings also fail (CI gate
 barndsl score   examples/cedar_ridge.barn          # deterministic 0-100 design score
 barndsl inspect examples/cedar_ridge.barn          # geometry pack: rooms, adjacency, free wall spans
 barndsl compare a.barn b.barn                      # scheme A vs B: score/takeoff/diagnostic deltas
+barndsl cost    examples/cedar_ridge.barn          # assembly construction cost estimate (budget)
+barndsl cost    examples/cedar_ridge.barn --costs local.json --multiplier 1.15
+barndsl packet  examples/cedar_ridge.barn -o plan.html  # one print-ready HTML permit packet
 barndsl fmt -w examples/cedar_ridge.barn           # canonically reformat in place
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl build   examples/cedar_ridge.barn --format png  # PNG/PDF (needs [raster])
@@ -511,6 +514,21 @@ pass schedules, but for users who don't open Revit. `barndsl dxf` exports the
 plan to DXF (a minimal, dependency-free DXF R12 writer) for any CAD tool;
 coordinates pass straight through (feet, x-east/y-north). `barndsl build
 --format png|pdf` rasterises the SVG (optional `cairosvg`).
+
+**Cost estimate.** `barndsl cost plan.barn` turns the takeoff into a transparent,
+assembly-based budget: every line is `quantity × unit cost` with the quantity's
+source named (slab, exterior/interior walls, roof, windows/doors/garage doors,
+plumbing fixtures, electrical/HVAC/finish allowances). The default unit costs are
+rough 2026 US national averages *for budgeting only, not a bid*; override any
+subset with `--costs FILE.json` and apply a regional factor with `--multiplier`.
+The total carries a ±15% low/expected/high band. `--json` emits the full sheet.
+
+**Permit-sketch packet.** `barndsl packet plan.barn -o plan.html` binds the cover
+metrics, design score, dimensioned floor plan, room/door/window schedules, cost
+estimate, and diagnostics appendix into one self-contained, print-ready HTML file
+(SVG inlined, no external requests, works offline). It adds no new dependency — to
+get a PDF, open it in a browser and *Print → Save as PDF*; CSS page-breaks
+paginate it into sections.
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
 
