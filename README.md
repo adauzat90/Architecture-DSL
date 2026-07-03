@@ -52,15 +52,16 @@ program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, c
 require adjacent|separate <room_a> <room_b>   # optional; spatial intent, checked vs the plan
 require exterior <room> [<wall>]              #   (also: require area <room> >= <sqft>)
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
+wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall between two rooms
 roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
 orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
 finish [siding "<name>"] [roof "<name>"]  # optional; exterior material hints (metal siding, standing-seam)
-door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
-door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]   # exterior door
 door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door (9 x 7 default; width 16 = double)
 open <id_a> - <id_b> [width <w>] [offset <o>]   # shorthand for `door <a> - <b> cased ...`
-entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
-window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]
+entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
+window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
 frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
@@ -88,6 +89,25 @@ intent (a required adjacency, separation, exterior wall, or minimum room area);
 both are re-checked mechanically on every compile (`PROGRAM_MISMATCH` /
 `REQUIRE_UNMET` warnings), so the brief lives in the source and survives every
 revision.
+`wall <a> - <b> plumbing|bearing|rated` declares what the **shared wall**
+between two abutting rooms *is* (the pair must really share one — `WALL_NOADJ`
+otherwise): a `plumbing` wall is the 2x6 wet wall the fixtures back onto (it
+satisfies the wet-room grouping nudge, thickens the flanking rooms'
+clear-dimension math, and hints a thicker wall type in the Revit exchange —
+`WALL_UNUSED` if no wet room backs onto it); a `bearing` wall is an interior
+bearing wall the auto `frame` honours as an **interior post line** when it runs
+along the building's long axis (one parallel to the bents' span can't split it —
+`WALL_BEARING_AXIS`); a `rated` wall records the garage/dwelling fire separation
+as built, turning the `GARAGE_SEPARATION` reminder into a verified fact (it
+silences for that pair; a garage ceiling under habitable space still reminds).
+**Window kinds** make egress honest: the default `casement` clears ~its full
+glazed size (exactly the historical math, so old plans are unchanged), a
+`slider` clears ~half its glazed width, a `double-hung` ~half its glazed height,
+and `fixed` glass still daylights (`NAT_LIGHT`) but is **never** an escape
+opening (`BEDROOM_EGRESS`/`EGRESS_SIZE`). A `double`/`french` door (interior or
+exterior) is a pair of half-width leaves — its egress clear width counts **one
+leaf** (IRC R311.2), it checks against stock pair widths (48/60/64/72 in), and
+it renders as two leaves.
 The footprint is one rectangle by default. For an **L/T/U-shaped building**, add
 `wing <W> x <L> at <x>,<y>` blocks: the footprint becomes the union of the
 `envelope` (the primary block at the origin) and every wing. Containment,
@@ -266,6 +286,10 @@ frame bay 12 span 40 post 6
 * When the span exceeds `span` feet, an **interior support post** line is added
   to split the beam; the validator flags one that strands in a room's open floor
   (`POST_OBSTRUCT`) so you can align a partition to it.
+* A declared interior bearing wall (`wall a - b bearing`) running along the long
+  axis is honoured as an **authored post line** — an interior post lands on it at
+  every bent crossing its run, so the beams bear on the wall you named instead of
+  (or in addition to) the auto-derived support line.
 * The post grid is the fixed discipline, so windows and doors belong in the
   **bays between posts**. A window or exterior door that a post lands inside is
   flagged (`POST_IN_OPENING`) — shift the opening into a clear bay (a post at the
@@ -317,7 +341,10 @@ is tested anywhere; only the final element creation needs Revit. What it does:
   *exterior* (open footprint beyond), then contiguous like segments merge back
   into runs. A partition shared by two rooms becomes **one** wall centreline, not
   two coincident ones. Walls carry an `exterior` flag and a nominal `thickness`
-  hint so the consumer can pick a 2x6 shell vs. a 2x4 partition wall type.
+  hint so the consumer can pick a 2x6 shell vs. a 2x4 partition wall type — and
+  a segment matching a declared `wall a - b plumbing|bearing|rated` statement
+  carries a `kind` key (absent otherwise) so `config.json` can map it to a real
+  named wall type (a plumbing wall also raises the thickness hint to a 2x6).
 * **Openings host onto walls.** Each interior door, cased opening, exterior door
   and window is matched to the wall id whose line carries it, with a centre
   point, width, height, and (for windows) sill — ready to place as a family.
@@ -371,6 +398,42 @@ dsl  = exchange_to_dsl(data)           # → DSL source (via emit_dsl)
 The round-trip is verified in the test suite: every gallery plan lowered to the
 exchange and reconstructed recovers the same rooms, door/window connections and
 envelope, and re-emits DSL that still compiles clean.
+
+### Seeing the drift: `revit-diff`
+
+Once a plan is in Revit the architect *nudges* it — slides a wall, widens a door,
+deletes a window. `revit-diff` makes that drift visible: export the edited model
+back out (the extension's **Model to DSL** / an exchange `.json`) and diff it
+against the authored source.
+
+```bash
+barndsl revit-diff model.json plan.barn                 # what changed in Revit
+barndsl revit-diff model.json plan.barn --json          # machine-readable
+barndsl revit-diff model.json plan.barn --tolerance 0.25  # tighter move threshold
+```
+
+```
+Drift: model.json vs plan.barn  (tolerance 0.5 ft)
+1 moved, 1 added, 0 removed, 1 changed across 4 rooms / 5 doors / 2 windows / 7 walls
+Score: authored 52 → model 58  (Δ +6)
+Rooms:
+  changed  D: kind office→bedroom
+Doors:
+  added    o4 at (40,2.5)
+```
+
+Either argument may be a `.barn` source **or** a `barndsl.revit/1` `.json`
+exchange (sniffed by extension, then content). Both sides are lowered the same
+way — `to_revit_model → to_dict` — so the model side (which came back from Revit,
+where rooms collapse to bounding boxes and types are guessed) compares
+apples-to-apples with the authored side. Elements are matched by **stable id
+first**, then by **nearest position** when ids differ (Revit-drawn elements
+rarely carry barndsl ids); each side reports `added` / `removed` / `moved` /
+`resized` / `changed` per kind, with before→after numbers, plus the design-score
+delta. Exit code: `0` no drift, `1` drift found, `2` unreadable input (a `.barn`
+that doesn't compile cleanly is refused — a diff against a half-parsed plan is
+meaningless). The API is `diff_plans(model, authored) -> dict` and
+`diff_text(d) -> str`.
 
 ### The pyRevit extension
 
@@ -458,7 +521,15 @@ barndsl new "Cedar Ridge" --out cedar.barn         # scaffold a clean starter pl
 barndsl compile examples/cedar_ridge.barn          # diagnostics only
 barndsl compile examples/cedar_ridge.barn --json   # diagnostics as JSON
 barndsl compile examples/cedar_ridge.barn --strict # warnings also fail (CI gate)
+barndsl compile examples/cedar_ridge.barn --profile strict   # amend code thresholds to a jurisdiction
+barndsl compile examples/cedar_ridge.barn --profile travis.json  # or a JSON override file
+barndsl profiles                                   # list the built-in jurisdiction profiles
 barndsl score   examples/cedar_ridge.barn          # deterministic 0-100 design score
+barndsl inspect examples/cedar_ridge.barn          # geometry pack: rooms, adjacency, free wall spans
+barndsl compare a.barn b.barn                      # scheme A vs B: score/takeoff/diagnostic deltas
+barndsl cost    examples/cedar_ridge.barn          # assembly construction cost estimate (budget)
+barndsl cost    examples/cedar_ridge.barn --costs local.json --multiplier 1.15
+barndsl packet  examples/cedar_ridge.barn -o plan.html  # one print-ready HTML permit packet
 barndsl fmt -w examples/cedar_ridge.barn           # canonically reformat in place
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl build   examples/cedar_ridge.barn --format png  # PNG/PDF (needs [raster])
@@ -470,6 +541,8 @@ barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
+barndsl revit-diff model.json plan.barn            # drift: what changed in Revit vs the authored plan
+barndsl revit-log plan.buildlog.json               # what the Revit build couldn't do, as diagnostics
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
@@ -481,6 +554,35 @@ pass schedules, but for users who don't open Revit. `barndsl dxf` exports the
 plan to DXF (a minimal, dependency-free DXF R12 writer) for any CAD tool;
 coordinates pass straight through (feet, x-east/y-north). `barndsl build
 --format png|pdf` rasterises the SVG (optional `cairosvg`).
+
+**Cost estimate.** `barndsl cost plan.barn` turns the takeoff into a transparent,
+assembly-based budget: every line is `quantity × unit cost` with the quantity's
+source named (slab, exterior/interior walls, roof, windows/doors/garage doors,
+plumbing fixtures, electrical/HVAC/finish allowances). The default unit costs are
+rough 2026 US national averages *for budgeting only, not a bid*; override any
+subset with `--costs FILE.json` and apply a regional factor with `--multiplier`.
+The total carries a ±15% low/expected/high band. `--json` emits the full sheet.
+
+**Permit-sketch packet.** `barndsl packet plan.barn -o plan.html` binds the cover
+metrics, design score, dimensioned floor plan, room/door/window schedules, cost
+estimate, and diagnostics appendix into one self-contained, print-ready HTML file
+(SVG inlined, no external requests, works offline). It adds no new dependency — to
+get a PDF, open it in a browser and *Print → Save as PDF*; CSS page-breaks
+paginate it into sections.
+
+**Jurisdiction profiles.** The code checks enforce one IRC-flavoured rule set by
+default, but a real project answers to a county or state that *amends* the
+numbers. `--profile NAME_OR_JSON` (on `compile`, `score`, `build`) swaps in a
+named set of thresholds so "compile under these local rules" is one flag instead
+of mental math. Built-ins: `default` (alias `irc-2021`), `strict` (tighter,
+accessibility-leaning), `rural` (looser). A JSON file overrides any subset of the
+thresholds (`{"extends": "strict", "min_ceiling_height": 8}`); unknown keys are
+rejected. `barndsl profiles` prints every built-in and the numbers it sets.
+Diagnostics stay honest — a profiled message prints the number actually enforced
+and names the profile and IRC base. **The non-default profiles are ILLUSTRATIVE
+examples of how thresholds vary — not legal advice, and not transcribed from any
+adopted code. Confirm the numbers your jurisdiction enforces with the authority
+having jurisdiction.**
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
 

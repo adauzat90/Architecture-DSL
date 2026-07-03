@@ -85,14 +85,19 @@ note "free text"                   # optional; repeatable
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeatable); also:
 require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
+site <W> x <L>                     # optional; the lot's east-west × north-south dimensions (ft)
+setback [front <n>] [side <n>] [rear <n>]     # optional; required yard clearances (needs a `site`)
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
-door <id_a> - <id_b> [swing|cased|pocket|sliding] [width <w>] [offset <o>] [into <room>] [hinge near|far]
-door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]   # exterior door
+wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall (rooms must abut)
+suite <id>: <room> ...             # optional; group rooms that read as one unit
+zone <id>: <member> ...            # optional; group rooms/suites into a band (members: room OR suite ids)
+door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]   # exterior door
 door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door
 open <id_a> - <id_b> [width <w>] [offset <o>]     # shorthand for `door <a> - <b> cased ...`
-entry <id> <wall> [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
-window <id> <wall> [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
+entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
+window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
 frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
@@ -112,6 +117,80 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
   egress door (no-egress is implied) and doesn't count as a building entrance —
   the plan still needs a people-door `entry`. On a room that isn't a garage/shop
   it notes `OVERHEAD_ROOM`.
+- `wall <a> - <b> plumbing|bearing|rated` declares what the **shared wall**
+  between two abutting rooms *is* (one or more attributes; the rooms must really
+  share a wall — `WALL_NOADJ` error otherwise, `WALL_REF` for an unknown id):
+  - `plumbing` — the 2x6 wet wall the fixtures back onto. A wet room (bath /
+    kitchen / laundry / utility) backing onto a declared plumbing wall satisfies
+    the `WET_GROUP` grouping nudge; the flanking rooms' **clear dimensions**
+    lose half a 2x6 on that side; and the Revit exchange hints the thicker wall
+    type. Declared between two dry rooms it notes `WALL_UNUSED`.
+  - `bearing` — an interior bearing wall. When it runs along the building's
+    long axis, the auto `frame` honours it as an **interior post line** (a post
+    at every bent crossing it). One running across the span can't split it —
+    `WALL_BEARING_AXIS` info instead of a silent no-op.
+  - `rated` — the garage/dwelling fire separation, detailed and declared. It
+    silences the `GARAGE_SEPARATION` reminder for that pair (verified, not
+    reminded); a garage ceiling under habitable space still reminds.
+- `suite <id>: <room> ...` and `zone <id>: <member> ...` declare the plan's
+  **structure** — which rooms read as one unit, and which band they sit in:
+
+  ```barn
+  suite primary: master_bed master_bath master_wic
+  zone private: primary bed_2 bed_3 hall_beds
+  ```
+
+  A `suite`'s members are room ids; a `zone`'s members are room ids **or suite
+  ids**, so a zone can group whole suites. Both are declared *intent* like
+  `program`/`require` — not geometry — and the checks use them:
+  - An unknown member is a `SUITE_REF` / `ZONE_REF` **error** (a typo would
+    otherwise group nothing). A room in two suites is a `SUITE_OVERLAP`
+    **warning**; a room in two zones (directly, or via a suite one zone lists)
+    is a `ZONE_OVERLAP` warning — groups are meant to be mutually exclusive.
+  - A **declared suite sharpens the design checks** that otherwise *infer*
+    membership — but a declaration never overrides geometry, it only relaxes
+    the inference where the plan backs it up: a bedroom satisfies
+    `MASTER_ENSUITE` when a full bath in its suite is **reachable from it by
+    doors that stay inside the suite** (bed → bath, or bed → wic → bath — a
+    bath across the plan doesn't become an ensuite by declaration); two
+    bedrooms whose suite contains **exactly that pair** (a bunk room) don't
+    fire `BED_SOUND` (one giant all-bedroom "suite" doesn't mute the check);
+    a public room inside a bedroom's own suite doesn't fire `BED_PRIVACY`;
+    and a patio-door `entry` into a bedroom that is the **only bedroom of its
+    suite** (the primary suite) doesn't fire `ENTRY_PRIVATE`. With **nothing
+    declared the behaviour is unchanged** — the sharpening only ever
+    suppresses a nudge the declaration *and the geometry* explain. Naming a
+    suite like an existing room is a `SUITE_SHADOW` warning (a zone member
+    with that name resolves to the room, not the suite).
+  - A `zone` enables `ZONE_CROSS` (**info**): a clearly public room
+    (living/kitchen/dining) whose only zone otherwise holds just private rooms
+    (bed/bath) — or the reverse — is a public room stranded in the private band.
+    It's deliberately conservative: it fires only when the room sits in exactly
+    one zone that's unambiguously the opposite band, so a mixed open-concept
+    zone (or a plan with no zones) never triggers it.
+- A **window kind** (right after the wall, default `casement`) sets the honest
+  escape-opening math: a casement clears ~its full glazed size (the historical
+  default), a `slider` ~half its glazed width, a `double-hung` ~half its glazed
+  height, and `fixed` glass **never** counts for bedroom egress
+  (`BEDROOM_EGRESS` / `EGRESS_SIZE`) though it still daylights (`NAT_LIGHT`).
+- A `double`/`french` door (interior or exterior) is a **pair of half-width
+  leaves** (default 5 ft — the stock 60 in pair; stock pairs 48/60/64/72 in for
+  `DOOR_SIZE`). Egress clear width counts **one leaf** (IRC R311.2): a 5 ft pair
+  is two 30 in leaves and does *not* satisfy the 32 in egress-door minimum — use
+  `width 6` where the pair is the required exit.
+- `site <W> x <L>` declares the **lot** (feet, east-west × north-south) and
+  `setback [front <n>] [side <n>] [rear <n>]` the required yard clearances (any
+  subset). The **buildable rectangle** is the lot minus its setbacks: `front` and
+  `rear` consume the plan's north-south depth (front along the plan's south/entry
+  edge, rear along its north), and a single `side` clears **both** the east and
+  west edges. If the building footprint — the envelope, any wings, **and any
+  porch** — doesn't fit inside the buildable rectangle, that's a `SETBACK` error
+  (a county/legal violation, so it's an error). barndsl has no lot-position
+  statement, so the check is by **dimensions only**: the footprint's bounding box
+  must fit the buildable width and length; *where* the building sits on the lot
+  isn't modelled. A `site` on its own imposes no check; a `setback` with no
+  `site` to measure against is a `SETBACK_NO_SITE` error. This is a sanity guard,
+  not a substitute for a surveyed site plan.
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
 
@@ -320,6 +399,14 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - Every interior room is **reachable** from an `entry` through interior doors.
 - An `entry` must be on an **exterior** wall (it can't open onto another room).
 - Openings fit on their wall (`offset + width <= wall length`).
+- A `wall` statement names two existing rooms (`WALL_REF`) that really share a
+  wall (`WALL_NOADJ`) — it declares an attribute of a wall that must exist.
+- A bedroom whose only exterior windows are `fixed` has **no escape opening**
+  (`BEDROOM_EGRESS`) — fixed glass doesn't open.
+- `SETBACK` — with a `site` + `setback` declared, the building footprint
+  (envelope + wings + porches) must fit the **buildable rectangle** (the lot minus
+  its setbacks). Checked by dimensions only; a `setback` with no `site` is a
+  `SETBACK_NO_SITE` error.
 - Numbers are finite; ids/names are non-empty.
 
 **Warnings (should address):**
@@ -608,6 +695,55 @@ plan = (
 print(validate(plan))   # same diagnostics
 print(emit_dsl(plan))   # → .barn source (loft emitted as `... level 1`)
 ```
+
+## Jurisdiction profiles: compiling under local code amendments
+
+The code checks enforce one IRC-flavoured rule set by default. But the numeric
+thresholds a check compares against — minimum ceiling height, habitable-room
+area and width, hallway width, egress-window clear area/dimensions/sill, stair
+riser/tread, daylight glazing — are exactly the numbers a county or state
+*amends*. A **jurisdiction profile** bundles those ~14 amendable thresholds so
+"compile under these local rules" is one flag instead of mental math on every
+diagnostic.
+
+```bash
+barndsl profiles                             # list the built-ins and their numbers
+barndsl compile plan.barn --profile strict   # a tighter, accessibility-leaning set
+barndsl compile plan.barn --profile rural    # a looser example
+barndsl compile plan.barn --profile travis.json   # your own JSON override file
+barndsl score   plan.barn --profile strict   # score/build honour it too
+```
+
+Built-ins: `default` (alias `irc-2021`, the baseline — compiling with it is
+identical to compiling with no profile), `strict`, and `rural`. A **JSON file**
+overrides any subset of the thresholds and can extend a built-in:
+
+```json
+{ "name": "Travis County", "extends": "default",
+  "min_ceiling_height": 7.5, "min_tread_depth": 0.9167 }
+```
+
+Unknown keys are rejected with the list of valid ones. Measurements are in feet
+(so an 11 in tread is `0.9167`). From Python:
+
+```python
+from barndsl import compile_file, load_profile
+result = compile_file("plan.barn", profile=load_profile("strict"))
+```
+
+A profiled diagnostic stays **honest about what number was enforced**: it prints
+the enforced threshold, names the profile, and cites the IRC base value it
+amended — e.g. *"Ceiling height 7 ft is below the 7.5 ft minimum for habitable
+space (the 'strict' profile amends the IRC base of 7 ft)."* Only these ~14
+thresholds are profile-driven; every other check (geometry, door/opening sizes,
+fixture clearances, the design-quality nudges) is unchanged.
+
+> **Not legal advice.** The non-default built-in profiles (`strict`, `rural`)
+> are ILLUSTRATIVE examples of *how* thresholds vary between jurisdictions —
+> plausible numbers chosen to demonstrate the mechanism. They are **not**
+> transcribed from any adopted code. Always confirm the thresholds your
+> jurisdiction actually enforces with the authority having jurisdiction before
+> relying on a compile.
 
 ## Porches
 

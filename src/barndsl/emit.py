@@ -48,6 +48,18 @@ def emit_dsl(plan: Barndominium) -> str:
         if pitch:
             line += f" pitch {_n(pitch)}"
         out.append(line)
+    ss = getattr(plan, "site_spec", None)
+    if ss is not None and ss.has_dims:
+        out.append(f"site {_n(ss.width)} x {_n(ss.length)}")
+    if ss is not None and ss.has_setback:
+        line = "setback"
+        if ss.front is not None:
+            line += f" front {_n(ss.front)}"
+        if ss.side is not None:
+            line += f" side {_n(ss.side)}"
+        if ss.rear is not None:
+            line += f" rear {_n(ss.rear)}"
+        out.append(line)
     if plan.program_spec is not None:
         spec = plan.program_spec
         line = f"program {spec.beds} bed"
@@ -70,6 +82,15 @@ def emit_dsl(plan: Barndominium) -> str:
             out.append(line)
         else:  # area
             out.append(f"require area {req.a} >= {_n(req.min_area)}")
+    for ws in getattr(plan, "wall_specs", None) or []:
+        # Declared wall attributes sit in the same contract block; attributes
+        # are stored in canonical order, so this is already deterministic.
+        out.append(f"wall {ws.room_a} - {ws.room_b} {' '.join(ws.attributes)}")
+    for s in getattr(plan, "suites", None) or []:
+        # Declared groupings ride the contract block, in declaration order.
+        out.append(f"suite {s.id}: {' '.join(s.members)}")
+    for z in getattr(plan, "zones", None) or []:
+        out.append(f"zone {z.id}: {' '.join(z.members)}")
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")
@@ -129,7 +150,10 @@ def emit_dsl(plan: Barndominium) -> str:
                     f"height {_n(h)} offset {_n(xd.offset)}"
                 )
                 continue
-            line = f"entry {xd.room} {xd.wall.value} width {_n(xd.width)} offset {_n(xd.offset)}"
+            line = f"entry {xd.room} {xd.wall.value}"
+            if getattr(xd, "kind", "entry") in ("double", "french"):
+                line += f" {xd.kind}"  # a pair of half-width leaves
+            line += f" width {_n(xd.width)} offset {_n(xd.offset)}"
             if not xd.egress:
                 line += " no-egress"
             out.append(line)
@@ -137,7 +161,10 @@ def emit_dsl(plan: Barndominium) -> str:
     if plan.windows:
         out.append("")
         for w in plan.windows:
-            line = f"window {w.room} {w.wall.value} width {_n(w.width)} offset {_n(w.offset)}"
+            line = f"window {w.room} {w.wall.value}"
+            if getattr(w, "kind", "casement") != "casement":
+                line += f" {w.kind}"  # the kind rides right after the wall
+            line += f" width {_n(w.width)} offset {_n(w.offset)}"
             # Only emit sill/head when they differ from the defaults, to keep the
             # common case terse while round-tripping a custom (e.g. transom) window.
             if abs(w.sill_height - 3.0) > 1e-6:

@@ -519,6 +519,88 @@ def test_roof_slopes_its_eave_edges():
     assert all(a == pytest.approx(angle) for a in roofs[0].slopes.values())
 
 
+#: An L-shaped plan — a primary block plus a wing — so the roof splits into one
+#: footprint-following plane per section instead of one box over the notch.
+_LSHAPE = """\
+plan "L Barn"
+envelope 40 x 24
+ceiling 9
+wing 16 x 20 at 40,0
+room living: living at 0,0 size 40 x 24
+room shop: shop at 40,0 size 16 x 20
+"""
+
+#: A monitor-roof plan (raised centre aisle) — the namesake barn silhouette.
+_MONITOR = """\
+plan "Monitor Barn"
+envelope 40 x 60
+ceiling 9
+roof monitor pitch 0.5
+room living: living at 0,0 size 40 x 60
+"""
+
+
+def _rect_of(section):
+    """(minx, miny, maxx, maxy) of a roof section's outline rectangle."""
+    xs = [pt[0] for seg in section["outline"] for pt in seg]
+    ys = [pt[1] for seg in section["outline"] for pt in seg]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def test_lshape_roof_covers_each_footprint_section():
+    # Mirroring the slab/foundation pass: one roof plane per footprint rectangle,
+    # so the roof follows the L (the wing is covered) instead of one bounding box
+    # that also roofs the empty concave notch.
+    data = _exchange(_LSHAPE)
+    sections = data["roof"]["sections"]
+    assert len(sections) == 2
+    rects = sorted(_rect_of(s) for s in sections)
+    assert rects == [(0.0, 0.0, 40.0, 24.0), (40.0, 0.0, 56.0, 20.0)]
+    # The wing rectangle is roofed; the concave notch (48, 22) — outside the
+    # footprint — is covered by no section (the old bounding box would have).
+    def covered(px, py):
+        return any(x0 <= px <= x1 and y0 <= py <= y1 for x0, y0, x1, y1 in rects)
+
+    assert covered(48.0, 10.0)  # inside the wing
+    assert not covered(48.0, 22.0)  # the notch — correctly left uncovered
+
+    doc = _ready_doc()
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="roof") == 2
+    roofs = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "roof"]
+    assert len(roofs) == 2
+    assert all(r.slopes for r in roofs)  # every plane sloped its eaves
+
+
+def test_monitor_roof_builds_three_planes():
+    # The monitor barn form reaches Revit as three real roof planes: two low side
+    # sheds + a raised centre gable (built as center gable + two shed roofs).
+    data = _exchange(_MONITOR)
+    sections = data["roof"]["sections"]
+    assert [s["role"] for s in sections] == [
+        "monitor_side", "monitor_center", "monitor_side"
+    ]
+    assert [s["style"] for s in sections] == ["shed", "gable", "shed"]
+    # The centre gable is raised on the clerestory (base_height > 0); the side
+    # sheds sit at the plate.
+    center = next(s for s in sections if s["role"] == "monitor_center")
+    assert center["base_height"] > 0
+    assert all(s["base_height"] == 0 for s in sections if s["role"] == "monitor_side")
+
+    doc = _ready_doc()
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="roof") == 3
+    roofs = [el for k, el in ((e[0], e[1]) for e in doc.created) if k == "roof"]
+    assert len(roofs) == 3 and all(r.slopes for r in roofs)
+
+
+def test_monitor_roof_skipped_without_roof_type_reports_each_plane():
+    doc = _ready_doc(roof=False)
+    rep = builder.build(doc, _exchange(_MONITOR))
+    assert rep.count(status="created", kind="roof") == 0
+    assert rep.count(status="skipped", kind="roof") == 3
+
+
 def test_gable_walls_build_from_a_profile():
     doc = _ready_doc()
     data = _example_exchange("cedar_ridge.barn")
@@ -649,7 +731,10 @@ def test_replace_rebuild_is_idempotent():
     rep = builder.build(doc, data, report.BuildOptions(replace=True))
     after_two = _managed_count(doc)
     assert after_two == after_one  # replaced, not doubled
-    assert any("replaced" in n for n in rep.notes)
+    # The default replace re-build is a diff: nothing changed, so everything is
+    # kept in place rather than purged and recreated.
+    assert rep.count(status="kept") == after_one
+    assert rep.count(status="created") == 0
 
 
 def test_without_replace_rebuild_duplicates():
@@ -667,6 +752,539 @@ def test_replace_leaves_unmanaged_elements_alone():
     user_wall = revit_fakes.Wall("user", doc)
     builder.build(doc, _exchange(CEDAR), report.BuildOptions(replace=True))
     assert user_wall.Id.Value in doc._by_id  # survived the purge
+
+
+# --- diff rebuild (update-in-place) --------------------------------------------
+
+from barndsl_revit import exchange as bx  # noqa: E402
+
+
+def _managed_ids(doc):
+    """{identity_key: revit element id} for every identity-stamped element."""
+    out = {}
+    for e in doc._by_id.values():
+        ident = builder._es_identity(e)
+        if ident is not None:
+            out[ident[0]] = e.Id.Value
+    return out
+
+
+def test_identities_are_deterministic_across_reexports():
+    # Re-exporting the same plan must yield byte-identical identity keys and
+    # fingerprints, or unchanged elements would be needlessly recreated.
+    a = bx.identities(_example_exchange("cedar_ridge.barn"))
+    b = bx.identities(_example_exchange("cedar_ridge.barn"))
+    assert a == b
+    keys = [k for _kind, _src, k, _fp in a]
+    assert len(keys) == len(set(keys))  # identity keys are unique
+
+
+def test_unchanged_rebuild_keeps_every_element_id():
+    doc = _ready_doc(columns=True, framing=True)
+    doc.add_ceiling_type("2x2 ACT")
+    builder.build(doc, _framed_exchange())
+    ids1 = _managed_ids(doc)
+    assert ids1
+    rep2 = builder.build(doc, _framed_exchange())
+    ids2 = _managed_ids(doc)
+    # Every element survived with its Revit id intact — user dimensions/tags
+    # attached to them stay live across the iteration.
+    assert ids2 == ids1
+    assert rep2.count(status="kept") == len(ids1)
+    # Nothing managed was recreated (only non-element passes may re-run).
+    created = [r for r in rep2.records if r.status == "created"]
+    assert all(r.kind == "project" for r in created)
+
+
+def test_unchanged_dry_run_rebuild_reports_kept_and_rolls_back():
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    ids1 = _managed_ids(doc)
+    rep = builder.build(doc, data, report.BuildOptions(dry_run=True))
+    assert rep.count(status="kept") == len(ids1)
+    assert doc.rollbacks  # nothing committed
+    assert _managed_ids(doc) == ids1
+
+
+def test_unchanged_rebuild_keeps_non_roof_elements():
+    # The core idempotency guarantee: rebuilding an unchanged plan keeps every
+    # managed element (walls/doors/rooms/slabs/…) — no needless recreation.
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    ids1 = _managed_ids(doc)
+    assert ids1
+    rep2 = builder.build(doc, data)
+    assert _managed_ids(doc) == ids1
+    assert rep2.count(status="kept") == len(ids1)
+    # Nothing managed was recreated (only the non-element "project" pass re-runs).
+    created = [r for r in rep2.records if r.status == "created"]
+    assert all(r.kind == "project" for r in created)
+
+
+def test_unchanged_lshape_rebuild_keeps_every_element_including_section_roofs():
+    # An L-shaped plan now emits a multi-plane (per-section) roof. Rebuilding it
+    # unchanged must keep BOTH roof planes and every wall/door/room — proving the
+    # richer roof records are as stable under the diff as the single-roof shape.
+    doc = _ready_doc()
+    data = _exchange(_LSHAPE)
+    assert len(data["roof"]["sections"]) == 2
+    builder.build(doc, data)
+    ids1 = _managed_ids(doc)
+    assert sum(1 for k in ids1 if k.startswith("roof")) == 2  # both planes stamped
+    rep2 = builder.build(doc, data)
+    assert _managed_ids(doc) == ids1
+    assert rep2.count(status="kept") == len(ids1)
+    assert rep2.count(status="kept", kind="roof") == 2
+    created = [r for r in rep2.records if r.status == "created"]
+    assert all(r.kind == "project" for r in created)
+
+
+def test_rebuild_keeps_room_numbers():
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    from revit_fakes import BuiltInParameter as BIP
+
+    numbers1 = {r.Id.Value: r.get_Parameter(BIP.ROOM_NUMBER).AsString()
+                for r in doc.placed_rooms}
+    builder.build(doc, data)
+    numbers2 = {r.Id.Value: r.get_Parameter(BIP.ROOM_NUMBER).AsString()
+                for r in doc.placed_rooms}
+    assert numbers2 == numbers1  # same rooms, same numbers
+
+
+#: CEDAR with the bed/bath boundary moved north one foot — one localised edit.
+CEDAR_MOVED = CEDAR.replace(
+    "room bed: bedroom at 24,0 size 16 x 15", "room bed: bedroom at 24,0 size 16 x 16"
+).replace(
+    "room bath: bathroom at 24,15 size 16 x 15", "room bath: bathroom at 24,16 size 16 x 14"
+)
+
+
+def test_moving_a_room_boundary_recreates_only_the_affected_elements():
+    doc = _ready_doc()
+    data_a = _exchange(CEDAR)
+    data_b = _exchange(CEDAR_MOVED)
+    builder.build(doc, data_a)
+    ids1 = _managed_ids(doc)
+    rep2 = builder.build(doc, data_b)
+    ids2 = _managed_ids(doc)
+
+    # The expected keeps fall out of the pure exchange-vs-exchange diff.
+    a = {k: fp for _kind, _src, k, fp in bx.identities(data_a)}
+    b = {k: fp for _kind, _src, k, fp in bx.identities(data_b)}
+    expected_kept = {k for k in ids1 if b.get(k) == a.get(k)}
+    assert expected_kept, "an unrelated room should survive the edit"
+
+    # Untouched: the living room, its west window, the entry, the walls away
+    # from the moved boundary — all keep their Revit ids.
+    assert "room|living" in expected_kept
+    for k in expected_kept:
+        assert ids2[k] == ids1[k]
+    assert rep2.count(status="kept") == len(expected_kept)
+
+    # Touched: the resized rooms and the walls/openings along the moved
+    # boundary were recreated (new ids), stale ones removed.
+    assert ids2["room|bed"] != ids1["room|bed"]
+    assert ids2["room|bath"] != ids1["room|bath"]
+    changed = set(ids2) - expected_kept
+    assert changed
+    for k in changed:
+        assert ids1.get(k) != ids2[k]
+
+    # The exchange merges the east exterior wall into one unchanged run, so the
+    # bed window (whose record is untouched) is kept; the bed/bath divider wall
+    # itself moved, so it (and the doors whose locations shifted) recreated.
+    bed_win = next(o for o in data_b["openings"] if o["category"] == "window"
+                   and "bed" in o["rooms"])
+    assert bx.opening_identity(bed_win) in expected_kept
+    divider = next(w for w in data_b["walls"] if not w["exterior"]
+                   and abs(w["start"][1] - 16.0) < 1e-6 and abs(w["end"][1] - 16.0) < 1e-6)
+    assert bx.wall_identity(divider) in changed
+
+
+def test_changing_a_wall_recreates_its_hosted_openings():
+    # An opening whose record is untouched still can't be kept when its host
+    # wall changes: Revit deletes hosted instances with their host.
+    import copy
+
+    doc = _ready_doc()
+    data_a = _exchange(CEDAR)
+    builder.build(doc, data_a)
+    ids1 = _managed_ids(doc)
+
+    data_b = copy.deepcopy(data_a)
+    entry = next(o for o in data_b["openings"]
+                 if o["category"] == "door" and o["exterior"])
+    host = next(w for w in data_b["walls"] if w["id"] == entry["host_wall"])
+    host["height"] = float(host["height"]) + 1.0  # same line, changed record
+
+    rep2 = builder.build(doc, data_b)
+    ids2 = _managed_ids(doc)
+    wall_key = bx.wall_identity(host)
+    entry_key = bx.opening_identity(entry)
+    assert ids2[wall_key] != ids1[wall_key]    # wall recreated
+    assert ids2[entry_key] != ids1[entry_key]  # hosted door recreated with it
+    # Openings on other walls were kept.
+    kept_openings = [r for r in rep2.records
+                     if r.status == "kept" and r.kind in ("door", "window")]
+    assert kept_openings
+
+
+def test_removed_elements_are_purged_on_rebuild():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    assert len(doc.instances.get(BIC.OST_Windows, [])) == 2
+    slim = CEDAR.replace("window bed east width 4 offset 4\n", "")
+    rep = builder.build(doc, _exchange(slim))
+    # The removed window's element is gone; the other window was kept.
+    assert len(doc.instances.get(BIC.OST_Windows, [])) == 1
+    assert rep.count(status="kept", kind="window") == 1
+    assert any("changed/removed" in n for n in rep.notes)
+
+
+def test_legacy_marked_elements_are_purged_by_a_diff_rebuild():
+    # Elements from pre-identity builds carry only the managed marker — via the
+    # old Comments field or the v1 (marker-only) Extensible Storage schema.
+    # They can't be matched to a record, so a diff rebuild purges them (the old
+    # behaviour) instead of keeping stale geometry around.
+    doc = _ready_doc()
+    comments_wall = revit_fakes.Wall("legacy-comments", doc)
+    comments_wall.get_Parameter(
+        revit_fakes.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS
+    ).Set(builder.MANAGED_MARK)
+
+    ES = revit_fakes.ExtensibleStorage
+    sb = ES.SchemaBuilder(builder._LEGACY_SCHEMA_GUID)
+    sb.SetSchemaName("BarndslManaged")
+    sb.AddSimpleField("marker", str)
+    v1_schema = sb.Finish()
+    es_wall = revit_fakes.Wall("legacy-es", doc)
+    ent = ES.Entity(v1_schema)
+    ent.Set("marker", builder.MANAGED_MARK)
+    es_wall.SetEntity(ent)
+    assert builder._is_managed(es_wall) and builder._es_identity(es_wall) is None
+
+    rep = builder.build(doc, _exchange(CEDAR))
+    assert comments_wall.Id.Value not in doc._by_id
+    assert es_wall.Id.Value not in doc._by_id
+    assert any("older barndsl build" in n for n in rep.notes)
+
+
+def test_full_rebuild_mode_purges_and_recreates():
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    ids1 = _managed_ids(doc)
+    rep = builder.build(doc, data, report.BuildOptions(rebuild="full"))
+    ids2 = _managed_ids(doc)
+    assert rep.count(status="kept") == 0
+    assert any("replaced" in n for n in rep.notes)
+    # Same plan, so the same identity set — but every element id is new.
+    assert set(ids2) == set(ids1)
+    assert all(ids2[k] != ids1[k] for k in ids2)
+
+
+def test_rebuild_option_round_trips_and_validates():
+    assert report.BuildOptions().rebuild == "diff"
+    assert report.BuildOptions.from_dict({"rebuild": "full"}).rebuild == "full"
+    assert report.BuildOptions.from_dict({"rebuild": "bogus"}).rebuild == "diff"
+    assert report.BuildOptions(rebuild="Full").to_dict()["rebuild"] == "full"
+
+
+def test_kept_outcome_shows_in_the_report():
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    rep = builder.build(doc, data)
+    assert "kept" in rep.summary_line()
+    md = rep.to_markdown()
+    assert "| element | created | kept | skipped | failed |" in md
+    parsed = rep.to_dict()
+    assert parsed["counts"]["wall"]["kept"] > 0
+    assert any(r["status"] == "kept" and r["revit_id"] for r in parsed["records"])
+
+
+def test_disabled_pass_purges_kept_candidates_on_diff_rebuild():
+    # Turning a pass off mid-iteration removes its elements, matching the full
+    # purge: a diff rebuild must not silently keep what the pass no longer owns.
+    doc = _ready_doc()
+    data = _example_exchange("cedar_ridge.barn")
+    builder.build(doc, data)
+    assert bx.ROOF_IDENTITY in _managed_ids(doc)
+    rep = builder.build(doc, data, report.BuildOptions(roof=False))
+    assert bx.ROOF_IDENTITY not in _managed_ids(doc)
+    assert rep.count(kind="roof") == 0
+
+
+def test_fake_wall_delete_cascades_to_hosted_instances():
+    # The fakes mirror Revit's host cascade: deleting a wall removes its hosted
+    # door/window instances (the assumption the diff's fingerprint coupling
+    # rests on; the real cascade still needs live-Revit validation).
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    hosted = next(e[1] for e in doc.created if e[0] == "instance"
+                  and isinstance(e[2][2], revit_fakes.Wall))
+    host = hosted.Host
+    assert hosted.Id.Value in doc._by_id
+    doc.Delete(host.Id)
+    assert hosted.Id.Value not in doc._by_id
+
+
+def test_changed_wall_type_override_recreates_walls():
+    # Config changes must not be invisible to the diff: rebuilding with a
+    # different (resolved) wall type / location line recreates the walls with
+    # the new resources instead of keeping ones built the old way.
+    doc = _ready_doc()
+    doc.add_wall_type("Ext2", function=WallFunction.Exterior)
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+
+    opts = report.BuildOptions(
+        exterior_wall_type="Ext2", location_line="finish_face_exterior"
+    )
+    rep = builder.build(doc, data, opts)
+    assert rep.count(status="kept", kind="wall") == 0
+    assert rep.count(status="created", kind="wall") > 0
+    # The rebuilt exterior walls really use the overridden type + location line.
+    ext2_id = next(w.Id.Value for w in doc.wall_types if w.Name == "Ext2")
+    from revit_fakes import BuiltInParameter as BIP
+
+    walls = [e for e in doc._by_id.values()
+             if isinstance(e, revit_fakes.Wall) and builder._is_managed(e)]
+    ext2_walls = [w for w in walls
+                  if getattr(w, "wtype_id", None) is not None and w.wtype_id.Value == ext2_id]
+    assert ext2_walls
+    assert any(w.get_Parameter(BIP.WALL_KEY_REF_PARAM).AsDouble() == 2 for w in ext2_walls)
+    # Wall-independent elements (rooms) were kept; hosted openings recreated
+    # with their walls.
+    assert rep.count(status="kept", kind="room") == 3
+    assert rep.count(status="kept", kind="door") == 0
+
+    # Rebuilding again with the *same* options keeps everything.
+    rep2 = builder.build(doc, data, opts)
+    assert rep2.count(status="created", kind="wall") == 0
+    assert rep2.count(status="kept", kind="wall") == rep.count(status="created", kind="wall")
+
+
+#: CEDAR with the living room split in two — bed/bath are untouched (kept).
+CEDAR_SPLIT = CEDAR.replace(
+    "room living: living at 0,0 size 24 x 30",
+    "room living: living at 0,0 size 24 x 20\nroom office: office at 0,20 size 24 x 10",
+)
+
+
+def test_inserted_room_gets_a_unique_number_and_kept_rooms_keep_theirs():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))
+    from revit_fakes import BuiltInParameter as BIP
+
+    before = {r.Id.Value: r.get_Parameter(BIP.ROOM_NUMBER).AsString()
+              for r in doc.placed_rooms}
+    kept_ids = {r.Id.Value for r in doc.placed_rooms
+                if r.get_Parameter(BIP.ROOM_NAME).AsString().lower() in ("bed", "bath")}
+    assert len(kept_ids) == 2
+
+    builder.build(doc, _exchange(CEDAR_SPLIT))
+    after = {r.Id.Value: r.get_Parameter(BIP.ROOM_NUMBER).AsString()
+             for r in doc.placed_rooms}
+    numbers = list(after.values())
+    # No duplicate numbers, and the kept rooms still hold their originals.
+    assert len(numbers) == len(set(numbers)) == 4
+    for rid in kept_ids:
+        assert after[rid] == before[rid]
+
+
+def test_kept_ceilings_are_reported_when_the_ceiling_type_disappears():
+    doc = _ready_doc()
+    doc.add_ceiling_type("2x2 ACT")
+    data = _exchange(CEDAR)
+    rep1 = builder.build(doc, data)
+    assert rep1.count(status="created", kind="ceiling") == 3
+    doc.ceiling_types.clear()  # the type vanished from the project
+    rep2 = builder.build(doc, data)
+    # The ceilings themselves survive (the diff kept them) and are reported so.
+    assert rep2.count(status="kept", kind="ceiling") == 3
+    assert any("no ceiling type" in n for n in rep2.notes)
+    kept_keys = [k for k in _managed_ids(doc) if k.startswith("ceiling|")]
+    assert len(kept_keys) == 3
+
+
+# --- candidates as Design Options (§3.3) -------------------------------------
+#
+# The agent shortlists N scored iterations; the architect picks among them IN
+# Revit. Since the Revit API can't *create* Design Options (DB.DesignOption is
+# read-only — option sets are UI-only), the Build Option command builds ONE
+# candidate exchange into whatever option the user has active, with every
+# managed-element identity namespaced per candidate so each option's elements
+# diff-rebuild independently and purging one candidate never touches another.
+
+
+def _candidate_ids(doc, label):
+    """{identity_key: revit id} for elements stamped under ``label``'s namespace."""
+    prefix = bx.candidate_prefix(label)
+    return {k: rid for k, rid in _managed_ids(doc).items() if k.startswith(prefix)}
+
+
+def test_candidate_namespacing_leaves_plain_identities_byte_identical():
+    # The namespace must apply ONLY when a label is set — a plain build's keys
+    # and fingerprints stay byte-for-byte what they were, so existing models
+    # never recreate on the next rebuild.
+    data = _exchange(CEDAR)
+    plain = bx.identities(data)
+    assert bx.identities(data, candidate=None) == plain
+    # No plain key reads as a candidate key.
+    assert not any(bx.is_candidate_key(k) for _kind, _src, k, _fp in plain)
+
+
+def test_candidate_identities_are_namespaced_but_share_fingerprints():
+    data = _exchange(CEDAR)
+    plain = bx.identities(data)
+    a = bx.identities(data, candidate="iteration-3, score 84")
+    b = bx.identities(data, candidate="iteration-7, score 79")
+    # Every candidate key is namespaced, and A's and B's key sets are disjoint.
+    assert all(bx.is_candidate_key(k) for _k, _s, k, _f in a)
+    assert not (set(k for _k, _s, k, _f in a) & set(k for _k, _s, k, _f in b))
+    # Fingerprints are identical geometry → identical fp across A/B/plain; only
+    # the identity keys separate the namespaces.
+    assert [fp for _k, _s, _key, fp in a] == [fp for _k, _s, _key, fp in plain]
+    assert [fp for _k, _s, _key, fp in b] == [fp for _k, _s, _key, fp in plain]
+
+
+def test_candidate_rebuild_is_idempotent():
+    # Rebuilding the SAME candidate twice keeps every element (its Revit ids,
+    # and any annotations on them, survive) — the diff guarantee, per candidate.
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    opts = report.BuildOptions(candidate="scheme-A")
+    builder.build(doc, data, opts)
+    ids1 = _candidate_ids(doc, "scheme-A")
+    assert ids1
+    rep2 = builder.build(doc, data, report.BuildOptions(candidate="scheme-A"))
+    assert _candidate_ids(doc, "scheme-A") == ids1
+    assert rep2.count(status="kept") == len(ids1)
+    created = [r for r in rep2.records if r.status == "created"]
+    assert all(r.kind == "project" for r in created)
+
+
+def test_building_candidate_b_does_not_purge_candidate_a():
+    # THE regression risk: today's diff/purge considers EVERY managed element in
+    # the document, so without namespacing, building B would purge A's model.
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="scheme-A"))
+    a_ids = _candidate_ids(doc, "scheme-A")
+    assert a_ids
+
+    # Build a DIFFERENT candidate (different plan) — A must be untouched.
+    builder.build(doc, _exchange(CEDAR_SPLIT), report.BuildOptions(candidate="scheme-B"))
+    b_ids = _candidate_ids(doc, "scheme-B")
+    assert b_ids
+    # A survived intact, keys+ids unchanged; A and B coexist in disjoint namespaces.
+    assert _candidate_ids(doc, "scheme-A") == a_ids
+    assert not (set(a_ids) & set(b_ids))
+
+    # Rebuilding A still keeps all of A and still doesn't disturb B.
+    repA = builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="scheme-A"))
+    assert repA.count(status="kept") == len(a_ids)
+    assert _candidate_ids(doc, "scheme-A") == a_ids
+    assert _candidate_ids(doc, "scheme-B") == b_ids
+
+
+def test_candidate_build_does_not_touch_a_plain_build_and_vice_versa():
+    # A plain (winner-only) build and candidate builds must not purge each other.
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR))  # plain
+    plain_ids = {k: rid for k, rid in _managed_ids(doc).items()
+                 if not bx.is_candidate_key(k)}
+    assert plain_ids
+
+    builder.build(doc, _exchange(CEDAR_SPLIT), report.BuildOptions(candidate="alt"))
+    # The plain build is untouched by the candidate build.
+    assert {k: rid for k, rid in _managed_ids(doc).items()
+            if not bx.is_candidate_key(k)} == plain_ids
+
+    # And a plain rebuild keeps the plain elements without purging the candidate.
+    alt_ids = _candidate_ids(doc, "alt")
+    builder.build(doc, _exchange(CEDAR))
+    assert {k: rid for k, rid in _managed_ids(doc).items()
+            if not bx.is_candidate_key(k)} == plain_ids
+    assert _candidate_ids(doc, "alt") == alt_ids
+
+
+def test_full_rebuild_of_one_candidate_purges_only_that_candidate():
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="A"))
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="B"))
+    b_ids = _candidate_ids(doc, "B")
+    # A "full" rebuild of A purges+recreates A's elements; B is untouched.
+    rep = builder.build(
+        doc, _exchange(CEDAR), report.BuildOptions(candidate="A", rebuild="full")
+    )
+    assert rep.count(status="kept") == 0
+    assert rep.count(status="created", kind="wall") > 0
+    assert _candidate_ids(doc, "B") == b_ids  # the other candidate survived
+
+
+def test_candidate_label_is_recorded_in_the_report():
+    doc = _ready_doc()
+    rep = builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="iteration-3"))
+    assert rep.candidate == "iteration-3"
+    assert rep.to_dict()["candidate"] == "iteration-3"
+    assert "iteration-3" in rep.to_markdown()
+    # A plain build carries no candidate key (byte-identical log).
+    plain = builder.build(doc, _exchange(CEDAR))
+    assert plain.candidate is None
+    assert "candidate" not in plain.to_dict()
+
+
+def test_document_artifacts_are_not_misreported_as_a_legacy_build():
+    # document()'s dimensions/elevation markers are managed but never in a
+    # build's incoming set — the rebuild purges them as ordinary stale
+    # elements, not with the misleading "older barndsl build" note.
+    doc = _ready_doc()
+    doc.add_view_family_type("Floor Plan", revit_fakes.ViewFamily.FloorPlan)
+    doc.add_view_family_type("Elevation", revit_fakes.ViewFamily.Elevation)
+    data = _framed_exchange()
+    builder.build(doc, data)
+    builder.document(doc)
+    assert any(isinstance(e, revit_fakes.Dimension) for e in doc._by_id.values())
+
+    rep = builder.build(doc, data)
+    assert not any("older barndsl build" in n for n in rep.notes)
+    assert any("changed/removed" in n for n in rep.notes)
+    # The stale doc artifacts were purged (re-document recreates them)...
+    assert not any(isinstance(e, revit_fakes.Dimension) for e in doc._by_id.values())
+    assert not any(isinstance(e, revit_fakes.ElevationMarker) for e in doc._by_id.values())
+    # ...while the model itself was kept in place.
+    assert rep.count(status="kept", kind="wall") > 0
+    assert rep.count(status="created", kind="wall") == 0
+
+
+def test_plan_ceiling_height_change_recreates_walls_and_ceilings_only():
+    doc = _ready_doc()
+    doc.add_ceiling_type("2x2 ACT")
+    data_a = _exchange(CEDAR)  # ceiling 10
+    builder.build(doc, data_a)
+    ids1 = _managed_ids(doc)
+
+    rep = builder.build(doc, _exchange(CEDAR.replace("ceiling 10", "ceiling 9")))
+    ids2 = _managed_ids(doc)
+    # Wall heights and ceiling planes moved: all recreated (openings ride along
+    # via the host coupling; room records fold the plan ceiling in too).
+    assert rep.count(status="kept", kind="wall") == 0
+    assert rep.count(status="created", kind="wall") > 0
+    assert rep.count(status="kept", kind="ceiling") == 0
+    assert rep.count(status="created", kind="ceiling") == 3
+    # Ceiling-independent elements keep their Revit ids.
+    for prefix in ("slab|", "fixture|"):
+        keys = [k for k in ids1 if k.startswith(prefix)]
+        assert keys, "expected %s elements in the first build" % prefix
+        for k in keys:
+            assert ids2[k] == ids1[k]
+    assert rep.count(status="kept", kind="fixture") > 0
+    assert rep.count(status="kept", kind="slab") == 1
 
 
 # --- door swing / hinge ------------------------------------------------------
@@ -1003,3 +1621,159 @@ def test_read_model_skips_unplaced_rooms():
     exchange, rep = builder.read_model(doc)
     assert exchange["rooms"] == []
     assert any(r.kind == "room" and r.status == "skipped" for r in rep.records)
+
+
+# --- declared wall kinds + opening kinds (review round 2 §2.1/§2.2 builder pass)
+
+
+#: CEDAR with a declared plumbing wall and authored opening kinds.
+CEDAR_KINDS = CEDAR.replace(
+    "door living - bed width 2.67",
+    "door living - bed double width 5\nwall living - bath plumbing",
+).replace(
+    "window bed east width 4 offset 4",
+    "window bed east fixed width 4 offset 4",
+)
+
+
+def test_declared_wall_kind_picks_a_matching_wall_type():
+    # A `wall a - b plumbing` segment lands on the wall type whose name reads
+    # like the kind; undeclared interior walls keep the standard interior type.
+    doc = _ready_doc()
+    wet = doc.add_wall_type("Interior - Plumbing 2x6", function=WallFunction.Interior)
+    rep = builder.build(doc, _exchange(CEDAR_KINDS))
+    assert rep.resources["plumbing_wall"] == "Interior - Plumbing 2x6"
+    walls = [e for e in doc._by_id.values()
+             if isinstance(e, revit_fakes.Wall) and builder._is_managed(e)]
+    wet_walls = [w for w in walls if w.wtype_id.Value == wet.Id.Value]
+    assert len(wet_walls) == 1  # exactly the declared living|bath segment
+    int_id = next(w.Id.Value for w in doc.wall_types if w.Name == "Int")
+    assert any(w.wtype_id.Value == int_id for w in walls)  # the rest unchanged
+
+
+def test_declared_wall_kind_override_wins_and_falls_back():
+    # A named config override beats the name match; with neither, the interior
+    # wall type stands in (the declaration still builds a wall).
+    doc = _ready_doc()
+    doc.add_wall_type("Interior - Plumbing 2x6", function=WallFunction.Interior)
+    special = doc.add_wall_type("Wet Wall Special", function=WallFunction.Interior)
+    opts = report.BuildOptions(plumbing_wall_type="Wet Wall Special")
+    rep = builder.build(doc, _exchange(CEDAR_KINDS), opts)
+    assert rep.resources["plumbing_wall"] == "Wet Wall Special"
+    walls = [e for e in doc._by_id.values()
+             if isinstance(e, revit_fakes.Wall) and builder._is_managed(e)]
+    assert any(w.wtype_id.Value == special.Id.Value for w in walls)
+
+    doc2 = _ready_doc()  # no plumbing-named type, no override
+    rep2 = builder.build(doc2, _exchange(CEDAR_KINDS))
+    assert rep2.resources["plumbing_wall"] == "Int"
+
+
+def test_changed_kind_wall_type_recreates_only_the_declared_wall():
+    # Folding the kind resolution into the wall context must be surgical: when
+    # the plumbing mapping changes, the declared segment is recreated and the
+    # rest of the model is kept.
+    doc = _ready_doc()
+    data = _exchange(CEDAR_KINDS)
+    builder.build(doc, data)  # plumbing falls back to Int (no match)
+    doc.add_wall_type("Interior - Plumbing 2x6", function=WallFunction.Interior)
+    rep = builder.build(doc, data)
+    assert rep.count(status="created", kind="wall") == 1
+    assert rep.count(status="kept", kind="wall") > 0
+    assert rep.count(status="kept", kind="room") == 3
+
+
+def _hosted_families(doc):
+    return {
+        e[2][1].Family.Name
+        for e in doc.created
+        if e[0] == "instance" and len(e[2]) >= 3 and isinstance(e[2][2], revit_fakes.Wall)
+    }
+
+
+def test_window_and_door_kinds_pick_matching_families():
+    # An authored `fixed` window lands on the Fixed family; a `double` door
+    # prefers a double-leaf family over the single-flush standard. Default
+    # (casement) windows stay on the standard pick — a casement-named family
+    # in the template must NOT hijack them (review defect: config override
+    # bypass + fingerprint churn on every default window).
+    doc = _ready_doc()  # window family is literally named "Fixed"
+    doc.add_family(BIC.OST_Windows, "Casement Std")
+    doc.add_family(BIC.OST_Doors, "Double-Glass")
+    builder.build(doc, _exchange(CEDAR_KINDS))
+    fams = _hosted_families(doc)
+    assert "Double-Glass" in fams  # the double living|bed door
+    assert "Fixed" in fams  # the fixed bed window AND the default windows
+    assert "Casement Std" not in fams  # default kind keeps the standard pick
+
+
+def test_default_windows_honour_the_window_family_override():
+    doc = _ready_doc()
+    doc.add_family(BIC.OST_Windows, "Casement Cheap Builder Grade")
+    doc.add_family(BIC.OST_Windows, "Premium Slider")
+    opts = report.BuildOptions(window_family="Fixed")
+    builder.build(doc, _exchange(CEDAR), opts)
+    fams = _hosted_families(doc)
+    assert "Casement Cheap Builder Grade" not in fams
+    assert "Fixed" in fams
+    # And nothing recreates on rebuild: the casement family's presence must
+    # not perturb default-window fingerprints.
+    rep = builder.build(doc, _exchange(CEDAR), opts)
+    assert rep.count(status="created") == 0
+
+
+def test_double_door_never_matches_a_garage_family():
+    # "Overhead-Sectional Double" contains the token but is a garage family;
+    # the double entry must fall back to the sized standard door, noted.
+    doc = _ready_doc()
+    doc.add_family(BIC.OST_Doors, "Overhead-Sectional Double")
+    rep = builder.build(doc, _exchange(CEDAR_KINDS))
+    fams = _hosted_families(doc)
+    assert "Overhead-Sectional Double" not in fams
+    assert any("no door family reads 'double'" in n for n in rep.notes)
+
+
+def test_unmatched_authored_kind_stands_in_with_a_note():
+    # No double-leaf door family loaded: the standard family stands in, noted.
+    doc = _ready_doc()
+    rep = builder.build(doc, _exchange(CEDAR_KINDS))
+    assert any("no door family reads 'double'" in n for n in rep.notes)
+    # Default casement windows fall back *silently* (old plans, old behavior).
+    assert not any("casement" in n.lower() for n in rep.notes)
+
+
+def test_default_kinds_do_not_perturb_fingerprints():
+    # A plan with only default-kind windows/doors fingerprints identically
+    # whether or not the kind plumbing exists — rebuild keeps everything, and
+    # the kind entries are omitted from the context when they resolve to the
+    # standard picks.
+    doc = _ready_doc()
+    data = _exchange(CEDAR)
+    builder.build(doc, data)
+    rep = builder.build(doc, data)
+    assert rep.count(status="created") == 0
+    ctx = builder._resource_context(
+        builder._resolve_resources(doc, report.BuildOptions(), report.BuildReport(), data),
+        report.BuildOptions(),
+    )
+    # Default-kind resolutions land on the standard picks, so no
+    # per-sub-kind context keys appear and every fingerprint matches the
+    # pre-kind era.
+    assert not any("/" in k for k in ctx)
+
+
+def test_plain_build_after_two_candidates_disturbs_neither():
+    """Review gap: the plain-vs-candidate isolation was only tested with ONE
+    candidate in the document — pin the two-candidate sequence too."""
+    doc = _ready_doc()
+    builder.build(doc, _exchange(CEDAR), report.BuildOptions(candidate="scheme-A"))
+    builder.build(doc, _exchange(CEDAR_SPLIT), report.BuildOptions(candidate="scheme-B"))
+    a_ids = _candidate_ids(doc, "scheme-A")
+    b_ids = _candidate_ids(doc, "scheme-B")
+    assert a_ids and b_ids
+
+    builder.build(doc, _exchange(CEDAR))  # plain build into the same document
+    assert _candidate_ids(doc, "scheme-A") == a_ids
+    assert _candidate_ids(doc, "scheme-B") == b_ids
+    # And the plain namespace exists alongside both.
+    assert {k for k in _managed_ids(doc) if not bx.is_candidate_key(k)}

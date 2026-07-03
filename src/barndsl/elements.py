@@ -195,15 +195,28 @@ class Room:
 
 #: The interior-door kinds. ``swing`` is a hinged leaf (the default); ``cased``
 #: is an open walk-through (no leaf — the old ``open``); ``pocket``/``sliding``
-#: are sliding leaves (no swing arc). All four join the two rooms in the
-#: circulation graph; they differ in how they render and which checks apply.
-DOOR_KINDS = ("swing", "cased", "pocket", "sliding")
+#: are sliding leaves (no swing arc); ``double`` is a pair of hinged half-width
+#: leaves and ``french`` its glazed variant (both swing). All join the two rooms
+#: in the circulation graph; they differ in how they render and which checks apply.
+DOOR_KINDS = ("swing", "cased", "pocket", "sliding", "double", "french")
+
+#: Door kinds whose opening is a pair of half-width leaves. Egress and
+#: accessibility clear widths count **one** leaf (IRC R311.2 — the required
+#: egress door provides its 32 in clear through a single leaf), so the checks
+#: divide a double's total width by two.
+DOUBLE_LEAF_KINDS = frozenset({"double", "french"})
+
+#: Default total width (feet) of a double/french door when none is given: the
+#: stock 60 in pair (two 30 in leaves).
+DEFAULT_DOUBLE_DOOR_WIDTH = 60 / 12.0
 
 #: The exterior-door kinds. ``entry`` is a hinged people-door (the default);
+#: ``double``/``french`` are a pair of hinged half-width leaves (a patio /
+#: front-entry pair — egress counts one leaf, see :data:`DOUBLE_LEAF_KINDS`);
 #: ``overhead`` is a sectional/overhead garage door — vehicle access on a
 #: garage/shop bay. An overhead door has no swing, is never an egress door, and
 #: doesn't count as a building entrance (the plan still needs an ``entry``).
-EXTERIOR_DOOR_KINDS = ("entry", "overhead")
+EXTERIOR_DOOR_KINDS = ("entry", "overhead", "double", "french")
 
 #: Overhead (sectional garage) door defaults: the residential 9 x 7 single.
 #: A double is ``width 16``; stock heights are 7 or 8 ft.
@@ -275,6 +288,28 @@ class ExteriorDoor:
         return self.kind == "overhead"
 
 
+#: The window kinds a plan can declare. ``casement`` is the **default** — it is
+#: the only kind whose full glazed size is also its clear opening, which matches
+#: the compiler's historical egress math, so plans written before window kinds
+#: existed keep exactly the same diagnostics. A ``fixed`` window is glass that
+#: doesn't open: it still daylights (NAT_LIGHT) but is **never** an escape
+#: opening (BEDROOM_EGRESS / EGRESS_SIZE ignore it).
+WINDOW_KINDS = ("casement", "slider", "fixed", "double-hung")
+
+#: Per-kind ``(width, height)`` clear-opening fractions of the glazed size —
+#: the honest escape-opening math behind EGRESS_SIZE. A casement swings its
+#: whole sash out (~full opening; modelled as 1.0). A slider opens one of two
+#: horizontal panels, so roughly half its glazed *width* is clear. A double-hung
+#: raises one of two sashes, so roughly half its glazed *height* is clear.
+#: Fixed glass opens nothing.
+WINDOW_CLEAR_FACTORS: dict[str, tuple[float, float]] = {
+    "casement": (1.0, 1.0),
+    "slider": (0.5, 1.0),
+    "double-hung": (1.0, 0.5),
+    "fixed": (0.0, 0.0),
+}
+
+
 @dataclass
 class Window:
     """A window on an exterior-facing wall of a room."""
@@ -285,6 +320,8 @@ class Window:
     offset: float = 2.0
     sill_height: float = feet(3)
     head_height: float = feet(6.67)
+    #: One of :data:`WINDOW_KINDS`. Defaults to ``casement`` (see there for why).
+    kind: str = "casement"
     #: Source location of the `window` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
@@ -293,6 +330,20 @@ class Window:
     @property
     def glazed_area(self) -> float:
         return self.width * max(0.0, self.head_height - self.sill_height)
+
+    @property
+    def escape_capable(self) -> bool:
+        """Can this window be an emergency escape opening at all? Fixed glass
+        doesn't open, so it can never be one (IRC R310)."""
+        return self.kind != "fixed"
+
+    @property
+    def clear_opening(self) -> tuple[float, float]:
+        """The net clear ``(width, height)`` this window can open to, per its
+        kind (:data:`WINDOW_CLEAR_FACTORS`) — the figure EGRESS_SIZE checks."""
+        fw, fh = WINDOW_CLEAR_FACTORS.get(self.kind, (1.0, 1.0))
+        glass_h = max(0.0, self.head_height - self.sill_height)
+        return self.width * fw, glass_h * fh
 
 
 @dataclass
@@ -487,6 +538,127 @@ class ProgramSpec:
 #: The requirement kinds a plan can declare (see :meth:`Barndominium.require`).
 REQUIRE_KINDS = ("adjacent", "separate", "exterior", "area")
 
+#: The attributes a `wall` statement can put on a shared wall (any combination):
+#:
+#: * ``plumbing`` — a 2x6 wet wall carrying supply/waste. Satisfies the
+#:   WET_GROUP nudge for a wet room backing onto it, thickens the flanking
+#:   rooms' clear-dimension math, and hints a thicker wall type in the exchange.
+#: * ``bearing`` — an interior bearing wall. The auto frame honours it as an
+#:   interior post line when it runs along the building (perpendicular to the
+#:   bents' span); one parallel to the span can't split it and gets an info.
+#: * ``rated`` — a fire-separation wall. Declared on a garage/shop–dwelling
+#:   common wall it verifies (and silences) the GARAGE_SEPARATION reminder.
+WALL_ATTRIBUTES = ("plumbing", "bearing", "rated")
+
+
+@dataclass
+class WallSpec:
+    """Declared attributes of the shared wall between two rooms — one ``wall``
+    statement (``wall <a> - <b> plumbing|bearing|rated``, one or more).
+
+    Like :class:`Requirement`, this is declared *intent* checked mechanically:
+    a spec naming an unknown room is a ``WALL_REF`` error, a pair that shares no
+    wall is a ``WALL_NOADJ`` error (the wall doesn't exist), and a ``plumbing``
+    wall no wet room backs onto is a ``WALL_UNUSED`` info. ``attributes`` is
+    stored deduplicated in canonical :data:`WALL_ATTRIBUTES` order.
+    """
+
+    room_a: str
+    room_b: str
+    attributes: tuple[str, ...] = ()
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+    def has(self, attribute: str) -> bool:
+        return attribute in self.attributes
+
+
+@dataclass
+class Suite:
+    """A named group of rooms that read as one unit — a bedroom with its
+    ensuite bath and walk-in closet, say (the ``suite`` statement).
+
+    Declared *intent*, like :class:`ProgramSpec` and :class:`WallSpec`: the
+    membership isn't geometry, it's the author telling the checks which rooms
+    belong together. A member naming an unknown room is a ``SUITE_REF`` error;
+    a room declared in two suites is a ``SUITE_OVERLAP`` warning. When a suite
+    covers the rooms a design-quality check reasons about, that check uses the
+    declared membership instead of inferring it from types and adjacency.
+    ``members`` are room ids, deduplicated in declaration order.
+    """
+
+    id: str
+    members: tuple[str, ...] = ()
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Zone:
+    """A named band of the plan — the private wing, the public core (the
+    ``zone`` statement). Members are room ids **or** suite ids, so a zone can
+    group whole suites.
+
+    Declared intent like :class:`Suite`. An unknown member is a ``ZONE_REF``
+    error; a room in two zones (directly or via a suite) is a ``ZONE_OVERLAP``
+    warning; a clearly public room stranded in an otherwise-private zone (or the
+    reverse) is a ``ZONE_CROSS`` info. ``members`` are stored deduplicated in
+    declaration order.
+    """
+
+    id: str
+    members: tuple[str, ...] = ()
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class SiteSpec:
+    """Declared lot dimensions and yard setbacks — the ``site`` / ``setback``
+    statements. Optional, like :class:`ProgramSpec`: barndominiums are usually
+    acreage builds where the lot isn't the constraint, but when a ``site`` is
+    declared the validator checks the building footprint fits inside the
+    **buildable rectangle** (the lot minus its setbacks).
+
+    ``width``/``length`` are the lot's east-west / north-south dimensions (feet;
+    ``None`` until a ``site`` statement sets them). Setbacks are the required
+    clear yard on each edge: ``front`` and ``rear`` consume the plan's
+    north-south depth (front along the plan's south/entry side, rear along its
+    north), and ``side`` applies to **both** the east and west edges (a single
+    value, the two side yards being equal — there is no lot-position statement to
+    tell them apart). Any subset may be declared; ``None`` means that edge has no
+    setback (treated as 0 in the fit math). A ``setback`` with no ``site`` is a
+    ``SETBACK_NO_SITE`` error; a footprint that overruns the buildable rectangle
+    is a ``SETBACK`` error (a county/legal violation, checked by dimensions only).
+    """
+
+    width: float | None = None
+    length: float | None = None
+    front: float | None = None
+    side: float | None = None
+    rear: float | None = None
+    #: Source location of the `site` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+    #: Source location of the `setback` statement (textual front-end only).
+    setback_line: int | None = None
+    setback_col: int | None = None
+    setback_end_col: int | None = None
+
+    @property
+    def has_dims(self) -> bool:
+        """True once a ``site <W> x <L>`` has set the lot dimensions."""
+        return self.width is not None and self.length is not None
+
+    @property
+    def has_setback(self) -> bool:
+        """True if any of front/side/rear was declared."""
+        return any(v is not None for v in (self.front, self.side, self.rear))
+
 
 @dataclass
 class Requirement:
@@ -564,6 +736,20 @@ class Barndominium:
     #: Optional declared spatial requirements (intent). Each one is checked
     #: against the compiled geometry. See :class:`Requirement`.
     requirements: list[Requirement] = field(default_factory=list)
+    #: Declared shared-wall attributes (the ``wall`` statement): plumbing /
+    #: bearing / rated walls between room pairs. See :class:`WallSpec`.
+    wall_specs: list[WallSpec] = field(default_factory=list)
+    #: Declared room groupings (the ``suite`` statement) — a bedroom + ensuite
+    #: + closet read as one unit. Declaration order preserved. See :class:`Suite`.
+    suites: list[Suite] = field(default_factory=list)
+    #: Declared bands (the ``zone`` statement) — private wing, public core.
+    #: Members are room or suite ids. Declaration order preserved. See :class:`Zone`.
+    zones: list[Zone] = field(default_factory=list)
+    #: Optional declared lot dimensions + yard setbacks (the ``site`` /
+    #: ``setback`` statements). When set with dimensions and any setback, the
+    #: validator checks the footprint fits the buildable rectangle. See
+    #: :class:`SiteSpec`.
+    site_spec: SiteSpec | None = None
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
     #: true north. Used for solar/setback reasoning and to set Project North when
@@ -798,6 +984,104 @@ class Barndominium:
         if ma < 0:
             raise ValueError("require area must be non-negative.")
         self.requirements.append(Requirement(kind, str(a), min_area=ma))
+        return self
+
+    def wall(self, room_a: str, room_b: str, *attributes: str) -> "Barndominium":
+        """Declare attributes of the shared wall between two rooms (the ``wall``
+        statement): ``plumbing`` (a 2x6 wet wall), ``bearing`` (an interior
+        bearing wall the auto frame honours as a post line), and/or ``rated``
+        (a fire-separation wall, verifying the garage-separation reminder).
+
+        One or more attributes; duplicates are deduplicated and the set is
+        stored in canonical :data:`WALL_ATTRIBUTES` order. Validation errors on
+        an unknown room id (``WALL_REF``) or a pair that shares no wall
+        (``WALL_NOADJ``) — see :class:`WallSpec`.
+        """
+        if room_a == room_b:
+            raise ValueError("a wall statement names two different rooms.")
+        if not attributes:
+            raise ValueError(
+                f"a wall needs at least one attribute: {WALL_ATTRIBUTES}."
+            )
+        attrs = []
+        for a in attributes:
+            a = str(a).lower()
+            if a not in WALL_ATTRIBUTES:
+                raise ValueError(
+                    f"wall attribute must be one of {WALL_ATTRIBUTES}, got {a!r}."
+                )
+            attrs.append(a)
+        canonical = tuple(a for a in WALL_ATTRIBUTES if a in attrs)
+        self.wall_specs.append(WallSpec(str(room_a), str(room_b), canonical))
+        return self
+
+    def suite(self, suite_id: str, *rooms: str) -> "Barndominium":
+        """Declare a suite (the ``suite`` statement): a named group of rooms
+        that read as one unit — e.g. ``suite("primary", "master_bed",
+        "master_bath", "master_wic")``.
+
+        Like :meth:`program` / :meth:`wall`, this records intent the validator
+        checks: a member naming an unknown room is a ``SUITE_REF`` error, and a
+        room declared in two suites a ``SUITE_OVERLAP`` warning. Declaration
+        order is preserved; duplicate members are dropped (keeping the first).
+        Needs at least one member.
+        """
+        if not rooms:
+            raise ValueError("a suite needs at least one member room.")
+        members = tuple(dict.fromkeys(str(r) for r in rooms))
+        self.suites.append(Suite(str(suite_id), members))
+        return self
+
+    def zone(self, zone_id: str, *members: str) -> "Barndominium":
+        """Declare a zone (the ``zone`` statement): a named band of the plan —
+        ``zone("private", "primary", "bed_2", "hall_beds")``. Members are room
+        ids **or** suite ids, so a zone can group whole suites.
+
+        Records intent like :meth:`suite`: an unknown member is a ``ZONE_REF``
+        error, a room in two zones a ``ZONE_OVERLAP`` warning. Declaration order
+        preserved; duplicate members dropped. Needs at least one member.
+        """
+        if not members:
+            raise ValueError("a zone needs at least one member.")
+        mems = tuple(dict.fromkeys(str(m) for m in members))
+        self.zones.append(Zone(str(zone_id), mems))
+        return self
+
+    def site(self, width: float, length: float) -> "Barndominium":
+        """Declare the lot (``site``) dimensions in feet — ``site <W> x <L>``.
+
+        Optional. Gives the ``orientation`` azimuth something to anchor to and,
+        with a ``setback``, lets the validator check the building footprint fits
+        the buildable rectangle (see :meth:`setback` and :class:`SiteSpec`).
+        """
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        self.site_spec.width = float(width)
+        self.site_spec.length = float(length)
+        return self
+
+    def setback(
+        self,
+        *,
+        front: float | None = None,
+        side: float | None = None,
+        rear: float | None = None,
+    ) -> "Barndominium":
+        """Declare yard setbacks (feet) — ``setback front <n> side <n> rear <n>``.
+
+        Any subset may be given. ``front``/``rear`` clear the plan's south/north
+        (depth) edges; ``side`` clears **both** the east and west edges. A
+        setback with no :meth:`site` is a ``SETBACK_NO_SITE`` error, since there
+        are no lot dimensions to measure it against. See :class:`SiteSpec`.
+        """
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        if front is not None:
+            self.site_spec.front = float(front)
+        if side is not None:
+            self.site_spec.side = float(side)
+        if rear is not None:
+            self.site_spec.rear = float(rear)
         return self
 
     def frame(
@@ -1106,8 +1390,14 @@ class Barndominium:
 
         ``kind="overhead"`` makes it a sectional garage door: ``egress`` is
         forced False (vehicle access, never an escape route) and ``height``
-        defaults to the stock 7 ft panel.
+        defaults to the stock 7 ft panel. ``kind="double"``/``"french"`` is a
+        pair of half-width leaves (egress clear width counts one leaf).
         """
+        if kind not in EXTERIOR_DOOR_KINDS:
+            raise ValueError(
+                f"exterior door kind must be one of {EXTERIOR_DOOR_KINDS}, "
+                f"got {kind!r}."
+            )
         if kind == "overhead":
             egress = False
             if height is None:
@@ -1129,7 +1419,16 @@ class Barndominium:
         offset: float = 2.0,
         sill_height: float = feet(3),
         head_height: float = feet(6.67),
+        kind: str = "casement",
     ) -> "Barndominium":
+        """Add a window. ``kind`` is one of :data:`WINDOW_KINDS` (default
+        ``casement`` — full glazed size = clear opening; a ``fixed`` window
+        never counts as an escape opening)."""
+        kind = str(kind).lower()
+        if kind not in WINDOW_KINDS:
+            raise ValueError(
+                f"window kind must be one of {WINDOW_KINDS}, got {kind!r}."
+            )
         self.windows.append(
             Window(
                 room,
@@ -1138,6 +1437,7 @@ class Barndominium:
                 float(offset),
                 float(sill_height),
                 float(head_height),
+                kind=kind,
             )
         )
         return self

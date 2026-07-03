@@ -19,7 +19,10 @@ layout aid, not an engineered design.
 
 Possible follow-ups: feed `beam_linear_ft` into the roadmap's cost estimator;
 engineered member-sizing tables (span vs. section); lateral-bracing / shear-wall
-hints; honour an explicit interior bearing wall as a post line.
+hints. ~~Honour an explicit interior bearing wall as a post line~~ — DONE: the
+`wall a - b bearing` statement declares it, and `place_frame` drops an interior
+post onto the wall at every bent crossing its run (a wall across the span gets a
+`WALL_BEARING_AXIS` info instead).
 
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the

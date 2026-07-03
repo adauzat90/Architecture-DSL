@@ -1,0 +1,268 @@
+"""A single client / permit-sketch deliverable for a compiled plan.
+
+`barndsl packet FILE -o plan.html` binds the capabilities that already exist —
+`metrics()`, the deterministic design score, the dimensioned SVG render, the
+room/door/window schedules, the compiler diagnostics, and the `cost` estimate —
+into one self-contained, print-ready HTML document: the "hand it to a
+builder / lender / county" artifact, and the non-Revit user's equivalent of the
+Revit *Document* pass.
+
+**Format.** A single self-contained HTML file, styled for print with a CSS
+page-break before each section (cover, floor plan, schedules, cost, diagnostics).
+Every asset is embedded — the SVG is inlined, there are no external requests, and
+it works fully offline. No new dependency is added: `cairosvg` (which only turns
+one SVG into one PDF and cannot lay out a multi-section document) is **not**
+required. To get a PDF, open the HTML and *Print → Save as PDF* in any browser;
+the page-break CSS paginates it into the sections above.
+
+    from barndsl import compile_file, build_packet
+    open("plan.html", "w").write(build_packet(compile_file("plan.barn")))
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from xml.sax.saxutils import escape
+
+from .cost import estimate_cost
+from .render import render_svg
+from .schedule import _schedules
+from .score import design_score
+
+_CSS = """
+:root { --ink:#222; --muted:#666; --line:#ddd; --accent:#8A4B12; }
+* { box-sizing: border-box; }
+body { font-family: Helvetica, Arial, sans-serif; color: var(--ink); margin: 0;
+       line-height: 1.4; }
+.page { padding: 40px 48px; page-break-after: always; }
+.page:last-child { page-break-after: auto; }
+h1 { font-size: 30px; margin: 0 0 4px; }
+h2 { font-size: 20px; margin: 0 0 16px; border-bottom: 2px solid var(--accent);
+     padding-bottom: 6px; }
+h3 { font-size: 15px; margin: 20px 0 8px; color: var(--muted); }
+.sub { color: var(--muted); font-size: 15px; margin: 0 0 28px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 6px 0 18px; }
+th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--line); }
+th { background: #f6f6f6; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.metrics td:first-child { color: var(--muted); }
+.metrics td:last-child { text-align: right; font-weight: bold; }
+.metrics { max-width: 460px; }
+.score-total { font-size: 40px; font-weight: bold; }
+.score-total small { font-size: 18px; color: var(--muted); font-weight: normal; }
+.svgwrap { overflow-x: auto; border: 1px solid var(--line); padding: 10px;
+           background: #fff; }
+.svgwrap svg { max-width: 100%; height: auto; }
+.diag { font-size: 13px; margin: 4px 0; padding: 8px 10px; border-left: 4px solid; }
+.diag.error { border-color: #c0392b; background: #fdeceb; }
+.diag.warning { border-color: #d68910; background: #fef6e9; }
+.diag.info { border-color: #2874a6; background: #eaf2f9; }
+.diag .code { font-weight: bold; font-family: monospace; }
+.diag .hint { color: var(--muted); }
+.total-row td { font-weight: bold; border-top: 2px solid var(--ink);
+                border-bottom: none; }
+.note { color: var(--muted); font-size: 12px; font-style: italic; margin-top: 12px; }
+.badge { display: inline-block; font-size: 12px; color: var(--muted);
+         margin-left: 8px; }
+"""
+
+
+def _tag(text: str) -> str:
+    return escape(str(text))
+
+
+def _cover(result: Any, plan: Any, est: dict[str, Any]) -> str:
+    m = plan.metrics()
+    score = design_score(result)
+    program = (
+        f"{int(m['bedroom_count'])} bed / {m['bathroom_count']:g} bath · "
+        f"{m['interior_sqft']:.0f} sq ft interior · "
+        f"{m['habitable_sqft']:.0f} sq ft habitable · "
+        f"footprint {m['footprint_sqft']:.0f} sq ft"
+    )
+    rows = [
+        ("Footprint", f"{m['footprint_sqft']:.0f} sq ft"),
+        ("Interior (conditioned)", f"{m['interior_sqft']:.0f} sq ft"),
+        ("Habitable", f"{m['habitable_sqft']:.0f} sq ft"),
+        ("Bedrooms", f"{int(m['bedroom_count'])}"),
+        ("Bathrooms", f"{m['bathroom_count']:g}"),
+        ("Ceiling", f"{plan.ceiling_height:g} ft"),
+        ("Exterior wall area", f"{m['exterior_wall_area_sqft']:.0f} sq ft"),
+        ("Roof area (approx)", f"{m['roof_area_sqft']:.0f} sq ft"),
+        ("Foundation concrete", f"{m['foundation_concrete_yd3']:.1f} cu yd"),
+        ("Estimated cost", f"${est['total']['expected']:,.0f}"),
+    ]
+    metric_rows = "\n".join(
+        f"<tr><td>{_tag(k)}</td><td>{_tag(v)}</td></tr>" for k, v in rows
+    )
+    comp_rows = "\n".join(
+        f"<tr><td>{_tag(name)}</td><td class='num'>-{points:g}</td>"
+        f"<td>{_tag(score.details.get(name, ''))}</td></tr>"
+        for name, points in score.components.items()
+        if points
+    ) or "<tr><td colspan='3'>No deductions — a clean plan.</td></tr>"
+    c = score.counts
+    return f"""
+<section class="page">
+  <h1>{_tag(plan.name)}</h1>
+  <p class="sub">Permit-sketch packet · {_tag(program)}</p>
+  <h3>Key metrics</h3>
+  <table class="metrics">{metric_rows}</table>
+  <h3>Design score</h3>
+  <p class="score-total">{score.total:g}<small> / 100</small>
+     <span class="badge">{c['error']} error(s), {c['warning']} warning(s),
+     {c['info']} info(s)</span></p>
+  <table>
+    <tr><th>Component</th><th class="num">Deduction</th><th>Cause</th></tr>
+    {comp_rows}
+  </table>
+</section>
+"""
+
+
+def _floor_plan(plan: Any) -> str:
+    # render_svg draws the dimensioned plan (overall dimension lines + per-room
+    # W x L, and one stacked block per level for a multi-story plan); inline it.
+    svg = render_svg(plan)
+    levels = plan.levels()
+    note = (
+        f"One block per level ({len(levels)} levels)."
+        if len(levels) > 1
+        else "Dimensions in feet."
+    )
+    return f"""
+<section class="page">
+  <h2>Floor Plan</h2>
+  <div class="svgwrap">{svg}</div>
+  <p class="note">{_tag(note)} Not to scale when printed — verify all dimensions.</p>
+</section>
+"""
+
+
+def _schedule_tables(plan: Any) -> str:
+    blocks = []
+    for title, columns, rows in _schedules(plan, True, True, True):
+        head = "".join(f"<th>{_tag(c.header)}</th>" for c in columns)
+        if rows:
+            body = "\n".join(
+                "<tr>" + "".join(f"<td>{_tag(c.get(row))}</td>" for c in columns) + "</tr>"
+                for row in rows
+            )
+        else:
+            body = f"<tr><td colspan='{len(columns)}'>None.</td></tr>"
+        blocks.append(
+            f"<h3>{_tag(title)} ({len(rows)})</h3>"
+            f"<table><tr>{head}</tr>{body}</table>"
+        )
+    return f"""
+<section class="page">
+  <h2>Schedules</h2>
+  {''.join(blocks)}
+</section>
+"""
+
+
+def _cost_section(est: dict[str, Any]) -> str:
+    rows = "\n".join(
+        f"<tr><td>{_tag(ln['group'])}</td><td>{_tag(ln['item'])}</td>"
+        f"<td class='num'>{ln['quantity']:g} {_tag(ln['unit'])}</td>"
+        f"<td class='num'>${ln['unit_cost']:,.0f}</td>"
+        f"<td class='num'>${ln['cost']:,.0f}</td>"
+        f"<td>{_tag(ln['source'])}</td></tr>"
+        for ln in est["assemblies"]
+    )
+    t = est["total"]
+    mult = (
+        f" · regional multiplier x{est['multiplier']:g}"
+        if est["multiplier"] != 1.0
+        else ""
+    )
+    return f"""
+<section class="page">
+  <h2>Cost Estimate</h2>
+  <p class="sub">Assembly takeoff{_tag(mult)}. Every line is quantity x unit cost.</p>
+  <table>
+    <tr><th>Assembly</th><th>Item</th><th class="num">Qty</th>
+        <th class="num">Unit cost</th><th class="num">Cost</th><th>Source</th></tr>
+    {rows}
+    <tr class="total-row"><td colspan="4">Estimated total (expected)</td>
+        <td class="num">${t['expected']:,.0f}</td><td></td></tr>
+    <tr class="total-row"><td colspan="4">Range (+/-{est['band_pct']:g}%)</td>
+        <td class="num">${t['low']:,.0f} – ${t['high']:,.0f}</td><td></td></tr>
+  </table>
+  <p class="note">{_tag(est['disclaimer'])}</p>
+</section>
+"""
+
+
+def _diagnostics(result: Any) -> str:
+    diags = sorted(result.diagnostics, key=lambda i: (i.line or 0, i.col or 0))
+    if not diags:
+        body = "<p>No diagnostics — the plan compiles clean.</p>"
+    else:
+        items = []
+        for d in diags:
+            sev = d.severity.value
+            where = f" ({_tag(d.room)})" if d.room else ""
+            loc = f"line {d.line}: " if d.line else ""
+            hint = f"<div class='hint'>hint: {_tag(d.hint)}</div>" if d.hint else ""
+            items.append(
+                f"<div class='diag {sev}'>{loc}<span class='code'>{_tag(d.code)}</span>"
+                f"{where} — {_tag(d.message)}{hint}</div>"
+            )
+        body = "\n".join(items)
+    c = result.to_dict()["counts"]
+    return f"""
+<section class="page">
+  <h2>Diagnostics Appendix</h2>
+  <p class="sub">{c['error']} error(s), {c['warning']} warning(s),
+     {c['info']} info(s)</p>
+  {body}
+</section>
+"""
+
+
+def build_packet(
+    result: Any,
+    *,
+    costs: dict[str, float] | None = None,
+    multiplier: float = 1.0,
+) -> str:
+    """Return the full permit-sketch packet as a self-contained HTML string.
+
+    ``result`` is a :class:`~barndsl.compiler.CompileResult` (needed for the
+    diagnostics appendix); its ``plan`` must be non-``None``. ``costs`` and
+    ``multiplier`` are passed straight to :func:`~barndsl.cost.estimate_cost`.
+    """
+    plan = getattr(result, "plan", None)
+    if plan is None:
+        raise ValueError("cannot build a packet: the source did not compile to a plan")
+    est = estimate_cost(plan, overrides=costs, multiplier=multiplier)
+    sections = (
+        _cover(result, plan, est)
+        + _floor_plan(plan)
+        + _schedule_tables(plan)
+        + _cost_section(est)
+        + _diagnostics(result)
+    )
+    return (
+        f"<!doctype html>\n<html lang=\"en\">\n<head>\n"
+        f"<meta charset=\"utf-8\">\n"
+        f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        f"<title>{_tag(plan.name)} — Permit Packet</title>\n"
+        f"<style>{_CSS}</style>\n</head>\n<body>\n{sections}\n</body>\n</html>\n"
+    )
+
+
+def save_packet(
+    result: Any,
+    path: str,
+    *,
+    costs: dict[str, float] | None = None,
+    multiplier: float = 1.0,
+) -> str:
+    """Write :func:`build_packet` to ``path``. Returns the path."""
+    html = build_packet(result, costs=costs, multiplier=multiplier)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    return path

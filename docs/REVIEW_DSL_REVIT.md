@@ -1,5 +1,8 @@
 # Review — DSL & Revit improvements (2026-07)
 
+> A second review round — new findings plus the still-open items below,
+> consolidated — lives in `docs/REVIEW_DSL_REVIT_2.md`.
+
 ## Status (update)
 
 Implemented since this review: the **bug batch** (§5 — wing-aware

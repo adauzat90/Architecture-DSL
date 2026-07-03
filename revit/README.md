@@ -21,6 +21,7 @@ barndsl.extension/
   barndsl.tab/
     Plan.panel/
       Build Plan.pushbutton/      # pick a .json or .barn → build or preview it
+      Build Option.pushbutton/    # pick a candidate from candidates.json → build it into the active Design Option
       Document.pushbutton/        # views + tags + schedules + a sheet per level
       Export Exchange.pushbutton/ # pick a .barn → write its .json (no model change)
       Diagnostics.pushbutton/     # report environment + available types/families
@@ -105,6 +106,8 @@ model. Use it to shake a plan out against a project template before committing.
 | `plan.siding` / `plan.roofing` | **Finish hints select types**: between the named `config.json` override (highest) and the Function auto-pick (fallback), an exterior wall type / roof type whose *name* contains a hint token (case-insensitive; `siding "metal"` → "Exterior - Metal Panel") is preferred. The report notes which path picked the type. |
 | `levels` | Reused if one exists at the same elevation, else a new `Level`. |
 | `walls` | A `Wall` per segment, on its level, at its height. `exterior` picks an Exterior-function wall type; interior picks an Interior one (falls back to any basic type). A **gable-end** wall (flagged `profile: gable`) builds from a vertical pentagon profile so its top rises to the ridge; a profile failure falls back to a flat wall with a note. |
+| `walls[].kind` | A **declared wall kind** (`wall a - b plumbing\|bearing\|rated` in the DSL) maps to its own wall type: the named `plumbing_wall_type`/`rated_wall_type`/`bearing_wall_type` config override, else an Interior-function type whose *name* reads like the kind (plumbing/wet, rated/fire, bearing), else the standard interior type. The kind resolution is folded into those walls' rebuild fingerprints, so changing the mapping recreates exactly the declared segments. |
+| `openings[].kind` (window kinds, `double`/`french` doors) | An authored **window kind** (`casement`/`slider`/`fixed`/`double-hung`) or double-leaf door prefers a family whose name reads like the kind (e.g. a `fixed` window → the "Fixed" family, `double` door → "Double-Glass"); the standard sized family stands in with a note when nothing matches. The default `casement` kind never name-matches: it always uses the standard window pick (the `window_family` override / auto-pick), so old plans build exactly as before and a casement-named family can't hijack the override. Garage-door families (garage/overhead/sectional names) are excluded from `double`/`french` matching. |
 | `openings` (doors/windows) | A hosted `FamilyInstance` on the matched wall. The base door/window family is **duplicated and sized** to the exchange's width/height (a `barndsl WxH` type, cached per size), so openings come out the right size — not the family default. Window sill heights are applied. A door's authored **swing** (`swing_into`/`hinge`) flips the instance's facing/hand so the leaf opens into the named room; **egress** doors are stamped `barndsl egress` in Comments so a schedule can filter them. |
 | `openings` (cased) | A `cased_opening` (the doorless walk-through) cuts a **real wall opening** (`NewOpening`: floor to the opening height, the opening wide) instead of hanging a swinging leaf. If the cut fails it falls back to the sized door family with a note (the old behaviour). Reported as kind `opening`. |
 | `rooms` | A `Room` placed at each seed point once walls enclose it, then named, **numbered** (101, 102, … per level) and given default **finishes** (floor/base/ceiling/wall) by room type — a residential room schedule filled in, ready to refine. |
@@ -114,7 +117,7 @@ model. Use it to shake a plan out against a project template before committing.
 | `slabs` | A floor slab (`Floor.Create`) per level — the footprint at ground (one per section for an L/T/U), each upper level's room extent above. |
 | `foundation` | A **pad footing** (structural-foundation family) under each post of a placed frame; **only if** such a family is loaded, skipped with a note otherwise. The thickened perimeter edge (turndown / grade beam) and the rough concrete takeoff are reported for detailing. |
 | `grids` | Structural grid lines (`Grid.Create`) from a placed `frame`: numbered (`1, 2, …`) along the bents, lettered (`A, B, …`) across the eaves and any interior post line. None without a frame. |
-| `roof` | A footprint roof (`NewFootPrintRoof`) over the building outline, with its **eave edges made slope-defining** at the plan's pitch so it comes out as a gable (the gable ends stay vertical). Falls back to a flat roof if the slope can't be applied (**experimental** — the slope call needs live-Revit validation). |
+| `roof` | A footprint roof (`NewFootPrintRoof`), with its **eave edges made slope-defining** at the plan's pitch (gable ends stay vertical); a flat-roof fallback if the slope can't be applied (**experimental** — the slope call needs live-Revit validation). A plain gable/shed plan builds **one** roof over the building outline (the historic shape). A richer plan carries `roof.sections` and builds **one plane per section**: for an **L/T/U** plan, one footprint roof per footprint rectangle (so the roof follows the wing instead of one box over the concave notch — mirrors the slab pass); for a **monitor** plan, three planes — two low side sheds plus a **raised centre gable** lifted by its `base_height` onto the clerestory (built as *center gable + two shed roofs*). The clerestory stub walls that close the gap under the raised centre are **not built** — a manual refinement. Each plane is stamped separately, so an unchanged plan keeps them all. |
 | `areas` (porches) | A floor slab (`Floor.Create`) from each porch outline at the ground level. |
 | `areas` (stairs) | The flights the core planned for the footprint — a single **straight** run, or a **switchback** (two flights + an automatic landing) when the straight run won't fit — built via the Stairs component API. An overrun (neither fits) is built straight and flagged. Experimental: falls back to a note if the Stairs API rejects the geometry. |
 
@@ -124,16 +127,148 @@ build afterward in their own edit scopes (the Stairs API manages its own
 transactions). Every element is created defensively: if one fails (e.g. a missing
 family), it's recorded in the report and the rest still build.
 
-**Re-building is idempotent.** Every element a build creates is stamped
+**Re-building updates in place.** Every element a build creates is stamped
 barndsl-managed in a private **Extensible Storage** schema — not the user-facing
 Comments field, so the mark never clobbers your annotations and you can't
-accidentally match it. (A legacy Comments mark from an older build is still
-*read*, so an old build is still recognised and replaced.) By default a re-build
-first **removes the previous barndsl build** and lays down the current one — so
-iterating on the `.barn` and rebuilding *replaces* the model instead of stacking
-duplicates, and never touches anything you drew by hand. It's all one undo step.
-Set `"replace": false` in the config to append instead (levels are always reused,
-and stairs aren't purged).
+accidentally match it. The stamp also carries the element's **exchange identity**
+and a **fingerprint** of the exchange record that produced it, so a re-build can
+*diff* instead of starting over: an element whose record is unchanged is **kept**
+— same Revit element id, so your dimensions, tags and keynotes on it stay live
+across the agent's iterations — while changed elements are deleted and recreated,
+and removed ones purged. Dependencies cascade correctly: an opening's fingerprint
+folds in its host wall's, so a recreated wall always recreates the doors/windows
+hosted on it (Revit deletes hosted instances with their host); kept rooms keep
+their room numbers (new rooms number around them, never colliding). The
+fingerprints also fold in the **resolved types/families and placement options**
+per element kind, so changing the config (a different `exterior_wall_type`,
+`door_family`, `location_line`, `size_families`, …) rebuilds exactly the
+elements that config shapes — a kept element is guaranteed built with the
+resources the report names. (Deliberate exception: the auto-picked ceiling type
+isn't folded in — it has no config override, and a project that *loses* its
+ceiling type keeps its built ceilings rather than deleting what couldn't be
+rebuilt.) The per-run outcome shows in the report as **kept** alongside
+created/skipped/failed.
+
+Set `"rebuild": "full"` in the config to restore the old purge-everything-and-
+recreate behaviour (every re-build then hands out fresh element ids). Set
+`"replace": false` to append instead of replacing at all. Levels are always
+reused, and stairs aren't purged either way. A build from an **older extension
+version** is still recognised: its elements carry only the managed marker (the
+legacy Comments mark or the v1 marker-only storage schema, both still read) with
+no identity, so they are purged and rebuilt once — after which diffing kicks in.
+Everything runs in the one build transaction (one undo step).
+
+Needs live-Revit confirmation: the two-schema Extensible Storage dance (schemas
+are immutable once created, so the identity stamp lives under a new GUID while
+the v1 schema is still read); that a kept room whose bounding walls are deleted
+and recreated inside the same transaction stays placed and re-bounds; and the
+exact reach of Revit's host-delete cascade (the fakes mirror the documented
+behaviour: hosted instances and wall cuts die with the wall).
+
+## Build candidates as Design Options (the Build Option button)
+
+The agent's `design()` loop doesn't produce one plan — it shortlists several
+scored iterations and, today, ships only the winner. **Build Option** turns that
+into *"the agent shortlisted, you choose in the model"*: it builds one chosen
+candidate into a native Revit **Design Option**, so an architect can flip between
+schemes, compare them in real views, and keep the one they want — the way
+generated design actually wants to be consumed.
+
+### The API limitation (verified)
+
+**The Revit API cannot create Design Options or option sets.** `DB.DesignOption`
+is read-only — there is no supported call to make an option set, add options to
+it, or activate one; that is a UI-only operation in every version this extension
+targets (Revit 2025 included). What the API *does* give us is the one hook that
+makes this workflow possible: **any element created while a Design Option is
+active in the UI is automatically assigned to that option.** So the command never
+touches the DesignOption API to *write* — it just builds into whatever option you
+have active, and the identity namespacing (below) keeps each candidate's elements
+independent. Build Option reads the active option's name only to show it back to
+you (a read-only sanity check); if that read isn't available it prints a reminder
+instead.
+
+### The workflow
+
+1. **Shortlist and export (terminal).** Run the agent, then export each candidate
+   you want to offer to its own exchange with the core CLI — one file per
+   candidate:
+
+   ```bash
+   barndsl revit iteration_3.barn --out plan_a.json
+   barndsl revit iteration_7.barn --out plan_b.json
+   ```
+
+   (Producing the per-candidate `.barn`/exchange files from a `design()` run is a
+   core/CLI step — see the note in the batch report; this extension only consumes
+   the exchange JSON.)
+
+2. **Write a manifest** — a `candidates.json` next to those exchanges the command
+   reads to build its pick-list:
+
+   ```json
+   {
+     "schema": "barndsl.options/1",
+     "candidates": [
+       {"label": "iteration-3, score 84", "exchange": "plan_a.json"},
+       {"label": "iteration-7, score 79", "exchange": "plan_b.json"}
+     ]
+   }
+   ```
+
+   `label` is what you pick from the list (and what namespaces the build);
+   `exchange` is the candidate's `barndsl.revit/1` JSON, resolved relative to the
+   manifest. **One label = one Design Option = one identity namespace**: labels
+   must be unique and non-blank — the command refuses a manifest with a
+   duplicate or blank label, because two candidates sharing a label would share
+   a namespace and the second build would diff against (and purge) the first's
+   elements.
+
+3. **Create the option set in Revit, once (UI).** **Manage → Design Options → New**
+   an option set (e.g. "Schemes"), **New** an option per candidate under it, then
+   select an option and **Edit Selected** to *activate* it. (This is the UI-only
+   step the API can't do for you.)
+
+4. **Build Option.** With an option active, run **barndsl → Plan → Build Option**,
+   pick the manifest, then pick the candidate — its model lands in the active
+   option. Switch the active option and repeat for the next candidate. Choose
+   **Build** or **Preview (dry run)** just like Build Plan.
+
+### Identity namespacing (why candidates don't collide)
+
+Every managed element a build stamps carries an **identity key** so a rebuild can
+*diff* (keep unchanged elements, recreate changed ones, purge removed ones). That
+diff historically considered **every** managed element in the document — which
+would be a disaster here: building candidate B would see candidate A's elements as
+"removed from the plan" and purge them.
+
+Build Option fixes this by **namespacing every identity key with the candidate's
+label**. A candidate's build only ever matches — and only ever deletes — elements
+in its own namespace; another candidate's (and a plain Build Plan's) elements are
+left completely untouched. So:
+
+- rebuilding the **same** candidate keeps all of its elements (Revit ids, and any
+  dimensions/tags on them, survive) — the normal diff guarantee, per candidate;
+- building candidate **B** after **A** never disturbs A;
+- a `"rebuild": "full"` of one candidate purges and recreates only *that*
+  candidate's elements.
+
+The namespace is applied **only** when a candidate label is set. A plain Build
+Plan produces byte-identical identity keys and fingerprints to before, so existing
+models never recreate — the two paths coexist in the same document. The build
+report (and the `*.buildlog.json`) records the candidate label the build ran
+under.
+
+Config sidecars work exactly as for Build Plan (`<exchange>.config.json` or
+`barndsl_revit.config.json` beside it) — the candidate label is orthogonal to the
+config, so the same template mapping can drive every candidate.
+
+**Needs live-Revit confirmation:** that elements created by the build genuinely
+land in the active Design Option (the auto-assignment hook), and that
+`DesignOption.GetActiveDesignOptionId` reads the active option as expected for the
+sanity-check note. The identity namespacing and cross-candidate diff isolation
+themselves are pure exchange bookkeeping and are covered by the fakes tests
+(`tests/test_revit_builder.py`).
 
 ## Documentation (the Document button)
 
@@ -164,7 +299,7 @@ load a title block family). Each sub-pass can be turned off with the `views`,
 ## Debugging a run
 
 Each build prints a **report** to the pyRevit output panel — a per-kind
-created/skipped/failed table, the types/families it used, and a list of every
+created/kept/skipped/failed table, the types/families it used, and a list of every
 element that needs attention with the reason (e.g. `room bath — skipped: point
 not in an enclosed region`). It also writes the full report as
 `<source>.buildlog.json` next to the file you picked, so you can attach it when
@@ -192,6 +327,9 @@ folder). Unknown keys are ignored, so you can leave comments.
 {
   "exterior_wall_type": "Exterior - Brick on Mtl. Stud",
   "interior_wall_type": "Interior - 4 7/8\" Partition (1-hr)",
+  "plumbing_wall_type": "Interior - 6 1/8\" Partition (Plumbing)",
+  "rated_wall_type": "Interior - 5 1/2\" Partition (1-hr)",
+  "bearing_wall_type": "Interior - Bearing 2x6",
   "door_family": "Single-Flush",
   "window_family": "Fixed",
   "floor_type": "Generic 12\"",
@@ -212,6 +350,7 @@ folder). Unknown keys are ignored, so you can leave comments.
   "grids": true,
   "roof": true,
   "replace": true,
+  "rebuild": "diff",
   "views": true,
   "tags": true,
   "schedules": true,
@@ -255,11 +394,20 @@ back to the auto-pick with a note in the report.
   real Revit is still needed to confirm. If the Stairs API rejects the geometry,
   the stair is left for you to model (the rest of the build is fine).
 - **The roof slopes its eaves (experimental).** The outline/ridge/pitch/slope are
-  computed by the core's `roof_plan` (tested), and the builder now makes the eave
+  computed by the core's `roof_plan` (tested), and the builder makes the eave
   edges slope-defining via the model-curve mapping `NewFootPrintRoof` returns — so
   the roof builds as a gable. The mapping and slope calls still need live-Revit
-  confirmation; a failure falls back to a flat roof with a note. For an L/T/U
-  footprint the outline is the bounding rectangle.
+  confirmation; a failure falls back to a flat roof with a note.
+- **L/T/U and monitor roofs build per section (experimental).** An L/T/U plan now
+  roofs each footprint rectangle separately (the roof follows the footprint, no
+  longer spanning the concave notch); a **monitor** plan builds three planes (two
+  side sheds + a raised centre gable). The per-plane outlines/pitches/base heights
+  are computed by `roof_plan`'s `sections` (tested); the raised centre is lifted by
+  building its footprint at the clerestory elevation, which — like the eave slopes —
+  needs live-Revit confirmation. The **clerestory stub walls** under the raised
+  centre are not generated (model them by hand). A monitor's *gable-end* walls are
+  still marked to the full bounding apex (the true low-high-low monitor end
+  silhouette is a manual refinement).
 - **Gable-end walls build from a profile (experimental).** They're flagged in the
   exchange with a ridge apex and built via the vertical-profile overload of
   `Wall.Create`; if that overload rejects the geometry the wall falls back to a
@@ -305,9 +453,61 @@ Caveats to review in the output before trusting it:
   opening-driven, and the DSL re-derives walls. Non-rectangular rooms collapse to
   their bounding box.
 
+### Declared intent round-trips (exchange v2)
+
+Some of a plan's declared **intent** can't be reconstructed from geometry, so the
+exchange carries it as optional keys in the `plan` block, and `exchange_to_plan`
+restores each via the matching builder method. A plan that went through Revit and
+back therefore still knows what it was meant to be — in particular the declared
+**program** survives, so `PROGRAM_MISMATCH` keeps guarding a bedroom deleted after
+a round-trip. Each key is present only when non-default, so a plan declaring none
+of them (and any older `barndsl.revit/1` document) is byte-identical to before and
+loads unchanged. None of these keys is fingerprinted, so they never affect the
+diff rebuild.
+
+| `plan` key | Restores |
+|---|---|
+| `roof_style` / `roof_pitch` | The roof form (`gable`/`shed`/`monitor`) and the authored pitch override. The *override* is carried (not the effective pitch, which stays in the geometric `roof` block), so a plan with no override round-trips back to the default — a fixed point under `emit_dsl`. |
+| `notes` | Free-text plan notes (`plan.note`). |
+| `accessible` | The accessibility / aging-in-place opt-in (`plan.mark_accessible`). |
+| `program` | The declared program `{beds, baths?, required?, min_area?}` (`plan.program`) — `required` keyed by room-type name. |
+| `frame` | The frame *request* `{bay, span, post, ridge}` (`plan.frame`); the posts/beams themselves ride `structure` and are re-placed from the request on import. |
+| `suites` / `zones` | The declared `suite`/`zone` groupings, `[{id, members}, ...]` in declaration order (`plan.suite` / `plan.zone`). Each room record also carries its resolved `zone` (suite members inherit the zone that lists their suite; first-declared wins), which the builder writes to the room's **Department** parameter — so native room schedules group by zone with no shared-parameter setup. The per-room `zone` key IS part of the room's fingerprint, so changing a room's zone re-places that room (and re-applies its parameters). |
+
 The pure reconstruction (`exchange_to_plan`) and the name heuristics are covered
 by the repo suite (`tests/test_revit_roundtrip.py`, `tests/test_revit_naming.py`);
 the Revit-reading step (`builder.read_model`) needs a running Revit.
+
+## Units (`units`)
+
+Every exchange carries a top-level `units` field. The exchange is canonically
+**feet** — Revit's internal unit — and the producer *always emits* `"units":
+"feet"` (this never changes, so element fingerprints are stable and a re-export
+is byte-identical). What the field buys is **acceptance**: a document may declare
+metric, and both consumers normalise it to feet before anything reads a
+coordinate.
+
+- **Accepted spellings.** `feet` (canonical), and the metric aliases `meters`,
+  `metres`, `m`. A missing `units` is treated as feet (legacy documents). Any
+  other value is rejected, naming the value and the supported set — a
+  `RevitImportError` from `exchange_to_plan`, an `ExchangeError` (a hard `load`
+  failure) in the extension.
+- **Conversion factor.** `1 m = 1/0.3048 ft`, rounded to 6 decimals
+  (`3.28084`). Areas convert by the **square** of the factor, the lone volume
+  (`foundation.concrete_yd3`) by the cube. Angles and ratios — `orientation`,
+  `roof_pitch`/`pitch`, `slope_angle` — are **not** converted.
+- **Where it happens.** `exchange_to_plan` (core) and `exchange.load` (extension)
+  each normalise up front; the feet path is a pass-through (no copy, no
+  mutation), so the common case is untouched. The Revit builder therefore stays
+  entirely unit-unaware — post-normalisation everything is feet.
+- **Schema-driven + fails loud.** The conversion walks a table (`_UNIT_FIELDS`)
+  classifying every field of every record as length / area / volume / point /
+  pass-through. A **new numeric field added to the exchange without a table
+  entry raises** during conversion rather than importing an unconverted (and
+  silently corrupt) value — so extending the exchange forces a matching table
+  entry. The table is duplicated in `barndsl.revit` and `barndsl_revit.exchange`
+  (the extension can't import the core); `tests/test_revit_units.py` asserts the
+  two copies never drift.
 
 ## Testing
 
@@ -319,11 +519,18 @@ config round-trip), `tests/test_revit_naming.py` (the name→type/id heuristics)
 `tests/test_revit_model_extras.py` (floor slabs, structural grids, gable roof).
 
 `builder.py` itself is exercised against a **fake Revit API** (`tests/revit_fakes.py`
-supplies the DB/pyRevit/Stairs/views/`System` shapes). `tests/test_revit_builder.py`
+supplies the DB/pyRevit/Stairs/views/`System` shapes, including multi-schema
+Extensible Storage and the wall→hosted-instance delete cascade). `tests/test_revit_builder.py`
 covers the wall-type pick, opening hosting, family **sizing** (duplicate-per-size),
 the **dry-run rollback**, **named overrides**, structure/slab/porch/grid/roof/stair
-passes (including the switchback → two runs + landing), the **idempotent re-build**,
-`diagnose`, and `read_model`'s round-trip; `tests/test_revit_document.py` covers
+passes (including the switchback → two runs + landing), the **diff re-build**
+(unchanged plans keep every element id; a moved room recreates only its own
+elements; a changed wall recreates its hosted openings; removed/legacy elements
+are purged; `"rebuild": "full"` still purges everything), the **Design Options
+candidate isolation** (a candidate build namespaces its identities, rebuilding one
+candidate keeps it, building candidate B never purges candidate A, and a plain
+build stays byte-identical), `diagnose`, and
+`read_model`'s round-trip; `tests/test_revit_document.py` covers
 the **Document** pass (views, tags, schedules, sheets, and its idempotent
 re-document). These verify the builder *drives the API correctly* —
 only a running Revit confirms Revit does the right thing with the calls, so still

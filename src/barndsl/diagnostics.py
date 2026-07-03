@@ -100,6 +100,28 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two rooms share an id; ids must be unique."),
         _c("NO_BATH", W, "No bathroom",
            "The plan has no bathroom or half-bath."),
+        # --- site / setbacks (the `site` / `setback` statements) -------------
+        _c("SETBACK", E, "Footprint violates the setbacks",
+           "The building footprint (envelope + wings + porches) doesn't fit "
+           "inside the buildable rectangle — the lot (`site`) minus its yard "
+           "setbacks. `front` and `rear` consume the plan's north-south depth "
+           "(front along the south/entry edge); `side` clears both the east and "
+           "west edges. A dimensions-only check — barndsl has no lot-position "
+           "statement — so it compares the footprint's bounding box against the "
+           "buildable width and length. Shrink the footprint, enlarge the lot, or "
+           "reduce the setbacks. Not a substitute for a survey/site plan."),
+        _c("SITE", E, "Invalid site declaration",
+           "The `site` lot dimensions are zero/negative/non-finite, or a "
+           "`setback` value is negative. Declare a real lot: positive "
+           "dimensions, non-negative setbacks."),
+        _c("SETBACK_NO_SITE", E, "Setback without a site",
+           "A `setback` statement declares yard setbacks but no `site <W> x <L>` "
+           "gives the lot dimensions to measure them against. Add a `site` line, "
+           "or drop the setbacks."),
+        _c("RECOVERY_LIMIT", W, "Partial-plan checks incomplete",
+           "Parse-error recovery kept a partial plan, but frame placement or "
+           "validation crashed on it and was skipped - the diagnostics listed "
+           "are incomplete. Fix the parse error(s) to get the full report."),
         # --- geometry -------------------------------------------------------
         _c("ROOM_GEOMETRY", E, "Non-finite room geometry",
            "A room has nan/inf coordinates or size."),
@@ -185,9 +207,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A swinging interior door is below the 30 in minimum clear width."),
         _c("DOOR_SIZE", I, "Non-standard door width",
            "A swing door's width isn't a manufactured leaf size (interior "
-           "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72), or an overhead "
-           "door isn't a stock sectional size (widths 8/9/10/12/16 ft, heights "
-           "7/8 ft). Snap it to the nearest so it's orderable off-the-shelf."),
+           "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72), a declared "
+           "double/french pair isn't a stock pair width (48/60/64/72 in total), "
+           "or an overhead door isn't a stock sectional size (widths 8/9/10/12/16 "
+           "ft, heights 7/8 ft). Snap it to the nearest so it's orderable "
+           "off-the-shelf."),
         _c("OVERHEAD_ROOM", I, "Overhead door in a living space",
            "An overhead (sectional garage) door is on a room that isn't a garage "
            "or shop — unusual for a living space. Either the room should be a "
@@ -256,14 +280,21 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "or reached by stairs not yet modelled."),
         # --- egress & light -------------------------------------------------
         _c("BEDROOM_EGRESS", E, "Bedroom has no escape opening",
-           "Every bedroom needs an emergency escape opening — a window or its "
-           "own exterior door — on an exterior wall (IRC R310)."),
+           "Every bedroom needs an emergency escape opening — a window that "
+           "opens, or its own exterior door — on an exterior wall (IRC R310). "
+           "A `fixed` window is glass that doesn't open: it daylights but is "
+           "never an escape opening."),
         _c("EGRESS_SIZE", W, "Egress opening too small",
            "A bedroom's escape opening is below the IRC R310 minimums: ~5.7 sq "
            "ft net clear opening (5.0 at grade), >= 20 in clear width, >= 24 in "
-           "clear height, sill <= 44 in above the floor."),
+           "clear height, sill <= 44 in above the floor. The clear opening "
+           "follows the window kind: a casement clears ~its full glazed size, a "
+           "slider ~half its glazed width, a double-hung ~half its glazed "
+           "height; fixed glass never counts."),
         _c("EGRESS_DOOR", W, "No wide egress door",
-           "No exterior egress door is at least 32 in clear wide (R311.2)."),
+           "No exterior egress door is at least 32 in clear wide (R311.2). A "
+           "double/french pair provides its required clear width through ONE "
+           "leaf, so it counts half its total width."),
         _c("NAT_LIGHT", W, "Insufficient natural light",
            "A habitable room's glazing on exterior walls is below 8% of floor "
            "area (R303.1)."),
@@ -324,7 +355,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "(info — it might be a patio door)."),
         _c("WET_GROUP", I, "Scattered plumbing",
            "Three or more wet rooms (bath/kitchen/laundry/utility) share no "
-           "walls, spreading plumbing runs out."),
+           "walls, spreading plumbing runs out. A declared plumbing wall — "
+           "`wall <bath> - <neighbour> plumbing` — that a wet room really backs "
+           "onto also satisfies this: the wet wall exists, just shared with a "
+           "dry room."),
         _c("CLOSET_SHAPE", I, "Long, skinny closet",
            "A closet has the floor area for a walk-in but is shaped as a narrow "
            "strip (>= 4:1). A more square footprint (under ~3:1, >= 4 ft deep) is "
@@ -353,7 +387,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "space above it. IRC R302.6 requires the common wall to be a fire "
            "separation (min ½ in gypsum) and, where a habitable room is above, the "
            "ceiling to be ⅝ in Type X gypsum. A barndominium shop bay is treated as "
-           "a garage. The DSL can't model the assembly, so this is a reminder."),
+           "a garage. Declaring the detailed wall — `wall <garage> - <room> rated` "
+           "— records the separation and silences the reminder for that pair "
+           "(verified, not just reminded); a ceiling can't be declared, so "
+           "habitable space above keeps reminding."),
         _c("GARAGE_DOOR", I, "Garage/dwelling door must be self-closing & rated",
            "A door between a garage or shop and the dwelling must be self-closing "
            "and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood door) per "
@@ -376,6 +413,56 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("REQUIRE_REF", E, "Requirement references unknown room",
            "A `require` statement names a room id that doesn't exist — a mistyped "
            "id would otherwise silently check nothing."),
+        # --- declared wall attributes (the `wall` statement) ------------------
+        _c("WALL_REF", E, "Wall statement references unknown room",
+           "A `wall` statement names a room id that doesn't exist — a mistyped id "
+           "would otherwise silently declare nothing."),
+        _c("WALL_NOADJ", E, "Wall statement between non-adjacent rooms",
+           "A `wall` statement declares attributes of the shared wall between two "
+           "rooms, but the pair doesn't share one (a corner touch isn't enough, "
+           "and rooms on different levels never share a wall) — the declared wall "
+           "doesn't exist. Same geometry rule an interior `door` needs."),
+        _c("WALL_UNUSED", I, "Plumbing wall serves no wet room",
+           "A wall is declared `plumbing` (a 2x6 wet wall for supply/waste runs) "
+           "but neither room flanking it is a bath, kitchen, laundry or utility — "
+           "the declaration matches no fixtures. Put the wet wall where fixtures "
+           "back onto it, or drop the attribute."),
+        _c("WALL_BEARING_AXIS", I, "Bearing wall runs across the frame's span",
+           "A wall declared `bearing` runs parallel to the frame's bents (across "
+           "the span), so it can't carry an interior post line — post lines run "
+           "along the building's long axis, splitting the bents' clear span. The "
+           "frame ignored the declaration; declare a wall running the long way, "
+           "or leave the span to the auto interior supports."),
+        # --- suites / zones (the `suite` / `zone` statements) ---------------
+        _c("SUITE_SHADOW", W, "Suite id shadows a room id",
+           "A suite is named like an existing room, so a zone member with that "
+           "name resolves to the room and the suite silently never expands. "
+           "Rename the suite."),
+        _c("SUITE_REF", E, "Suite references unknown room",
+           "A `suite` statement lists a member room id that doesn't exist — a "
+           "mistyped id would otherwise group nothing. Reference a real room, or "
+           "declare it."),
+        _c("SUITE_OVERLAP", W, "Room in more than one suite",
+           "A room is declared a member of two different suites. A room belongs "
+           "to one suite (a bedroom's own bath/closet), so this is almost always "
+           "an authoring slip; drop it from all but one. A warning, not an error "
+           "— the plan still builds — matching the other declared-intent checks."),
+        _c("ZONE_REF", E, "Zone references unknown room or suite",
+           "A `zone` statement lists a member that names neither a room nor a "
+           "declared suite. Zone members are room ids or suite ids; reference an "
+           "existing one, or declare it."),
+        _c("ZONE_OVERLAP", W, "Room in more than one zone",
+           "A room falls in two zones — directly, or because it is in a suite "
+           "that a zone lists while another zone lists the room. Zones are "
+           "mutually-exclusive bands (private wing, public core), so this is an "
+           "authoring slip; keep each room in one zone."),
+        _c("ZONE_CROSS", I, "Room crosses its zone's band",
+           "A clearly public room (living/kitchen/dining) is the only such room "
+           "in a zone that otherwise holds only private rooms (bed/bath), or the "
+           "reverse — a public room stranded in the private band. A design nudge, "
+           "not a rule: it fires only when the room is in exactly one zone and "
+           "that zone is unambiguously the opposite band, so a mixed open-concept "
+           "zone (or a plan with no zones) never triggers it."),
         # --- structural frame (the `frame` directive) -----------------------
         _c("POST_OBSTRUCT", I, "Support post in open floor",
            "An auto-placed interior support post (needed where the beam span "
@@ -404,6 +491,22 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "The source declares no `program` line, so the compiler cannot check the "
            "plan delivers the brief's beds/baths/area. Derive one from the brief — "
            "`program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`."),
+        # --- Revit build log (`barndsl revit-log`) ---------------------------
+        _c("REVIT_FAIL", W, "Element failed to build in Revit",
+           "The pyRevit builder hit an API error creating this element (see the "
+           "message for Revit's reason); the rest of the build carried on, so the "
+           "model is missing it. Usually a template/family problem — check the "
+           "build log's resources block for what was picked."),
+        _c("REVIT_SKIP", W, "Element skipped by the Revit build",
+           "The builder had nothing to build this element with — a missing level, "
+           "host wall, family or type — so it is absent from the model. Load a "
+           "matching family into the template or map the pass to a named type in "
+           "the config.json sidecar."),
+        _c("REVIT_NOTE", I, "Revit build used a stand-in",
+           "The element built, but not the way the plan asked: a stand-in family, "
+           "a flat fallback for a gable profile, or a type hint that matched "
+           "nothing. The model is usable; refine the template (or the config "
+           "mapping) to close the gap."),
     ]
 )
 
