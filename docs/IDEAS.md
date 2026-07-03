@@ -48,6 +48,44 @@ IfcWall/IfcSlab/IfcRoof via an optional `ifcopenshell` dep); billboarded room
 labels in the viewer; true swept gable-wall pentagons instead of the box + infill
 approximation.
 
+## Web playground — DONE
+Shipped (Tier 2 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/playground.py`
+(`barndsl serve [FILE] [--port 8787] [--open]`) — a **local** web app, not a
+hosted service. It's a stdlib `http.server` (`ThreadingHTTPServer` +
+`BaseHTTPRequestHandler`) bound to `127.0.0.1` that calls the installed compiler
+directly: **zero new dependencies, no CDN, works offline** (deliberately not
+Pyodide). Four routes and nothing else — no static-file serving, no directory
+listing, no state, no files written. `POST /api/compile` (1 MB cap) returns the
+compile as JSON — the same diagnostics `CompileResult.to_dict` exposes plus,
+on a built plan, `svg` (render), `scene` (the exact blob the single-file viewer
+embeds), `score`, `metrics`, and the four elevations + section (pure functions,
+included). Bad DSL is a normal 200 with diagnostics, never a 500; only
+malformed/oversize JSON is 400. `GET /` serves a self-contained single-page app
+(inlined HTML/CSS/JS, no external references): a textarea editor with a
+synchronised line-number + severity gutter, a click-to-jump diagnostics panel,
+compile-on-type (400 ms debounce, Ctrl/Cmd+Enter to force), a header with plan
+title / score / metrics, a `/api/examples` load menu, and a viewport tabbed 2D
+plan (CSS-transform pan/zoom) / 3D / elevations. The last good render stays
+visible (dimmed) while the source is broken. `GET /api/reference` serves
+`DSL_REFERENCE` for a help panel.
+
+The 3D tab reuses the single-file viewer's inline WebGL renderer **verbatim**:
+it was factored out of `viewer.py`'s template into `viewer.RENDERER_JS` — one
+`mountScene(canvas, labels, togglesEl)` function returning a controller whose
+`setScene(json)` loads/swaps geometry — which both the viewer and the playground
+embed, so the two renderers can't drift. `tests/test_playground.py` pins the
+API contract (fields present, every example compiles through it, bad DSL → 200,
+malformed → 400, oversize rejected, unknown path → 404 serving no files), the
+no-external-references invariant, and the shared-renderer refactor (the viewer
+stays self-contained; the app embeds the same asset).
+
+Possible follow-ups: **Tier 3 — the agent in the app** (`agent.py`'s compile-fix
+loop behind a conversation pane, streaming intermediate renders); a **static
+Pyodide build** as an alternative zero-backend deploy target (the engine is pure
+Python + pydantic, so Pyodide can run it entirely client-side — trades the local
+server for a heavier first load); a shareable-plan permalink (source in the URL
+hash); side-by-side scheme compare (`compare_plans`) in the UI.
+
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the
 `barndsl.revit/1` exchange) and a `barndsl revit FILE --out plan.json` command.

@@ -1,6 +1,7 @@
 # Agent-first architecture application
 
-Status: **design** — tier 1 (3D output) **shipped/DONE**; tiers 2–5 planned.
+Status: **design** — tiers 1 (3D output) and 2 (web playground) **shipped/DONE**;
+tiers 3–5 planned.
 Context: `docs/IDEAS.md` (Revit plug-in — foundation DONE), `docs/PRODUCT_REVIEW.md`,
 `docs/REVIEW_DSL_REVIT*.md`.
 
@@ -115,11 +116,21 @@ from any `.barn` file, no CAD license, no plug-in, no API key. **Shipped:**
    minimal embedded renderer — implementation's choice; single-file output is
    the requirement.)
 
-### Tier 2 — web playground
+### Tier 2 — web playground — DONE
 
-Compiler-in-browser (barndsl's engine is pure Python + pydantic — Pyodide can
-run both) or a thin API server. DSL editor with inline diagnostics, live SVG +
-3D. No agent yet; this is the shell the agent plugs into.
+DSL editor with inline diagnostics, live SVG + 3D. No agent yet; this is the
+shell the agent plugs into. **Shipped:** `src/barndsl/playground.py`
+(`barndsl serve`) — a stdlib `http.server` **local** app (127.0.0.1, zero new
+dependencies, works offline; not Pyodide) that calls the installed compiler
+directly. `POST /api/compile` returns the compile as JSON (diagnostics + `svg`,
+`scene`, `score`, `metrics`, elevations/section — all pure functions of the
+plan); bad DSL is a normal 200 with diagnostics, never a 500. The single-page app
+(inlined, no CDN) is a textarea editor with a line-number + severity gutter,
+a clickable diagnostics panel, and a viewport tabbed 2D plan / 3D / elevations.
+The 3D tab reuses the single-file viewer's inline WebGL renderer verbatim — it
+was factored into `viewer.RENDERER_JS` (a shared `mountScene()` asset both embed)
+so the two never diverge. Tested in `tests/test_playground.py`. (A static Pyodide
+build remains a possible later deploy target — see `docs/IDEAS.md`.)
 
 ### Tier 3 — the agent in the app
 

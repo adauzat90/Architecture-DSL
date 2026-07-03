@@ -564,6 +564,7 @@ barndsl schedule examples/cedar_ridge.barn --format csv --out sched.csv
 barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
 barndsl gltf    examples/cedar_ridge.barn --out plan.glb  # → 3D model (glTF 2.0)
 barndsl view3d  examples/cedar_ridge.barn --out plan.html # → single-file 3D viewer
+barndsl serve   examples/cedar_ridge.barn --open   # local web playground (editor + live 2D/3D)
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
@@ -601,6 +602,17 @@ orbit/pan/zoom and layer toggles (turn the roof off to look inside) — that wor
 offline by double-clicking it, no network and no dependency. Both are pure
 Python, stdlib only. Schematic by design, like the elevations: for design review,
 not construction detailing.
+
+**Playground.** `barndsl serve --open` starts a local web app — a DSL editor with
+live, click-to-jump diagnostics on the left and a viewport (2D plan, 3D model,
+elevations + section) on the right. Type and it recompiles (~400 ms debounce,
+Ctrl/Cmd+Enter forces it); the header shows the plan title, design score and key
+metrics; a dropdown loads the bundled examples; the last good render stays up
+(dimmed) while the source is broken. It's a **local** tool — a stdlib
+`http.server` bound to `127.0.0.1` that calls the compiler directly, so **no new
+dependency, no CDN, and it works offline** (nothing is uploaded anywhere). The 3D
+tab reuses the same inline WebGL renderer `barndsl view3d` writes. `barndsl serve
+plan.barn` preloads a file; `--port` picks the port.
 
 **Cost estimate.** `barndsl cost plan.barn` turns the takeoff into a transparent,
 assembly-based budget: every line is `quantity × unit cost` with the quantity's

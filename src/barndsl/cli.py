@@ -41,6 +41,12 @@
         Write a single self-contained HTML file that renders the 3D model with
         orbit/pan/zoom and layer toggles. Works offline by double-clicking it.
 
+    barndsl serve [FILE.barn] [--port 8787] [--open]
+        Start the local web playground: a DSL editor with live diagnostics and a
+        2D-plan / 3D / elevations viewport, served from a stdlib http.server on
+        127.0.0.1 (no new dependency, works offline). An optional FILE preloads
+        the editor; `--open` launches a browser.
+
     barndsl revit FILE.barn [--out FILE.json] [--frame]
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
         (levels, deduplicated walls, hosted doors/windows, room seeds, structural
@@ -648,6 +654,23 @@ def _cmd_view3d(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Start the local web playground (editor + live diagnostics + 2D/3D views)."""
+    from .playground import run
+
+    source = None
+    if getattr(args, "file", None):
+        try:
+            with open(args.file, encoding="utf-8") as fh:
+                source = fh.read()
+        except OSError as exc:
+            print(f"error: cannot read {args.file}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
+    return run(
+        initial_source=source, port=args.port, open_browser=getattr(args, "open", False)
+    )
+
+
 def _cmd_elevation(args: argparse.Namespace) -> int:
     from .views import save_elevation
 
@@ -1131,6 +1154,20 @@ def main(argv: list[str] | None = None) -> int:
         "--open", action="store_true", help="open the written viewer in a browser"
     )
     p_view3d.set_defaults(func=_cmd_view3d)
+
+    p_serve = sub.add_parser(
+        "serve", help="start the local web playground (editor, live diagnostics, 2D/3D)"
+    )
+    p_serve.add_argument(
+        "file", nargs="?", default=None, help="optional .barn file to preload the editor"
+    )
+    p_serve.add_argument(
+        "--port", type=int, default=8787, help="port to bind on 127.0.0.1 (default 8787)"
+    )
+    p_serve.add_argument(
+        "--open", action="store_true", help="open the playground in a browser"
+    )
+    p_serve.set_defaults(func=_cmd_serve)
 
     p_elev = sub.add_parser(
         "elevation", help="render a schematic exterior elevation (one face) to SVG"

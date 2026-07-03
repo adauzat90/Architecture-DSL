@@ -61,6 +61,7 @@ from .layout2 import (
 from .dxf import save_dxf, to_dxf
 from .gltf import build_scene, to_glb, to_gltf, write_gltf
 from .viewer import viewer_html, write_viewer
+from .playground import compile_payload, make_server, run as serve
 from .render import RenderConfig, render_svg, save_render, save_svg
 from .views import (
     elevation_svg,
@@ -201,6 +202,10 @@ __all__ = [
     "build_scene",
     "viewer_html",
     "write_viewer",
+    # web playground (local http.server app: editor + live diagnostics + 2D/3D)
+    "serve",
+    "make_server",
+    "compile_payload",
     # Revit exchange (lowering to a Revit-shaped model + JSON)
     "to_revit_model",
     "to_revit_json",
