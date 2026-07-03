@@ -30,9 +30,14 @@ from .constants import (
     MIN_BEDROOM_DIMENSION,
     MIN_CEILING,
     MIN_HALLWAY_WIDTH,
+    MIN_SHADE_OVERHANG,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
     PLUMBING_WALL_THICKNESS,
+    SOLAR_SOUTH_MIN_GLAZING,
+    SOLAR_SOUTH_MIN_WALL,
+    SOLAR_SOUTH_SHADE_GLAZING,
+    SOLAR_WEST_MAX_GLAZING,
     STAIR_HEADROOM,
 )
 from .profiles import DEFAULT, Profile
@@ -53,6 +58,8 @@ from .geometry import (
     shared_edge,
     wall_faces_outside,
 )
+from .solar import compass_label, true_azimuth, wall_sector
+from .energy import WWR_CEILING, describe_targets
 
 
 class _WallOpening(Protocol):
@@ -120,6 +127,20 @@ ACCESSIBLE_TURN = 5.0  # 60 in wheelchair turning circle (A117.1 §304)
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
+#: Minimum plan overlap (sq ft) between an upper-floor wet room and a wet room
+#: below for their plumbing to share one straight vertical waste stack. A mere
+#: corner touch (0) can't route a stack + wet wall; require a small real overlap.
+MIN_STACK_OVERLAP = 4.0
+#: Furniture-fit floors on the *clear* interior (ft) — the livability analogue of
+#: the wet-room fixture checks, and one step beyond BEDROOM_DIM (which only sets a
+#: 7 ft nominal side). A bedroom must hold a **queen** bed (5×6.67) against a wall
+#: with a 24 in walk-around on one long side → a 7 (bed width + access) × 6.67 (bed
+#: length) clear envelope, so a 7×10 room that clears the area/dimension checks but
+#: is too narrow for a queen still gets flagged. A dining room must seat a 4-person
+#: table (~3 ft) with 30 in of chair-pull/circulation all round → ~8 ft clear.
+BED_FURNISH_SHORT = 6.67
+BED_FURNISH_LONG = 7.0
+DINING_FURNISH_CLEAR = 8.0
 CLOSET_WALKIN_ASPECT = 4.0  # a closet skinnier than this (long:short) is "long skinny"
 MIN_WALKIN_AREA = 24.0  # a closet this big is worth shaping as a walk-in, not a strip
 #: A swing door centred on a wall with at least this much clear wall on *both*
@@ -349,6 +370,13 @@ def _profile_tag(profile: Profile, field: str, base_str: str) -> str:
 #: Public, shared living spaces — bedrooms ideally don't open straight onto these.
 PUBLIC_TYPES = {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
 BATH_TYPES = {RoomType.BATHROOM, RoomType.HALF_BATH}
+#: Dedicated-storage rooms, for the whole-house storage ratio (LOW_STORAGE) and
+#: the `program storage <sqft>` minimum.
+STORAGE_TYPES = {RoomType.CLOSET, RoomType.PANTRY}
+#: Below this fraction of conditioned interior area in dedicated storage, a plan is
+#: storage-poor. Conservative — set below the worked gallery's floor so a curated,
+#: reasonably-storaged plan never trips it; it catches a home with almost no closets.
+LOW_STORAGE_RATIO = 0.025
 #: Rooms with plumbing fixtures — cheaper to build when clustered on a wet wall.
 WET_TYPES = {
     RoomType.BATHROOM,
@@ -891,12 +919,19 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_geometry(plan, add)
     _validate_room_programs(plan, add, profile)
     _validate_fixtures(plan, add)
+    _validate_furniture(plan, add)
+    _validate_storage(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_stairs(plan, add, profile)
     _validate_guards(plan, add)
     _validate_life_safety(plan, add)
     _validate_load_path(plan, add)
+    _validate_plumbing_stack(plan, add)
+    _validate_electrical_plan(plan, add)
+    _validate_solar(plan, add)
+    _validate_approach(plan, add)
+    _validate_energy(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add, profile)
     _validate_design_quality(plan, add, profile)
@@ -1346,6 +1381,71 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
                     + " fit with clear floor in front.",
                 )
             )
+
+
+def _validate_furniture(plan: Barndominium, add) -> None:
+    """Furniture-fit nudges for habitable rooms — the livability companion to the
+    wet-room fixture checks. A room can clear ``BEDROOM_AREA`` yet be the wrong
+    *shape* to arrange: a long thin bedroom that won't hold a bed with a
+    walk-around, a dining room too tight to pull a chair. Uses the clear
+    (finish-face) interior, like the fixture checks. INFO — guidance, not a gate.
+    """
+    for room in plan.rooms:
+        if room.type is RoomType.BEDROOM:
+            cw, cl = clear_dimensions(plan, room)
+            short, long = min(cw, cl), max(cw, cl)
+            if short + EPSILON < BED_FURNISH_SHORT or long + EPSILON < BED_FURNISH_LONG:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BED_CLEARANCE",
+                        f"Bedroom '{room.id}' is {_f(cw)}×{_f(cl)} ft clear — too tight "
+                        "to place a queen bed with a walk-around (needs about "
+                        f"{_f(BED_FURNISH_LONG)}×{_f(BED_FURNISH_SHORT)} ft clear).",
+                        room=room.id,
+                        hint="Widen or reshape the room so a queen bed backs to a wall "
+                        "with a ~24 in path on one long side.",
+                    )
+                )
+        elif room.type is RoomType.DINING:
+            cw, cl = clear_dimensions(plan, room)
+            if min(cw, cl) + EPSILON < DINING_FURNISH_CLEAR:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "DINING_CLEARANCE",
+                        f"Dining room '{room.id}' is {_f(cw)}×{_f(cl)} ft clear — too "
+                        "tight to seat a table with room to pull the chairs (needs "
+                        f"about {_f(DINING_FURNISH_CLEAR)} ft clear each way).",
+                        room=room.id,
+                        hint="Enlarge it so a 4-seat table (~3 ft) has ~30 in of "
+                        "chair-pull and circulation all round.",
+                    )
+                )
+
+
+def _validate_storage(plan: Barndominium, add) -> None:
+    """Flag a storage-poor plan — dedicated storage (closets + pantry) below a small
+    fraction of the conditioned area. Deterministic and unconditional, but the floor
+    is conservative (below the worked gallery), so it only catches a home with almost
+    no closets. INFO. For a specific target, declare `program ... storage <sqft>`.
+    """
+    interior = plan.interior_area
+    if interior <= EPSILON:
+        return
+    storage = sum(r.area for r in plan.rooms if r.type in STORAGE_TYPES)
+    if storage / interior < LOW_STORAGE_RATIO:
+        add(
+            Issue(
+                Severity.INFO,
+                "LOW_STORAGE",
+                f"Dedicated storage (closets + pantry) is {storage:.0f} sq ft — "
+                f"{storage / interior * 100:.1f}% of the conditioned area, a "
+                "storage-poor plan.",
+                hint="Add closets or a pantry — a linen closet by the baths, a coat "
+                "closet at the entry, a walk-in pantry off the kitchen.",
+            )
+        )
 
 
 def _validate_room_programs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
@@ -3214,6 +3314,13 @@ def _validate_program(plan: Barndominium, add) -> None:
             mismatches.append(
                 f"{_f(spec.min_area)} sq ft declared but {interior:.0f} placed"
             )
+    if spec.min_storage is not None:
+        storage = sum(r.area for r in plan.rooms if r.type in STORAGE_TYPES)
+        if storage + EPSILON < spec.min_storage:
+            mismatches.append(
+                f"{_f(spec.min_storage)} sq ft of storage declared but "
+                f"{storage:.0f} placed"
+            )
     if not mismatches:
         return
     loc: dict = {}
@@ -3838,6 +3945,329 @@ def _validate_load_path(plan: Barndominium, add) -> None:
                         "partition, or size the floor framing to carry a bearing wall.",
                     )
                 )
+
+
+def _validate_plumbing_stack(plan: Barndominium, add) -> None:
+    """Flag an upper-floor wet room with no wet room stacked beneath it.
+
+    A bath/kitchen/laundry drains through a vertical waste stack, and the plumbing
+    is far cheaper and simpler when that stack drops straight into a wet room (or a
+    wet wall) on the level below rather than jogging horizontally through the floor
+    assembly and down through a dry room's ceiling. If an upper-level wet room's
+    footprint doesn't overlap any wet room on the level directly below, its stack
+    can't run straight down. INFO — a cost/quality nudge like ``WET_GROUP`` (the
+    same-floor analogue); only a multi-storey plan with an upper wet room can trip
+    it, so single-storey and dry upper floors are untouched.
+    """
+    if len(plan.levels()) < 2:
+        return
+    by_level: dict[int, list[Room]] = {}
+    for r in plan.rooms:
+        by_level.setdefault(r.level, []).append(r)
+    for upper in plan.rooms:
+        if upper.level < 1 or upper.type not in WET_TYPES:
+            continue
+        below = [r for r in by_level.get(upper.level - 1, []) if r.type in WET_TYPES]
+        if any(upper.overlaps(r) >= MIN_STACK_OVERLAP for r in below):
+            continue
+        kind = upper.type.value.replace("_", " ")
+        add(
+            Issue(
+                Severity.INFO,
+                "PLUMBING_STACK",
+                f"The {kind} '{upper.id}' (level {upper.level}) sits over no wet room "
+                "below, so its waste stack can't drop straight down — it has to jog "
+                "through the floor assembly and down a dry room.",
+                room=upper.id,
+                hint="Stack it over a bath/kitchen/laundry on the level below (align "
+                "their wet walls) so the plumbing drops straight through the floor.",
+            )
+        )
+
+
+def _validate_electrical_plan(plan: Barndominium, add) -> None:
+    """Opt-in electrical / life-safety reminders the geometry can't verify.
+
+    The DSL models rooms and openings, not receptacles, luminaires, switches or
+    exterior grade, so these code requirements can't be checked from the plan —
+    yet a plan handed to a builder still has to meet them. Gated behind the
+    ``electrical`` directive (exactly like ``accessible``) so an ordinary plan
+    isn't nagged; when a plan opts in it gets a single checklist ``info`` to carry
+    onto the construction documents. The stair-lighting and door-landing clauses
+    only appear when the plan actually has a stair / an exterior people-door.
+    """
+    if not getattr(plan, "electrical", False):
+        return
+    parts = [
+        "space receptacles so no point along any wall is more than 6 ft from one "
+        "(IRC E3901.2), with GFCI protection at kitchens, baths, laundry and "
+        "outdoors and AFCI protection on habitable-room circuits (E3902)",
+        "provide a wall-switch-controlled lighting outlet at every habitable room, "
+        "hallway and exterior entrance (IRC R303.7 / E3903)",
+    ]
+    if plan.stairs:
+        parts.append(
+            "light each stair, switched at every floor level it serves (IRC R303.7)"
+        )
+    if any(not d.overhead for d in plan.exterior_doors):
+        parts.append(
+            "provide a level landing on each side of every exterior door, no more "
+            "than 1.5 in below the threshold (IRC R311.3)"
+        )
+    add(
+        Issue(
+            Severity.INFO,
+            "ELECTRICAL_PLAN",
+            "Electrical / life-safety items the DSL can't place — carry them onto "
+            "the construction documents: " + "; ".join(parts) + ".",
+            hint="These aren't in the geometry; confirm them on the electrical and "
+            "site plans.",
+        )
+    )
+
+
+#: The rooms where lack of winter sun (a north-only aspect) most hurts comfort.
+#: An office is excluded on purpose: even, glare-free north light is a legitimate
+#: choice for a studio/workspace, so "lit only from the north" isn't a defect there.
+_SUN_WANTED_TYPES = {RoomType.LIVING, RoomType.DINING, RoomType.BEDROOM, RoomType.KITCHEN}
+#: Preference order for the sunnier wall SOLAR_NORTH_ONLY recommends.
+_SECTOR_PREF = {"south": 0, "east": 1, "west": 2}
+
+
+def _shaded_by_covered_porch(plan: Barndominium, room: Room, win) -> bool:
+    """True if a covered porch abuts ``win``'s wall on the outside and spans it —
+    real vertical shade (the kind a low west sun actually needs)."""
+    if win.wall in (Direction.SOUTH, Direction.NORTH):
+        lo = room.x + win.offset
+    else:
+        lo = room.y + win.offset
+    mid = lo + win.width / 2.0
+    for p in plan.porches:
+        if not p.covered:
+            continue
+        px2, py2 = p.x + p.width, p.y + p.length
+        spans_x = p.x - EPSILON <= mid <= px2 + EPSILON
+        spans_y = p.y - EPSILON <= mid <= py2 + EPSILON
+        if win.wall is Direction.SOUTH and abs(py2 - room.y) < 0.75 and spans_x:
+            return True
+        if win.wall is Direction.NORTH and abs(p.y - room.y2) < 0.75 and spans_x:
+            return True
+        if win.wall is Direction.WEST and abs(px2 - room.x) < 0.75 and spans_y:
+            return True
+        if win.wall is Direction.EAST and abs(p.x - room.x2) < 0.75 and spans_y:
+            return True
+    return False
+
+
+def _validate_solar(plan: Barndominium, add) -> None:
+    """Solar-glazing nudges — only when the plan declares an ``orientation``.
+
+    With a true-north azimuth in hand, each exterior wall's outward face maps to a
+    compass bearing, so a room's windows can be bucketed by sun exposure. Two
+    nudges (INFO; northern-hemisphere): too much unshaded **west** glass overheats
+    a room through a low afternoon sun that's hard to shade, and a room lit **only
+    from the north** is dim and cold in winter when it has a sunnier wall free.
+    Dormant on an unsited plan (``orientation is None``), so it never imposes a
+    north on an abstract sketch — the same opt-in discipline as ``accessible``.
+    """
+    theta = plan.orientation
+    if theta is None:
+        return
+    for room in plan.rooms:
+        if room.type not in HABITABLE_TYPES:
+            continue
+        wins = plan.windows_for(room.id)
+        if not wins:
+            continue
+        by_sector: dict[str, float] = {}
+        for w in wins:
+            sec = wall_sector(w.wall, theta)
+            by_sector[sec] = by_sector.get(sec, 0.0) + w.glazed_area
+
+        # (1) Too much *unshaded* west glass — overheats in the afternoon. A
+        #     covered porch gives the vertical shade a low west sun needs, so glass
+        #     behind one doesn't count against this.
+        west_wins = [
+            w
+            for w in wins
+            if wall_sector(w.wall, theta) == "west"
+            and not _shaded_by_covered_porch(plan, room, w)
+        ]
+        west = sum(w.glazed_area for w in west_wins)
+        if west > SOLAR_WEST_MAX_GLAZING:
+            widest = max(west_wins, key=lambda w: w.glazed_area)
+            az = true_azimuth(widest.wall, theta)
+            add(
+                Issue(
+                    Severity.INFO,
+                    "SOLAR_WEST_GAIN",
+                    f"'{room.id}' has {_f(west)} sq ft of glazing facing "
+                    f"{compass_label(az)} ({az:.0f}° true) — a low afternoon sun "
+                    "that overheats the room and is hard to shade.",
+                    room=room.id,
+                    hint="Shade it with a deep overhang/porch or an awning, cut the "
+                    "west glass back, or move it to the south face.",
+                )
+            )
+
+        # (2) Glazed only to the north — dim, cold — with a sunnier wall to spare.
+        total = sum(by_sector.values())
+        if (
+            room.type in _SUN_WANTED_TYPES
+            and total > EPSILON
+            and by_sector.get("north", 0.0) + EPSILON >= total
+        ):
+            alt = sorted(
+                (
+                    wall
+                    for wall in exterior_walls(plan, room)
+                    if wall_sector(wall, theta) != "north"
+                ),
+                key=lambda wall: _SECTOR_PREF[wall_sector(wall, theta)],
+            )
+            if alt:
+                best = alt[0]
+                bearing = compass_label(true_azimuth(best, theta))
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "SOLAR_NORTH_ONLY",
+                        f"'{room.id}' is glazed only to the north — little direct sun, "
+                        "so it will feel dim and cold in winter.",
+                        room=room.id,
+                        hint=f"Add a window on the {best.value} wall (faces {bearing}) "
+                        f"for winter sun, e.g. `window {room.id} {best.value} width 4 "
+                        "offset 2`.",
+                    )
+                )
+
+    # (3) Plan-level: a large south face left almost unglazed wastes the best
+    #     passive-solar wall (free winter heat you can shade in summer).
+    south_wall = sum(
+        _wall_length(room, wall)
+        for room in plan.rooms
+        for wall in exterior_walls(plan, room)
+        if wall_sector(wall, theta) == "south"
+    )
+    south_glass = sum(
+        w.glazed_area for w in plan.windows if wall_sector(w.wall, theta) == "south"
+    )
+    if south_wall >= SOLAR_SOUTH_MIN_WALL and south_glass < SOLAR_SOUTH_MIN_GLAZING:
+        add(
+            Issue(
+                Severity.INFO,
+                "SOLAR_SOUTH_UNUSED",
+                f"The plan has ~{_f(south_wall)} ft of south-facing wall but only "
+                f"{_f(south_glass)} sq ft of south glazing — the best passive-solar "
+                "face is nearly blank.",
+                hint="Add south-facing windows for free winter sun (with an overhang "
+                "or porch to block the high summer sun).",
+            )
+        )
+
+    # (4) Plan-level: substantial south glass with no eave to shade it overheats
+    #     in summer. A covered porch over the glass counts as shade instead.
+    def _win_shaded(w) -> bool:
+        r = plan.room(w.room)
+        return r is not None and _shaded_by_covered_porch(plan, r, w)
+
+    south_unshaded = sum(
+        w.glazed_area
+        for w in plan.windows
+        if wall_sector(w.wall, theta) == "south" and not _win_shaded(w)
+    )
+    if plan.overhang < MIN_SHADE_OVERHANG and south_unshaded > SOLAR_SOUTH_SHADE_GLAZING:
+        add(
+            Issue(
+                Severity.INFO,
+                "SOLAR_SOUTH_NO_OVERHANG",
+                f"{_f(south_unshaded)} sq ft of south glazing has no roof overhang to "
+                "shade it — the high summer sun will overheat those rooms.",
+                hint="Add a ~2 ft eave (`overhang 2`) or a covered porch over the south "
+                "glass — it blocks the high summer sun but still lets the low winter "
+                "sun in.",
+            )
+        )
+
+
+def _validate_approach(plan: Barndominium, add) -> None:
+    """Approach nudges — only when the plan declares a ``street`` side.
+
+    A home should meet its street: the front door faces the approach, and the
+    garage doors don't turn their back on it (forcing a drive around the house).
+    Both INFO; dormant unless ``street`` is set, so an unsited plan is untouched.
+    """
+    street = plan.street
+    if street is None:
+        return
+    people = [d for d in plan.exterior_doors if not d.overhead]
+    if people and not any(d.wall == street for d in people):
+        add(
+            Issue(
+                Severity.INFO,
+                "APPROACH_ENTRY",
+                f"No entrance faces the street ({street.value} side); the front door "
+                "is around the side or back.",
+                hint=f"Put a people-door on the {street.value} wall, e.g. "
+                f"`entry <room> {street.value} width 3`.",
+            )
+        )
+    back = street.opposite()
+    for d in plan.exterior_doors:
+        if d.overhead and d.wall == back:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "APPROACH_GARAGE",
+                    f"The overhead door on '{d.room}' faces away from the street (the "
+                    f"{back.value} side); a vehicle would have to drive around the "
+                    "house to reach it.",
+                    room=d.room,
+                    hint=f"Face the overhead door toward the street/approach or a side "
+                    f"wall, not the {back.value} wall.",
+                )
+            )
+
+
+def _validate_energy(plan: Barndominium, add) -> None:
+    """Thermal-envelope guidance — only when the plan declares a ``climate`` zone.
+
+    The compiler can't run an energy model, so this is guidance, not a pass/fail:
+    the prescriptive R-value targets for the zone, the steel-frame thermal-bridge
+    note (the barndominium's characteristic failure), and a window-to-wall-ratio
+    *ceiling* to go with the existing daylight *floor* (NAT_LIGHT). Dormant unless
+    ``climate`` is set, so ordinary plans are untouched.
+    """
+    zone = plan.climate
+    if zone is None:
+        return
+    add(
+        Issue(
+            Severity.INFO,
+            "ENERGY_ENVELOPE",
+            f"IECC climate zone {zone} — prescriptive envelope targets (approx.): "
+            f"{describe_targets(zone)}. On a steel frame, put the wall insulation as "
+            "continuous exterior insulation — steel studs are a severe thermal bridge "
+            "that guts the cavity R-value.",
+            hint="Confirm the R-values against the adopted energy code (ideally with a "
+            "rater); the DSL can't model the assembly.",
+        )
+    )
+    wall_area = plan.metrics()["exterior_wall_area_sqft"]
+    glazing = sum(w.glazed_area for w in plan.windows)
+    if wall_area > EPSILON and glazing / wall_area > WWR_CEILING:
+        wwr = glazing / wall_area
+        add(
+            Issue(
+                Severity.INFO,
+                "WINDOW_HEAVY",
+                f"Glazing is {wwr * 100:.0f}% of the exterior wall area (target "
+                f"<= {WWR_CEILING * 100:.0f}%) — a high window-to-wall ratio drives "
+                "the heating and cooling load.",
+                hint="Trim glazing toward the target, or concentrate it on the south "
+                "for winter gain and shade it with an overhang.",
+            )
+        )
 
 
 def _door_clear_width(door) -> float:

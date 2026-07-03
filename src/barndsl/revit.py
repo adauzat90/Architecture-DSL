@@ -1459,7 +1459,7 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         areas=areas,
         fixtures=fixtures,
         foundation=foundation,
-        orientation=float(getattr(plan, "orientation", 0.0)),
+        orientation=float(getattr(plan, "orientation", None) or 0.0),
         siding=getattr(plan, "siding", None),
         roofing=getattr(plan, "roofing", None),
         site=_site_block(plan),

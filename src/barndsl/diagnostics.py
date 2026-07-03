@@ -159,6 +159,16 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A kitchen's clear interior is too small to hold a sink, range and "
            "refrigerator along the counters with a comfortable ~40 in working aisle. "
            "Enlarge it or lengthen the counter run."),
+        _c("BED_CLEARANCE", I, "Bedroom too tight to furnish",
+           "A bedroom clears its area and 7 ft nominal dimension but its clear "
+           "(finish-face) shape still can't hold a queen bed (5×6.67) against a wall "
+           "with a ~24 in walk-around — needs about 7×6.67 ft clear. Catches the "
+           "narrow room that passes the area/dimension checks but not the layout; "
+           "the livability companion to the wet-room fixture checks."),
+        _c("DINING_CLEARANCE", I, "Dining room too tight to furnish",
+           "A dining room's clear interior is too small to seat a 4-person table "
+           "(~3 ft) with ~30 in of chair-pull and circulation all round (about 8 ft "
+           "clear each way). Enlarge it."),
         _c("ACCESS_ENTRY", I, "No-step entrance (accessible target)",
            "An accessible plan needs at least one no-step entrance (threshold ≤ ½ in) "
            "with a level landing (ANSI A117.1). Thresholds aren't in the geometry, so "
@@ -268,6 +278,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "required outside each sleeping area (IRC R315), plus smoke alarms in "
            "each bedroom, outside sleeping areas, and on every level (IRC R314). "
            "The DSL can't place alarms — confirm them on the electrical plan."),
+        _c("ELECTRICAL_PLAN", I, "Electrical / life-safety checklist",
+           "An opt-in reminder (the `electrical` directive) for code requirements "
+           "the DSL can't place from geometry: receptacle spacing (no wall point "
+           ">6 ft from an outlet, IRC E3901.2) with GFCI/AFCI protection (E3902), "
+           "switched lighting outlets at habitable rooms/halls/entries (R303.7 / "
+           "E3903), stair lighting, and a level landing at each exterior door "
+           "(R311.3). Carry these onto the construction documents."),
         # --- access ---------------------------------------------------------
         _c("NO_ENTRY", E, "No exterior door",
            "The plan has no exterior people-door — no way to enter the building. "
@@ -298,6 +315,51 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("NAT_LIGHT", W, "Insufficient natural light",
            "A habitable room's glazing on exterior walls is below 8% of floor "
            "area (R303.1)."),
+        # --- solar orientation (advisory; needs a declared `orientation`) ---
+        _c("SOLAR_WEST_GAIN", I, "Overheating west glazing",
+           "A habitable room has a lot of west-facing glass. The low afternoon sun "
+           "on a west wall is hard to shade and overheats the room. Shade it with a "
+           "deep overhang/porch or awning, cut it back, or move it to the south "
+           "face. Runs only when the plan declares an `orientation` (northern "
+           "hemisphere)."),
+        _c("SOLAR_NORTH_ONLY", I, "Room lit only from the north",
+           "A living/dining/bedroom/kitchen is glazed only to the north — little "
+           "direct sun, so it feels dim and cold in winter — while it has a sunnier "
+           "(south/east/west) exterior wall to spare. Add a window on that wall. "
+           "Offices are exempt (even north light is a valid studio choice). Runs "
+           "only when the plan declares an `orientation`."),
+        _c("SOLAR_SOUTH_UNUSED", I, "South wall left unglazed",
+           "The plan has a substantial south-facing exterior wall but almost no "
+           "south glazing — the best passive-solar face is nearly blank. South "
+           "glass gives free low-angle winter sun that a summer-blocking overhang "
+           "can shade. Runs only when the plan declares an `orientation`."),
+        _c("SOLAR_SOUTH_NO_OVERHANG", I, "Unshaded south glazing",
+           "The plan has a lot of south glazing but no roof `overhang` (and no "
+           "covered porch over it) to shade it — the high summer sun overheats "
+           "those rooms. A ~2 ft eave blocks the summer sun while still admitting "
+           "the low winter sun. Runs only when the plan declares an `orientation`."),
+        # --- thermal envelope (advisory; needs a declared `climate` zone) ---
+        _c("ENERGY_ENVELOPE", I, "Envelope R-value guidance",
+           "The prescriptive envelope targets (ceiling/wall/floor/slab R-values and "
+           "window U-factor) for the plan's declared IECC `climate` zone, plus the "
+           "steel-frame thermal-bridge note: insulate a metal shell with continuous "
+           "exterior insulation, since steel studs short-circuit cavity insulation. "
+           "Guidance, not the code of record — confirm with the adopted energy code."),
+        _c("WINDOW_HEAVY", I, "High window-to-wall ratio",
+           "Glazing exceeds ~28% of the gross exterior wall area — a high "
+           "window-to-wall ratio that drives the heating/cooling load. The daylight "
+           "floor (NAT_LIGHT, 8%) is the minimum; this is the practical ceiling. "
+           "Concentrate glass on the south (winter gain) and shade it. Runs only "
+           "when the plan declares a `climate` zone."),
+        _c("APPROACH_ENTRY", I, "Front door doesn't face the street",
+           "No people-door is on the wall the `street` directive names as facing "
+           "the approach — the front door is around the side or back. Runs only "
+           "when the plan declares a `street`."),
+        _c("APPROACH_GARAGE", I, "Garage faces away from the street",
+           "An overhead/garage door is on the wall opposite the `street` side, so a "
+           "vehicle would have to drive around the house to reach it. Face it toward "
+           "the approach or a side wall. Runs only when the plan declares a "
+           "`street`."),
         # --- design quality (advisory) --------------------------------------
         _c("KITCHEN_FLOW", I, "Kitchen not open to living/dining",
            "An idiomatic barndo opens the kitchen to a dining or living area."),
@@ -359,6 +421,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "`wall <bath> - <neighbour> plumbing` — that a wet room really backs "
            "onto also satisfies this: the wet wall exists, just shared with a "
            "dry room."),
+        _c("PLUMBING_STACK", I, "Upper wet room not stacked",
+           "An upper-floor wet room (bath/kitchen/laundry) sits over no wet room "
+           "on the level below, so its waste stack can't drop straight down and "
+           "must jog horizontally through the floor assembly and down through a "
+           "dry room. Stack it over a wet room below (the cross-floor analogue of "
+           "WET_GROUP)."),
         _c("CLOSET_SHAPE", I, "Long, skinny closet",
            "A closet has the floor area for a walk-in but is shaped as a narrow "
            "strip (>= 4:1). A more square footprint (under ~3:1, >= 4 ft deep) is "
@@ -371,6 +439,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A bedroom has no closet reached by a door from it — either none "
            "abuts it, or one abuts but with no door into it (e.g. a neighbour's "
            "closet)."),
+        _c("LOW_STORAGE", I, "Storage-poor plan",
+           "Dedicated storage (closets + pantry) is below a small fraction of the "
+           "conditioned floor area — the whole-house storage the review flagged as "
+           "invisible, now visible. Conservative floor (below the worked gallery), "
+           "so it only catches a home with almost no closets. Declare a specific "
+           "target with `program ... storage <sqft>`."),
         _c("MASTER_ENSUITE", I, "No private ensuite",
            "On a floor with two or more full bathrooms, no bedroom has a private "
            "(ensuite) bath — every bath is shared. The primary bedroom should get "

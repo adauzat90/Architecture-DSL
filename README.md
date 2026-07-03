@@ -47,14 +47,20 @@ wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>
 floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
+electrical                         # optional; opt in to the electrical / life-safety checklist reminder
 note "free text"
-program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
+program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional; intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional; spatial intent, checked vs the plan
 require exterior <room> [<wall>]              #   (also: require area <room> >= <sqft>)
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
+overhang <ft>                      # optional; roof eave/rake projection past the walls (0 = flush; 1–2 ft typical)
+climate <zone>                     # optional; IECC climate zone 1–8 → envelope R-value guidance + a WWR ceiling
 wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall between two rooms
 roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
 orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
+site <W> x <L>                     # optional; the lot dimensions (east-west x north-south, feet)
+setback [front <n>] [side <n>] [rear <n>]  # optional; required yard setbacks (feet); needs a `site`
+street <wall>                      # optional; the wall facing the street/approach → entry/garage nudges
 finish [siding "<name>"] [roof "<name>"]  # optional; exterior material hints (metal siding, standing-seam)
 door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
 door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]   # exterior door
@@ -180,17 +186,33 @@ the diagnostics as machine-readable JSON for the agent loop or other tooling.
 **Three severities, one channel.** `error`s must be fixed; `warning`s flag likely
 problems; `info`s carry **design-quality** guidance — open-concept kitchen flow,
 bedroom privacy, bath proximity, plumbing economy (cluster wet rooms on a shared
-wall), bedroom closets, room proportion, workable room sizes, **fixture
+wall, and stack an upper-floor bath/kitchen/laundry over a wet room below so its
+waste stack drops straight), bedroom closets, room proportion, workable room
+sizes, **fixture
 clearances** (a bath that can't hold a toilet/lav/tub with IRC R307 clearances, a
-kitchen too tight for its appliances), bathroom ventilation, dead-end hallways,
+kitchen too tight for its appliances), **furniture fit** (a bedroom too narrow for
+a queen bed with a walk-around, a dining room too tight to pull a chair — the
+clear-floor test extended past the wet rooms), bathroom ventilation, dead-end
+hallways, **storage** (a storage-poor plan with almost no closets; or a declared
+`program … storage <sqft>` minimum that isn't met),
 **garage/dwelling fire separation** (a garage *or shop* common wall or the ceiling
 under habitable space above it, and the self-closing rated door between them — IRC
 R302.6 / R302.5.1), **clear-dimension** shortfalls (a room that meets a code
 minimum on its centreline rectangle but not once the walls are built), and — when
 a plan opts in with `accessible` — **accessibility / aging-in-place** nudges
 (accessible door clear widths, a wheelchair turning space in the bath,
-single-floor living, a no-step entry, per ANSI A117.1) — so "is it good?" travels
-the same diagnostic
+single-floor living, a no-step entry, per ANSI A117.1) — and, when a plan opts in
+with `electrical`, an **electrical / life-safety checklist** (receptacle spacing,
+switched lighting, stair lighting, exterior-door landings — the code items the
+geometry can't place, gathered for the construction documents) — and, when a plan
+declares an `orientation`, **solar-glazing** nudges (too much overheating west
+glass, a room lit only from the cold north face — the sun-aware half of siting a
+barndominium; a compass rosette showing true north is drawn on the plan) — and,
+when a plan declares a `climate` zone, a **thermal-envelope** reminder (the IECC
+prescriptive R-values, the steel-frame continuous-insulation note, and a
+window-to-wall-ratio ceiling to go with the daylight floor) — so "is
+it good?"
+travels the same diagnostic
 stream as "is it valid?" and never blocks a compile. The agent's architectural
 critique is folded into this same `info` channel.
 
@@ -534,6 +556,8 @@ barndsl fmt -w examples/cedar_ridge.barn           # canonically reformat in pla
 barndsl build   examples/cedar_ridge.barn --out plan.svg
 barndsl build   examples/cedar_ridge.barn --format png  # PNG/PDF (needs [raster])
 barndsl build   examples/cedar_ridge.barn --json   # diagnostics + metrics as JSON
+barndsl elevation examples/cedar_ridge.barn --side south   # schematic exterior elevation → SVG
+barndsl section examples/cedar_ridge.barn --out sec.svg    # schematic vertical section → SVG
 barndsl watch   examples/cedar_ridge.barn --out plan.svg  # recompile/render on save
 barndsl schedule examples/cedar_ridge.barn         # room/door/window schedules (MD)
 barndsl schedule examples/cedar_ridge.barn --format csv --out sched.csv
@@ -553,7 +577,12 @@ barndsl explain BEDROOM_EGRESS                     # what a diagnostic code mean
 pass schedules, but for users who don't open Revit. `barndsl dxf` exports the
 plan to DXF (a minimal, dependency-free DXF R12 writer) for any CAD tool;
 coordinates pass straight through (feet, x-east/y-north). `barndsl build
---format png|pdf` rasterises the SVG (optional `cairosvg`).
+--format png|pdf` rasterises the SVG (optional `cairosvg`). `barndsl elevation`
+and `barndsl section` draw the **vertical** dimension the floor plan can't — a
+schematic exterior elevation (roof profile + doors/windows at their true sill/head
+heights) and a transverse section (each level's floor/ceiling, vaulted
+double-heights, the roof over them), straight from the model's heights, roof form
+and pitch. No Revit, no raster dep.
 
 **Cost estimate.** `barndsl cost plan.barn` turns the takeoff into a transparent,
 assembly-based budget: every line is `quantity × unit cost` with the quantity's
@@ -663,7 +692,9 @@ tests/             # no API key required
   level. The builder is unit-tested against a fake Revit API. Remaining work
   genuinely needs a live Revit: validating the calls against Revit 2025 and
   refining the experimental pieces (the gable-roof slope, the model reader).
-- Cost estimation from the material takeoff
+- ~~Cost estimation from the material takeoff~~ — **done**: `barndsl cost` (an
+  assembly takeoff × unit costs, `--costs`/`--multiplier` overrides, ±15% band;
+  see `barndsl/cost.py`)
 - More residential building types beyond barndominiums
 
 ## License

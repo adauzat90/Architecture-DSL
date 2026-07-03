@@ -66,7 +66,7 @@ _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
     "roof", "orientation", "finish", "accessible", "site", "setback", "suite",
-    "zone"
+    "zone", "electrical", "street", "overhang", "climate"
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -113,9 +113,11 @@ Statements:
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   floor <D>                       # inter-floor assembly depth (ft); floor-to-floor = ceiling + this
   accessible                      # opt-in: run accessibility / aging-in-place nudges
+  electrical                      # opt-in: emit the electrical / life-safety checklist reminder
   note "free text"                # optional design note
-  program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
-                                  #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
+  program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
+                                  #   bed/bath = exact counts; other types = at-least; area = min interior;
+                                  #   storage = min closet+pantry sq ft
   require adjacent <room_a> <room_b>    # the two rooms must share a wall
   require separate <room_a> <room_b>    # the two rooms must NOT share a wall
   require exterior <room> [<wall>]      # the room needs an exterior wall (optionally that side)
@@ -173,11 +175,14 @@ Statements:
         # axis, interior support posts where that span exceeds <span> ft (default
         # 40), a ridge member over them (no-ridge omits it). post = nominal section
         # in inches (default 6). A layout aid, not an engineered design.
+  overhang <ft>                    # roof eave/rake projection past the walls (0 = flush; 1–2 ft typical)
+  climate <zone>                   # IECC climate zone 1-8 -> envelope R-value guidance + WWR check
   roof gable|shed|monitor [pitch <rise:run>]
         # the roof form over the building: gable (default, ridge down the long
         # axis), shed (a single slope), or monitor (a raised centre clerestory
         # aisle). pitch is rise:run (e.g. 0.333 for 4:12).
   orientation <degrees>            # compass azimuth that plan-north (+y) points (0 = true north)
+  street <wall>                    # the wall (n|s|e|w) that faces the street/approach → approach nudges
   finish [siding "<name>"] [roof "<name>"]  # exterior material hints (e.g. metal siding, standing-seam)
   site <W> x <L>                   # optional lot dimensions in feet (east-west x north-south)
   setback [front <n>] [side <n>] [rear <n>]  # required yard setbacks (feet); needs a `site`
@@ -606,6 +611,29 @@ def _parse_statement(
     elif key == "accessible":
         plan.mark_accessible()
         c.expect_end()
+    elif key == "electrical":
+        plan.mark_electrical()
+        c.expect_end()
+    elif key == "street":
+        street_wall = c.wall()
+        c.expect_end()
+        plan.set_street(street_wall)
+    elif key == "overhang":
+        plan.set_overhang(c.number("the overhang depth in feet"))
+        c.expect_end()
+    elif key == "climate":
+        tok = c.peek()
+        czone = c.number("the IECC climate zone (1-8)")
+        if czone != int(czone) or not 1 <= int(czone) <= 8:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"climate zone must be an IECC zone 1-8, got {czone:g}.",
+                tok.col if tok else 1,
+                end_col=tok.end_col if tok else None,
+                hint="Use a whole number 1 (warmest) to 8 (coldest).",
+            )
+        c.expect_end()
+        plan.set_climate(int(czone))
     elif key == "orientation":
         # `orientation <degrees>` — azimuth (clockwise from N) that plan-north points.
         plan.orient(c.number("the orientation in degrees"))
@@ -711,10 +739,15 @@ def _parse_statement(
         baths = None
         requires: dict[RoomType | str, int] = {}
         min_area = None
+        min_storage = None
         while (tok := c.peek()) is not None:
             if tok.text.lower() == "area":
                 c.take("area")
                 min_area = c.number("the minimum area")
+                continue
+            if tok.text.lower() == "storage":
+                c.take("storage")
+                min_storage = c.number("the minimum storage area")
                 continue
             n = c.count("a room count")
             noun = c.take("a room type")
@@ -725,7 +758,7 @@ def _parse_statement(
                     f"Unknown program room type '{noun.text}'.",
                     noun.col,
                     end_col=noun.end_col,
-                    hint=f"Use 'bed', 'bath', 'area', or a room type: {_TYPES}.",
+                    hint=f"Use 'bed', 'bath', 'area', 'storage', or a room type: {_TYPES}.",
                 )
             if cat == "bed":
                 beds = n
@@ -734,7 +767,9 @@ def _parse_statement(
             else:
                 requires[cat] = requires.get(cat, 0) + n
         c.expect_end()
-        plan.program(beds, baths, requires=requires, min_area=min_area)
+        plan.program(
+            beds, baths, requires=requires, min_area=min_area, min_storage=min_storage
+        )
         assert plan.program_spec is not None  # just set by plan.program(...)
         plan.program_spec.line = lineno
         plan.program_spec.col = kw.col

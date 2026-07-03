@@ -33,8 +33,13 @@ def emit_dsl(plan: Barndominium) -> str:
         out.append(f"floor {_n(plan.floor_depth)}")
     if plan.accessible:
         out.append("accessible")
-    if getattr(plan, "orientation", 0.0):
+    if getattr(plan, "electrical", False):
+        out.append("electrical")
+    if plan.orientation is not None:
+        # A declared `orientation 0` round-trips (distinct from undeclared/None).
         out.append(f"orientation {_n(plan.orientation)}")
+    if plan.street is not None:
+        out.append(f"street {plan.street.value}")
     if getattr(plan, "siding", None) or getattr(plan, "roofing", None):
         line = "finish"
         if plan.siding:
@@ -42,6 +47,10 @@ def emit_dsl(plan: Barndominium) -> str:
         if plan.roofing:
             line += f" roof {_q(plan.roofing)}"
         out.append(line)
+    if getattr(plan, "overhang", 0.0):
+        out.append(f"overhang {_n(plan.overhang)}")
+    if getattr(plan, "climate", None) is not None:
+        out.append(f"climate {plan.climate}")
     if getattr(plan, "roof_style", "gable") != "gable" or getattr(plan, "roof_pitch", None):
         line = f"roof {getattr(plan, 'roof_style', 'gable')}"
         pitch = getattr(plan, "roof_pitch", None)
@@ -69,6 +78,8 @@ def emit_dsl(plan: Barndominium) -> str:
             line += f" {n} {rtype.value}"
         if spec.min_area is not None:
             line += f" area {_n(spec.min_area)}"
+        if spec.min_storage is not None:
+            line += f" storage {_n(spec.min_storage)}"
         out.append(line)
     for req in getattr(plan, "requirements", None) or []:
         # Declared spatial intent rides next to `program` — the plan's contract

@@ -81,8 +81,9 @@ wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>                        # >= 7; 9–12 is typical
 floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D (default 1)
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
+electrical                         # optional; opt in to the electrical / life-safety checklist reminder
 note "free text"                   # optional; repeatable
-program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
+program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeatable); also:
 require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
 site <W> x <L>                     # optional; the lot's east-west × north-south dimensions (ft)
@@ -569,6 +570,11 @@ Brief grammar (one statement per line, `#` comments):
 | `ceiling <H>` | ceiling height |
 | `floor <D>` | inter-floor assembly depth (ft); floor-to-floor = ceiling + D |
 | `accessible` | opt in to accessibility / aging-in-place nudges (ANSI A117.1) |
+| `electrical` | opt in to the electrical / life-safety checklist reminder (receptacles, lighting, stair light, door landings) |
+| `orientation <deg>` | true-north azimuth plan-north points; drives the solar-glazing nudges + compass |
+| `street <wall>` | the wall facing the street/approach → APPROACH_ENTRY / APPROACH_GARAGE nudges |
+| `overhang <ft>` | roof eave/rake projection past the walls (shades south glass; widens the roof + takeoff) |
+| `climate <zone>` | IECC climate zone 1–8 → ENERGY_ENVELOPE R-value guidance + the WINDOW_HEAVY (WWR) ceiling |
 | `note "…"` | free text |
 | `room <id>: <type> <W> x <L> [level <n>]` | a room to place (no coordinates) |
 | `adjacent <a> <b> [<c> …]` | connect `<a>` to **each** of the rest — a hub. `adjacent hall bed1 bed2 bath` is the "rooms off a spine" idiom |

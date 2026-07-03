@@ -43,6 +43,36 @@ GUARD_HEIGHT = 36.0 / 12.0
 #: Glazing must total at least 8% of a habitable room's floor area.
 NATURAL_LIGHT_RATIO = 0.08
 
+# --- solar orientation (northern hemisphere) ---------------------------------
+# The compass sector a wall's outward face falls into drives the solar-glazing
+# nudges. Arcs are chosen so the *hot afternoon quadrant* (SW→W) is one sector,
+# not split across "south" and "west" by a naive nearest-cardinal rule. Azimuth
+# is degrees clockwise from true north; a wall's azimuth is the plan orientation
+# plus the wall's plan bearing (N=0, E=90, S=180, W=270), mod 360.
+#: [start, end) half-open arcs, in degrees. "north" is the wrap-around remainder.
+SOLAR_SOUTH_ARC = (135.0, 225.0)  # controlled winter gain, easy to shade — good
+SOLAR_WEST_ARC = (225.0, 300.0)  # low afternoon sun (SW→W), hard to shade — overheats
+SOLAR_EAST_ARC = (60.0, 135.0)  # morning sun — benign
+# everything else (300°–360°, 0°–60°) is "north": little direct sun, heat loss.
+#: A single room with more than this much west-sector glazing (sq ft) overheats
+#: in the afternoon and is hard to shade — the SOLAR_WEST_GAIN threshold. ~a big
+#: 5x5 window; a small west window in a bath never trips it.
+SOLAR_WEST_MAX_GLAZING = 24.0
+#: An exterior south-sector wall run longer than this (ft) with little glazing is
+#: a passive-solar face left unused — the SOLAR_SOUTH_UNUSED floor.
+SOLAR_SOUTH_MIN_WALL = 16.0
+#: If a qualifying south wall carries less south-sector glazing than this (sq ft),
+#: the passive-solar opportunity is being wasted — SOLAR_SOUTH_UNUSED. Conservative:
+#: fires only when the sunny face is almost blank.
+SOLAR_SOUTH_MIN_GLAZING = 12.0
+#: South glazing above this (sq ft) that isn't shaded overheats in summer without
+#: an eave — the SOLAR_SOUTH_NO_OVERHANG floor. Above SOLAR_SOUTH_MIN_GLAZING so a
+#: plan is never told both to add south glass *and* that it has too much unshaded.
+SOLAR_SOUTH_SHADE_GLAZING = 24.0
+#: A roof overhang at least this deep (ft) reads as real summer shade for south
+#: glass — the high winter sun still reaches under it. ~18 in.
+MIN_SHADE_OVERHANG = 1.5
+
 # --- habitability / circulation minimums (IRC R304/R305/R311) ----------------
 # These were previously defined inline in ``validation.py``; they live here now
 # so the jurisdiction-profile layer (``profiles.py``) can build its DEFAULT

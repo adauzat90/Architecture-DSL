@@ -127,6 +127,18 @@ class Direction(str, Enum):
     EAST = "east"
     WEST = "west"
 
+    def opposite(self) -> "Direction":
+        """The wall facing the other way (north↔south, east↔west)."""
+        return _OPPOSITE_DIR[self]
+
+
+_OPPOSITE_DIR: dict[Direction, Direction] = {
+    Direction.NORTH: Direction.SOUTH,
+    Direction.SOUTH: Direction.NORTH,
+    Direction.EAST: Direction.WEST,
+    Direction.WEST: Direction.EAST,
+}
+
 
 # --- Geometry ---------------------------------------------------------------
 
@@ -530,6 +542,8 @@ class ProgramSpec:
     baths: int | None = None
     required: dict[RoomType, int] = field(default_factory=dict)
     min_area: float | None = None
+    #: Minimum whole-house dedicated-storage area (closets + pantry), sq ft.
+    min_storage: float | None = None
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
@@ -718,6 +732,11 @@ class Barndominium:
     #: wheelchair turning space in the bath, single-floor living, a no-step entry).
     #: Off by default so ordinary plans aren't held to an accessible standard.
     accessible: bool = False
+    #: Opt-in electrical / life-safety checklist. When set, validation emits a
+    #: one-shot ``ELECTRICAL_PLAN`` reminder for the requirements the geometry
+    #: can't place (receptacle spacing, switched lighting, stair light, exterior
+    #: door landings). Off by default so ordinary plans aren't nagged.
+    electrical: bool = False
     rooms: list[Room] = field(default_factory=list)
     interior_doors: list[InteriorDoor] = field(default_factory=list)
     exterior_doors: list[ExteriorDoor] = field(default_factory=list)
@@ -752,9 +771,14 @@ class Barndominium:
     site_spec: SiteSpec | None = None
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
-    #: true north. Used for solar/setback reasoning and to set Project North when
-    #: the plan is lowered to Revit.
-    orientation: float = 0.0
+    #: true north. ``None`` means **undeclared** — distinct from a declared ``0`` —
+    #: so the solar checks only run when the author actually sited the plan (the
+    #: same opt-in discipline as ``accessible``/``electrical``). Drives the
+    #: solar-glazing nudges and sets Project North when lowered to Revit.
+    orientation: float | None = None
+    #: The plan-relative wall that faces the street / approach (the "front"). When
+    #: set, the approach nudges check the entry and garage doors relate to it.
+    street: "Direction | None" = None
     #: Exterior wall finish hint (e.g. metal siding). ``None`` leaves the consumer
     #: to choose; carried into the Revit exchange so a metal-shell wall type can be
     #: matched. A barndominium is typically metal or board-and-batten.
@@ -768,6 +792,16 @@ class Barndominium:
     roof_style: str = "gable"
     #: Optional roof pitch (rise:run) override; ``None`` uses the default pitch.
     roof_pitch: float | None = None
+    #: Roof eave/rake overhang depth (ft) — the roof's projection past the walls.
+    #: A barndominium's signature deep eave, and the primary passive-shading device
+    #: for south glass. ``0`` (default) is a flush roof; a typical eave is 1–2 ft.
+    #: Widens the roof in the elevations/section and the roof-area takeoff, and
+    #: shades south glazing in the solar checks.
+    overhang: float = 0.0
+    #: Optional IECC climate zone (1 warmest … 8 coldest). When set, the compiler
+    #: reports the prescriptive envelope R-value targets, the metal-frame
+    #: thermal-bridge note, and a window-to-wall-ratio ceiling. ``None`` = undeclared.
+    climate: int | None = None
     #: Optional structural-frame request. When set, :func:`barndsl.structure.place_frame`
     #: populates :attr:`posts` and :attr:`beams` from the footprint. See :class:`FrameSpec`.
     frame_spec: FrameSpec | None = None
@@ -868,12 +902,34 @@ class Barndominium:
             self.roof_pitch = pitch
         return self
 
+    def set_overhang(self, depth: float) -> "Barndominium":
+        """Set the roof eave/rake overhang depth (ft) — the roof's projection past
+        the walls. ``0`` is flush; a typical barndominium eave is 1–2 ft."""
+        d = _finite("plan", "overhang", depth)
+        if d < 0:
+            raise ValueError("overhang must be non-negative.")
+        self.overhang = d
+        return self
+
+    def set_climate(self, zone: int) -> "Barndominium":
+        """Declare the IECC climate zone (1–8) for the thermal-envelope guidance."""
+        z = int(zone)
+        if not 1 <= z <= 8:
+            raise ValueError("climate zone must be an IECC zone 1–8.")
+        self.climate = z
+        return self
+
     def orient(self, degrees: float) -> "Barndominium":
         """Set the true-north azimuth (degrees) that plan-north (``+y``) points."""
         d = float(degrees)
         if not math.isfinite(d):
             raise ValueError("orientation must be a finite number of degrees.")
         self.orientation = d % 360.0
+        return self
+
+    def set_street(self, wall: "Direction | str") -> "Barndominium":
+        """Declare which plan-relative wall faces the street / approach (the front)."""
+        self.street = Direction(wall) if isinstance(wall, str) else wall
         return self
 
     def finish(
@@ -901,6 +957,18 @@ class Barndominium:
         self.accessible = bool(value)
         return self
 
+    def mark_electrical(self, value: bool = True) -> "Barndominium":
+        """Opt in to the electrical / life-safety checklist reminder.
+
+        The DSL models rooms and openings, not receptacles, luminaires, switches
+        or exterior grade, so those code requirements can't be verified from the
+        geometry. This flag turns on a one-shot ``ELECTRICAL_PLAN`` reminder that
+        carries them onto the electrical/site plans. Off by default so an ordinary
+        plan isn't nagged — opt in via this method or the `electrical` directive.
+        """
+        self.electrical = bool(value)
+        return self
+
     def program(
         self,
         beds: int,
@@ -908,6 +976,7 @@ class Barndominium:
         *,
         requires: dict[RoomType | str, int] | None = None,
         min_area: float | None = None,
+        min_storage: float | None = None,
     ) -> "Barndominium":
         """Declare the intended program (bedroom / bathroom counts and more).
 
@@ -934,7 +1003,10 @@ class Barndominium:
         ma = None if min_area is None else float(min_area)
         if ma is not None and ma < 0:
             raise ValueError("program area must be non-negative.")
-        self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma)
+        ms = None if min_storage is None else float(min_storage)
+        if ms is not None and ms < 0:
+            raise ValueError("program storage must be non-negative.")
+        self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma, min_storage=ms)
         return self
 
     def require(
@@ -1513,7 +1585,14 @@ class Barndominium:
         # factor follows the actual pitch instead of a fixed guess.
         pitch = self.roof_pitch if self.roof_pitch is not None else DEFAULT_ROOF_PITCH
         slope_factor = math.hypot(1.0, pitch)  # sec(atan(pitch))
-        roof_area = self.footprint_area * slope_factor
+        # The roof covers the footprint plus a band of the eave/rake `overhang`
+        # around its perimeter (exact for a rectangle: perimeter·oh + 4·oh²; a
+        # close approximation for an L/T/U). Zero overhang leaves the plan area.
+        oh = self.overhang
+        roof_plan_area = self.footprint_area + perimeter * oh + 4.0 * oh * oh
+        roof_area = roof_plan_area * slope_factor
+        # Covered porches carry their own (shed) roof — a rough materials figure.
+        covered_porch_roof = sum(p.area for p in self.porches if p.covered) * slope_factor
         # Monolithic slab-on-grade concrete: the slab, its thickened perimeter
         # edge (turndown), and a pad footing under each post. Rough takeoff (yd³).
         concrete_ft3 = (
@@ -1521,6 +1600,14 @@ class Barndominium:
             + turndown_len * TURNDOWN_WIDTH * TURNDOWN_DEPTH
             + len(self.posts) * FOOTING_SIZE * FOOTING_SIZE * FOOTING_DEPTH
         )
+        # Glazing split by true compass sector (local import avoids the
+        # elements↔solar cycle). Uses orientation, or plan-north when unsited.
+        from .solar import wall_sector
+
+        theta = self.orientation or 0.0
+        glaze = {"south": 0.0, "east": 0.0, "west": 0.0, "north": 0.0}
+        for w in self.windows:
+            glaze[wall_sector(w.wall, theta)] += w.glazed_area
         return {
             "footprint_sqft": self.footprint_area,
             "interior_sqft": self.interior_area,
@@ -1530,6 +1617,9 @@ class Barndominium:
             "exterior_perimeter_ft": perimeter,
             "exterior_wall_area_sqft": exterior_wall_area,
             "roof_area_sqft": roof_area,
+            "overhang_ft": float(oh),
+            "covered_porch_roof_sqft": covered_porch_roof,
+            "climate_zone": float(self.climate) if self.climate is not None else 0.0,
             "foundation_concrete_yd3": concrete_ft3 / 27.0,
             "bedroom_count": float(
                 sum(1 for r in self.rooms if r.type is RoomType.BEDROOM)
@@ -1546,4 +1636,11 @@ class Barndominium:
             "beam_count": float(len(self.beams)),
             "frame_count": float(sum(1 for b in self.beams if b.role == "frame")),
             "beam_linear_ft": sum(b.length for b in self.beams),
+            # Solar takeoff: true-north azimuth and glazing by compass sector
+            # (plan-relative when the plan declares no orientation).
+            "true_north_azimuth": float(theta),
+            "glazing_south_sqft": glaze["south"],
+            "glazing_east_sqft": glaze["east"],
+            "glazing_west_sqft": glaze["west"],
+            "glazing_north_sqft": glaze["north"],
         }

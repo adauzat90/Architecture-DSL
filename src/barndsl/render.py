@@ -204,12 +204,15 @@ class _Renderer:
         self.parts.append(f'<rect width="{self.width:.0f}" height="{self.height:.0f}" fill="#ffffff" />')
 
         self._draw_title()
+        if self.plan.orientation is not None:
+            self._draw_compass()
         if self.multi:
             for i, lvl in enumerate(self.levels):
                 self._block_top = self._env_top(i)
                 self._draw_level_block(lvl)
             self._draw_panel(multi=True)
         else:
+            self._draw_street()
             self._draw_porches()
             self._draw_envelope()
             self._draw_rooms()
@@ -230,6 +233,7 @@ class _Renderer:
             size=13, anchor="start", weight="bold", fill="#333333",
         )
         if lvl == 0:
+            self._draw_street()
             self._draw_porches()
         self._draw_envelope()
         self._draw_rooms(level=lvl)
@@ -237,6 +241,64 @@ class _Renderer:
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
         self._draw_stairs(lvl)
+
+    def _draw_street(self):
+        """Mark the street/approach edge (a thick grey line + label) on the side the
+        `street` directive names — along the footprint edge. No-op unless the plan
+        declares a ``street``."""
+        st = self.plan.street
+        if st is None:
+            return
+        x0, y0, x1, y1 = self.plan.bounds()
+        col = "#8A8F98"
+        if st in (Direction.SOUTH, Direction.NORTH):
+            yw = y0 if st is Direction.SOUTH else y1
+            ys = self.sy(yw)
+            self._line(self.sx(x0), ys, self.sx(x1), ys, col, sw=3.0)
+            ty = ys + 14 if st is Direction.SOUTH else ys - 6
+            self._text((self.sx(x0) + self.sx(x1)) / 2, ty, "STREET", size=10, fill=col)
+        else:
+            xw = x0 if st is Direction.WEST else x1
+            xs = self.sx(xw)
+            self._line(xs, self.sy(y0), xs, self.sy(y1), col, sw=3.0)
+            anchor = "start" if st is Direction.WEST else "end"
+            tx = xs + 4 if st is Direction.WEST else xs - 4
+            self._text(tx, self.sy(y1) + 12, "STREET", size=10, fill=col, anchor=anchor)
+
+    def _draw_compass(self):
+        """A north-arrow rosette showing *true* north given the plan orientation.
+
+        Screen-up is plan-north (the drawing is in plan coordinates). Plan-north
+        points to compass azimuth ``orientation``, so true north is that many
+        degrees counter-clockwise of up: a direction ``(-sinθ, -cosθ)`` in screen
+        space (x right, y down). At ``orientation 0`` the arrow points straight up.
+        Drawn only when the plan is sited, so unoriented plans render unchanged.
+        """
+        theta = math.radians(self.plan.orientation or 0.0)
+        cx, cy, r = self.width - 46.0, 48.0, 22.0
+        dx, dy = -math.sin(theta), -math.cos(theta)  # unit vector toward true north
+        px, py = -dy, dx  # perpendicular (for the arrowhead base)
+        self.parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="#ffffff" '
+            f'stroke="#bbbbbb" stroke-width="1" />'
+        )
+        tipx, tipy = cx + dx * r, cy + dy * r
+        tailx, taily = cx - dx * r * 0.7, cy - dy * r * 0.7
+        self._line(tailx, taily, tipx, tipy, WALL, sw=1.6)
+        # Arrowhead: a small filled triangle at the tip, along the arrow axis.
+        hl, hw = 7.0, 4.0
+        bx, by = tipx - dx * hl, tipy - dy * hl
+        self.parts.append(
+            f'<polygon points="{tipx:.1f},{tipy:.1f} '
+            f'{bx + px * hw:.1f},{by + py * hw:.1f} '
+            f'{bx - px * hw:.1f},{by - py * hw:.1f}" fill="{WALL}" />'
+        )
+        # "N" just beyond the tip, and the declared azimuth beneath the rosette.
+        self._text(cx + dx * (r + 9), cy + dy * (r + 9) + 3, "N", size=11, weight="bold")
+        self._text(
+            cx, cy + r + 14, f"true N · {self.plan.orientation or 0.0:g}°",
+            size=9, fill="#888888",
+        )
 
     def _draw_title(self):
         self._text(self.c.margin_left, 34, self.plan.name, size=22, anchor="start", weight="bold")
