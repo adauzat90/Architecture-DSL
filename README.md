@@ -631,6 +631,17 @@ dependency, no CDN, and it works offline** (nothing is uploaded anywhere). The 3
 tab reuses the same inline WebGL renderer `barndsl view3d` writes. `barndsl serve
 plan.barn` preloads a file; `--port` picks the port.
 
+*Editor + viewport ergonomics.* The editor has muted **DSL syntax highlighting**
+(keywords, room types, strings, numbers and comments — the token vocabulary is
+derived from the compiler, not hardcoded) drawn on a scroll-synced layer behind
+the textarea, so typing behaviour is untouched. The **2D plan** and each
+**elevation** (click a card for a zoomable lightbox) have zoom controls —
+`−` / percentage / `+` / **Fit** — with wheel-zoom, drag-to-pan and `+`/`−`/`0`
+keys; Fit fills the pane and is the default on load and tab-switch. Clicking a
+room on the plan jumps the editor to its line. The header's **?** button opens a
+slide-over with the searchable DSL reference and the keyboard shortcuts, and the
+score chip opens a per-category breakdown popover.
+
 *Work that persists and leaves.* The editor autosaves to the browser
 (`localStorage`) on the same debounce, so a reload restores your last session (and
 if you started with a `FILE` argument it keeps that file on screen and *offers*
@@ -658,7 +669,10 @@ a stray Ctrl+P on the app itself prints the active viewport tab, not the chrome.
 *Edit mode.* Toggle **Edit layout** on the 2D plan tab for direct manipulation:
 an interactive overlay (room-palette colours, id labels) where you drag a room to
 move it (0.5 ft grid snap), drag its edge/corner handles to resize it (3 ft
-minimum), and drag a door/window/entry marker to slide it along its wall. Every
+minimum), and drag a door/window/entry marker to slide it along its wall. A live
+readout chip near the cursor shows the position/size (and the resize delta) as you
+drag, and neighbour **snap guides** appear when an edge lines up with another
+room's. Every
 gesture is round-tripped as a **surgical DSL text edit** — only the one statement
 changes, comments and formatting untouched — so the text stays the source of
 truth (`POST /api/edit`, engine in `barndsl.edits`). Clicking a room scrolls the

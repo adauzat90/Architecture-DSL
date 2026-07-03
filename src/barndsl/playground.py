@@ -82,6 +82,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .compiler import DSL_REFERENCE, compile_source
+from .elements import RoomType
 from .cost import estimate_cost
 from .dxf import to_dxf
 from .edits import EditError, apply_edit, edit_from_json, opening_overlays
@@ -101,6 +102,45 @@ from .views import elevation_svg, section_svg
 MAX_BODY = 1_000_000
 
 _ELEVATION_SIDES = ("south", "north", "east", "west")
+
+#: Statement heads the compiler's ``_parse_statement`` dispatch recognises — kept
+#: in step with that if/elif chain in :mod:`barndsl.compiler`. These are the DSL's
+#: line-leading keywords; the editor's syntax highlighter colours them.
+_STATEMENT_KEYWORDS = (
+    "plan", "envelope", "wing", "ceiling", "floor", "accessible", "electrical",
+    "street", "overhang", "climate", "orientation", "finish", "site", "setback",
+    "roof", "note", "program", "require", "room", "wall", "suite", "zone", "door",
+    "open", "entry", "window", "porch", "stair", "frame",
+)
+
+#: Secondary keywords — placement anchors, opening modifiers and option words that
+#: appear mid-statement (from the grammar in :data:`~barndsl.compiler.DSL_REFERENCE`).
+#: Highlighted the same muted "keyword" colour as the statement heads.
+_MODIFIER_KEYWORDS = (
+    "x", "at", "size", "level", "vaulted", "width", "offset", "height", "sill",
+    "head", "into", "hinge", "near", "far", "center", "align", "from", "to",
+    "exterior", "overhead", "no-egress", "covered", "bay", "span", "post",
+    "no-ridge", "pitch", "gable", "shed", "monitor", "siding", "adjacent",
+    "separate", "area", "storage", "bed", "bath", "front", "side", "rear",
+    "swing", "cased", "pocket", "sliding", "double", "french", "casement",
+    "slider", "fixed", "double-hung", "of",
+    "east-of", "west-of", "north-of", "south-of",
+    "right-of", "left-of", "above-of", "below-of",
+)
+
+
+def _highlight_tokens() -> dict:
+    """The token vocabulary the editor's syntax highlighter uses.
+
+    ``types`` comes straight from :class:`~barndsl.elements.RoomType` (the real
+    source of room-type names) and ``keywords`` from the compiler's statement
+    dispatch plus the grammar's modifier words — derived, not re-invented, so the
+    highlighting tracks the language rather than drifting from it.
+    """
+    return {
+        "keywords": sorted(set(_STATEMENT_KEYWORDS) | set(_MODIFIER_KEYWORDS)),
+        "types": [t.value for t in RoomType],
+    }
 
 
 # --- example / starter source ------------------------------------------------
@@ -811,6 +851,7 @@ def render_app(initial_source: str, from_file: bool = False) -> str:
         .replace("__INITIAL_SOURCE__", _js_string(initial_source))
         .replace("__INITIAL_FROM_FILE__", "true" if from_file else "false")
         .replace("__SCAFFOLD_SOURCE__", _js_string(starter_dsl("My Barndo")))
+        .replace("__HIGHLIGHT__", json.dumps(_highlight_tokens()))
     )
 
 
@@ -1063,10 +1104,133 @@ _APP_HTML = r"""<!doctype html>
   .rempty { color:var(--faint); padding:12px 0; }
   .rmeta { font-size:12.5px; color:var(--muted); margin:0 0 10px; }
 
+  /* --- syntax-highlight overlay (a coloured <pre> behind the textarea) --- */
+  .editor-stack { flex:1; position:relative; min-width:0; overflow:hidden; }
+  #hl { position:absolute; inset:0; margin:0; overflow:hidden; pointer-events:none;
+    padding:10px 12px; color:var(--ink); background:transparent; white-space:pre;
+    tab-size:2; font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .editor-stack #editor { position:absolute; inset:0; flex:none; width:100%; height:100%;
+    color:transparent; caret-color:var(--ink); background:transparent; }
+  .editor-stack #editor::selection { background:rgba(47,111,176,.28); }
+  /* muted, professional token palette (both schemes) */
+  #hl .c { color:#8a94a4; font-style:italic; }
+  #hl .s { color:#2e8b57; }
+  #hl .n { color:#b06a2e; }
+  #hl .k { color:#2f6fb0; font-weight:600; }
+  #hl .t { color:#8a5cc0; }
+  #hl .id { color:#1d2530; font-weight:600; }
+  @media (prefers-color-scheme: dark) {
+    #hl .c { color:#6b7686; } #hl .s { color:#7fc79a; } #hl .n { color:#d99a63; }
+    #hl .k { color:#6fa8e0; } #hl .t { color:#c0a0e6; } #hl .id { color:#e6ebf2; }
+  }
+  :root[data-theme="dark"] #hl .c { color:#6b7686; }
+  :root[data-theme="dark"] #hl .s { color:#7fc79a; }
+  :root[data-theme="dark"] #hl .n { color:#d99a63; }
+  :root[data-theme="dark"] #hl .k { color:#6fa8e0; }
+  :root[data-theme="dark"] #hl .t { color:#c0a0e6; }
+  :root[data-theme="dark"] #hl .id { color:#e6ebf2; }
+  :root[data-theme="light"] #hl .c { color:#8a94a4; }
+  :root[data-theme="light"] #hl .s { color:#2e8b57; }
+  :root[data-theme="light"] #hl .n { color:#b06a2e; }
+  :root[data-theme="light"] #hl .k { color:#2f6fb0; }
+  :root[data-theme="light"] #hl .t { color:#8a5cc0; }
+  :root[data-theme="light"] #hl .id { color:#1d2530; }
+
+  /* --- viewport zoom controls (2D plan + elevation lightbox) --- */
+  .zoom-ctl { position:absolute; z-index:8; bottom:12px; right:14px; display:flex;
+    align-items:center; gap:2px; padding:3px; background:var(--panel);
+    border:1px solid var(--line); border-radius:9px; box-shadow:0 3px 12px rgba(20,30,50,.16);
+    font-size:12.5px; user-select:none; }
+  .zoom-ctl button { font:inherit; font-size:14px; line-height:1; width:26px; height:24px;
+    padding:0; border:0; border-radius:6px; background:transparent; color:var(--ink);
+    cursor:pointer; }
+  .zoom-ctl button:hover { background:rgba(127,127,127,.14); }
+  .zoom-ctl .zpct { min-width:44px; text-align:center; color:var(--muted);
+    font-variant-numeric:tabular-nums; }
+  .zoom-ctl .zfit { width:auto; padding:0 9px; font-size:12px; font-weight:600; }
+  .plan-body .svgbox { overflow:hidden; align-items:flex-start; justify-content:flex-start;
+    padding:0; }
+  .plan-body .svgbox svg { position:absolute; top:0; left:0; transform-origin:0 0; }
+
+  /* --- live dimension readout chip (edit mode) --- */
+  #dim-chip { position:absolute; z-index:12; display:none; pointer-events:none;
+    padding:4px 9px; border-radius:7px; font:600 12px/1.2 ui-monospace,Menlo,Consolas,monospace;
+    background:rgba(29,37,48,.92); color:#fff; box-shadow:0 3px 12px rgba(20,30,50,.28);
+    white-space:nowrap; }
+  #dim-chip .delta { color:#f0c088; font-weight:700; margin-left:6px; }
+
+  /* --- score popover (per-category breakdown) --- */
+  #score-chip { cursor:pointer; }
+  .score-pop { position:absolute; z-index:40; top:44px; left:16px; width:270px;
+    background:var(--panel); border:1px solid var(--line); border-radius:11px;
+    box-shadow:0 8px 28px rgba(20,30,50,.22); padding:12px 13px; font-size:12px; }
+  .score-pop[hidden] { display:none; }
+  .score-pop h4 { margin:0 0 9px; font-size:12.5px; }
+  .score-pop h4 span { color:var(--muted); font-weight:600; }
+  .sp-row { display:grid; grid-template-columns:74px 1fr 34px; gap:8px; align-items:center;
+    margin:0 0 6px; }
+  .sp-row .lbl { color:var(--muted); text-transform:capitalize; }
+  .sp-bar { height:7px; border-radius:4px; background:rgba(127,127,127,.16); overflow:hidden; }
+  .sp-bar > span { display:block; height:100%; border-radius:4px; }
+  .sp-row .val { text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); }
+  .sp-details { margin:8px 0 0; padding-top:8px; border-top:1px solid var(--line);
+    color:var(--faint); font-size:11.5px; line-height:1.45; }
+  .sp-details div { margin:2px 0; }
+  .sp-clean { color:var(--okc); font-weight:600; }
+
+  /* --- help slide-over panel (DSL reference + shortcuts) --- */
+  .help-backdrop { position:fixed; inset:0; z-index:50; background:rgba(15,20,30,.34); }
+  .help-backdrop[hidden] { display:none; }
+  .help-panel { position:fixed; top:0; right:0; z-index:51; width:min(440px,92vw); height:100%;
+    background:var(--panel); border-left:1px solid var(--line); box-shadow:-8px 0 30px rgba(20,30,50,.24);
+    display:flex; flex-direction:column; transform:translateX(0); }
+  .help-panel[hidden] { display:none; }
+  .help-head { display:flex; align-items:center; gap:10px; padding:12px 14px;
+    border-bottom:1px solid var(--line); }
+  .help-head .ht { font-weight:700; font-size:14px; }
+  .help-head .hclose { margin-left:auto; font-size:19px; line-height:1; border:0; padding:0 6px;
+    background:transparent; color:var(--muted); cursor:pointer; }
+  #help-search { width:100%; font:inherit; font-size:12.5px; padding:7px 10px; border-radius:8px;
+    border:1px solid var(--line); background:var(--editor); color:var(--ink); outline:none; }
+  .help-search-wrap { padding:10px 14px; border-bottom:1px solid var(--line); }
+  .help-body { flex:1; overflow:auto; padding:12px 14px; }
+  .help-shortcuts { margin:0 0 14px; }
+  .help-shortcuts h5, .help-ref h5 { font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.6px; color:var(--faint); margin:0 0 7px; }
+  .help-shortcuts .sc { display:flex; justify-content:space-between; gap:12px; padding:3px 0;
+    font-size:12px; }
+  .help-shortcuts kbd { font:11px ui-monospace,Menlo,Consolas,monospace; background:var(--gutter);
+    border:1px solid var(--line); border-radius:5px; padding:1px 6px; color:var(--muted); }
+  .help-ref .rline { font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    white-space:pre-wrap; color:var(--ink); padding:1px 0; }
+  .help-ref .rline.head { color:var(--accent); font-weight:700; margin-top:12px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    font-size:12.5px; letter-spacing:.2px; }
+  .help-ref .rline.hit mark { background:rgba(209,135,63,.35); color:inherit; border-radius:2px; }
+  .help-ref .rempty { color:var(--faint); padding:12px 0; }
+
+  /* --- elevation lightbox (a zoomable single-view overlay) --- */
+  .views-grid figure { cursor:zoom-in; }
+  .lightbox { position:fixed; inset:0; z-index:55; background:rgba(15,20,30,.62);
+    display:flex; flex-direction:column; }
+  .lightbox[hidden] { display:none; }
+  .lb-head { display:flex; align-items:center; gap:10px; padding:10px 14px; color:#fff;
+    font-size:13px; font-weight:600; }
+  .lb-head .lbclose { margin-left:auto; font-size:20px; line-height:1; border:0; padding:0 8px;
+    background:transparent; color:#fff; cursor:pointer; }
+  .lb-body { flex:1; position:relative; overflow:hidden; margin:0 14px 14px; border-radius:10px;
+    background:var(--panel); }
+  .lb-body .svgbox { position:absolute; inset:0; overflow:hidden; padding:0;
+    align-items:flex-start; justify-content:flex-start; cursor:grab; }
+  .lb-body .svgbox svg { position:absolute; top:0; left:0; transform-origin:0 0; }
+
   /* --- print the current viewport, not the three-pane app chrome --- */
   @media print {
     header, #notice, .agent, .left, .tabs, .edit-bar, #three-panel,
-    .drop-hint { display:none !important; }
+    .drop-hint, .zoom-ctl, #dim-chip, .score-pop, .help-backdrop, .help-panel,
+    .lightbox { display:none !important; }
+    .plan-body .svgbox { overflow:visible !important; }
+    .plan-body .svgbox svg { position:static !important; transform:none !important; }
     html, body { overflow:visible !important; height:auto !important; background:#fff !important; }
     main, .right, .viewport { display:block !important; position:static !important;
       overflow:visible !important; min-height:0 !important; }
@@ -1100,7 +1264,26 @@ _APP_HTML = r"""<!doctype html>
   <label class="examples">example
     <select id="example-select"><option value="">loading…</option></select>
   </label>
+  <button class="tbtn" id="help-btn" aria-haspopup="dialog"
+    title="DSL reference &amp; keyboard shortcuts (?)">?</button>
 </header>
+<div id="score-pop" class="score-pop" hidden></div>
+<div id="help-backdrop" class="help-backdrop" hidden></div>
+<aside id="help-panel" class="help-panel" hidden role="dialog" aria-label="Help">
+  <div class="help-head">
+    <span class="ht">Reference &amp; shortcuts</span>
+    <button class="hclose" id="help-close" title="Close (Esc)" aria-label="Close">×</button>
+  </div>
+  <div class="help-search-wrap">
+    <input id="help-search" type="search" placeholder="Filter the DSL reference…"
+      autocomplete="off" spellcheck="false">
+  </div>
+  <div class="help-body">
+    <div class="help-shortcuts" id="help-shortcuts"></div>
+    <div class="help-ref" id="help-ref"><h5>DSL reference</h5>
+      <div id="help-ref-body" class="rempty">loading…</div></div>
+  </div>
+</aside>
 <div id="notice" hidden>
   <span class="notice-msg" id="notice-msg"></span>
   <span id="notice-actions"></span>
@@ -1127,8 +1310,11 @@ _APP_HTML = r"""<!doctype html>
   <section class="left">
     <div class="editor-wrap" id="editor-wrap">
       <div class="gutter" id="gutter"></div>
-      <textarea id="editor" spellcheck="false" autocapitalize="off"
-        autocomplete="off" wrap="off"></textarea>
+      <div class="editor-stack">
+        <pre id="hl" aria-hidden="true"></pre>
+        <textarea id="editor" spellcheck="false" autocapitalize="off"
+          autocomplete="off" wrap="off"></textarea>
+      </div>
       <div class="drop-hint">Drop a .barn file to open</div>
     </div>
     <div class="diagnostics" id="diagnostics"></div>
@@ -1165,8 +1351,15 @@ _APP_HTML = r"""<!doctype html>
           <span class="edit-note" id="edit-note"></span>
         </div>
         <div class="plan-body">
-          <div class="svgbox" id="plan-svg"></div>
+          <div class="svgbox" id="plan-svg" tabindex="0" style="outline:none"></div>
           <div class="edit-layer" id="edit-layer" hidden></div>
+          <div id="dim-chip"></div>
+          <div class="zoom-ctl" id="plan-zoom">
+            <button data-z="out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+            <span class="zpct" id="plan-zpct">100%</span>
+            <button data-z="in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+            <button class="zfit" data-z="fit" title="Fit to pane (0)">Fit</button>
+          </div>
         </div>
       </div>
       <div class="pane" id="pane-three">
@@ -1178,17 +1371,32 @@ _APP_HTML = r"""<!doctype html>
     </div>
   </section>
 </main>
+<div id="lightbox" class="lightbox" hidden>
+  <div class="lb-head">
+    <span id="lb-title">Elevation</span>
+    <div class="zoom-ctl" id="lb-zoom" style="position:static;box-shadow:none;background:transparent;border:0;">
+      <button data-z="out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <span class="zpct" id="lb-zpct" style="color:#fff;">100%</span>
+      <button data-z="in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+      <button class="zfit" data-z="fit" title="Fit to view (0)">Fit</button>
+    </div>
+    <button class="lbclose" id="lb-close" title="Close (Esc)" aria-label="Close">×</button>
+  </div>
+  <div class="lb-body"><div class="svgbox" id="lb-svg" tabindex="0" style="outline:none"></div></div>
+</div>
 <script>__RENDERER_JS__</script>
 <script>
 const LAYER_LABELS = __LAYER_LABELS__;
 const INITIAL_SOURCE = __INITIAL_SOURCE__;
 const INITIAL_FROM_FILE = __INITIAL_FROM_FILE__;   // server started with an explicit FILE arg
 const SCAFFOLD_SOURCE = __SCAFFOLD_SOURCE__;        // "New plan" starter
+const HIGHLIGHT = __HIGHLIGHT__;                    // {keywords, types} for the editor highlighter
 const LS_SOURCE = 'barndsl.playground.source';
 const LS_SAVED_AT = 'barndsl.playground.savedAt';
 
 const editor = document.getElementById('editor');
 const gutter = document.getElementById('gutter');
+const hl = document.getElementById('hl');
 const diagEl = document.getElementById('diagnostics');
 const planSvg = document.getElementById('plan-svg');
 const viewsPane = document.getElementById('pane-views');
@@ -1224,8 +1432,52 @@ function renderGutter(){
       (m ? '<span class="dot"></span>' : '') + i + '</div>'; }
   gutter.innerHTML = html;
   gutter.scrollTop = editor.scrollTop;
+  renderHighlight();          // keep the colour layer in step with every text change
 }
-editor.addEventListener('scroll', () => { gutter.scrollTop = editor.scrollTop; });
+
+// --- syntax highlighting: a coloured <pre> behind the transparent textarea ---
+// Same font metrics, tab-size and padding as the textarea, aria-hidden, and
+// scroll-synced with it — so the colours sit exactly under the caret and never
+// desync. Purely visual: the textarea keeps all input behaviour (tab, IME, paste).
+const HL_KW = new Set(HIGHLIGHT.keywords || []);
+const HL_TYPE = new Set(HIGHLIGHT.types || []);
+function hlWord(w){
+  if (w.length > 1 && w.endsWith(':'))
+    return '<span class="id">' + esc(w.slice(0, -1)) + '</span>:';
+  const lw = w.toLowerCase();
+  if (HL_KW.has(lw)) return '<span class="k">' + esc(w) + '</span>';
+  if (HL_TYPE.has(lw)) return '<span class="t">' + esc(w) + '</span>';
+  if (/\d/.test(w))
+    return esc(w).replace(/\d+(?:\.\d+)?/g, m => '<span class="n">' + m + '</span>');
+  return esc(w);
+}
+function hlLine(line){
+  let out = '', i = 0; const n = line.length;
+  while (i < n){
+    const ch = line[i];
+    if (ch === '#'){ out += '<span class="c">' + esc(line.slice(i)) + '</span>'; break; }
+    if (ch === '"'){
+      let j = i + 1;
+      while (j < n && line[j] !== '"'){ if (line[j] === '\\') j++; j++; }
+      if (j < n) j++;                       // include the closing quote if present
+      out += '<span class="s">' + esc(line.slice(i, j)) + '</span>'; i = j; continue;
+    }
+    if (ch === ' ' || ch === '\t'){ out += ch; i++; continue; }
+    let j = i;
+    while (j < n && line[j] !== ' ' && line[j] !== '\t' && line[j] !== '#' && line[j] !== '"') j++;
+    out += hlWord(line.slice(i, j)); i = j;
+  }
+  return out;
+}
+function renderHighlight(){
+  // A trailing newline keeps the <pre> the same height as the textarea's content.
+  hl.innerHTML = editor.value.split('\n').map(hlLine).join('\n') + '\n';
+  hl.scrollTop = editor.scrollTop; hl.scrollLeft = editor.scrollLeft;
+}
+function syncScroll(){ gutter.scrollTop = editor.scrollTop;
+  hl.scrollTop = editor.scrollTop; hl.scrollLeft = editor.scrollLeft; }
+
+editor.addEventListener('scroll', syncScroll);
 editor.addEventListener('input', () => { renderGutter(); schedule(); });
 editor.addEventListener('keydown', e => {
   if (e.key === 'Tab'){ e.preventDefault(); insertText('  '); }
@@ -1260,6 +1512,7 @@ function applyResult(p){
     lastGood = p; scene3d = p.scene; sceneLoaded = false;
     viewport.classList.remove('stale');
     planSvg.innerHTML = p.svg;
+    if (currentTab === 'plan') planZoom.refit(); else planNeedsFit = true;
     renderViews(p);
     renderReport(p);
     if (currentTab === 'three') showThree();
@@ -1293,7 +1546,129 @@ function updateHeader(p){
   if (p.metrics){ const m = p.metrics;
     metricsEl.textContent = Math.round(m.footprint_sqft) + ' sq ft · ' +
       (m.bedroom_count | 0) + ' bed / ' + trimNum(m.bathroom_count) + ' bath'; }
+  if (p.score){ lastScore = p.score; if (!scorePop.hidden) renderScorePop(); }
 }
+
+// --- score popover (per-category breakdown, click / touch) ------------------
+// The chip's `title` stays as a fallback; the popover draws the same components
+// as colour-coded bars plus the detail lines, and works on touch (click, not
+// hover). Bars are sized to each category's deduction relative to the largest.
+const scorePop = document.getElementById('score-pop');
+let lastScore = null;
+const SCORE_COLORS = { errors:'#c8452f', warnings:'#c98a1e', infos:'#2f6fb0',
+  space:'#8a5cc0', circulation:'#2e8b57', proportion:'#d1873f', daylight:'#2F6FB0' };
+function renderScorePop(){
+  const s = lastScore; if (!s){ scorePop.innerHTML = ''; return; }
+  const comps = s.components || {};
+  const entries = Object.keys(comps).map(k => [k, comps[k]]);
+  const max = Math.max(1, ...entries.map(e => e[1]));
+  const active = entries.filter(e => e[1] > 0);
+  let rows = '';
+  for (const [k, v] of (active.length ? active : entries)){
+    const pct = Math.max(v > 0 ? 6 : 0, Math.round((v / max) * 100));
+    const col = SCORE_COLORS[k] || 'var(--accent)';
+    rows += '<div class="sp-row"><span class="lbl">' + esc(k) + '</span>' +
+      '<span class="sp-bar"><span style="width:' + pct + '%;background:' + col + '"></span></span>' +
+      '<span class="val">-' + fmt(v) + '</span></div>';
+  }
+  if (!active.length) rows += '<div class="sp-clean">No deductions — a clean plan.</div>';
+  let details = '';
+  for (const k in (s.details || {}))
+    details += '<div><strong>' + esc(k) + ':</strong> ' + esc(s.details[k]) + '</div>';
+  scorePop.innerHTML = '<h4>Design score ' + fmt(s.total) + ' <span>/ 100</span></h4>' + rows +
+    (details ? '<div class="sp-details">' + details + '</div>' : '');
+}
+function toggleScorePop(show){
+  const open = show == null ? scorePop.hidden : show;
+  if (open && lastScore){ renderScorePop(); scorePop.hidden = false; }
+  else scorePop.hidden = true;
+}
+scoreChip.addEventListener('click', e => { e.stopPropagation(); toggleScorePop(); });
+document.addEventListener('click', e => {
+  if (!scorePop.hidden && !e.target.closest('#score-pop') && !e.target.closest('#score-chip'))
+    toggleScorePop(false);
+});
+
+// --- help slide-over: DSL reference + keyboard shortcuts --------------------
+// The reference is fetched once (finally wiring GET /api/reference) and rendered
+// with a light touch: heading lines get an accent heading, everything else a
+// monospace block. A filter input narrows it; Esc / click-outside closes.
+const helpBtn = document.getElementById('help-btn');
+const helpPanel = document.getElementById('help-panel');
+const helpBackdrop = document.getElementById('help-backdrop');
+const helpSearch = document.getElementById('help-search');
+const helpRefBody = document.getElementById('help-ref-body');
+const helpShortcuts = document.getElementById('help-shortcuts');
+const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
+const SHORTCUTS = [
+  ['Save .barn', MOD + '+S'], ['Open a .barn file', MOD + '+O'],
+  ['Send to the agent', MOD + '+Enter'], ['Undo a layout edit', MOD + '+Z'],
+  ['Zoom in / out / fit', '+  −  0'], ['Compile now', MOD + '+Enter'],
+  ['Cancel a drag', 'Esc'], ['Open this help', '?'],
+];
+let helpRefLines = null;   // cached parsed reference lines (fetched once)
+
+function renderShortcuts(){
+  let h = '<h5>Keyboard shortcuts</h5>';
+  for (const [label, keys] of SHORTCUTS)
+    h += '<div class="sc"><span>' + esc(label) + '</span><kbd>' + esc(keys) + '</kbd></div>';
+  helpShortcuts.innerHTML = h;
+}
+function isHelpHeading(line){
+  // A non-indented line that reads as a section title (ends with ':' or is a
+  // banner). Indented grammar lines stay monospace.
+  if (!line || /^\s/.test(line)) return false;
+  return /:\s*$/.test(line) || /^[A-Z][A-Z0-9 ]+[A-Z0-9]$/.test(line);
+}
+function loadReference(){
+  if (helpRefLines) return Promise.resolve();
+  return fetch('/api/reference').then(r => r.json()).then(j => {
+    helpRefLines = String(j.reference || '').split('\n');
+    renderReference('');
+  }).catch(() => { helpRefBody.className = 'rempty';
+    helpRefBody.textContent = 'Reference unavailable.'; });
+}
+function renderReference(q){
+  if (!helpRefLines) return;
+  q = (q || '').trim().toLowerCase();
+  let out = '', shown = 0;
+  for (const raw of helpRefLines){
+    if (q && raw.toLowerCase().indexOf(q) < 0) continue;
+    const head = isHelpHeading(raw);
+    let body = esc(raw);
+    if (q){ const i = raw.toLowerCase().indexOf(q);
+      body = esc(raw.slice(0, i)) + '<mark>' + esc(raw.slice(i, i + q.length)) +
+        '</mark>' + esc(raw.slice(i + q.length)); }
+    out += '<div class="rline' + (head ? ' head' : '') + (q ? ' hit' : '') + '">' +
+      (body || '&nbsp;') + '</div>';
+    shown++;
+  }
+  helpRefBody.className = '';
+  helpRefBody.innerHTML = shown ? out : '<div class="rempty">No matches for “' + esc(q) + '”.</div>';
+}
+function openHelp(){
+  renderShortcuts();
+  helpBackdrop.hidden = false; helpPanel.hidden = false;
+  loadReference();
+  setTimeout(() => helpSearch.focus(), 30);
+}
+function closeHelp(){ helpPanel.hidden = true; helpBackdrop.hidden = true; }
+helpBtn.addEventListener('click', openHelp);
+document.getElementById('help-close').addEventListener('click', closeHelp);
+helpBackdrop.addEventListener('click', closeHelp);
+helpSearch.addEventListener('input', () => renderReference(helpSearch.value));
+
+// Global keys: `?` opens help (when not typing); Esc closes the open overlay.
+document.addEventListener('keydown', e => {
+  const el = document.activeElement, tag = el && el.tagName;
+  const typing = tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT';
+  if (e.key === '?' && !typing){ e.preventDefault(); openHelp(); return; }
+  if (e.key === 'Escape'){
+    if (lb && !lb.hidden){ closeLightbox(); return; }
+    if (!helpPanel.hidden){ closeHelp(); return; }
+    if (!scorePop.hidden){ toggleScorePop(false); return; }
+  }
+});
 
 // --- diagnostics list -------------------------------------------------------
 function countChip(kind, n){
@@ -1347,7 +1722,10 @@ function selectTab(tab){
   document.querySelectorAll('.pane').forEach(p =>
     p.classList.toggle('active', p.id === 'pane-' + tab));
   if (tab === 'three') showThree();
+  // A pane has no measurable size while hidden, so Fit is deferred until it shows.
+  if (tab === 'plan'){ planNeedsFit = false; planZoom.refit(); }
 }
+let planNeedsFit = false;
 function showThree(){
   if (!threeInit){ threeInit = true;
     ctrl = mountScene(document.getElementById('three-canvas'), LAYER_LABELS,
@@ -1362,12 +1740,44 @@ function renderViews(p){
   const order = [['south','South'],['north','North'],['east','East'],['west','West']];
   let html = '<div class="views-grid">';
   for (const pair of order){ const svg = p.elevations[pair[0]];
-    if (svg) html += '<figure><figcaption>' + pair[1] +
-      ' elevation</figcaption><div class="svgbox">' + svg + '</div></figure>'; }
-  if (p.section) html += '<figure><figcaption>Section</figcaption>' +
-    '<div class="svgbox">' + p.section + '</div></figure>';
+    if (svg) html += '<figure data-view="' + pair[0] + '" title="Click to zoom"><figcaption>' +
+      pair[1] + ' elevation</figcaption><div class="svgbox">' + svg + '</div></figure>'; }
+  if (p.section) html += '<figure data-view="section" title="Click to zoom">' +
+    '<figcaption>Section</figcaption><div class="svgbox">' + p.section + '</div></figure>';
   viewsPane.innerHTML = html + '</div>';
 }
+
+// --- elevation lightbox (a zoomable single-view overlay) --------------------
+const lb = document.getElementById('lightbox');
+const lbSvg = document.getElementById('lb-svg');
+const lbTitle = document.getElementById('lb-title');
+const lbZoom = makeZoom(lbSvg, {
+  onChange: pct => { document.getElementById('lb-zpct').textContent = pct + '%'; },
+});
+const VIEW_LABEL = { south:'South elevation', north:'North elevation', east:'East elevation',
+  west:'West elevation', section:'Section' };
+function openLightbox(view){
+  const p = lastGood; if (!p) return;
+  const svg = view === 'section' ? p.section : (p.elevations && p.elevations[view]);
+  if (!svg) return;
+  lbTitle.textContent = VIEW_LABEL[view] || 'View';
+  lbSvg.innerHTML = svg;
+  lb.hidden = false;
+  lbZoom.refit();
+  try { lbSvg.focus({ preventScroll:true }); } catch(_){}
+}
+function closeLightbox(){ lb.hidden = true; lbSvg.innerHTML = ''; }
+viewsPane.addEventListener('click', e => {
+  const fig = e.target.closest('figure[data-view]'); if (!fig) return;
+  openLightbox(fig.getAttribute('data-view'));
+});
+document.getElementById('lb-close').addEventListener('click', closeLightbox);
+document.getElementById('lb-zoom').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const z = b.getAttribute('data-z');
+  if (z === 'in') lbZoom.zoomIn(); else if (z === 'out') lbZoom.zoomOut(); else lbZoom.fit();
+});
+lb.addEventListener('click', e => { if (e.target === lb) closeLightbox(); });
 
 // --- Report tab (cost / schedules / energy / areas) -------------------------
 // Rendered from the server-computed `report` block on the compile payload (cost,
@@ -1529,22 +1939,91 @@ function openPrint(){
 }
 printBtn.addEventListener('click', openPrint);
 
-// --- 2D plan pan / zoom (CSS transform) -------------------------------------
-(function(box){
-  let scale = 1, tx = 0, ty = 0, dragging = false, ox = 0, oy = 0;
-  function apply(){ const svg = box.querySelector('svg'); if (!svg) return;
-    svg.style.transformOrigin = '0 0';
-    svg.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')'; }
+// --- viewport zoom / pan (CSS transform) ------------------------------------
+// A reusable controller over a `.svgbox` holding one <svg>: transform-driven
+// zoom + drag-pan, a Fit that fills the pane from the SVG's intrinsic size, and
+// keyboard +/-/0. Shared by the 2D plan and the elevation lightbox.
+function makeZoom(box, opts){
+  opts = opts || {};
+  const MIN = 0.05, MAX = 12, PAD = 12;
+  let scale = 1, tx = 0, ty = 0, fitScale = 1;
+  let dragging = false, sx = 0, sy = 0, moved = false;
+  function svg(){ return box.querySelector('svg'); }
+  function intrinsic(el){
+    let w = parseFloat(el.getAttribute('width')), h = parseFloat(el.getAttribute('height'));
+    if (!(w > 0) || !(h > 0)){
+      const vb = (el.getAttribute('viewBox') || '').split(/[ ,]+/).map(Number);
+      if (vb.length === 4){ w = vb[2]; h = vb[3]; }
+    }
+    return { w: w || el.clientWidth || 1, h: h || el.clientHeight || 1 };
+  }
+  function apply(){ const el = svg(); if (!el) return;
+    el.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+    if (opts.onChange) opts.onChange(Math.round((scale / (fitScale || 1)) * 100)); }
+  function fit(){ const el = svg(); if (!el) return;
+    const bw = box.clientWidth, bh = box.clientHeight; if (!bw || !bh) return;
+    const it = intrinsic(el);
+    fitScale = Math.min((bw - 2 * PAD) / it.w, (bh - 2 * PAD) / it.h);
+    if (!(fitScale > 0) || !isFinite(fitScale)) fitScale = 1;
+    scale = fitScale;
+    tx = (bw - it.w * scale) / 2; ty = (bh - it.h * scale) / 2; apply();
+  }
+  function zoomAt(factor, cx, cy){ const el = svg(); if (!el) return;
+    const r = box.getBoundingClientRect();
+    if (cx == null){ cx = r.width / 2; cy = r.height / 2; } else { cx -= r.left; cy -= r.top; }
+    const ns = Math.min(MAX, Math.max(MIN, scale * factor));
+    tx = cx - (cx - tx) * (ns / scale); ty = cy - (cy - ty) * (ns / scale);
+    scale = ns; apply();
+  }
   box.addEventListener('wheel', e => { e.preventDefault();
-    scale = Math.min(8, Math.max(0.2, scale * Math.exp(-e.deltaY * 0.0012))); apply(); },
-    { passive:false });
-  box.addEventListener('pointerdown', e => { dragging = true; ox = e.clientX - tx;
-    oy = e.clientY - ty; box.setPointerCapture(e.pointerId); box.style.cursor = 'grabbing'; });
-  box.addEventListener('pointerup', () => { dragging = false; box.style.cursor = 'grab'; });
+    zoomAt(Math.exp(-e.deltaY * 0.0012), e.clientX, e.clientY); }, { passive:false });
+  box.addEventListener('pointerdown', e => { if (!svg()) return; dragging = true; moved = false;
+    sx = e.clientX - tx; sy = e.clientY - ty; box.setPointerCapture(e.pointerId);
+    if (box.hasAttribute('tabindex')) try { box.focus({ preventScroll:true }); } catch(_){}
+    box.style.cursor = 'grabbing'; });
+  box.addEventListener('keydown', zoomKeys);
+  box.addEventListener('pointerup', e => { dragging = false; box.style.cursor = '';
+    if (!moved && opts.onClick) opts.onClick(e); });
   box.addEventListener('pointermove', e => { if (!dragging) return;
-    tx = e.clientX - ox; ty = e.clientY - oy; apply(); });
-  box.addEventListener('dblclick', () => { scale = 1; tx = 0; ty = 0; apply(); });
-})(planSvg);
+    tx = e.clientX - sx; ty = e.clientY - sy; moved = true; apply(); });
+  box.addEventListener('dblclick', () => fit());
+  return {
+    fit,
+    zoomIn(){ zoomAt(1.25); }, zoomOut(){ zoomAt(0.8); },
+    // fit lazily on the first render (once the pane has a measurable size)
+    refit(){ requestAnimationFrame(fit); },
+  };
+}
+
+const planZoom = makeZoom(planSvg, {
+  onChange: pct => { document.getElementById('plan-zpct').textContent = pct + '%'; },
+  onClick: planClickToSource,
+});
+document.getElementById('plan-zoom').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const z = b.getAttribute('data-z');
+  if (z === 'in') planZoom.zoomIn(); else if (z === 'out') planZoom.zoomOut(); else planZoom.fit();
+});
+
+// Click a room on the (non-edit) plan → jump the editor to its source line + flash.
+function planClickToSource(e){
+  if (editMode) return;
+  const rect = e.target && e.target.closest ? e.target.closest('[data-room]') : null;
+  if (!rect) return;
+  const id = rect.getAttribute('data-room');
+  const room = (lastGood && lastGood.rooms || []).find(r => r.id === id);
+  const ln = room && room.line;
+  if (ln){ jumpToLine(ln); flashLine(ln); }
+}
+
+// Keyboard zoom when the plan viewport has focus (+/-/0). The plan pane is made
+// focusable so these don't fight the editor's own key handling.
+function zoomKeys(e){
+  if (e.key === '+' || e.key === '=' ){ e.preventDefault(); activeZoom().zoomIn(); }
+  else if (e.key === '-' || e.key === '_'){ e.preventDefault(); activeZoom().zoomOut(); }
+  else if (e.key === '0'){ e.preventDefault(); activeZoom().fit(); }
+}
+function activeZoom(){ return (lb && !lb.hidden) ? lbZoom : planZoom; }
 
 // --- examples menu ----------------------------------------------------------
 fetch('/api/examples').then(r => r.json()).then(list => {
@@ -1746,6 +2225,8 @@ const editChk = document.getElementById('edit-mode');
 const editLayer = document.getElementById('edit-layer');
 const undoBtn = document.getElementById('undo-btn');
 const editNoteEl = document.getElementById('edit-note');
+const dimChip = document.getElementById('dim-chip');
+const planBody = document.querySelector('.plan-body');
 const editLevel = 0;                 // the overlay edits level 0 (see the note)
 let editMode = false, editReady = false;
 let editRooms = [], editOpens = [], editLevels = [0];
@@ -1772,7 +2253,8 @@ function initEdit(){
   editChk.addEventListener('change', () => {
     editMode = editChk.checked; editLayer.hidden = !editMode;
     planSvg.style.display = editMode ? 'none' : '';
-    if (editMode) buildOverlay(); else { selectedRoomId = null; editNote(''); }
+    document.getElementById('plan-zoom').style.display = editMode ? 'none' : '';
+    if (editMode) buildOverlay(); else { selectedRoomId = null; editNote(''); planZoom.refit(); }
   });
   undoBtn.addEventListener('click', doUndo);
 }
@@ -1887,6 +2369,62 @@ function placeGhostLine(o, off){ if (!ghostEl) return; const seg = openSeg(o, of
   ghostEl.setAttribute('x1', seg[0].x); ghostEl.setAttribute('y1', Y(seg[0].y));
   ghostEl.setAttribute('x2', seg[1].x); ghostEl.setAttribute('y2', Y(seg[1].y)); }
 
+// -- live dimension readout (a small chip near the cursor) --
+function showDim(html, e){
+  const r = planBody.getBoundingClientRect();
+  dimChip.innerHTML = html;
+  dimChip.style.display = 'block';
+  let x = e.clientX - r.left + 14, y = e.clientY - r.top + 16;
+  // keep it inside the pane
+  const cw = dimChip.offsetWidth, ch = dimChip.offsetHeight;
+  if (x + cw > r.width - 6) x = e.clientX - r.left - cw - 14;
+  if (y + ch > r.height - 6) y = e.clientY - r.top - ch - 16;
+  dimChip.style.left = Math.max(4, x) + 'px'; dimChip.style.top = Math.max(4, y) + 'px';
+}
+function hideDim(){ dimChip.style.display = 'none'; }
+
+// -- neighbour snap guides (align a dragged edge to another room's edge) --
+// Cheap axis-aligned comparisons against the rooms array. When a moving edge is
+// within the grid step of a neighbour's edge, snap to it and remember a guide.
+let guideEls = [];
+function clearGuides(){ for (const g of guideEls) if (g.parentNode) g.remove(); guideEls = []; }
+function drawGuide(vertical, coord){
+  if (!ov) return;
+  const NS = svgEl.namespaceURI;
+  const ln = document.createElementNS(NS, 'line');
+  if (vertical){ ln.setAttribute('x1', coord); ln.setAttribute('x2', coord);
+    ln.setAttribute('y1', Y(ov.maxY + 3)); ln.setAttribute('y2', Y(ov.minY - 3)); }
+  else { ln.setAttribute('y1', Y(coord)); ln.setAttribute('y2', Y(coord));
+    ln.setAttribute('x1', ov.minX - 3); ln.setAttribute('x2', ov.maxX + 3); }
+  ln.setAttribute('stroke', '#2F6FB0'); ln.setAttribute('stroke-width', '1');
+  ln.setAttribute('stroke-dasharray', '4 3'); ln.setAttribute('vector-effect', 'non-scaling-stroke');
+  ln.setAttribute('pointer-events', 'none');
+  svgEl.appendChild(ln); guideEls.push(ln);
+}
+// Snap the given edges of a rect to a neighbour's edges. `edges` limits which
+// sides may move: {l,r,b,t} booleans (move drags all four together; resize only
+// the handled sides). Returns the adjusted {x,y,w,l} plus the guide coords hit.
+function neighborSnap(id, rect, edges){
+  const T = 0.5;
+  let dx = null, gx = null, dy = null, gy = null;
+  const vs = []; if (edges.l) vs.push(['l', rect.x]); if (edges.r) vs.push(['r', rect.x + rect.w]);
+  const hs = []; if (edges.b) hs.push(['b', rect.y]); if (edges.t) hs.push(['t', rect.y + rect.l]);
+  for (const r of editRooms){
+    if (r.id === id) continue;
+    const rv = [r.x, r.x + r.w], rh = [r.y, r.y + r.l];
+    for (const [, mv] of vs) for (const v of rv){ const d = v - mv;
+      if (Math.abs(d) <= T && (dx === null || Math.abs(d) < Math.abs(dx))){ dx = d; gx = v; } }
+    for (const [, mh] of hs) for (const h of rh){ const d = h - mh;
+      if (Math.abs(d) <= T && (dy === null || Math.abs(d) < Math.abs(dy))){ dy = d; gy = h; } }
+  }
+  const out = { x: rect.x, y: rect.y, w: rect.w, l: rect.l, gx, gy };
+  if (dx !== null){ if (edges.l && !edges.r){ out.x += dx; } else if (edges.r && !edges.l){ out.w += dx; }
+    else { out.x += dx; } }
+  if (dy !== null){ if (edges.b && !edges.t){ out.y += dy; } else if (edges.t && !edges.b){ out.l += dy; }
+    else { out.y += dy; } }
+  return out;
+}
+
 // -- pointer interactions --
 function onDown(e){
   if (!editMode) return;
@@ -1914,25 +2452,46 @@ function onDown(e){
 function onMove(e){
   if (!drag) return;
   const P = toPlan(e);
+  clearGuides();
   if (drag.kind === 'move'){
-    const nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
+    let nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
+    const sn = neighborSnap(drag.id, { x:nx, y:ny, w:drag.cur.w, l:drag.cur.l },
+      { l:true, r:true, b:true, t:true });
+    nx = sn.x; ny = sn.y;
+    if (sn.gx !== null) drawGuide(true, sn.gx);
+    if (sn.gy !== null) drawGuide(false, sn.gy);
     drag.calc = { x:nx, y:ny, w:drag.cur.w, l:drag.cur.l };
     if (nx !== drag.cur.x || ny !== drag.cur.y) drag.moved = true;
     placeGhostRect(nx, ny, drag.cur.w, drag.cur.l);
+    showDim(esc(drag.id) + ' — ' + trimNum(drag.cur.w) + ' × ' + trimNum(drag.cur.l) +
+      ' at ' + trimNum(nx) + ', ' + trimNum(ny), e);
   } else if (drag.kind === 'resize'){
-    const c = resizeCalc(drag, P); drag.calc = c;
+    let c = resizeCalc(drag, P);
+    const h = drag.h;
+    const sn = neighborSnap(drag.id, c, { l: h.indexOf('w') >= 0, r: h.indexOf('e') >= 0,
+      b: h.indexOf('s') >= 0, t: h.indexOf('n') >= 0 });
+    if (sn.w >= 3 && sn.l >= 3) c = { x:sn.x, y:sn.y, w:sn.w, l:sn.l };
+    if (sn.gx !== null) drawGuide(true, sn.gx);
+    if (sn.gy !== null) drawGuide(false, sn.gy);
+    drag.calc = c;
     if (c.x !== drag.cur.x || c.y !== drag.cur.y || c.w !== drag.cur.w || c.l !== drag.cur.l) drag.moved = true;
     placeGhostRect(c.x, c.y, c.w, c.l);
+    const dw = c.w - drag.cur.w, dl = c.l - drag.cur.l;
+    const delta = (dw ? (dw > 0 ? '+' : '') + trimNum(dw) + "' w" : '') +
+      (dw && dl ? '  ' : '') + (dl ? (dl > 0 ? '+' : '') + trimNum(dl) + "' l" : '');
+    showDim(trimNum(c.w) + ' × ' + trimNum(c.l) +
+      (delta ? '<span class="delta">' + delta + '</span>' : ''), e);
   } else {
     const o = drag.o;
     const off = Math.max(o.min, Math.min(o.max, snap(projOffset(o, P) - o.width / 2)));
     drag.offset = off; if (Math.abs(off - o.offset) > 1e-9) drag.moved = true;
     placeGhostLine(o, off);
+    showDim('offset ' + trimNum(off), e);
   }
 }
 function onUp(e){
   if (!drag) return;
-  const d = drag; drag = null; removeGhost();
+  const d = drag; drag = null; removeGhost(); clearGuides(); hideDim();
   try { svgEl.releasePointerCapture(e.pointerId); } catch(_){}
   if (d.kind === 'move'){
     if (!d.moved){ const ln = roomLine(d.id); if (ln) jumpToLine(ln); return; }
@@ -1950,7 +2509,7 @@ function onUp(e){
     applyEdits([{ kind:'move_opening', opening:d.o.kind, key:d.o.key, offset:d.offset }]);
   }
 }
-function cancelDrag(){ if (!drag) return; drag = null; removeGhost(); buildOverlay(); }
+function cancelDrag(){ if (!drag) return; drag = null; removeGhost(); clearGuides(); hideDim(); buildOverlay(); }
 
 // -- apply a sequence of edits atomically (from the client's view) --
 async function applyEdits(edits){

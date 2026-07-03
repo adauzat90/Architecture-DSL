@@ -204,9 +204,11 @@ bearing / rated, add/remove a `wall` statement); **multi-select** + group move /
 align / distribute (one batched edit set, one undo entry); dragging to **create**
 (rubber-band a new `room`, drop a new window/door onto a wall) and **delete**;
 editing **porches / stairs / wings** (not just rooms and openings) and the upper
-levels of a multi-level plan (a level switcher); a **live coordinate/size readout**
-and dimension witnesses while dragging; snapping to **sibling edges** (align to an
-adjacent room's wall, not just the 0.5 ft grid).
+levels of a multi-level plan (a level switcher); ~~a **live coordinate/size
+readout** and dimension witnesses while dragging; snapping to **sibling edges**
+(align to an adjacent room's wall, not just the 0.5 ft grid)~~ — DONE (wave 3): a
+readout chip near the ghost shows position/size (and the resize delta) live with
+the snap, and neighbour snap guides draw + prefer an aligned edge.
 
 ## Report tab + print packet — DONE
 Shipped (wave 2 of the architect-lens playground review): the half of the engine
@@ -241,6 +243,39 @@ in the Report tab (the engine already takes them); wiring the server `packet`
 format into the Print button as an alternative "full permit packet" print; a
 **CSV/Markdown schedule** download straight from the Report tab (`schedules_csv` /
 `schedules_markdown` already exist).
+
+## Viewport ergonomics + editor affordances — DONE
+Shipped (wave 3 of the architect-lens playground review), all client-side and
+still stdlib-only / no-CDN / offline: **2D-plan zoom controls** (`−` / percentage /
+`+` / **Fit**) over a reusable `makeZoom` controller — wheel-zoom, drag-to-pan,
+`+`/`−`/`0` keys when the viewport has focus, double-click to fit — where **Fit**
+fills the pane computed from the SVG's intrinsic `width`/`height` (fixing the old
+render-small-with-dead-space default) and is applied on load and every tab-switch;
+each **elevation card opens a zoomable lightbox** on the same controller (chosen
+over a shared grid-wide zoom, which reads awkwardly on a 2×2 grid); **click a room
+on the plan** (outside edit mode) jumps the editor to its source line and flashes
+it (`render_svg` tags each room rect with an inert `data-room`; the payload's
+`rooms[].line` supplies the line). **Live drag readouts** + **neighbour snap
+guides** in edit mode (above). A header **?** opens a slide-over that finally wires
+the dead `GET /api/reference`: the `DSL_REFERENCE` fetched once and rendered with a
+light touch (heading vs monospace grammar lines), a filter input, the app's
+keyboard-shortcut list, Esc / click-outside to close. **DSL syntax highlighting**
+via the overlay technique — a coloured `aria-hidden` `<pre>` behind a
+transparent-text textarea, same font metrics / padding / tab-size, re-rendered and
+scroll-synced on every `renderGutter` (so it can't desync; cost is one line-wise
+tokenize pass, imperceptible on gallery sources) — with a muted palette for light
+and dark; the token vocabulary (statement heads + modifier words + `RoomType`
+values) is **derived from the compiler** (`_highlight_tokens`), not hardcoded. The
+**score chip** now opens a per-category breakdown popover (colour-coded bars +
+detail lines, click/touch, `title` kept as fallback). Tests in
+`tests/test_playground.py` pin the zoom/help/highlight/score/dimension markup, the
+`data-room` + per-room-line linking, that `/api/reference` is now consumed, and the
+no-external-references invariant.
+
+Possible follow-ups: **minimap / scroll-into-view** for very large plans;
+persisting the last zoom/pan per plan; extending highlighting to flag **unknown
+statement heads** or mismatched ids inline (the compiler already knows them);
+a **theme toggle** in the header (the CSS already honours `data-theme`).
 
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the

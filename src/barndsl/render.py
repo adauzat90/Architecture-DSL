@@ -167,12 +167,13 @@ class _Renderer:
 
     # -- primitives --------------------------------------------------------
 
-    def _rect(self, x, y, w, h, fill, stroke, sw=1.0, dash=None, rx=0.0):
+    def _rect(self, x, y, w, h, fill, stroke, sw=1.0, dash=None, rx=0.0, extra=""):
         d = f' stroke-dasharray="{dash}"' if dash else ""
         r = f' rx="{rx}"' if rx else ""
+        e = f" {extra}" if extra else ""
         self.parts.append(
             f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" '
-            f'fill="{fill}" stroke="{stroke}" stroke-width="{sw}"{d}{r} />'
+            f'fill="{fill}" stroke="{stroke}" stroke-width="{sw}"{d}{r}{e} />'
         )
 
     def _line(self, x1, y1, x2, y2, stroke, sw=1.0, dash=None):
@@ -354,7 +355,12 @@ class _Renderer:
             y = self.sy(r.y2)
             w = r.width * self.c.scale
             h = r.length * self.c.scale
-            self._rect(x, y, w, h, fill=ROOM_COLORS.get(r.type, "#f0f0f0"), stroke=WALL, sw=1.5)
+            # data-room lets the playground link a click on the plan back to the
+            # room's source line (an inert attribute — no effect on the drawing).
+            self._rect(
+                x, y, w, h, fill=ROOM_COLORS.get(r.type, "#f0f0f0"), stroke=WALL, sw=1.5,
+                extra=f'data-room="{escape(r.id)}"',
+            )
             cx = self.sx(r.center[0])
             cy = self.sy(r.center[1])
             # With dimensions, lift the label so name / size / area stack evenly.

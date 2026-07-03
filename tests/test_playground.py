@@ -508,3 +508,70 @@ def test_app_contains_report_and_print_markup_and_no_external_refs():
     # still no external network references (the offline guarantee holds)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 3: viewport zoom, help, highlighting, score popover, dimensions -----
+
+
+def test_app_contains_zoom_controls_and_fit_math():
+    html = render_app(CLEAN)
+    for token in ('id="plan-zoom"', 'id="plan-zpct"', 'data-z="fit"', 'data-z="in"',
+                  'data-z="out"', "function makeZoom(", "planZoom.refit(",
+                  "function planClickToSource(", "openLightbox("):
+        assert token in html, token
+
+
+def test_app_contains_help_panel_that_consumes_the_reference_endpoint():
+    html = render_app(CLEAN)
+    for token in ('id="help-btn"', 'id="help-panel"', 'id="help-search"',
+                  "function loadReference(", "function renderReference("):
+        assert token in html, token
+    # the previously-dead /api/reference endpoint is now fetched by the app
+    assert "'/api/reference'" in html or '"/api/reference"' in html
+    # the keyboard-shortcuts list is present
+    assert "Keyboard shortcuts" in html
+
+
+def test_app_contains_syntax_highlight_layer_kept_in_sync():
+    html = render_app(CLEAN)
+    for token in ('id="hl"', 'aria-hidden="true"', "function renderHighlight(",
+                  "function hlLine(", "const HL_KW", "const HL_TYPE"):
+        assert token in html, token
+    # the highlight vocabulary is derived from the compiler, not hardcoded blind:
+    # statement heads and room-type names both reach the SPA
+    assert '"room"' in html and '"envelope"' in html   # statement keywords
+    assert '"bedroom"' in html and '"kitchen"' in html  # RoomType values
+
+
+def test_app_contains_score_popover_and_dimension_readout():
+    html = render_app(CLEAN)
+    for token in ('id="score-pop"', "function renderScorePop(", "toggleScorePop(",
+                  'id="dim-chip"', "function showDim(", "function neighborSnap("):
+        assert token in html, token
+    # the title-attr fallback on the score chip is kept
+    assert 'id="score-chip"' in html
+
+
+def test_highlight_tokens_come_from_the_real_sources():
+    from barndsl.elements import RoomType
+    from barndsl.playground import _highlight_tokens
+
+    toks = _highlight_tokens()
+    assert toks["types"] == [t.value for t in RoomType]
+    # every statement head the highlighter knows is a real DSL keyword
+    for kw in ("plan", "envelope", "room", "door", "window", "frame"):
+        assert kw in toks["keywords"]
+
+
+def test_plan_svg_rooms_are_clickable_for_source_linking():
+    # render_svg tags each room rect with data-room so the plan links to source.
+    from barndsl import compile_source
+    from barndsl.render import render_svg
+
+    plan = compile_source(CLEAN).plan
+    assert plan is not None
+    svg = render_svg(plan)
+    assert 'data-room="' in svg
+    # the payload carries the matching source line for each room
+    p = compile_payload(CLEAN)
+    assert all(r.get("line") for r in p["rooms"])
