@@ -1,5 +1,10 @@
 # Architect's review — the design gaps (non-Revit)
 
+> **Status (2026-07-03): all eight items shipped.** This document is the original
+> review; each `## N` section below carries a dated "SHIPPED" note pointing at the
+> implementation and its tests. See the per-item notes for what landed and the
+> deliberate simplifications.
+
 A **senior residential architect's** pass over barndsl (2026-07-02), reviewing
 the application *as a design tool*, with the Revit integration deliberately set
 aside (untested here — no Revit on this machine). The lens is not "is the
@@ -15,26 +20,30 @@ few mechanically-checkable code domains, are where the gaps are.
 
 ## Headline finding
 
-The model lives at a single plan altitude, on no site. There is no section, no
-elevation (outside Revit), no site/lot/setback, and no passive-comfort story
-(sun, shading, thermal envelope) — even though `orientation` is already in the
-grammar. These aren't "build a bigger validator" asks; several are deterministic,
-IRC-cited checks in the exact house style the engine already excels at.
+The model lived at a single plan altitude, on no site — no section, no elevation
+(outside Revit), no site/lot/setback, and no passive-comfort story (sun, shading,
+thermal envelope), even though `orientation` was already in the grammar. These
+weren't "build a bigger validator" asks; several are deterministic, IRC-cited
+checks in the exact house style the engine already excels at — and all eight have
+since been built along exactly those lines.
 
 ## Impact / effort summary
 
-| # | Feature | Effort | Impact | In house style? |
-|---|---------|--------|--------|-----------------|
-| 1 | Site model: `lot`, `setback` + solar-aware glazing | M | High | Yes — deterministic checks from geometry + azimuth |
-| 2 | Schematic **section + elevation** renderer (non-Revit) | M | High | Renderer-only; IR data already present |
-| 3 | **Overhang/eave depth** + **porch roofs** in the model | M | High | New geometry; feeds shading + elevations |
-| 4 | Electrical / life-safety check batch | S | High | Yes — pure deterministic `info`/`warning` |
-| 5 | Thermal envelope: `climate` zone, WWR, thermal-bridge note | S | Med-High | Yes — takeoff + one ratio check |
-| 6 | Furniture-fit for habitable rooms (bed/seating/dining) | M | Med | Yes — same clear-floor geometry as baths |
-| 7 | Program staples: linen/coat closet, mechanical space | S | Med | Yes — extends `program`/`require` |
-| 8 | `barndsl cost` (roadmap's open item) | S | High | Yes — `metrics()` already has the quantities |
+| # | Feature | Effort | Impact | Status |
+|---|---------|--------|--------|--------|
+| 1 | Site model: `lot`, `setback` + solar-aware glazing | M | High | ✅ shipped (`solar.py`, `design/SITE_SOLAR.md`) |
+| 2 | Schematic **section + elevation** renderer (non-Revit) | M | High | ✅ shipped (`views.py`) |
+| 3 | **Overhang/eave depth** + **porch roofs** in the model | M | High | ✅ shipped (overhang + porch shading) |
+| 4 | Electrical / life-safety check batch | S | High | ✅ shipped (`PLUMBING_STACK`, `electrical`) |
+| 5 | Thermal envelope: `climate` zone, WWR, thermal-bridge note | S | Med-High | ✅ shipped (`energy.py`) |
+| 6 | Furniture-fit for habitable rooms (bed/dining) | M | Med | ✅ shipped (`BED_/DINING_CLEARANCE`) |
+| 7 | Program staples / whole-house storage | S | Med | ✅ shipped (`LOW_STORAGE`, `program … storage`) |
+| 8 | `barndsl cost` (roadmap's open item) | S | High | ✅ shipped (`cost.py`) |
 
-(S = a few dozen lines, M = a focused day or two.)
+(S = a few dozen lines, M = a focused day or two. Two deliberate scope calls:
+living-room *seating* fit was left out of #6 as too layout-subjective, and #7's
+service/linen/coat *spaces* are declarable via `program` rather than guessed —
+matching the codebase's `NO_LAUNDRY` decision.)
 
 ---
 
