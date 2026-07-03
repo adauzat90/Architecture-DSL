@@ -310,7 +310,11 @@ class BarndoAgent:
                     "The agent requires the 'anthropic' package. "
                     "Install with: pip install 'barndsl[agent]'"
                 ) from exc
-            self._client = anthropic.Anthropic()
+            # Point the agent at a custom endpoint (proxy, gateway, or a
+            # self-hosted Anthropic-compatible API) via ANTHROPIC_BASE_URL.
+            # Unset → the SDK default (https://api.anthropic.com).
+            base_url = os.environ.get("ANTHROPIC_BASE_URL") or None
+            self._client = anthropic.Anthropic(base_url=base_url)
         return self._client
 
     # -- single steps ------------------------------------------------------
