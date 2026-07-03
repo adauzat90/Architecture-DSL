@@ -38,7 +38,12 @@ Geometry choices (schematic by design, like the elevations and the glTF):
 
 * Walls, slabs, columns, beams, spaces, stair treads and door/window panels are
   ``IfcExtrudedAreaSolid`` of an ``IfcRectangleProfileDef`` (a box) — a vertical
-  extrusion of the plan rectangle.
+  extrusion of the plan rectangle. A wall run's vertical extent comes from
+  :mod:`barndsl.wallheights` (shared with the glTF export): on a multi-level plan
+  a lower run rises to the level above where an upper floor covers it and to the
+  roof plate where it does not, so there is no open band between stacked levels or
+  between a wall and the roof. A run keeps its lengthwise pieces as several solids
+  in one IfcWall.
 * Openings are modelled the *correct* BIM way: the wall keeps its **uncut** box,
   an ``IfcOpeningElement`` (a box spanning the wall) voids it via
   ``IfcRelVoidsElement``, and an ``IfcDoor``/``IfcWindow`` fills it via
@@ -66,6 +71,7 @@ from dataclasses import dataclass
 from .constants import SLAB_THICKNESS
 from .elements import Barndominium
 from .revit import RevitModel, RevitOpening, RevitWall, to_revit_model
+from .wallheights import wall_top_intervals
 
 # --- deterministic IFC GlobalId (22-char compressed GUID) --------------------
 
@@ -469,7 +475,7 @@ class _Builder:
         for w in self.model.walls:
             base = elev.get(w.level, 0.0)
             placement = self.storey_placement.get(w.level, self.wcs)
-            solids = [self._wall_box(w, base)]
+            solids = self._wall_solids(w, base)
             wall = s.add(
                 "IFCWALL", self.guid("wall", w.id), owner,
                 "Exterior Wall" if w.exterior else "Interior Wall", None, None,
@@ -480,14 +486,29 @@ class _Builder:
             for o in hosted.get(w.id, []):
                 self._opening(owner, context, w, o, base, wall)
 
-    def _wall_box(self, w: RevitWall, base: float) -> Ref:
+    def _wall_solids(self, w: RevitWall, base: float) -> list[Ref]:
+        """One box per corrected height interval of the run (see wallheights).
+
+        A single IfcWall keeps its lengthwise pieces as several solids in one
+        body representation, so a lower run reaches the level above where it is
+        covered and the roof plate where it is not — closing the inter-floor gap
+        band and the wall-to-roof void — while the wall/opening/door counts the
+        tests pin stay one-per-run. The triangular gable above the plate is
+        closed by the roof prism's end cap (an ``IfcExtrudedAreaSolid`` triangle),
+        so no separate wall infill is needed here. A single-level plan yields one
+        plate-high box per run, byte-identical to before.
+        """
         t = w.thickness
-        lo, hi = w.span
         c = w.const_coord
-        top = base + w.height
-        if w.orientation == "v":
-            return _box_solid(self.spf, c - t / 2.0, lo, base, c + t / 2.0, hi, top)
-        return _box_solid(self.spf, lo, c - t / 2.0, base, hi, c + t / 2.0, top)
+        solids: list[Ref] = []
+        for lo, hi, top in wall_top_intervals(w, self.model):
+            if top - base <= 0:
+                continue
+            if w.orientation == "v":
+                solids.append(_box_solid(self.spf, c - t / 2.0, lo, base, c + t / 2.0, hi, top))
+            else:
+                solids.append(_box_solid(self.spf, lo, c - t / 2.0, base, hi, c + t / 2.0, top))
+        return solids
 
     def _opening(
         self, owner: Ref, context: Ref, w: RevitWall, o: RevitOpening, base: float, wall: Ref

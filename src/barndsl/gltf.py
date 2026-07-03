@@ -25,6 +25,18 @@ same rule and stay consistent — we build all geometry in plan space and transf
 points and normals identically at serialisation time. **1 glTF unit = 1 foot**
 (recorded in ``asset.extras``).
 
+Wall heights on multi-level plans
+---------------------------------
+The exchange carries each wall at its storey's clear ceiling (its plate). Extruded
+naively that leaves a gap band between stacked levels and a void where a lower
+level is not covered by an upper floor. :mod:`barndsl.wallheights` corrects the
+vertical extent of every run (shared with :mod:`barndsl.ifc`): a lower run rises
+to the **base of the level above** where an upper floor covers it, and an exterior
+lower run rises to the **top plate** where it does not, so walls meet the floor
+above or the roof with no open band. A gable end that reaches the plate this way
+is closed to the ridge by :func:`_gable_infill_segment`. Single-level plans have
+only top-level runs and are byte-identical to before.
+
 Roof approximations mirror what :mod:`barndsl.views` documents: **gable** exact
 (two sloped planes eave→ridge at the plan's pitch, projected past the walls by the
 eave overhang), **shed** one sloped plane, **monitor** built from its per-section
@@ -56,8 +68,10 @@ from dataclasses import dataclass, field
 
 from .constants import SLAB_THICKNESS
 from .elements import Barndominium, RoomType
+from .geometry import TOL
 from .render import BEAM_COLOR, ROOM_COLORS
 from .revit import RevitModel, RevitOpening, RevitWall, to_revit_model
+from .wallheights import gable_line, is_gable_end, roof_plate, wall_top_intervals
 
 # --- materials (hex colours; converted to linear baseColorFactor on emit) -----
 
@@ -182,7 +196,12 @@ class Scene:
 # --- wall solids (the door/window box decomposition) -------------------------
 
 
-def wall_solids(wall: RevitWall, openings: list[RevitOpening], base: float) -> list[Box]:
+def wall_solids(
+    wall: RevitWall,
+    openings: list[RevitOpening],
+    base: float,
+    intervals: list[tuple[float, float, float]] | None = None,
+) -> list[Box]:
     """The solid boxes of one wall run, with its hosted ``openings`` cut out.
 
     Pure and deterministic: the run is split lengthwise into full-height segments
@@ -190,10 +209,28 @@ def wall_solids(wall: RevitWall, openings: list[RevitOpening], base: float) -> l
     re-added (sill / lintel), so the void is exactly the opening rectangle. With no
     openings this is a single box — the uncut wall — so opening cuts strictly
     reduce the summed volume (the invariant the tests pin).
+
+    ``intervals`` is the run's corrected vertical extent as ``(lo, hi, top)``
+    running pieces (see :mod:`barndsl.wallheights`): each piece extrudes from
+    ``base`` to its own ``top``, so a lower level's run reaches the level above
+    where it is covered and the roof plate where it is not. It defaults to a
+    single plate-high box over the whole span, which is the historical behaviour
+    (and keeps single-level plans byte-identical).
     """
+    if intervals is None:
+        lo, hi = wall.span
+        intervals = [(lo, hi, base + wall.height)]
+    boxes: list[Box] = []
+    for lo, hi, top in intervals:
+        boxes.extend(_segment_solids(wall, openings, base, lo, hi, top))
+    return boxes
+
+
+def _segment_solids(
+    wall: RevitWall, openings: list[RevitOpening], base: float, lo: float, hi: float, top: float
+) -> list[Box]:
+    """One vertical segment ``[lo, hi]`` of a run, base→``top``, with openings cut."""
     t = wall.thickness
-    lo, hi = wall.span
-    top = base + wall.height
     vertical = wall.orientation == "v"
     c = wall.const_coord
 
@@ -202,7 +239,7 @@ def wall_solids(wall: RevitWall, openings: list[RevitOpening], base: float) -> l
             return Box(c - t / 2.0, a, z0, c + t / 2.0, b, z1)
         return Box(a, c - t / 2.0, z0, b, c + t / 2.0, z1)
 
-    # Opening spans along the running axis, clamped to the wall and sorted.
+    # Opening spans along the running axis, clamped to this segment and sorted.
     spans: list[tuple[float, float, float, float]] = []  # (a, b, sill, head)
     for o in openings:
         along = o.location[1] if vertical else o.location[0]
@@ -292,6 +329,46 @@ def _gable_infill(node: MeshNode, wall: RevitWall, base: float) -> None:
         pt(ax, -t / 2.0, apex_top), pt(ax, t / 2.0, apex_top),
         pt(hi, t / 2.0, plate), pt(hi, -t / 2.0, plate),
     )
+
+
+def _gable_infill_segment(
+    node: MeshNode, wall: RevitWall, lo: float, hi: float, plate: float, gl: dict
+) -> None:
+    """Close the gable above ``[lo, hi]`` for a run that reaches the plate.
+
+    Generalises :func:`_gable_infill` (which fills a whole marked top-level gable
+    wall) to an arbitrary run interval, following the roof underside from
+    :func:`barndsl.wallheights.gable_line`. Used for a *lower* exterior run that
+    the uncovered-extension rule lifts to the plate at a gable end — e.g. the
+    single-storey end of a plan with a partial upper floor, which the exchange's
+    top-level-only gable marking never reaches.
+    """
+    t = wall.thickness
+    vertical = wall.orientation == "v"
+    c = wall.const_coord
+    mid, half, rise = gl["mid"], gl["half"], gl["rise"]
+
+    def zf(s: float) -> float:
+        return plate + rise * max(0.0, 1.0 - abs(s - mid) / half)
+
+    def pt(along: float, face: float, z: float):
+        if vertical:
+            return (c + face, along, z)
+        return (along, c + face, z)
+
+    # Split at the ridge so each piece has a straight (monotonic) roofline.
+    breaks = [lo, mid, hi] if lo < mid < hi else [lo, hi]
+    for p, q in zip(breaks, breaks[1:]):
+        zp, zq = zf(p), zf(q)
+        for face in (t / 2.0, -t / 2.0):  # the trapezoid plate→roofline on each face
+            node.add_quad(
+                pt(p, face, plate), pt(q, face, plate), pt(q, face, zq), pt(p, face, zp),
+            )
+        # The roof-underside strip closing the top across the wall thickness.
+        node.add_quad_up(
+            pt(p, -t / 2.0, zp), pt(p, t / 2.0, zp),
+            pt(q, t / 2.0, zq), pt(q, -t / 2.0, zq),
+        )
 
 
 # --- roof --------------------------------------------------------------------
@@ -413,13 +490,24 @@ def _add_walls(scene: Scene) -> None:
     for o in model.openings:
         if o.host_wall is not None:
             hosted.setdefault(o.host_wall, []).append(o)
+    plate = roof_plate(model)
+    gl = gable_line(model)
     for w in model.walls:
         base = elev.get(w.level, 0.0)
         ops = hosted.get(w.id, [])
         node = scene.node(f"wall:{w.id}", "walls", WALL_COLOR)
-        for box in wall_solids(w, ops, base):
+        intervals = wall_top_intervals(w, model)
+        for box in wall_solids(w, ops, base, intervals):
             node.add_box(box)
+        # Top-level gable ends carry the exchange's own marking; a lower exterior
+        # run lifted to the plate at a gable end (uncovered extension) is closed
+        # here from the corrected intervals so its end meets the ridge too.
         _gable_infill(node, w, base)
+        if gl is not None and plate is not None and w.profile != "gable" and w.exterior \
+                and is_gable_end(w, gl):
+            for lo, hi, top in intervals:
+                if abs(top - plate) <= TOL:
+                    _gable_infill_segment(node, w, lo, hi, plate, gl)
         # Lintel / sill boxes ride the openings layer so they can be toggled apart.
         lintels = _opening_boxes(w, ops, base)
         if lintels:

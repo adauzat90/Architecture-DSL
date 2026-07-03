@@ -43,6 +43,17 @@ view3d`. Tests pin glTF structural validity (accessor/bufferView bookkeeping,
 POSITION min/max, index ranges, .glb chunk padding), the geometry contract (every
 wall run → a mesh, opening cuts reduce wall volume), and a gallery export sweep.
 
+Bugfix — multi-level wall heights (`src/barndsl/wallheights.py`, shared by
+`gltf.py` and `ifc.py`): the exchange carries each run at its storey's clear
+ceiling (the centreline fact the pyRevit consumer needs), so extruded naively a
+multi-level plan showed an open **gap band** the floor-assembly depth between
+stacked levels and a wall-to-roof **void** wherever a lower level wasn't under an
+upper floor (e.g. `two_story`'s single-storey east end). The exporters now correct
+each run's vertical extent per segment — covered runs rise to the base of the level
+above, uncovered exterior runs rise to the roof plate — and close any gable end a
+run newly reaches. The Revit exchange is unchanged; single-level plans are
+byte-identical.
+
 Possible follow-ups: billboarded room labels in the viewer; true swept gable-wall
 pentagons instead of the box + infill approximation.
 

@@ -154,6 +154,22 @@ def test_multi_level_plan_has_a_storey_per_level():
     assert _count(types, "IFCBUILDINGSTOREY") == len(model.levels)
 
 
+def test_multi_level_walls_stay_one_per_run_but_gain_height_pieces():
+    # The gap-band / wall-to-roof fix keeps every run one IfcWall (the count the
+    # exchange pins), while a split run (covered part + uncovered part) carries
+    # several box solids — so the extrusion count exceeds the wall count.
+    from barndsl.wallheights import wall_top_intervals
+
+    plan = _example("gallery/two_story.barn")
+    model = to_revit_model(plan)
+    _, types, _ = _split_data(to_ifc(plan))
+    assert _count(types, "IFCWALL") == len(model.walls)
+    # At least one lower run is split into covered/uncovered height pieces.
+    assert any(
+        w.level == 0 and len(wall_top_intervals(w, model)) > 1 for w in model.walls
+    ), "expected a level-0 run split into multiple height pieces"
+
+
 # --- GlobalIds ---------------------------------------------------------------
 
 
@@ -346,6 +362,35 @@ def test_oracle_units_are_feet(tmp_path):
     f = _open(_plan(), tmp_path)
     units = {u.Name for u in f.by_type("IfcProject")[0].UnitsInContext.Units if hasattr(u, "Name")}
     assert "foot" in units
+
+
+@_needs_oracle
+def test_oracle_two_story_walls_close_gap_and_reach_roof(tmp_path):
+    # Tessellate the two-storey model and read each IfcWall's world-space z-extent.
+    # The lower walls must no longer stop at the ceiling (9): covered runs reach
+    # the level-1 base (10) and uncovered exterior runs reach the roof plate (19),
+    # so the inter-floor gap band and the wall-to-roof void are both gone.
+    import ifcopenshell.geom as geom
+
+    plan = _example("gallery/two_story.barn")
+    path = tmp_path / "two.ifc"
+    path.write_text(to_ifc(plan), encoding="utf-8")
+    f = _ifc.open(str(path))
+    settings = geom.settings()
+
+    ft = 0.3048  # ifcopenshell tessellates in SI metres; the model declares feet
+    exterior_tops: list[float] = []
+    for wall in f.by_type("IfcWall"):
+        shape = geom.create_shape(settings, wall)
+        base_z = list(shape.transformation.matrix)[14]  # storey elevation, metres
+        top = base_z + max(shape.geometry.verts[2::3])
+        if wall.Name == "Exterior Wall":
+            exterior_tops.append(top)
+
+    # Every exterior run reaches at least the level-1 base (10 ft) — no gap band —
+    # and the uncovered ones reach the roof plate (19 ft) — no wall-to-roof void.
+    assert min(exterior_tops) >= 10.0 * ft - 1e-3
+    assert max(exterior_tops) >= 19.0 * ft - 1e-3
 
 
 @_needs_oracle
