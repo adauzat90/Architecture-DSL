@@ -24,6 +24,30 @@ hints. ~~Honour an explicit interior bearing wall as a post line~~ — DONE: the
 post onto the wall at every bent crossing its run (a wall across the span gets a
 `WALL_BEARING_AXIS` info instead).
 
+## 3D export + viewer — DONE
+Shipped (Tier 1 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/gltf.py`
+(`to_gltf`/`to_glb`/`write_gltf`) lowers the plan into a 3D model as **glTF 2.0**
+— pure Python, stdlib only (`base64`, `struct`, `json`, `math`), no new
+dependency. It builds on the existing Revit-shaped exchange, not a new geometry
+layer: wall runs extruded to their level height with door/window openings cut
+(solid piers + lintel/sill boxes — axis-aligned box decomposition, no CSG), floor
+slabs, gable-end infill, the roof from `roof_plan` (gable exact, shed one plane,
+monitor from its sections), frame posts/beams, porches (+ covered-porch posts),
+stepped stair flights from `plan_stair_runs`, and room floors tinted with
+`render.ROOM_COLORS` (hex → linear baseColorFactor). Plan feet x-east/y-north/z-up
+maps to glTF y-up `(x, z, -y)`; nodes are named and grouped per layer so viewers
+can toggle them. `src/barndsl/viewer.py` (`write_viewer`) writes **one**
+self-contained, offline HTML file with an inline WebGL renderer (orbit/pan/zoom,
+one directional light + Lambert, layer toggles). CLI: `barndsl gltf` and `barndsl
+view3d`. Tests pin glTF structural validity (accessor/bufferView bookkeeping,
+POSITION min/max, index ranges, .glb chunk padding), the geometry contract (every
+wall run → a mesh, opening cuts reduce wall volume), and a gallery export sweep.
+
+Possible follow-ups: Tier 4 IFC export (the same exchange lowered to
+IfcWall/IfcSlab/IfcRoof via an optional `ifcopenshell` dep); billboarded room
+labels in the viewer; true swept gable-wall pentagons instead of the box + infill
+approximation.
+
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the
 `barndsl.revit/1` exchange) and a `barndsl revit FILE --out plan.json` command.

@@ -32,6 +32,15 @@
         keeping the best-scoring iteration. Requires `pip install 'barndsl[agent]'`
         and ANTHROPIC_API_KEY.
 
+    barndsl gltf FILE.barn [--out FILE.glb]
+        Compile, then lower the plan to a 3D model as glTF 2.0. `.glb` (default)
+        is the binary container; `.gltf` writes JSON with an embedded buffer.
+        Any glTF viewer opens it — no CAD licence, no plug-in.
+
+    barndsl view3d FILE.barn [--out FILE.html] [--open]
+        Write a single self-contained HTML file that renders the 3D model with
+        orbit/pan/zoom and layer toggles. Works offline by double-clicking it.
+
     barndsl revit FILE.barn [--out FILE.json] [--frame]
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
         (levels, deduplicated walls, hosted doors/windows, room seeds, structural
@@ -601,6 +610,44 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_gltf(args: argparse.Namespace) -> int:
+    from .gltf import write_gltf
+    from .revit import to_revit_model
+
+    result = compile_file(args.file)
+    print(result.report(os.path.basename(args.file)))
+    if result.plan is None or result.recovered:
+        # Never emit a 3D model for a partial recovery — same contract as `dxf`.
+        return 1
+    out = args.out or f"{os.path.splitext(os.path.basename(args.file))[0]}.glb"
+    write_gltf(result.plan, out)
+    model = to_revit_model(result.plan)
+    n_open = len(model.openings)
+    print(
+        f"\nglTF: {len(model.walls)} wall(s), {n_open} opening(s), "
+        f"{len(model.rooms)} room(s), {len(model.columns)} post(s)"
+    )
+    print(f"Wrote {out}")
+    return 0 if result.ok else 1
+
+
+def _cmd_view3d(args: argparse.Namespace) -> int:
+    from .viewer import write_viewer
+
+    result = compile_file(args.file)
+    print(result.report(os.path.basename(args.file)))
+    if result.plan is None or result.recovered:
+        return 1
+    out = args.out or f"{os.path.splitext(os.path.basename(args.file))[0]}.html"
+    write_viewer(result.plan, out)
+    print(f"\nWrote {out} (self-contained 3D viewer)")
+    if getattr(args, "open", False):
+        import webbrowser
+
+        webbrowser.open(f"file://{os.path.abspath(out)}")
+    return 0 if result.ok else 1
+
+
 def _cmd_elevation(args: argparse.Namespace) -> int:
     from .views import save_elevation
 
@@ -1061,6 +1108,29 @@ def main(argv: list[str] | None = None) -> int:
     p_dxf.add_argument("file", help="path to a .barn DSL file")
     p_dxf.add_argument("--out", default="plan.dxf", help="output DXF path")
     p_dxf.set_defaults(func=_cmd_dxf)
+
+    p_gltf = sub.add_parser(
+        "gltf", help="export a plan to a 3D model (glTF 2.0: .glb binary or .gltf)"
+    )
+    p_gltf.add_argument("file", help="path to a .barn DSL file")
+    p_gltf.add_argument(
+        "--out",
+        default=None,
+        help="output path (default: FILE stem + .glb); .gltf writes an embedded-buffer JSON",
+    )
+    p_gltf.set_defaults(func=_cmd_gltf)
+
+    p_view3d = sub.add_parser(
+        "view3d", help="write a single-file, offline HTML 3D viewer for a plan"
+    )
+    p_view3d.add_argument("file", help="path to a .barn DSL file")
+    p_view3d.add_argument(
+        "--out", default=None, help="output HTML path (default: FILE stem + .html)"
+    )
+    p_view3d.add_argument(
+        "--open", action="store_true", help="open the written viewer in a browser"
+    )
+    p_view3d.set_defaults(func=_cmd_view3d)
 
     p_elev = sub.add_parser(
         "elevation", help="render a schematic exterior elevation (one face) to SVG"

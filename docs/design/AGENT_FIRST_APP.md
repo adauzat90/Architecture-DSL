@@ -1,6 +1,6 @@
 # Agent-first architecture application
 
-Status: **design** — tier 1 in progress.
+Status: **design** — tier 1 (3D output) **shipped/DONE**; tiers 2–5 planned.
 Context: `docs/IDEAS.md` (Revit plug-in — foundation DONE), `docs/PRODUCT_REVIEW.md`,
 `docs/REVIEW_DSL_REVIT*.md`.
 
@@ -83,10 +83,13 @@ formats as the hand-off.
 
 ## Roadmap
 
-### Tier 1 — 3D output (highest leverage, in progress)
+### Tier 1 — 3D output (highest leverage) — DONE
 
 The single biggest change to how the product *feels*: a reviewable 3D model
-from any `.barn` file, no CAD license, no plug-in, no API key.
+from any `.barn` file, no CAD license, no plug-in, no API key. **Shipped:**
+`src/barndsl/gltf.py` (`barndsl gltf`) and `src/barndsl/viewer.py`
+(`barndsl view3d`), both pure Python / stdlib-only, tested in
+`tests/test_gltf.py` and `tests/test_viewer.py`.
 
 1. **`gltf.py` — glTF 2.0 exporter.** Pure Python, stdlib only (glTF is JSON +
    a base64/binary buffer; no library needed). Lower the `revit.py` exchange

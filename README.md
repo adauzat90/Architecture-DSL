@@ -562,6 +562,8 @@ barndsl watch   examples/cedar_ridge.barn --out plan.svg  # recompile/render on 
 barndsl schedule examples/cedar_ridge.barn         # room/door/window schedules (MD)
 barndsl schedule examples/cedar_ridge.barn --format csv --out sched.csv
 barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
+barndsl gltf    examples/cedar_ridge.barn --out plan.glb  # → 3D model (glTF 2.0)
+barndsl view3d  examples/cedar_ridge.barn --out plan.html # → single-file 3D viewer
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
@@ -583,6 +585,22 @@ schematic exterior elevation (roof profile + doors/windows at their true sill/he
 heights) and a transverse section (each level's floor/ceiling, vaulted
 double-heights, the roof over them), straight from the model's heights, roof form
 and pitch. No Revit, no raster dep.
+
+**3D output.** `barndsl gltf plan.barn` lowers the plan into a 3D model as
+**glTF 2.0** — `.glb` (binary, default) or `.gltf` (JSON with an embedded buffer)
+— that any glTF viewer opens, no CAD licence and no plug-in. It reuses the same
+Revit-shaped exchange the `revit` command does: wall runs extruded to their level
+height with door/window openings cut (solid piers + lintel/sill boxes), floor
+slabs, the roof from the roof plan (gable exact, shed/monitor as modeled), frame
+posts/beams, porches and stairs, room floors tinted with the plan palette. Units
+are feet (1 glTF unit = 1 ft); plan x-east/y-north/z-up maps to glTF y-up. Nodes
+are named and grouped per layer (`floors`, `walls`, `openings`, `roof`, `frame`,
+`porches`, `stairs`) so a viewer can toggle them. `barndsl view3d plan.barn`
+writes **one** self-contained HTML file — an inline WebGL renderer with
+orbit/pan/zoom and layer toggles (turn the roof off to look inside) — that works
+offline by double-clicking it, no network and no dependency. Both are pure
+Python, stdlib only. Schematic by design, like the elevations: for design review,
+not construction detailing.
 
 **Cost estimate.** `barndsl cost plan.barn` turns the takeoff into a transparent,
 assembly-based budget: every line is `quantity × unit cost` with the quantity's
