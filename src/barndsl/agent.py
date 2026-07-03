@@ -235,7 +235,7 @@ def _best_valid_step(history: list[DesignStep]) -> DesignStep | None:
     ]
     if not valid:
         return None
-    return max(valid, key=lambda s: (s.score.total, s.iteration))
+    return max(valid, key=lambda s: (s.score.total if s.score else 0.0, s.iteration))
 
 
 @dataclass
@@ -465,11 +465,13 @@ class BarndoAgent:
                             continue
                         loc = f" line {d['line']}" if d["line"] else ""
                         fatal.append(f"error {d['code']}{loc}: {d['message']}")
+                    bv_score = best_valid.score
+                    assert bv_score is not None  # _best_valid_step filters on it
                     feedback = (
                         f"NOTE: your newest attempt (iteration {i}) did not "
                         f"compile and was DISCARDED. The DSL shown above is "
                         f"your best valid iteration ({best_valid.iteration}, "
-                        f"scored {best_valid.score.total:g}); the feedback "
+                        f"scored {bv_score.total:g}); the feedback "
                         f"below describes THAT source. Improve it — and do "
                         f"not repeat the discarded attempt's mistakes.\n"
                         + render_feedback(best_valid.result, best_valid.score)
@@ -608,7 +610,7 @@ def _solver_seed_step(spec) -> DesignStep | None:
             continue
         _fold_program_nudge(result)
         score = design_score(result)
-        if best is None or score.total > best.score.total:
+        if best is None or best.score is None or score.total > best.score.total:
             best = DesignStep(0, result.source, result, None, score)
     return best
 

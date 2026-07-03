@@ -20,7 +20,6 @@ from barndsl import (
     get_profile,
     load_profile,
     profiles_text,
-    validate,
 )
 from barndsl.compiler import compile_file
 from barndsl.profiles import (

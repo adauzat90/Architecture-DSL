@@ -14,7 +14,6 @@ from __future__ import annotations
 import pytest
 
 from barndsl import (
-    RoomType as T,
     barndominium,
     compile_source,
     emit_dsl,

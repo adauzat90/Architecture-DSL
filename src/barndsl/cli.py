@@ -95,7 +95,7 @@ def _add_profile_flag(parser: argparse.ArgumentParser) -> None:
 
 def _cmd_profiles(args: argparse.Namespace) -> int:
     """List the built-in jurisdiction profiles and their thresholds."""
-    from .profiles import load_profile, profiles_text
+    from .profiles import profiles_text
 
     if getattr(args, "profile", None):
         # Resolve and dump a single profile (built-in or JSON) as JSON — handy

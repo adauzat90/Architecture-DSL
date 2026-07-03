@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .elements import (
     DEFAULT_DOUBLE_DOOR_WIDTH,
@@ -56,6 +57,9 @@ from .elements import (
     inches,
 )
 from .validation import Issue, Severity, ValidationReport, validate
+
+if TYPE_CHECKING:  # the annotation-only import; runtime resolution is lazy
+    from .profiles import Profile
 
 # Statement keywords, for "unknown statement" hints.
 _KEYWORDS = (
@@ -633,6 +637,7 @@ def _parse_statement(
         c.expect_end()
         plan.site(w, length)
         ss = plan.site_spec
+        assert ss is not None  # .site() just created it
         ss.line, ss.col, ss.end_col = lineno, kw.col, kw.end_col
     elif key == "setback":
         # `setback [front <n>] [side <n>] [rear <n>]` — any subset, in any order.
@@ -665,6 +670,7 @@ def _parse_statement(
         c.expect_end()
         plan.setback(front=front, side=side, rear=rear)
         ss = plan.site_spec
+        assert ss is not None  # .setback() just created it
         ss.setback_line, ss.setback_col, ss.setback_end_col = lineno, kw.col, kw.end_col
     elif key == "roof":
         # `roof <style> [pitch <p>]` — style in gable|shed|monitor.

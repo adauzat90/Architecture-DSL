@@ -782,7 +782,7 @@ def test_identities_are_deterministic_across_reexports():
 def test_unchanged_rebuild_keeps_every_element_id():
     doc = _ready_doc(columns=True, framing=True)
     doc.add_ceiling_type("2x2 ACT")
-    rep1 = builder.build(doc, _framed_exchange())
+    builder.build(doc, _framed_exchange())
     ids1 = _managed_ids(doc)
     assert ids1
     rep2 = builder.build(doc, _framed_exchange())

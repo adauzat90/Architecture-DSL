@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from barndsl import barndominium, compile_source, emit_dsl, validate
+from barndsl import barndominium, compile_source, emit_dsl
 from barndsl.diagnostics import REGISTRY, explain
 from barndsl.introspect import plan_summary, summary_text
 

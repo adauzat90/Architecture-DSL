@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import math
 
+from typing import Any
+
 from .elements import Barndominium, Beam, FrameSpec, Post
 from .geometry import SharedEdge, shared_edge
 
@@ -59,7 +61,7 @@ def _edge_in_section(
     return x - tol <= mx <= x + w + tol and y - tol <= my <= y + l + tol
 
 
-def bearing_wall_usage(plan: Barndominium) -> list[tuple[object, SharedEdge, bool]]:
+def bearing_wall_usage(plan: Barndominium) -> "list[tuple[Any, SharedEdge, bool]]":
     """Each **valid** declared bearing wall and whether the frame can use it.
 
     Returns ``(spec, edge, usable)`` per ground-level ``wall ... bearing``

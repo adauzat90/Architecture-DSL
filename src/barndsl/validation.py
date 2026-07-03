@@ -25,17 +25,11 @@ from .constants import (
     GUARD_DROP_TRIGGER,
     GUARD_HEIGHT,
     INTERIOR_WALL_THICKNESS,
-    MAX_EGRESS_SILL,
     MAX_RISER_HEIGHT,
     MIN_BEDROOM_AREA,
     MIN_BEDROOM_DIMENSION,
     MIN_CEILING,
-    MIN_EGRESS_AREA,
-    MIN_EGRESS_AREA_GRADE,
-    MIN_EGRESS_OPENING_HEIGHT,
-    MIN_EGRESS_OPENING_WIDTH,
     MIN_HALLWAY_WIDTH,
-    MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
     PLUMBING_WALL_THICKNESS,
@@ -1687,7 +1681,7 @@ def _validate_doors(plan: Barndominium, add) -> None:
             # A swing door that *is* wide enough should still be an orderable
             # size. A declared double/french pair checks against the stock pair
             # widths (two equal leaves) instead of the single-leaf sizes.
-            sizes = (
+            sizes: tuple[int, ...] = (
                 STD_DOUBLE_DOOR_WIDTHS_IN
                 if door.kind in DOUBLE_LEAF_KINDS
                 else STD_INTERIOR_DOOR_WIDTHS_IN
@@ -3176,7 +3170,7 @@ def _validate_design_quality(plan: Barndominium, add, profile: Profile = DEFAULT
         # check keeps the plain ``(plan, graph, by_id, add)`` shape (and stays
         # directly unit-testable with those four args).
         if check is _dq_hall_tight:
-            check(plan, graph, by_id, add, profile)
+            _dq_hall_tight(plan, graph, by_id, add, profile)
         else:
             check(plan, graph, by_id, add)
 
@@ -3293,6 +3287,7 @@ def _validate_requirements(plan: Barndominium, add) -> None:
         a = plan.room(req.a)
         assert a is not None  # checked above
         if req.kind == "adjacent":
+            assert req.b is not None  # the parser only builds pair kinds with b
             b = plan.room(req.b)
             assert b is not None
             if shared_edge(a, b) is None:
@@ -3315,6 +3310,7 @@ def _validate_requirements(plan: Barndominium, add) -> None:
                     )
                 )
         elif req.kind == "separate":
+            assert req.b is not None  # the parser only builds pair kinds with b
             b = plan.room(req.b)
             assert b is not None
             edge = shared_edge(a, b)  # None across levels: trivially separate
