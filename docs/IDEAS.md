@@ -192,7 +192,7 @@ with `{error:{kind,message}}`. The element→line map is a minimal
 is drawn client-side from compact `rooms`/`openings` payload arrays (room-palette
 colours, id labels) with 0.5 ft grid snap, a 3 ft minimum-dimension guard, an undo
 stack of source snapshots (button / Ctrl-Cmd-Z), a click-to-jump-to-line select,
-and level-0 editing on multi-level plans. Tests: `tests/test_edits.py` (the
+and a floor switcher for editing any level of a multi-level plan. Tests: `tests/test_edits.py` (the
 preservation/idempotence/typed-error guarantees + a gallery sweep) and the
 `/api/edit` + SPA-markup cases in `tests/test_playground.py`.
 
@@ -203,8 +203,12 @@ against its former anchor, emit an updated *relative* placement (`east-of foo al
 bearing / rated, add/remove a `wall` statement); **multi-select** + group move /
 align / distribute (one batched edit set, one undo entry); dragging to **create**
 (rubber-band a new `room`, drop a new window/door onto a wall) and **delete**;
-editing **porches / stairs / wings** (not just rooms and openings) and the upper
-levels of a multi-level plan (a level switcher); ~~a **live coordinate/size
+editing **porches / stairs / wings** (not just rooms and openings); ~~editing the
+upper **levels** of a multi-level plan (a level switcher)~~ — DONE (wave 4): a
+floor switcher (segmented chips, or `[` / `]`) picks the active level; its
+rooms/openings stay fully interactive while the other floors — and any stair
+footprint — render as a dimmed, non-interactive underlay to align against, and
+neighbour snap guides compare same-level rooms only; ~~a **live coordinate/size
 readout** and dimension witnesses while dragging; snapping to **sibling edges**
 (align to an adjacent room's wall, not just the 0.5 ft grid)~~ — DONE (wave 3): a
 readout chip near the ghost shows position/size (and the resize delta) live with

@@ -234,6 +234,16 @@ def compile_payload(source: str) -> dict:
             ]
             payload["openings"] = opening_overlays(plan)
             payload["levels"] = plan.levels()
+            # Stair footprints (compact) so the edit overlay can show each stair on
+            # both the level it runs from and the level it lands on — the cross-level
+            # anchor an architect aligns an upper floor against.
+            payload["stairs"] = [
+                {
+                    "id": s.id, "x": s.x, "y": s.y, "w": s.width, "l": s.length,
+                    "from": s.from_level, "to": s.to_level,
+                }
+                for s in plan.stairs
+            ]
             # The Report tab's data — cost, schedules, areas and (if the plan
             # declares one) the climate envelope. Cheap enough to inline: for the
             # gallery plans it adds <1 ms and <8 KB to the compile payload (measured),
@@ -1080,6 +1090,23 @@ _APP_HTML = r"""<!doctype html>
   .ov-room { cursor:move; }
   .ov-open { cursor:grab; }
   .ov-handle { fill:var(--accent2); stroke:#fff; }
+  /* other-level rooms: dimmed, non-interactive outlines you align the floor to */
+  .ov-under { fill:none; stroke:var(--faint); stroke-dasharray:3 2; opacity:.5;
+    pointer-events:none; }
+  .ov-under-t { fill:var(--faint); opacity:.6; pointer-events:none; }
+  /* stair footprint — shown on both the run's and the landing's level */
+  .ov-stair { fill:rgba(150,130,90,.16); stroke:#9a8c66; stroke-dasharray:2 2;
+    pointer-events:none; }
+  .ov-stair-t { fill:#8a7f63; pointer-events:none; }
+  /* segmented floor switcher (multi-level plans, edit mode only) */
+  .level-switch { display:flex; align-items:center; gap:4px; }
+  .level-switch[hidden] { display:none; }
+  .level-switch .lvl-label { font-size:11px; color:var(--faint); margin-right:1px; }
+  .lvl-chip { font:inherit; font-size:11.5px; font-weight:600; padding:3px 10px;
+    border-radius:20px; border:1px solid var(--line); background:var(--panel);
+    color:var(--muted); cursor:pointer; white-space:nowrap; }
+  .lvl-chip:hover:not(.on) { border-color:var(--accent); color:var(--accent); }
+  .lvl-chip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
   .h-e, .h-w { cursor:ew-resize; } .h-n, .h-s { cursor:ns-resize; }
   .h-ne, .h-sw { cursor:nesw-resize; } .h-nw, .h-se { cursor:nwse-resize; }
   @keyframes lineflash { from { background:rgba(209,135,63,.55); } to { background:transparent; } }
@@ -1348,6 +1375,7 @@ _APP_HTML = r"""<!doctype html>
         <div class="edit-bar">
           <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
           <button id="undo-btn" disabled title="Undo last edit (Ctrl/Cmd+Z)">↶ Undo</button>
+          <span class="level-switch" id="level-switch" hidden></span>
           <span class="edit-note" id="edit-note"></span>
         </div>
         <div class="plan-body">
@@ -1604,7 +1632,8 @@ const SHORTCUTS = [
   ['Save .barn', MOD + '+S'], ['Open a .barn file', MOD + '+O'],
   ['Send to the agent', MOD + '+Enter'], ['Undo a layout edit', MOD + '+Z'],
   ['Zoom in / out / fit', '+  −  0'], ['Compile now', MOD + '+Enter'],
-  ['Cancel a drag', 'Esc'], ['Open this help', '?'],
+  ['Cancel a drag', 'Esc'], ['Switch floor (edit mode)', '[  ]'],
+  ['Open this help', '?'],
 ];
 let helpRefLines = null;   // cached parsed reference lines (fetched once)
 
@@ -2227,9 +2256,11 @@ const undoBtn = document.getElementById('undo-btn');
 const editNoteEl = document.getElementById('edit-note');
 const dimChip = document.getElementById('dim-chip');
 const planBody = document.querySelector('.plan-body');
-const editLevel = 0;                 // the overlay edits level 0 (see the note)
+const levelSwitch = document.getElementById('level-switch');
+let editLevel = 0;                   // the floor the overlay currently edits
 let editMode = false, editReady = false;
 let editRooms = [], editOpens = [], editLevels = [0];
+let allRooms = [], allOpens = [], allStairs = [];   // every level — the dimmed underlay
 let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
 const undoStack = [];
 
@@ -2254,34 +2285,77 @@ function initEdit(){
     editMode = editChk.checked; editLayer.hidden = !editMode;
     planSvg.style.display = editMode ? 'none' : '';
     document.getElementById('plan-zoom').style.display = editMode ? 'none' : '';
+    renderLevelSwitcher();
     if (editMode) buildOverlay(); else { selectedRoomId = null; editNote(''); planZoom.refit(); }
   });
   undoBtn.addEventListener('click', doUndo);
+  levelSwitch.addEventListener('click', e => {
+    const b = e.target.closest('[data-level]'); if (!b) return;
+    setEditLevel(parseInt(b.getAttribute('data-level'), 10));
+  });
+}
+
+// -- the floor switcher (only on plans with >1 level, only in edit mode) --
+function levelLabel(lvl){ return lvl === 0 ? 'Ground' : ('Level ' + lvl); }
+function renderLevelSwitcher(){
+  const multi = editMode && editLevels.length > 1;
+  levelSwitch.hidden = !multi;
+  if (!multi){ levelSwitch.innerHTML = ''; return; }
+  let h = '<span class="lvl-label">Floor</span>';
+  for (const lvl of editLevels)
+    h += '<button class="lvl-chip' + (lvl === editLevel ? ' on' : '') +
+      '" data-level="' + lvl + '">' + esc(levelLabel(lvl)) + '</button>';
+  levelSwitch.innerHTML = h;
+}
+function applyLevelFilter(){
+  editRooms = allRooms.filter(r => r.level === editLevel);
+  editOpens = allOpens.filter(o => o.level === editLevel);
+}
+function setEditLevel(lvl){
+  if (editLevels.indexOf(lvl) < 0 || lvl === editLevel) return;
+  editLevel = lvl; selectedRoomId = null;
+  applyLevelFilter(); renderLevelSwitcher();
+  if (editMode) buildOverlay();
 }
 
 function refreshEditData(p){
   if (p && p.rooms){
-    editRooms = p.rooms.filter(r => r.level === editLevel);
-    editOpens = (p.openings || []).filter(o => o.level === editLevel);
-    editLevels = p.levels || [0]; editReady = true;
+    allRooms = p.rooms; allOpens = p.openings || []; allStairs = p.stairs || [];
+    editLevels = p.levels || [0];
+    if (editLevels.indexOf(editLevel) < 0) editLevel = editLevels[0] || 0;  // clamp
+    applyLevelFilter(); editReady = true;
   }
+  renderLevelSwitcher();
   if (editMode) buildOverlay();
 }
 
 function buildOverlay(){
   if (!editMode || !svgEl) return;
-  if (!editRooms.length){ svgEl.innerHTML = '';
-    editNote(editReady ? 'No rooms on level 0 to edit.' : 'Fix the errors to edit the layout.', !editReady);
-    return; }
+  if (!editReady){ svgEl.innerHTML = '';
+    editNote('Fix the errors to edit the layout.', true); return; }
+  // The viewBox spans every level's rooms (+ stair footprints), so the active
+  // floor sits in its true position over the floor below — the underlay you align
+  // the loft to. It also stays fixed as you switch floors.
+  const boxes = allRooms.map(r => [r.x, r.y, r.x + r.w, r.y + r.l])
+    .concat(allStairs.map(t => [t.x, t.y, t.x + t.w, t.y + t.l]));
+  if (!boxes.length){ svgEl.innerHTML = ''; editNote('No rooms to edit.'); return; }
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const r of editRooms){ minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
-    maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.l); }
+  for (const b of boxes){ minX = Math.min(minX, b[0]); minY = Math.min(minY, b[1]);
+    maxX = Math.max(maxX, b[2]); maxY = Math.max(maxY, b[3]); }
   const pad = 3, W = (maxX - minX) + 2 * pad, H = (maxY - minY) + 2 * pad;
   ov = { minX, minY, maxX, maxY, MID: minY + maxY };
   svgEl.setAttribute('viewBox', (minX - pad) + ' ' + (minY - pad) + ' ' + W + ' ' + H);
   const fs = Math.max(1.1, Math.min(2.4, Math.min(W, H) * 0.05));
   const hs = Math.max(0.8, Math.min(2.2, Math.min(W, H) * 0.032));
   let s = '';
+  // Dimmed context: rooms on the other floors, as non-interactive outlines.
+  for (const r of allRooms){
+    if (r.level === editLevel) continue;
+    s += '<rect class="ov-under" x="' + r.x + '" y="' + Y(r.y + r.l) +
+      '" width="' + r.w + '" height="' + r.l + '" vector-effect="non-scaling-stroke"/>' +
+      '<text class="ov-under-t" x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) + fs * 0.3) +
+      '" text-anchor="middle" font-size="' + (fs * 0.72) + '">' + esc(r.id) + '</text>';
+  }
   for (const r of editRooms){
     const sel = r.id === selectedRoomId;
     s += '<rect class="ov-room" data-room="' + esc(r.id) + '" x="' + r.x + '" y="' + Y(r.y + r.l) +
@@ -2301,6 +2375,18 @@ function buildOverlay(){
       '" x2="' + seg[1].x + '" y2="' + Y(seg[1].y) + '" stroke="' + col +
       '" stroke-width="4.5" vector-effect="non-scaling-stroke" stroke-linecap="round"/>';
   }
+  // Stair footprints touching this floor (run or landing) — drawn over the rooms
+  // so the cross-level anchor stays visible even where a room sits on it; inert
+  // (pointer-events:none) so the room beneath stays draggable.
+  for (const t of allStairs){
+    if (t.from !== editLevel && t.to !== editLevel) continue;
+    const up = t.from === editLevel;
+    s += '<rect class="ov-stair" x="' + t.x + '" y="' + Y(t.y + t.l) +
+      '" width="' + t.w + '" height="' + t.l + '" vector-effect="non-scaling-stroke"/>' +
+      '<text class="ov-stair-t" x="' + (t.x + t.w / 2) + '" y="' + (Y(t.y + t.l / 2) + fs * 0.3) +
+      '" text-anchor="middle" font-size="' + (fs * 0.72) + '">' +
+      esc(t.id) + (up ? ' ↑' + t.to : ' ↓' + t.from) + '</text>';
+  }
   const r = roomById(selectedRoomId);
   if (r){
     const pts = [['sw', r.x, r.y], ['s', r.x + r.w / 2, r.y], ['se', r.x + r.w, r.y],
@@ -2313,8 +2399,9 @@ function buildOverlay(){
     }
   }
   svgEl.innerHTML = s;
-  editNote(editLevels.length > 1
-    ? ('Editing level 0 of ' + editLevels.length + ' — drag rooms, handles & openings.') : '');
+  // The floor switcher replaces the old fixed per-level note; only surface a note
+  // when the chosen floor has nothing editable on it.
+  editNote(editRooms.length ? '' : 'No rooms on this floor to edit.');
 }
 
 function openSeg(o, off){
@@ -2551,6 +2638,16 @@ document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey){
     if (document.activeElement !== editor && document.activeElement !== briefEl){
       e.preventDefault(); doUndo(); }
+    return;
+  }
+  // `[` / `]` step the active floor while editing (no modifiers, not while typing).
+  if (editMode && editLevels.length > 1 && !e.metaKey && !e.ctrlKey && !e.altKey &&
+      (e.key === '[' || e.key === ']')){
+    const tag = (document.activeElement || {}).tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+    e.preventDefault();
+    const i = editLevels.indexOf(editLevel), j = e.key === ']' ? i + 1 : i - 1;
+    if (j >= 0 && j < editLevels.length) setEditLevel(editLevels[j]);
   }
 });
 initEdit();

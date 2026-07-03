@@ -678,7 +678,9 @@ changes, comments and formatting untouched — so the text stays the source of
 truth (`POST /api/edit`, engine in `barndsl.edits`). Clicking a room scrolls the
 editor to its line; a small undo stack (button, or Ctrl/Cmd+Z when the editor
 isn't focused) reverts applied edits and agent results; a rejected edit restores
-the drag and shows the reason inline. Multi-level plans edit level 0.
+the drag and shows the reason inline. On a multi-level plan a **floor switcher**
+(segmented chips, or `[` / `]`) picks which level you edit, drawing the other
+floors — and any stair footprint — as a dimmed underlay to align against.
 
 *Agent chat pane.* When the agent extra is installed and a key is set — `pip
 install 'barndsl[agent]'` and `export ANTHROPIC_API_KEY=…` — a chat pane lights

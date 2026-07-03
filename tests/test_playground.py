@@ -32,6 +32,10 @@ with open(os.path.join(EXAMPLES, "cedar_ridge.barn"), encoding="utf-8") as _fh:
     #: A known-clean plan (0 errors) — pins the ok=True / full-render path.
     CLEAN = _fh.read()
 
+with open(os.path.join(EXAMPLES, "gallery", "two_story.barn"), encoding="utf-8") as _fh:
+    #: A two-level plan (a loft on level 1, a stair) — pins the multi-level edit UI.
+    TWO_STORY = _fh.read()
+
 #: A plan that *builds* but trips a code check (bath has no access): it still
 #: renders, but ``ok`` stays false — the semantic-error path.
 WITH_ERROR = """\
@@ -226,6 +230,20 @@ def test_compile_payload_carries_edit_overlay_arrays():
     assert p["levels"] == sorted(set(p["levels"]))
 
 
+def test_compile_payload_carries_stairs_for_the_multilevel_overlay():
+    # The edit overlay draws each stair on both the level it runs from and the one
+    # it lands on, so the payload carries compact stair footprints.
+    p = compile_payload(TWO_STORY)
+    assert p["levels"] == [0, 1]
+    assert p["stairs"] and all(
+        {"id", "x", "y", "w", "l", "from", "to"} <= set(s) for s in p["stairs"]
+    )
+    st = p["stairs"][0]
+    assert (st["from"], st["to"]) == (0, 1)
+    # a loft lives on level 1, so the overlay can filter to an upper floor
+    assert any(r["level"] == 1 for r in p["rooms"])
+
+
 # --- the edit endpoint (Tier 5, direct manipulation) -------------------------
 
 
@@ -288,6 +306,39 @@ def test_app_contains_edit_mode_markup_and_no_external_refs():
     # still no external network references (the offline guarantee holds)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_contains_level_switcher_markup_and_shortcut():
+    html = render_app(CLEAN)
+    for token in ('id="level-switch"', "function renderLevelSwitcher(",
+                  "function setEditLevel(", "class=\"lvl-chip"):
+        assert token in html, token
+    # the floor-switch keyboard shortcut is documented in the help panel
+    assert "Switch floor (edit mode)" in html
+    # the old fixed "Editing level 0 of N" note is gone in favour of the switcher
+    assert "Editing level 0 of" not in html
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_edit_upper_level_room_changes_only_its_line(server):
+    # Moving the two_story loft (level 1) must rewrite exactly the loft's line and
+    # leave every other byte — including the ground floor — untouched.
+    p = compile_payload(TWO_STORY)
+    loft = next(r for r in p["rooms"] if r["id"] == "loft")
+    assert loft["level"] == 1
+    status, res = _edit(
+        server, TWO_STORY,
+        {"kind": "move_room", "room": "loft", "x": loft["x"] + 2, "y": loft["y"]},
+    )
+    assert status == 200
+    assert res["changed"] is True and res["line"]
+    before, after = TWO_STORY.split("\n"), res["source"].split("\n")
+    assert len(before) == len(after)
+    changed = [i for i in range(len(before)) if before[i] != after[i]]
+    assert changed == [res["line"] - 1]
+    assert "loft" in after[res["line"] - 1] and "level 1" in after[res["line"] - 1]
 
 
 # --- the export endpoint -----------------------------------------------------
