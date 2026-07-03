@@ -26,10 +26,12 @@ from .constants import (
     INTERIOR_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
+    MIN_SHADE_OVERHANG,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
     SOLAR_SOUTH_MIN_GLAZING,
     SOLAR_SOUTH_MIN_WALL,
+    SOLAR_SOUTH_SHADE_GLAZING,
     SOLAR_WEST_MAX_GLAZING,
     STAIR_HEADROOM,
 )
@@ -50,6 +52,7 @@ from .geometry import (
     wall_faces_outside,
 )
 from .solar import compass_label, true_azimuth, wall_sector
+from .energy import WWR_CEILING, describe_targets
 
 
 class _WallOpening(Protocol):
@@ -685,6 +688,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_solar(plan, add)
     _validate_setback(plan, add)
     _validate_approach(plan, add)
+    _validate_energy(plan, add)
     _validate_access(plan, add)
     _validate_egress_and_light(plan, add)
     _validate_design_quality(plan, add)
@@ -3178,6 +3182,31 @@ _SUN_WANTED_TYPES = {RoomType.LIVING, RoomType.DINING, RoomType.BEDROOM, RoomTyp
 _SECTOR_PREF = {"south": 0, "east": 1, "west": 2}
 
 
+def _shaded_by_covered_porch(plan: Barndominium, room: Room, win) -> bool:
+    """True if a covered porch abuts ``win``'s wall on the outside and spans it —
+    real vertical shade (the kind a low west sun actually needs)."""
+    if win.wall in (Direction.SOUTH, Direction.NORTH):
+        lo = room.x + win.offset
+    else:
+        lo = room.y + win.offset
+    mid = lo + win.width / 2.0
+    for p in plan.porches:
+        if not p.covered:
+            continue
+        px2, py2 = p.x + p.width, p.y + p.length
+        spans_x = p.x - EPSILON <= mid <= px2 + EPSILON
+        spans_y = p.y - EPSILON <= mid <= py2 + EPSILON
+        if win.wall is Direction.SOUTH and abs(py2 - room.y) < 0.75 and spans_x:
+            return True
+        if win.wall is Direction.NORTH and abs(p.y - room.y2) < 0.75 and spans_x:
+            return True
+        if win.wall is Direction.WEST and abs(px2 - room.x) < 0.75 and spans_y:
+            return True
+        if win.wall is Direction.EAST and abs(p.x - room.x2) < 0.75 and spans_y:
+            return True
+    return False
+
+
 def _validate_solar(plan: Barndominium, add) -> None:
     """Solar-glazing nudges — only when the plan declares an ``orientation``.
 
@@ -3203,13 +3232,18 @@ def _validate_solar(plan: Barndominium, add) -> None:
             sec = wall_sector(w.wall, theta)
             by_sector[sec] = by_sector.get(sec, 0.0) + w.glazed_area
 
-        # (1) Too much west glass — overheats in the afternoon.
-        west = by_sector.get("west", 0.0)
+        # (1) Too much *unshaded* west glass — overheats in the afternoon. A
+        #     covered porch gives the vertical shade a low west sun needs, so glass
+        #     behind one doesn't count against this.
+        west_wins = [
+            w
+            for w in wins
+            if wall_sector(w.wall, theta) == "west"
+            and not _shaded_by_covered_porch(plan, room, w)
+        ]
+        west = sum(w.glazed_area for w in west_wins)
         if west > SOLAR_WEST_MAX_GLAZING:
-            widest = max(
-                (w for w in wins if wall_sector(w.wall, theta) == "west"),
-                key=lambda w: w.glazed_area,
-            )
+            widest = max(west_wins, key=lambda w: w.glazed_area)
             az = true_azimuth(widest.wall, theta)
             add(
                 Issue(
@@ -3279,6 +3313,30 @@ def _validate_solar(plan: Barndominium, add) -> None:
             )
         )
 
+    # (4) Plan-level: substantial south glass with no eave to shade it overheats
+    #     in summer. A covered porch over the glass counts as shade instead.
+    def _win_shaded(w) -> bool:
+        r = plan.room(w.room)
+        return r is not None and _shaded_by_covered_porch(plan, r, w)
+
+    south_unshaded = sum(
+        w.glazed_area
+        for w in plan.windows
+        if wall_sector(w.wall, theta) == "south" and not _win_shaded(w)
+    )
+    if plan.overhang < MIN_SHADE_OVERHANG and south_unshaded > SOLAR_SOUTH_SHADE_GLAZING:
+        add(
+            Issue(
+                Severity.INFO,
+                "SOLAR_SOUTH_NO_OVERHANG",
+                f"{_f(south_unshaded)} sq ft of south glazing has no roof overhang to "
+                "shade it — the high summer sun will overheat those rooms.",
+                hint="Add a ~2 ft eave (`overhang 2`) or a covered porch over the south "
+                "glass — it blocks the high summer sun but still lets the low winter "
+                "sun in.",
+            )
+        )
+
 
 def _validate_approach(plan: Barndominium, add) -> None:
     """Approach nudges — only when the plan declares a ``street`` side.
@@ -3317,6 +3375,47 @@ def _validate_approach(plan: Barndominium, add) -> None:
                     f"wall, not the {back.value} wall.",
                 )
             )
+
+
+def _validate_energy(plan: Barndominium, add) -> None:
+    """Thermal-envelope guidance — only when the plan declares a ``climate`` zone.
+
+    The compiler can't run an energy model, so this is guidance, not a pass/fail:
+    the prescriptive R-value targets for the zone, the steel-frame thermal-bridge
+    note (the barndominium's characteristic failure), and a window-to-wall-ratio
+    *ceiling* to go with the existing daylight *floor* (NAT_LIGHT). Dormant unless
+    ``climate`` is set, so ordinary plans are untouched.
+    """
+    zone = plan.climate
+    if zone is None:
+        return
+    add(
+        Issue(
+            Severity.INFO,
+            "ENERGY_ENVELOPE",
+            f"IECC climate zone {zone} — prescriptive envelope targets (approx.): "
+            f"{describe_targets(zone)}. On a steel frame, put the wall insulation as "
+            "continuous exterior insulation — steel studs are a severe thermal bridge "
+            "that guts the cavity R-value.",
+            hint="Confirm the R-values against the adopted energy code (ideally with a "
+            "rater); the DSL can't model the assembly.",
+        )
+    )
+    wall_area = plan.metrics()["exterior_wall_area_sqft"]
+    glazing = sum(w.glazed_area for w in plan.windows)
+    if wall_area > EPSILON and glazing / wall_area > WWR_CEILING:
+        wwr = glazing / wall_area
+        add(
+            Issue(
+                Severity.INFO,
+                "WINDOW_HEAVY",
+                f"Glazing is {wwr * 100:.0f}% of the exterior wall area (target "
+                f"<= {WWR_CEILING * 100:.0f}%) — a high window-to-wall ratio drives "
+                "the heating and cooling load.",
+                hint="Trim glazing toward the target, or concentrate it on the south "
+                "for winter gain and shade it with an overhang.",
+            )
+        )
 
 
 def _validate_setback(plan: Barndominium, add) -> None:

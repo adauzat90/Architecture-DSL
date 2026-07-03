@@ -71,27 +71,33 @@ def _roof_geom(plan: Barndominium) -> dict:
 
 def _top_profile(
     plan: Barndominium, geom: dict, face: Direction
-) -> tuple[str, float, float, list[tuple[float, float]]]:
+) -> tuple[str, float, float, float, float, list[tuple[float, float]]]:
     """The building's silhouette top (roof line) for ``face``, as
-    ``(horiz_axis, p0, p1, [(p, z), ...])`` — a triangle on a gable end, a flat
-    ridge band on an eave side, a slope (or a low/high wall) for a shed."""
+    ``(horiz_axis, wall0, wall1, roof0, roof1, [(p, z), ...])``. The walls span
+    ``[wall0, wall1]``; the roof (and its top profile) spans the eave ``overhang``
+    beyond them on each side — a triangle on a gable end, a flat ridge band on an
+    eave side, a slope (or a low/high wall) for a shed."""
     minx, miny, maxx, maxy = plan.bounds()
     horiz = _FACE_AXIS[face][0]
-    p0, p1 = (minx, maxx) if horiz == "x" else (miny, maxy)
+    w0, w1 = (minx, maxx) if horiz == "x" else (miny, maxy)
+    oh = plan.overhang
+    p0, p1 = w0 - oh, w1 + oh  # roof/eave range, projected past the walls
     eave, ridge, rise = geom["eave"], geom["ridge"], geom["rise"]
     style, ga = geom["style"], geom["gable_axis"]
     if style in ("gable", "monitor"):
         if horiz != ga:  # face perpendicular to the ridge → gable end (triangle)
-            return horiz, p0, p1, [(p0, eave), ((p0 + p1) / 2.0, ridge), (p1, eave)]
-        return horiz, p0, p1, [(p0, ridge), (p1, ridge)]  # eave side → ridge band
-    # shed: one plane sloping across the short span from a low to a high eave.
-    short = "x" if (maxx - minx) <= (maxy - miny) else "y"
-    if horiz == short:
-        return horiz, p0, p1, [(p0, eave), (p1, eave + rise)]
-    # A face along the long axis is a whole wall: low at the short-axis min side.
-    low_face = Direction.WEST if short == "x" else Direction.SOUTH
-    h = eave if face is low_face else eave + rise
-    return horiz, p0, p1, [(p0, h), (p1, h)]
+            prof = [(p0, eave), ((p0 + p1) / 2.0, ridge), (p1, eave)]
+        else:  # eave side → ridge band
+            prof = [(p0, ridge), (p1, ridge)]
+    else:  # shed: one plane sloping across the short span from low to high eave.
+        short = "x" if (maxx - minx) <= (maxy - miny) else "y"
+        if horiz == short:
+            prof = [(p0, eave), (p1, eave + rise)]
+        else:  # a whole wall along the long axis: low at the short-axis min side.
+            low_face = Direction.WEST if short == "x" else Direction.SOUTH
+            h = eave if face is low_face else eave + rise
+            prof = [(p0, h), (p1, h)]
+    return horiz, w0, w1, p0, p1, prof
 
 
 class _Canvas:
@@ -171,15 +177,16 @@ def elevation_svg(plan: Barndominium, side: Direction | str) -> str:
     side = Direction(side) if isinstance(side, str) else side
     geom = _roof_geom(plan)
     _, flip = _FACE_AXIS[side]
-    horiz, p0, p1, profile = _top_profile(plan, geom, side)
+    horiz, w0, w1, r0, r1, profile = _top_profile(plan, geom, side)
+    eave = geom["eave"]
 
-    c = _Canvas(p0, p1, geom["ridge"], flip, f"{plan.name} — {side.value.upper()} elevation")
-    _draw_grade(c, p0, p1)
-    # Building mass: ground → silhouette top (walls + roof as one outline), with a
-    # light roof fill above the eave and the eave (top-plate) line drawn across.
-    c.poly([(p0, 0.0), *profile, (p1, 0.0)], WALLFILL)
-    c.poly([(p0, geom["eave"]), *profile, (p1, geom["eave"])], SKY, stroke="none")
-    c.line_wz(p0, geom["eave"], p1, geom["eave"], WALL, sw=1.0)
+    c = _Canvas(r0, r1, geom["ridge"], flip, f"{plan.name} — {side.value.upper()} elevation")
+    _draw_grade(c, w0, w1)
+    # Walls (0 → eave over [w0, w1]) and the roof above, projecting past the walls
+    # by the eave overhang [r0, r1]; a light fill and the eave (plate) line.
+    c.rect_wz(w0, 0.0, w1, eave, WALLFILL)
+    c.poly([(r0, eave), *profile, (r1, eave)], SKY)
+    c.line_wz(r0, eave, r1, eave, WALL, sw=1.0)
 
     # Openings on this face, at their true heights, stacked by level.
     for w in plan.windows:
@@ -224,14 +231,15 @@ def section_svg(plan: Barndominium) -> str:
         cut = (minx + maxx) / 2.0
         face = Direction.EAST
 
-    horiz, p0, p1, profile = _top_profile(plan, geom, face)
-    c = _Canvas(p0, p1, geom["ridge"], False, f"{plan.name} — SECTION")
-    _draw_grade(c, p0, p1)
-    # The cut roof profile (a gable triangle across the short span) over an open
-    # interior — draw the roof mass, then the plate line, then the rooms the cut
-    # passes through with their floor and ceiling at true heights.
-    c.poly([(p0, geom["eave"]), *profile, (p1, geom["eave"])], SKY)
-    c.line_wz(p0, geom["eave"], p1, geom["eave"], GUIDE, sw=1.0, dash="4,4")
+    horiz, w0, w1, r0, r1, profile = _top_profile(plan, geom, face)
+    eave = geom["eave"]
+    c = _Canvas(r0, r1, geom["ridge"], False, f"{plan.name} — SECTION")
+    _draw_grade(c, w0, w1)
+    # The cut roof profile (a gable triangle across the short span, projecting past
+    # the walls by the overhang) over an open interior — roof mass, then the plate
+    # line, then the rooms the cut passes through at their true floor/ceiling.
+    c.poly([(r0, eave), *profile, (r1, eave)], SKY)
+    c.line_wz(r0, eave, r1, eave, GUIDE, sw=1.0, dash="4,4")
 
     def crossed(room) -> bool:
         lo, hi = (room.y, room.y2) if horiz == "x" else (room.x, room.x2)
@@ -256,7 +264,7 @@ def section_svg(plan: Barndominium) -> str:
     for lvl in plan.levels():
         if lvl > 0:
             c.dim(plan.level_elevation(lvl), f"L{lvl} {_n(plan.level_elevation(lvl))} ft")
-    c.text(c.sx((p0 + p1) / 2), c.height - 14,
+    c.text(c.sx((w0 + w1) / 2), c.height - 14,
            f"cut looking along the ridge ({ga}-axis)", size=10, fill="#9AA6B2")
     if plan.wings:
         c.text(MARGIN_L, c.height - 28, "schematic — L/T/U footprint to its bounding box",

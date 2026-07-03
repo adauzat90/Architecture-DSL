@@ -488,6 +488,8 @@ Brief grammar (one statement per line, `#` comments):
 | `lot <W> x <L> [at <x>,<y>]` | the parcel (plan coords); omit `at` to auto-centre the footprint |
 | `setback <side> <ft> …` | zoning setbacks (south/north/east/west; front/back/left/right aliases) → SETBACK |
 | `street <wall>` | the wall facing the street/approach → APPROACH_ENTRY / APPROACH_GARAGE nudges |
+| `overhang <ft>` | roof eave/rake projection past the walls (shades south glass; widens the roof + takeoff) |
+| `climate <zone>` | IECC climate zone 1–8 → ENERGY_ENVELOPE R-value guidance + the WINDOW_HEAVY (WWR) ceiling |
 | `note "…"` | free text |
 | `room <id>: <type> <W> x <L> [level <n>]` | a room to place (no coordinates) |
 | `adjacent <a> <b> [<c> …]` | connect `<a>` to **each** of the rest — a hub. `adjacent hall bed1 bed2 bath` is the "rooms off a spine" idiom |

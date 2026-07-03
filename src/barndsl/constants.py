@@ -65,6 +65,13 @@ SOLAR_SOUTH_MIN_WALL = 16.0
 #: the passive-solar opportunity is being wasted — SOLAR_SOUTH_UNUSED. Conservative:
 #: fires only when the sunny face is almost blank.
 SOLAR_SOUTH_MIN_GLAZING = 12.0
+#: South glazing above this (sq ft) that isn't shaded overheats in summer without
+#: an eave — the SOLAR_SOUTH_NO_OVERHANG floor. Above SOLAR_SOUTH_MIN_GLAZING so a
+#: plan is never told both to add south glass *and* that it has too much unshaded.
+SOLAR_SOUTH_SHADE_GLAZING = 24.0
+#: A roof overhang at least this deep (ft) reads as real summer shade for south
+#: glass — the high winter sun still reaches under it. ~18 in.
+MIN_SHADE_OVERHANG = 1.5
 
 # --- vertical assembly -------------------------------------------------------
 #: Depth (feet) of the inter-floor assembly between two stacked levels — the

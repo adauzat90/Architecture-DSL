@@ -55,7 +55,8 @@ from .validation import Issue, Severity, ValidationReport, validate
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
     "room", "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
-    "orientation", "finish", "accessible", "electrical", "lot", "setback", "street"
+    "orientation", "finish", "accessible", "electrical", "lot", "setback", "street",
+    "overhang", "climate"
 )
 
 #: Setback side tokens accepted by the `setback` directive (cardinals + aliases).
@@ -140,6 +141,8 @@ Statements:
         # axis, interior support posts where that span exceeds <span> ft (default
         # 40), a ridge member over them (no-ridge omits it). post = nominal section
         # in inches (default 6). A layout aid, not an engineered design.
+  overhang <ft>                    # roof eave/rake projection past the walls (0 = flush; 1–2 ft typical)
+  climate <zone>                   # IECC climate zone 1-8 -> envelope R-value guidance + WWR check
   roof gable|shed|monitor [pitch <rise:run>]
         # the roof form over the building: gable (default, ridge down the long
         # axis), shed (a single slope), or monitor (a raised centre clerestory
@@ -616,6 +619,22 @@ def _parse_statement(
         street_wall = c.wall()
         c.expect_end()
         plan.set_street(street_wall)
+    elif key == "overhang":
+        plan.set_overhang(c.number("the overhang depth in feet"))
+        c.expect_end()
+    elif key == "climate":
+        tok = c.peek()
+        z = c.number("the IECC climate zone (1-8)")
+        if z != int(z) or not 1 <= int(z) <= 8:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"climate zone must be an IECC zone 1-8, got {z:g}.",
+                tok.col if tok else 1,
+                end_col=tok.end_col if tok else None,
+                hint="Use a whole number 1 (warmest) to 8 (coldest).",
+            )
+        c.expect_end()
+        plan.set_climate(int(z))
     elif key == "orientation":
         # `orientation <degrees>` — azimuth (clockwise from N) that plan-north points.
         plan.orient(c.number("the orientation in degrees"))

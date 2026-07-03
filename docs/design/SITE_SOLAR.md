@@ -148,9 +148,11 @@ Notes that keep it honest and quiet:
   corpus. The overhang it recommends is exactly the geometry review item #3 adds,
   so the two features reinforce.
 
-The `overhang`/porch-roof geometry (review item #3) will later let these checks
-*credit* a shaded west/south window instead of flagging it — designed for that
-seam now, implemented when overhangs land.
+The `overhang`/porch-roof geometry (review item #3) lets these checks *credit* a
+shaded window instead of flagging it — **now implemented**: a covered porch over a
+west window suppresses `SOLAR_WEST_GAIN`, and `SOLAR_SOUTH_NO_OVERHANG` flags
+substantial south glass that has neither an eave `overhang` nor a covered porch to
+shade it.
 
 ## 3. Lot & setbacks (Phase 2)
 

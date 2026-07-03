@@ -53,6 +53,8 @@ program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, c
 require adjacent|separate <room_a> <room_b>   # optional; spatial intent, checked vs the plan
 require exterior <room> [<wall>]              #   (also: require area <room> >= <sqft>)
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
+overhang <ft>                      # optional; roof eave/rake projection past the walls (0 = flush; 1–2 ft typical)
+climate <zone>                     # optional; IECC climate zone 1–8 → envelope R-value guidance + a WWR ceiling
 roof gable|shed|monitor [pitch <rise:run>]                           # optional; roof form (default gable)
 orientation <degrees>              # optional; compass azimuth plan-north (+y) points (0 = true north)
 lot <W> x <L> [at <x>,<y>]         # optional; the parcel (plan coords). Omit `at` to auto-centre the footprint
@@ -181,7 +183,10 @@ switched lighting, stair lighting, exterior-door landings — the code items the
 geometry can't place, gathered for the construction documents) — and, when a plan
 declares an `orientation`, **solar-glazing** nudges (too much overheating west
 glass, a room lit only from the cold north face — the sun-aware half of siting a
-barndominium; a compass rosette showing true north is drawn on the plan) — so "is
+barndominium; a compass rosette showing true north is drawn on the plan) — and,
+when a plan declares a `climate` zone, a **thermal-envelope** reminder (the IECC
+prescriptive R-values, the steel-frame continuous-insulation note, and a
+window-to-wall-ratio ceiling to go with the daylight floor) — so "is
 it good?"
 travels the same diagnostic
 stream as "is it valid?" and never blocks a compile. The agent's architectural

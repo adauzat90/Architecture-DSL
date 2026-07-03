@@ -56,8 +56,8 @@ def test_gable_end_is_a_triangle_eave_side_is_a_band():
     g = _roof_geom(plan)
     # East face is perpendicular to the ridge → a 3-point gable triangle peaking at
     # the ridge; South face is parallel → a 2-point band topping out at the ridge.
-    _, _, _, east = _top_profile(plan, g, D.EAST)
-    _, _, _, south = _top_profile(plan, g, D.SOUTH)
+    *_, east = _top_profile(plan, g, D.EAST)
+    *_, south = _top_profile(plan, g, D.SOUTH)
     assert len(east) == 3 and east[1][1] == pytest.approx(g["ridge"])
     assert len(south) == 2 and all(z == pytest.approx(g["ridge"]) for _, z in south)
 

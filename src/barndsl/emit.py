@@ -60,6 +60,10 @@ def emit_dsl(plan: Barndominium) -> str:
         if plan.roofing:
             line += f" roof {_q(plan.roofing)}"
         out.append(line)
+    if getattr(plan, "overhang", 0.0):
+        out.append(f"overhang {_n(plan.overhang)}")
+    if getattr(plan, "climate", None) is not None:
+        out.append(f"climate {plan.climate}")
     if getattr(plan, "roof_style", "gable") != "gable" or getattr(plan, "roof_pitch", None):
         line = f"roof {getattr(plan, 'roof_style', 'gable')}"
         pitch = getattr(plan, "roof_pitch", None)

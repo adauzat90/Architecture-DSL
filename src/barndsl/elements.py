@@ -629,6 +629,16 @@ class Barndominium:
     roof_style: str = "gable"
     #: Optional roof pitch (rise:run) override; ``None`` uses the default pitch.
     roof_pitch: float | None = None
+    #: Roof eave/rake overhang depth (ft) — the roof's projection past the walls.
+    #: A barndominium's signature deep eave, and the primary passive-shading device
+    #: for south glass. ``0`` (default) is a flush roof; a typical eave is 1–2 ft.
+    #: Widens the roof in the elevations/section and the roof-area takeoff, and
+    #: shades south glazing in the solar checks.
+    overhang: float = 0.0
+    #: Optional IECC climate zone (1 warmest … 8 coldest). When set, the compiler
+    #: reports the prescriptive envelope R-value targets, the metal-frame
+    #: thermal-bridge note, and a window-to-wall-ratio ceiling. ``None`` = undeclared.
+    climate: int | None = None
     #: Optional structural-frame request. When set, :func:`barndsl.structure.place_frame`
     #: populates :attr:`posts` and :attr:`beams` from the footprint. See :class:`FrameSpec`.
     frame_spec: FrameSpec | None = None
@@ -727,6 +737,23 @@ class Barndominium:
             if pitch <= 0:
                 raise ValueError("roof pitch must be positive.")
             self.roof_pitch = pitch
+        return self
+
+    def set_overhang(self, depth: float) -> "Barndominium":
+        """Set the roof eave/rake overhang depth (ft) — the roof's projection past
+        the walls. ``0`` is flush; a typical barndominium eave is 1–2 ft."""
+        d = _finite("plan", "overhang", depth)
+        if d < 0:
+            raise ValueError("overhang must be non-negative.")
+        self.overhang = d
+        return self
+
+    def set_climate(self, zone: int) -> "Barndominium":
+        """Declare the IECC climate zone (1–8) for the thermal-envelope guidance."""
+        z = int(zone)
+        if not 1 <= z <= 8:
+            raise ValueError("climate zone must be an IECC zone 1–8.")
+        self.climate = z
         return self
 
     def orient(self, degrees: float) -> "Barndominium":
@@ -1361,7 +1388,14 @@ class Barndominium:
         # factor follows the actual pitch instead of a fixed guess.
         pitch = self.roof_pitch if self.roof_pitch is not None else DEFAULT_ROOF_PITCH
         slope_factor = math.hypot(1.0, pitch)  # sec(atan(pitch))
-        roof_area = self.footprint_area * slope_factor
+        # The roof covers the footprint plus a band of the eave/rake `overhang`
+        # around its perimeter (exact for a rectangle: perimeter·oh + 4·oh²; a
+        # close approximation for an L/T/U). Zero overhang leaves the plan area.
+        oh = self.overhang
+        roof_plan_area = self.footprint_area + perimeter * oh + 4.0 * oh * oh
+        roof_area = roof_plan_area * slope_factor
+        # Covered porches carry their own (shed) roof — a rough materials figure.
+        covered_porch_roof = sum(p.area for p in self.porches if p.covered) * slope_factor
         # Monolithic slab-on-grade concrete: the slab, its thickened perimeter
         # edge (turndown), and a pad footing under each post. Rough takeoff (yd³).
         concrete_ft3 = (
@@ -1386,6 +1420,9 @@ class Barndominium:
             "exterior_perimeter_ft": perimeter,
             "exterior_wall_area_sqft": exterior_wall_area,
             "roof_area_sqft": roof_area,
+            "overhang_ft": float(oh),
+            "covered_porch_roof_sqft": covered_porch_roof,
+            "climate_zone": float(self.climate) if self.climate is not None else 0.0,
             "foundation_concrete_yd3": concrete_ft3 / 27.0,
             "bedroom_count": float(
                 sum(1 for r in self.rooms if r.type is RoomType.BEDROOM)

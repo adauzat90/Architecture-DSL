@@ -292,6 +292,24 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "south glazing — the best passive-solar face is nearly blank. South "
            "glass gives free low-angle winter sun that a summer-blocking overhang "
            "can shade. Runs only when the plan declares an `orientation`."),
+        _c("SOLAR_SOUTH_NO_OVERHANG", I, "Unshaded south glazing",
+           "The plan has a lot of south glazing but no roof `overhang` (and no "
+           "covered porch over it) to shade it — the high summer sun overheats "
+           "those rooms. A ~2 ft eave blocks the summer sun while still admitting "
+           "the low winter sun. Runs only when the plan declares an `orientation`."),
+        # --- thermal envelope (advisory; needs a declared `climate` zone) ---
+        _c("ENERGY_ENVELOPE", I, "Envelope R-value guidance",
+           "The prescriptive envelope targets (ceiling/wall/floor/slab R-values and "
+           "window U-factor) for the plan's declared IECC `climate` zone, plus the "
+           "steel-frame thermal-bridge note: insulate a metal shell with continuous "
+           "exterior insulation, since steel studs short-circuit cavity insulation. "
+           "Guidance, not the code of record — confirm with the adopted energy code."),
+        _c("WINDOW_HEAVY", I, "High window-to-wall ratio",
+           "Glazing exceeds ~28% of the gross exterior wall area — a high "
+           "window-to-wall ratio that drives the heating/cooling load. The daylight "
+           "floor (NAT_LIGHT, 8%) is the minimum; this is the practical ceiling. "
+           "Concentrate glass on the south (winter gain) and shade it. Runs only "
+           "when the plan declares a `climate` zone."),
         _c("APPROACH_ENTRY", I, "Front door doesn't face the street",
            "No people-door is on the wall the `street` directive names as facing "
            "the approach — the front door is around the side or back. Runs only "

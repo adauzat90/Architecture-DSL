@@ -88,7 +88,17 @@ feature, not a new model. It also makes `vaulted`, per-room `ceiling`, the loft
 guard and the roof form finally *visible* to the author, who today can only read
 them as text.
 
-## 3. Overhang/eave depth and porch roofs — missing geometry
+## 3. Overhang/eave depth and porch roofs — OVERHANGS + PORCH SHADING SHIPPED
+
+**Update (2026-07-03).** The `overhang <ft>` directive shipped: a real eave/rake
+depth that projects the roof past the walls in the elevations/section, grows the
+roof-area takeoff, and — the item #1↔#3 seam the design doc promised — *shades*
+south glazing (`SOLAR_SOUTH_NO_OVERHANG` flags substantial south glass with no
+eave), while a **covered porch** now credits the glass behind it (suppresses
+`SOLAR_WEST_GAIN`, and counts as south shade). Covered porches also carry a
+roof-area figure (`covered_porch_roof_sqft`). Covered by `tests/test_overhang.py`.
+**Still schematic:** drawing porch roofs *in the elevations* (only their shading
+and materials are modelled so far).
 
 * **Overhang / eave depth** is absent entirely. On a barndominium it is both the
   signature look *and* the primary passive-shading device; a 24" south overhang is
@@ -137,7 +147,16 @@ existing per-bedroom `BEDROOM_EGRESS`):
 Smoke/CO alarms (`ALARM_CO`) are already handled well as a reminder — these slot
 into the same channel.
 
-## 5. Thermal / energy envelope — a total gap, acute for a metal frame
+## 5. Thermal / energy envelope — a total gap, acute for a metal frame — SHIPPED
+
+**Update (2026-07-03).** The `climate <zone>` directive (IECC 1–8) shipped
+(`barndsl/energy.py`): `ENERGY_ENVELOPE` reports the zone's prescriptive R-value
+targets (ceiling/wall/floor/slab + window U) with the steel-frame
+continuous-insulation note the review called for, and `WINDOW_HEAVY` adds the
+window-to-wall-ratio *ceiling* (~28%) to complement the daylight *floor*. Both
+gated on a declared `climate`; `metrics()` gained `climate_zone`. Covered by
+`tests/test_energy.py`. (R-values are guidance, not the code of record — same
+posture as the frame/foundation disclaimers.)
 
 No climate zone, no insulation, no window-to-wall ratio ceiling, no
 thermal-bridging note. There is a daylight **floor** (`NAT_LIGHT`, 8% min) but no
