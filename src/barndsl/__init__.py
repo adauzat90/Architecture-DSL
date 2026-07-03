@@ -59,6 +59,10 @@ from .layout2 import (
     solve_layout2,
 )
 from .dxf import save_dxf, to_dxf
+from .gltf import build_scene, to_glb, to_gltf, write_gltf
+from .ifc import to_ifc, write_ifc
+from .viewer import viewer_html, write_viewer
+from .playground import compile_payload, make_server, run as serve
 from .render import RenderConfig, render_svg, save_render, save_svg
 from .views import (
     elevation_svg,
@@ -192,6 +196,20 @@ __all__ = [
     # DXF (CAD interchange)
     "to_dxf",
     "save_dxf",
+    # IFC4 (BIM interchange: Revit / ArchiCAD / any IFC viewer)
+    "to_ifc",
+    "write_ifc",
+    # glTF 2.0 3D export + single-file HTML viewer
+    "to_gltf",
+    "to_glb",
+    "write_gltf",
+    "build_scene",
+    "viewer_html",
+    "write_viewer",
+    # web playground (local http.server app: editor + live diagnostics + 2D/3D)
+    "serve",
+    "make_server",
+    "compile_payload",
     # Revit exchange (lowering to a Revit-shaped model + JSON)
     "to_revit_model",
     "to_revit_json",

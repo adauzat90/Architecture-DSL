@@ -24,6 +24,176 @@ hints. ~~Honour an explicit interior bearing wall as a post line~~ — DONE: the
 post onto the wall at every bent crossing its run (a wall across the span gets a
 `WALL_BEARING_AXIS` info instead).
 
+## 3D export + viewer — DONE
+Shipped (Tier 1 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/gltf.py`
+(`to_gltf`/`to_glb`/`write_gltf`) lowers the plan into a 3D model as **glTF 2.0**
+— pure Python, stdlib only (`base64`, `struct`, `json`, `math`), no new
+dependency. It builds on the existing Revit-shaped exchange, not a new geometry
+layer: wall runs extruded to their level height with door/window openings cut
+(solid piers + lintel/sill boxes — axis-aligned box decomposition, no CSG), floor
+slabs, gable-end infill, the roof from `roof_plan` (gable exact, shed one plane,
+monitor from its sections), frame posts/beams, porches (+ covered-porch posts),
+stepped stair flights from `plan_stair_runs`, and room floors tinted with
+`render.ROOM_COLORS` (hex → linear baseColorFactor). Plan feet x-east/y-north/z-up
+maps to glTF y-up `(x, z, -y)`; nodes are named and grouped per layer so viewers
+can toggle them. `src/barndsl/viewer.py` (`write_viewer`) writes **one**
+self-contained, offline HTML file with an inline WebGL renderer (orbit/pan/zoom,
+one directional light + Lambert, layer toggles). CLI: `barndsl gltf` and `barndsl
+view3d`. Tests pin glTF structural validity (accessor/bufferView bookkeeping,
+POSITION min/max, index ranges, .glb chunk padding), the geometry contract (every
+wall run → a mesh, opening cuts reduce wall volume), and a gallery export sweep.
+
+Possible follow-ups: billboarded room labels in the viewer; true swept gable-wall
+pentagons instead of the box + infill approximation.
+
+## IFC export — DONE
+Shipped (Tier 4 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/ifc.py`
+(`to_ifc`/`write_ifc`, CLI `barndsl ifc`) lowers the same Revit-shaped exchange
+into **IFC4**, the open BIM interchange, so a plan opens in full Revit, ArchiCAD,
+BIMcollab/Solibri and every IFC viewer — the professional hand-off. **Deviation
+from the original sketch:** rather than the optional `ifcopenshell` dependency the
+design doc imagined, it is a **hand-written, pure-Python, stdlib-only STEP/SPF
+writer** (like `dxf.py` hand-writes DXF) — the geometry is all extruded rectangles
+and a few prisms, so a tiny ISO-10303-21 backbone beats a heavyweight kernel and
+keeps the engine zero-dep. `ifcopenshell` is demoted to a test-time validation
+oracle (skipif in `tests/test_ifc.py`; optional `barndsl[ifc-validate]` extra),
+never a runtime dep. IfcProject → IfcSite → IfcBuilding → per-level
+IfcBuildingStorey; walls are `IfcWall` (uncut box) with real `IfcOpeningElement`
+voids (`IfcRelVoidsElement`) filled by `IfcDoor`/`IfcWindow` (`IfcRelFillsElement`,
+real `OverallWidth`/`OverallHeight`); slabs and porch slabs are `IfcSlab` (FLOOR);
+the roof is one `IfcRoof` (RoofType from gable/shed/monitor) whose planes are
+`IfcExtrudedAreaSolid` triangular/wedge **prisms** (an `IfcArbitraryClosedProfileDef`
+swept horizontally along the ridge — real solids every viewer renders, no
+faceted-brep fallback needed); frame → `IfcColumn`/`IfcBeam`; stairs → `IfcStair`;
+and one `IfcSpace` per room (name + LongName room-id/type, footprint extruded to
+ceiling) so downstream schedules/areas work. A small `barndsl` `IfcPropertySet` on
+the building carries the design score, sq-ft metrics and a source hash. Units are
+declared **imperial** (a conversion-based foot = 0.3048 m, plus square/cubic foot),
+so coordinates stay in feet with no boundary conversion; plan x-east/y-north/z-up
+maps straight onto IFC's z-up world frame. GlobalIds are IFC's 22-char compressed
+GUIDs derived deterministically with `uuid5` (plan name + kind + id), and the file
+carries no wall-clock timestamp, so re-exporting an unchanged plan is
+byte-identical. Tests parse the SPF textually (header, reference integrity, entity
+counts vs the exchange, GUID validity/determinism, unit block, tricky-name
+escaping, gallery sweep) with an `ifcopenshell` oracle layer that opens the file,
+walks the spatial tree and tessellates the geometry.
+
+Possible follow-ups: room-type colours as `IfcStyledItem`/`IfcSurfaceStyle` on the
+spaces/floor tiles; aggregate the roof as per-plane `IfcSlab(ROOF)` under the
+`IfcRoof` instead of direct geometry (stricter model-checker conformance); IFC2x3
+output for older Revit-import paths that still prefer it; a download/export menu in
+the playground offering `.barn`/`.svg`/`.glb`/`.ifc` of the current plan.
+
+## Web playground — DONE
+Shipped (Tier 2 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/playground.py`
+(`barndsl serve [FILE] [--port 8787] [--open]`) — a **local** web app, not a
+hosted service. It's a stdlib `http.server` (`ThreadingHTTPServer` +
+`BaseHTTPRequestHandler`) bound to `127.0.0.1` that calls the installed compiler
+directly: **zero new dependencies, no CDN, works offline** (deliberately not
+Pyodide). Four routes and nothing else — no static-file serving, no directory
+listing, no state, no files written. `POST /api/compile` (1 MB cap) returns the
+compile as JSON — the same diagnostics `CompileResult.to_dict` exposes plus,
+on a built plan, `svg` (render), `scene` (the exact blob the single-file viewer
+embeds), `score`, `metrics`, and the four elevations + section (pure functions,
+included). Bad DSL is a normal 200 with diagnostics, never a 500; only
+malformed/oversize JSON is 400. `GET /` serves a self-contained single-page app
+(inlined HTML/CSS/JS, no external references): a textarea editor with a
+synchronised line-number + severity gutter, a click-to-jump diagnostics panel,
+compile-on-type (400 ms debounce, Ctrl/Cmd+Enter to force), a header with plan
+title / score / metrics, a `/api/examples` load menu, and a viewport tabbed 2D
+plan (CSS-transform pan/zoom) / 3D / elevations. The last good render stays
+visible (dimmed) while the source is broken. `GET /api/reference` serves
+`DSL_REFERENCE` for a help panel.
+
+The 3D tab reuses the single-file viewer's inline WebGL renderer **verbatim**:
+it was factored out of `viewer.py`'s template into `viewer.RENDERER_JS` — one
+`mountScene(canvas, labels, togglesEl)` function returning a controller whose
+`setScene(json)` loads/swaps geometry — which both the viewer and the playground
+embed, so the two renderers can't drift. `tests/test_playground.py` pins the
+API contract (fields present, every example compiles through it, bad DSL → 200,
+malformed → 400, oversize rejected, unknown path → 404 serving no files), the
+no-external-references invariant, and the shared-renderer refactor (the viewer
+stays self-contained; the app embeds the same asset).
+
+Possible follow-ups: a **static Pyodide build** as an alternative zero-backend
+deploy target (the engine is pure Python + pydantic, so Pyodide can run it
+entirely client-side — trades the local server for a heavier first load); a
+shareable-plan permalink (source in the URL hash); side-by-side scheme compare
+(`compare_plans`) in the UI.
+
+## Agent in the playground — DONE
+Shipped (Tier 3 of `docs/design/AGENT_FIRST_APP.md`): `agent.py`'s
+compile-critique-revise loop behind a conversation pane in the playground, its
+intermediate renders streamed live. `POST /api/design` (`{brief, source?,
+iterations?}`) is a **Server-Sent Events** stream — a `status` opener, one
+`iteration` per round carrying the round's score, diagnostic counts and the FULL
+`compile_payload` (so the editor + viewport update as each round lands and the
+user watches the design evolve), and a final `done` carrying the **best-scoring**
+iteration (not the last — a regressed final round is never handed back). Errors
+are structured `error` frames with a `kind` (unavailable / missing_dependency /
+api_error / cancelled). `GET /api/agent` probes availability
+(`agent.agent_availability`: `anthropic` importable **and** `ANTHROPIC_API_KEY`
+set — only the key's *presence*, never its value) so the SPA lights up or disables
+the pane with the one-line install hint. A `source` in the body seeds the loop, so
+follow-up briefs refine the current plan instead of starting fresh. One job at a
+time (409); `POST /api/design/cancel {id}` sets a cancel flag the loop polls
+between rounds (also tripped when the SSE connection drops), and the **Stop**
+button uses it. The compile endpoint stays responsive throughout
+(`ThreadingHTTPServer`, one shared design lock).
+
+The seam into `agent.py` stays minimal and keyless-testable: `design()` gained
+three keyword-only hooks — `seed_source` (refine the caller's plan; primes round 1
+as a revision, *not* recorded as a competing iteration so an edit that trades a
+point for the user's request isn't vetoed by best-iteration-wins), `cancel` (a
+`() -> bool` polled per round), and `on_phase(phase, round)` (narrates
+writing/compiling/critiquing) — all defaulting to no-ops, so existing callers and
+tests are untouched. `stdlib`-only server; `anthropic` imported lazily only when a
+design job runs; the injectable `make_server(designer=…)` lets the tests exercise
+the whole SSE path with a scripted fake — no network, no key, no `anthropic`
+(`tests/test_playground_agent.py`, plus the hook tests in
+`tests/test_agent_loop.py`).
+
+Possible follow-ups: a **diff view** of what a refinement changed (source diff +
+score delta, reusing `compare_plans`); **per-phase token/latency** surfaced in the
+status line; letting the user pick `iterations` / `target_score` / model from the
+pane; **resumable** streams (an `EventSource` reconnect with a job cursor) so a
+dropped tab can rejoin a running job; a **thread transcript** export.
+
+## Direct manipulation — DONE
+Shipped (Tier 5 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/edits.py`
+(`apply_edit`) plus an **Edit layout** overlay in the 2D plan tab of the
+playground. Viewport gestures — drag a room, resize it by its edge/corner
+handles, slide a door/window/entry along its wall — become **surgical DSL text
+edits**, so the source stays the source of truth. The engine is a pure function
+over source *text* (not `emit.py`/`exchange_to_plan` regeneration, which would
+flatten comments, spacing and statement order): it compiles the source to find the
+one statement to touch, re-tokenizes only that line, and rewrites the changed
+tokens with every other byte preserved (inline `# comments` on the touched line
+survive; a no-op is byte-identical; a relative placement stays relative unless the
+coordinates truly change, then converts to absolute; unknown/malformed edits are
+typed errors, never exceptions). `POST /api/edit` (`{source, edit}`) applies one
+edit and returns the recompiled `compile_payload`; a refused edit is a normal 200
+with `{error:{kind,message}}`. The element→line map is a minimal
+`CompileResult.room_lines` addition (openings already carry `.line`); the overlay
+is drawn client-side from compact `rooms`/`openings` payload arrays (room-palette
+colours, id labels) with 0.5 ft grid snap, a 3 ft minimum-dimension guard, an undo
+stack of source snapshots (button / Ctrl-Cmd-Z), a click-to-jump-to-line select,
+and level-0 editing on multi-level plans. Tests: `tests/test_edits.py` (the
+preservation/idempotence/typed-error guarantees + a gallery sweep) and the
+`/api/edit` + SPA-markup cases in `tests/test_playground.py`.
+
+Genuine follow-ups: **adjacency-preserving drags** — when a moved room stays flush
+against its former anchor, emit an updated *relative* placement (`east-of foo align
+… offset …`) instead of converting to absolute, so the author's intent survives;
+**wall-attribute editing** from the overlay (toggle a shared wall plumbing /
+bearing / rated, add/remove a `wall` statement); **multi-select** + group move /
+align / distribute (one batched edit set, one undo entry); dragging to **create**
+(rubber-band a new `room`, drop a new window/door onto a wall) and **delete**;
+editing **porches / stairs / wings** (not just rooms and openings) and the upper
+levels of a multi-level plan (a level switcher); a **live coordinate/size readout**
+and dimension witnesses while dragging; snapping to **sibling edges** (align to an
+adjacent room's wall, not just the 0.5 ft grid).
+
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the
 `barndsl.revit/1` exchange) and a `barndsl revit FILE --out plan.json` command.

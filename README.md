@@ -562,6 +562,10 @@ barndsl watch   examples/cedar_ridge.barn --out plan.svg  # recompile/render on 
 barndsl schedule examples/cedar_ridge.barn         # room/door/window schedules (MD)
 barndsl schedule examples/cedar_ridge.barn --format csv --out sched.csv
 barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
+barndsl gltf    examples/cedar_ridge.barn --out plan.glb  # → 3D model (glTF 2.0)
+barndsl ifc     examples/cedar_ridge.barn --out plan.ifc  # → IFC4 BIM (Revit/ArchiCAD/any IFC viewer)
+barndsl view3d  examples/cedar_ridge.barn --out plan.html # → single-file 3D viewer
+barndsl serve   examples/cedar_ridge.barn --open   # local web playground (editor + live 2D/3D)
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
@@ -583,6 +587,72 @@ schematic exterior elevation (roof profile + doors/windows at their true sill/he
 heights) and a transverse section (each level's floor/ceiling, vaulted
 double-heights, the roof over them), straight from the model's heights, roof form
 and pitch. No Revit, no raster dep.
+
+**3D output.** `barndsl gltf plan.barn` lowers the plan into a 3D model as
+**glTF 2.0** — `.glb` (binary, default) or `.gltf` (JSON with an embedded buffer)
+— that any glTF viewer opens, no CAD licence and no plug-in. It reuses the same
+Revit-shaped exchange the `revit` command does: wall runs extruded to their level
+height with door/window openings cut (solid piers + lintel/sill boxes), floor
+slabs, the roof from the roof plan (gable exact, shed/monitor as modeled), frame
+posts/beams, porches and stairs, room floors tinted with the plan palette. Units
+are feet (1 glTF unit = 1 ft); plan x-east/y-north/z-up maps to glTF y-up. Nodes
+are named and grouped per layer (`floors`, `walls`, `openings`, `roof`, `frame`,
+`porches`, `stairs`) so a viewer can toggle them. `barndsl view3d plan.barn`
+writes **one** self-contained HTML file — an inline WebGL renderer with
+orbit/pan/zoom and layer toggles (turn the roof off to look inside) — that works
+offline by double-clicking it, no network and no dependency. Both are pure
+Python, stdlib only. Schematic by design, like the elevations: for design review,
+not construction detailing.
+
+**BIM hand-off (IFC).** `barndsl ifc plan.barn` lowers the same Revit-shaped
+exchange into **IFC4** — the open BIM interchange — so a plan opens in full Revit,
+ArchiCAD, BIMcollab/Solibri and every IFC viewer. It's the professional hand-off:
+iterate in barndsl, hand the `.ifc` to the incumbent for construction documents.
+Like the DXF and glTF exports it's **hand-written, pure Python, stdlib only** — a
+tiny ISO-10303-21 (STEP/SPF) writer, no `IfcOpenShell` dependency. Walls become
+`IfcWall` with real `IfcOpeningElement` voids filled by `IfcDoor`/`IfcWindow`
+(carrying `OverallWidth`/`OverallHeight`); levels become `IfcBuildingStorey`;
+slabs, a roof (`IfcRoof`, gable/shed/monitor), frame `IfcColumn`/`IfcBeam`, stairs
+and one `IfcSpace` per room (for schedules and areas) round it out, plus a small
+`barndsl` property set carrying the design score, sq-ft metrics and a source hash.
+Coordinates stay in **feet** (units declared imperial via a conversion-based foot),
+and the file is byte-reproducible (deterministic GlobalIds, a fixed timestamp).
+`IfcOpenShell` is used only as an optional test-time validation oracle
+(`pip install 'barndsl[ifc-validate]'`), never at runtime.
+
+**Playground.** `barndsl serve --open` starts a local web app — a DSL editor with
+live, click-to-jump diagnostics on the left and a viewport (2D plan, 3D model,
+elevations + section) on the right. Type and it recompiles (~400 ms debounce,
+Ctrl/Cmd+Enter forces it); the header shows the plan title, design score and key
+metrics; a dropdown loads the bundled examples; the last good render stays up
+(dimmed) while the source is broken. It's a **local** tool — a stdlib
+`http.server` bound to `127.0.0.1` that calls the compiler directly, so **no new
+dependency, no CDN, and it works offline** (nothing is uploaded anywhere). The 3D
+tab reuses the same inline WebGL renderer `barndsl view3d` writes. `barndsl serve
+plan.barn` preloads a file; `--port` picks the port.
+
+*Edit mode.* Toggle **Edit layout** on the 2D plan tab for direct manipulation:
+an interactive overlay (room-palette colours, id labels) where you drag a room to
+move it (0.5 ft grid snap), drag its edge/corner handles to resize it (3 ft
+minimum), and drag a door/window/entry marker to slide it along its wall. Every
+gesture is round-tripped as a **surgical DSL text edit** — only the one statement
+changes, comments and formatting untouched — so the text stays the source of
+truth (`POST /api/edit`, engine in `barndsl.edits`). Clicking a room scrolls the
+editor to its line; a small undo stack (button, or Ctrl/Cmd+Z when the editor
+isn't focused) reverts applied edits and agent results; a rejected edit restores
+the drag and shows the reason inline. Multi-level plans edit level 0.
+
+*Agent chat pane.* When the agent extra is installed and a key is set — `pip
+install 'barndsl[agent]'` and `export ANTHROPIC_API_KEY=…` — a chat pane lights
+up on the left: type a brief and Claude runs the `agent.py`
+compile-critique-revise loop, streaming each round's score and diagnostics back
+as it goes (the editor and viewport update live so you watch the design evolve),
+then lands the **best-scoring** iteration in the editor. Follow-up messages ("make
+the kitchen bigger") send the current plan as the seed, so the conversation
+refines it. A **Stop** button aborts between rounds; the pane collapses to keep
+the editor roomy on small screens. Without the extra or the key the pane stays
+disabled with that one-line hint and the rest of the playground works unchanged —
+the key's value is never sent anywhere or logged.
 
 **Cost estimate.** `barndsl cost plan.barn` turns the takeoff into a transparent,
 assembly-based budget: every line is `quantity × unit cost` with the quantity's
@@ -653,6 +723,7 @@ src/barndsl/
   revit.py       # lower the plan IR → Revit-shaped exchange JSON (barndsl.revit/1)
   schedule.py    # room/door/window schedules → Markdown or CSV (no Revit needed)
   dxf.py         # export the plan → DXF R12 (CAD interchange), dependency-free
+  ifc.py         # export the plan → IFC4 BIM (STEP/SPF), hand-written, dependency-free
   scaffold.py    # the starter plan `barndsl new` writes
   render.py      # annotated 2D SVG renderer (+ PNG/PDF via optional cairosvg)
   agent.py       # Claude write → compile → critique → revise loop

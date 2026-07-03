@@ -22,6 +22,10 @@ dependencies = [
 agent = ["anthropic>=0.49"]
 # PNG/PDF rendering (SVG works with no extras).
 raster = ["cairosvg>=2.7"]
+# IFC export needs NO dependency (ifc.py hand-writes STEP/SPF). This extra is only
+# the optional test-time validation oracle that `tests/test_ifc.py` uses when
+# present — it is never imported at runtime.
+ifc-validate = ["ifcopenshell>=0.7"]
 dev = [
     "pytest>=8.0",
     "anthropic>=0.49",
