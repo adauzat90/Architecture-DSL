@@ -411,3 +411,100 @@ def test_app_from_file_flag_flows_into_the_spa():
     # The FILE-argument flag reaches the SPA so restore can prefer the file.
     assert "const INITIAL_FROM_FILE = true;" in render_app(CLEAN, from_file=True)
     assert "const INITIAL_FROM_FILE = false;" in render_app(CLEAN, from_file=False)
+
+
+# --- the report payload (Report tab data: cost / schedules / energy / areas) --
+
+#: The clean plan with an IECC climate zone declared, to light up the energy
+#: section (no bundled example declares one).
+CLIMATE = CLEAN + "\nclimate 5\n"
+
+
+def test_compile_payload_carries_report_block():
+    rep = compile_payload(CLEAN)["report"]
+    # cost estimate, reused verbatim from cost.estimate_cost (total + breakdown)
+    assert rep["cost"]["total"]["expected"] > 0
+    assert rep["cost"]["assemblies"] and rep["cost"]["disclaimer"]
+    assert rep["cost"]["subtotals"] and rep["cost_per_sqft"] > 0
+    # the three architect schedules, each shaped columns + count-consistent rows
+    titles = {s["title"] for s in rep["schedules"]}
+    assert {"Room Schedule", "Door Schedule", "Window Schedule"} <= titles
+    for s in rep["schedules"]:
+        assert s["columns"] and s["count"] == len(s["rows"])
+        assert all(len(row) == len(s["columns"]) for row in s["rows"])
+    # areas: one row per room with the required fields
+    assert rep["areas"]["rooms"]
+    assert all(
+        {"name", "type", "level", "width", "length", "area"} <= set(r)
+        for r in rep["areas"]["rooms"]
+    )
+
+
+def test_report_area_total_is_consistent_with_metrics():
+    p = compile_payload(CLEAN)
+    total = p["report"]["areas"]["total_area"]
+    # the per-room areas sum to the plan's assigned area (metrics), within rounding
+    assert abs(total - p["metrics"]["assigned_sqft"]) < 0.01
+
+
+def test_report_energy_present_only_with_a_climate_zone():
+    assert compile_payload(CLEAN)["report"]["energy"] is None
+    energy = compile_payload(CLIMATE)["report"]["energy"]
+    assert energy["zone"] == 5
+    assert "R-" in energy["summary"]
+    assert energy["targets"]["ceiling"].startswith("R-")
+
+
+def test_report_absent_for_uncompilable_source():
+    # An erroring / non-plan source carries no report block (and never crashes).
+    assert "report" not in compile_payload("total garbage that is not dsl")
+
+
+def test_report_data_returns_empty_for_no_plan_and_never_raises():
+    from barndsl.compiler import compile_source
+    from barndsl.playground import report_data
+
+    assert report_data(compile_source("not dsl at all")) == {}
+    good = report_data(compile_source(CLEAN))
+    assert good["cost"]["total"]["expected"] > 0 and good["schedules"]
+
+
+# --- the export `packet` format (print-ready permit packet) -------------------
+
+
+def test_export_packet_returns_self_contained_html(server):
+    status, hdrs, data = _export(server, CLEAN, "packet")
+    assert status == 200
+    html = data.decode("utf-8")
+    assert html.lstrip().lower().startswith("<!doctype")
+    # carries the plan title and the inlined plan SVG
+    assert "cedar" in html.lower()
+    assert "<svg" in html
+    # self-contained: no external stylesheet/script/CDN. The only http:// is the
+    # inlined-SVG XML namespace identifier (not a network fetch).
+    assert "https://" not in html
+    assert "<script src" not in html and "//cdn" not in html
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert hdrs["Content-Type"].startswith("text/html")
+    assert hdrs["Content-Disposition"].endswith('-packet.html"')
+
+
+def test_export_packet_erroring_source_is_typed_error(server):
+    status, hdrs, data = _export(server, WITH_ERROR, "packet")
+    assert status == 200
+    assert json.loads(data)["error"]["kind"] == "compile_error"
+    assert "Content-Disposition" not in hdrs
+
+
+# --- the Report tab + Print packet SPA markup --------------------------------
+
+
+def test_app_contains_report_and_print_markup_and_no_external_refs():
+    html = render_app(CLEAN)
+    for token in ('data-tab="report"', 'id="print-btn"', 'id="report-wrap"',
+                  'data-fmt="packet"', "function reportHTML(", "function buildPrintDoc(",
+                  "function openPrint(", "@media print"):
+        assert token in html, token
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html

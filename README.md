@@ -622,7 +622,7 @@ and the file is byte-reproducible (deterministic GlobalIds, a fixed timestamp).
 
 **Playground.** `barndsl serve --open` starts a local web app — a DSL editor with
 live, click-to-jump diagnostics on the left and a viewport (2D plan, 3D model,
-elevations + section) on the right. Type and it recompiles (~400 ms debounce,
+elevations + section, Report) on the right. Type and it recompiles (~400 ms debounce,
 Ctrl/Cmd+Enter forces it); the header shows the plan title, design score and key
 metrics; a dropdown loads the bundled examples; the last good render stays up
 (dimmed) while the source is broken. It's a **local** tool — a stdlib
@@ -638,10 +638,22 @@ the newer session rather than clobbering it). **New** starts from the scaffold,
 **Open** reads a `.barn`/`.txt` file client-side (drag-and-drop onto the editor
 works too), and **Save** (Ctrl/Cmd+S; **Open** is Ctrl/Cmd+O) downloads the source
 as `<plan>.barn`. The viewport's **Export** menu turns the current plan into any of
-the build artifacts — `.barn` source, `SVG` plan, `DXF`, `GLB`, `IFC`, or the
-self-contained **3D viewer** HTML to share with a client — via `POST /api/export`,
-reusing the same exporters as the CLI (disabled with a reason until the plan
-compiles cleanly).
+the build artifacts — `.barn` source, `SVG` plan, `DXF`, `GLB`, `IFC`, the
+self-contained **3D viewer** HTML to share with a client, or the print-ready
+**permit packet** HTML (`packet.py`: cover, dimensioned plan, schedules, cost,
+diagnostics) — via `POST /api/export`, reusing the same exporters as the CLI
+(disabled with a reason until the plan compiles cleanly).
+
+*Report + print.* The viewport's **Report** tab surfaces the parts of the engine
+that had no UI — the assembly **cost estimate** (`cost.py`, with its planning-only
+disclaimer and $/sq ft), the architect's **door/window/room schedules**
+(`schedule.py`), a per-room **areas** table, and — only when the plan declares a
+`climate` zone — the IECC **envelope guidance** (`energy.py`) — all computed
+server-side and inlined on the compile payload. The **Print** button opens a
+self-contained, print-optimised window (title block, plan sheet, elevations +
+section, the Report tables, page breaks between sheets, auto `window.print()`)
+composed from the payload the app already holds, so it never disturbs the editor;
+a stray Ctrl+P on the app itself prints the active viewport tab, not the chrome.
 
 *Edit mode.* Toggle **Edit layout** on the 2D plan tab for direct manipulation:
 an interactive overlay (room-palette colours, id labels) where you drag a room to

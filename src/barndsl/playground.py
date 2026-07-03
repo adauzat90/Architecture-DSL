@@ -19,9 +19,10 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
     body ``{"source": "..."}`` (capped at 1 MB) → a JSON compile result:
     ``ok``, ``counts``, ``diagnostics`` (mirroring ``CompileResult.to_dict``),
     and — when the source built a plan — ``svg``, ``scene`` (the same blob the
-    single-file viewer embeds), ``score``, ``metrics``, ``elevations`` and
-    ``section``. Bad DSL is a normal ``200`` response with diagnostics, never a
-    ``500``; only malformed/oversize JSON is ``400``.
+    single-file viewer embeds), ``score``, ``metrics``, ``elevations``,
+    ``section`` and ``report`` (the cost / schedules / areas / climate data the
+    Report tab renders). Bad DSL is a normal ``200`` response with diagnostics,
+    never a ``500``; only malformed/oversize JSON is ``400``.
 ``GET /api/examples``
     the bundled ``examples/*.barn`` (and ``examples/gallery/*.barn``) as
     ``[{"name", "source"}]`` for the load-example menu.
@@ -52,8 +53,8 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
     (unknown room, malformed) is a normal ``200`` with ``{"error": {kind, message}}``
     — bad edits are ordinary UX, not failures; only malformed/oversize JSON is ``400``.
 ``POST /api/export``
-    body ``{"source": "...", "format": "svg|dxf|glb|ifc|viewer"}`` → the compiled
-    artifact as a file download: the right ``Content-Type`` and a
+    body ``{"source": "...", "format": "svg|dxf|glb|ifc|viewer|packet"}`` → the
+    compiled artifact as a file download: the right ``Content-Type`` and a
     ``Content-Disposition`` attachment filename derived from the plan name. Binary
     formats (``glb``) stream as bytes. The plan is compiled once and reused; a
     source with errors (or a recovered parse) is refused with a normal ``200`` and
@@ -61,8 +62,8 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
     disables the menu on a bad compile, so this is a backstop. Unknown format or
     malformed/oversize JSON is ``400``. No exporter is re-implemented: it reuses
     :func:`barndsl.render.render_svg`, :func:`barndsl.dxf.to_dxf`,
-    :func:`barndsl.gltf.to_glb`, :func:`barndsl.ifc.to_ifc` and
-    :func:`barndsl.viewer.viewer_html`.
+    :func:`barndsl.gltf.to_glb`, :func:`barndsl.ifc.to_ifc`,
+    :func:`barndsl.viewer.viewer_html` and :func:`barndsl.packet.build_packet`.
 
 The server is stateless apart from a single-job design lock: it writes no files
 and holds no session. The frontend keeps the last good render when the current
@@ -81,12 +82,16 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .compiler import DSL_REFERENCE, compile_source
+from .cost import estimate_cost
 from .dxf import to_dxf
 from .edits import EditError, apply_edit, edit_from_json, opening_overlays
+from .energy import describe_targets, envelope_targets
 from .gltf import build_scene, to_glb
 from .ifc import to_ifc
+from .packet import build_packet
 from .render import ROOM_COLORS, render_svg
 from .scaffold import starter_dsl
+from .schedule import _schedules
 from .score import design_score
 from .viewer import RENDERER_JS, _LAYER_LABELS, scene_json, viewer_html
 from .views import elevation_svg, section_svg
@@ -189,15 +194,87 @@ def compile_payload(source: str) -> dict:
             ]
             payload["openings"] = opening_overlays(plan)
             payload["levels"] = plan.levels()
+            # The Report tab's data — cost, schedules, areas and (if the plan
+            # declares one) the climate envelope. Cheap enough to inline: for the
+            # gallery plans it adds <1 ms and <8 KB to the compile payload (measured),
+            # so it rides along rather than a lazily-fetched second endpoint.
+            payload["report"] = report_data(result)
         except Exception as exc:  # a plan that lowers oddly must not 500 the API
             payload["render_error"] = str(exc)
     return payload
 
 
+# --- the report (cost / schedules / energy / areas) payload ------------------
+
+
+def report_data(result: Any) -> dict:
+    """Structured Report-tab data for a compiled plan, or ``{}`` when there is none.
+
+    Reuses :func:`barndsl.cost.estimate_cost`, the :mod:`barndsl.schedule` row
+    builders and the :mod:`barndsl.energy` reference table **verbatim** — no
+    pricing or geometry is recomputed here. Returns ``{}`` for a missing or
+    parse-recovered plan, and ``{"error": msg}`` (it never raises) if a source
+    module fails, so the Report tab degrades to one explanatory line instead of a
+    broken table or a 500. ``energy`` is ``None`` unless the plan declares a
+    ``climate`` zone — the tab skips the section entirely then.
+    """
+    plan = getattr(result, "plan", None)
+    if plan is None or getattr(result, "recovered", False):
+        return {}
+    try:
+        est = estimate_cost(plan)
+        m = plan.metrics()
+        schedules = [
+            {
+                "title": title,
+                "count": len(rows),
+                "columns": [c.header for c in columns],
+                "rows": [[c.get(row) for c in columns] for row in rows],
+            }
+            for title, columns, rows in _schedules(plan, True, True, True)
+        ]
+        areas = {
+            "rooms": [
+                {
+                    "id": r.id, "name": r.display_name, "type": r.type.value,
+                    "level": r.level, "width": r.width, "length": r.length,
+                    "area": round(r.area, 2),
+                }
+                for r in plan.rooms
+            ],
+            "total_area": round(sum(r.area for r in plan.rooms), 2),
+            "footprint_sqft": m["footprint_sqft"],
+            "interior_sqft": m["interior_sqft"],
+            "habitable_sqft": m["habitable_sqft"],
+        }
+        interior = m["interior_sqft"]
+        cost_per_sqft = (
+            round(est["total"]["expected"] / interior, 2) if interior else None
+        )
+        energy = None
+        if plan.climate is not None:
+            zone = int(plan.climate)
+            energy = {
+                "zone": zone,
+                "summary": describe_targets(zone),
+                "targets": envelope_targets(zone),
+            }
+        return {
+            "plan": plan.name,
+            "cost": est,
+            "cost_per_sqft": cost_per_sqft,
+            "schedules": schedules,
+            "areas": areas,
+            "energy": energy,
+        }
+    except Exception as exc:  # a source module that raises must not break the render
+        return {"error": str(exc)}
+
+
 # --- the export endpoint ------------------------------------------------------
 
 #: The formats ``POST /api/export`` can produce. Order is the SPA menu order.
-EXPORT_FORMATS = ("svg", "dxf", "glb", "ifc", "viewer")
+EXPORT_FORMATS = ("svg", "dxf", "glb", "ifc", "viewer", "packet")
 
 
 def _plan_slug(name: str) -> str:
@@ -208,12 +285,14 @@ def _plan_slug(name: str) -> str:
     return slug.strip("_") or "barndo"
 
 
-def export_artifact(fmt: str, plan: Any) -> tuple[bytes, str, str]:
+def export_artifact(fmt: str, plan: Any, result: Any = None) -> tuple[bytes, str, str]:
     """Render ``plan`` into ``fmt`` → ``(body_bytes, content_type, filename)``.
 
     Reuses the standalone exporters verbatim; ``fmt`` must be in
     :data:`EXPORT_FORMATS` (the caller validates). Binary formats return raw
     bytes; text formats are UTF-8 (DXF R12 is ASCII, matching :func:`~barndsl.dxf.save_dxf`).
+    ``result`` (the :class:`~barndsl.compiler.CompileResult`) is only needed by the
+    ``packet`` format, which binds the diagnostics appendix in too.
     """
     slug = _plan_slug(plan.name)
     if fmt == "svg":
@@ -225,6 +304,12 @@ def export_artifact(fmt: str, plan: Any) -> tuple[bytes, str, str]:
         return to_glb(plan), "model/gltf-binary", f"{slug}.glb"
     if fmt == "ifc":
         return to_ifc(plan).encode("utf-8"), "application/x-step; charset=utf-8", f"{slug}.ifc"
+    if fmt == "packet":
+        # The permit-sketch packet: one self-contained, print-ready HTML page
+        # (cover, dimensioned plan, schedules, cost, diagnostics), reusing
+        # packet.build_packet verbatim — the dependency-free deliverable.
+        return (build_packet(result).encode("utf-8"),
+                "text/html; charset=utf-8", f"{slug}-packet.html")
     # viewer: the self-contained single-file 3D viewer ("share with a client").
     return viewer_html(plan).encode("utf-8"), "text/html; charset=utf-8", f"{slug}-3d.html"
 
@@ -493,7 +578,7 @@ class _Handler(BaseHTTPRequestHandler):
             }})
             return
         try:
-            body, ctype, filename = export_artifact(fmt, result.plan)
+            body, ctype, filename = export_artifact(fmt, result.plan, result)
         except Exception as exc:  # an exporter that lowers oddly must not leak a 500-less path
             self._json({"error": f"internal error: {exc}"}, status=500)
             return
@@ -958,6 +1043,45 @@ _APP_HTML = r"""<!doctype html>
   .h-ne, .h-sw { cursor:nesw-resize; } .h-nw, .h-se { cursor:nwse-resize; }
   @keyframes lineflash { from { background:rgba(209,135,63,.55); } to { background:transparent; } }
   .gln.flash { animation:lineflash 1s ease-out; }
+
+  /* --- Report tab --- */
+  .tabs #print-btn { align-self:center; margin:0 6px 4px 0; }
+  .report-wrap { position:absolute; inset:0; overflow:auto; padding:16px 18px; }
+  .rsec { margin:0 0 22px; max-width:920px; }
+  .rsec h3 { font-size:11px; text-transform:uppercase; letter-spacing:.6px;
+    color:var(--faint); margin:0 0 8px; border-bottom:1px solid var(--line);
+    padding-bottom:5px; }
+  .rchips { display:flex; gap:7px; flex-wrap:wrap; margin:0 0 10px; }
+  .rtab { border-collapse:collapse; width:100%; font-size:12.5px; margin:2px 0 8px; }
+  .rtab th, .rtab td { text-align:left; padding:4px 9px; border-bottom:1px solid var(--line); }
+  .rtab th { color:var(--muted); font-weight:600; }
+  .rtab td.num, .rtab th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .rtab tr.grp td { font-weight:600; color:var(--muted); padding-top:10px; border-bottom:0; }
+  .rtab tr.total td { font-weight:700; border-top:2px solid var(--line); border-bottom:0; }
+  .rnote { font-size:11.5px; color:var(--faint); font-style:italic; margin:6px 0 0;
+    line-height:1.45; max-width:920px; }
+  .rempty { color:var(--faint); padding:12px 0; }
+  .rmeta { font-size:12.5px; color:var(--muted); margin:0 0 10px; }
+
+  /* --- print the current viewport, not the three-pane app chrome --- */
+  @media print {
+    header, #notice, .agent, .left, .tabs, .edit-bar, #three-panel,
+    .drop-hint { display:none !important; }
+    html, body { overflow:visible !important; height:auto !important; background:#fff !important; }
+    main, .right, .viewport { display:block !important; position:static !important;
+      overflow:visible !important; min-height:0 !important; }
+    .viewport { background:#fff !important; }
+    .pane { display:none !important; position:static !important; }
+    .pane.active { display:block !important; position:static !important; }
+    #pane-plan.active { display:block !important; }
+    .plan-body { position:static !important; }
+    .edit-layer { display:none !important; }
+    .svgbox { height:auto !important; overflow:visible !important; display:block !important;
+      cursor:auto !important; }
+    .svgbox svg { transform:none !important; max-width:100% !important; }
+    .report-wrap { position:static !important; overflow:visible !important; }
+    .views-grid { grid-template-columns:1fr 1fr !important; }
+  }
 </style>
 </head>
 <body>
@@ -1014,7 +1138,10 @@ _APP_HTML = r"""<!doctype html>
       <button class="tab active" data-tab="plan">2D plan</button>
       <button class="tab" data-tab="three">3D</button>
       <button class="tab" data-tab="views">Elevations</button>
+      <button class="tab" data-tab="report">Report</button>
       <div class="spacer"></div>
+      <button class="tbtn" id="print-btn"
+        title="Open a print-ready packet — title block, plan, elevations, report">Print</button>
       <div class="menu">
         <button class="tbtn" id="export-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
         <div class="menu-list" id="export-menu" hidden>
@@ -1025,6 +1152,8 @@ _APP_HTML = r"""<!doctype html>
           <button class="menu-item" data-fmt="ifc">BIM model <span class="fmt">.ifc</span></button>
           <button class="menu-item" data-fmt="viewer">3D viewer <span class="fmt">.html</span>
             <small>self-contained — share with a client</small></button>
+          <button class="menu-item" data-fmt="packet">Permit packet <span class="fmt">.html</span>
+            <small>print-ready — cover, plan, schedules, cost</small></button>
         </div>
       </div>
     </div>
@@ -1045,6 +1174,7 @@ _APP_HTML = r"""<!doctype html>
         <div id="three-panel"><div class="hd">Layers</div><div id="three-toggles"></div></div>
       </div>
       <div class="pane" id="pane-views"></div>
+      <div class="pane" id="pane-report"><div class="report-wrap" id="report-wrap"></div></div>
     </div>
   </section>
 </main>
@@ -1062,6 +1192,7 @@ const gutter = document.getElementById('gutter');
 const diagEl = document.getElementById('diagnostics');
 const planSvg = document.getElementById('plan-svg');
 const viewsPane = document.getElementById('pane-views');
+const reportWrap = document.getElementById('report-wrap');
 const titleEl = document.getElementById('plan-title');
 const scoreChip = document.getElementById('score-chip');
 const metricsEl = document.getElementById('metrics');
@@ -1130,6 +1261,7 @@ function applyResult(p){
     viewport.classList.remove('stale');
     planSvg.innerHTML = p.svg;
     renderViews(p);
+    renderReport(p);
     if (currentTab === 'three') showThree();
   } else if (lastGood){
     viewport.classList.add('stale');  // keep the last good render, dimmed
@@ -1236,6 +1368,166 @@ function renderViews(p){
     '<div class="svgbox">' + p.section + '</div></figure>';
   viewsPane.innerHTML = html + '</div>';
 }
+
+// --- Report tab (cost / schedules / energy / areas) -------------------------
+// Rendered from the server-computed `report` block on the compile payload (cost,
+// schedules, energy and areas all come from the pure engine functions). The same
+// reportHTML() string feeds the Print packet, so the two never drift.
+function money(v){ return '$' + Math.round(v).toLocaleString('en-US'); }
+function sqft(v){ return Math.round(v).toLocaleString('en-US') + ' sq ft'; }
+
+function reportHTML(rep){
+  if (!rep || rep.error || !rep.cost){
+    const why = rep && rep.error ? ('Report unavailable: ' + esc(rep.error))
+      : 'No report yet — compile a plan to see cost, schedules and areas.';
+    return '<div class="rempty">' + why + '</div>';
+  }
+  return costSection(rep) + scheduleSections(rep) + energySection(rep) + areaSection(rep);
+}
+function costSection(rep){
+  const est = rep.cost, t = est.total;
+  let rows = '', lastGroup = null;
+  for (const ln of est.assemblies){
+    if (ln.group !== lastGroup){ lastGroup = ln.group;
+      rows += '<tr class="grp"><td colspan="4">' + esc(ln.group) + '</td></tr>'; }
+    rows += '<tr><td>' + esc(ln.item) + '</td>' +
+      '<td class="num">' + trimNum(ln.quantity) + ' ' + esc(ln.unit) + '</td>' +
+      '<td class="num">' + money(ln.unit_cost) + '</td>' +
+      '<td class="num">' + money(ln.cost) + '</td></tr>';
+  }
+  let subs = '';
+  for (const g in est.subtotals)
+    subs += '<tr><td>' + esc(g) + '</td><td class="num">' + money(est.subtotals[g]) + '</td></tr>';
+  const cps = rep.cost_per_sqft != null ? (money(rep.cost_per_sqft) + '/sq ft') : '—';
+  const mult = est.multiplier !== 1 ? (' · regional ×' + est.multiplier) : '';
+  return '<div class="rsec"><h3>Cost estimate' + esc(mult) + '</h3>' +
+    '<div class="rchips"><span class="chip good">' + money(t.expected) + ' expected</span>' +
+    '<span class="chip">' + money(t.low) + ' – ' + money(t.high) + ' (±' + est.band_pct + '%)</span>' +
+    '<span class="chip">' + cps + '</span></div>' +
+    '<table class="rtab"><tr><th>Item</th><th class="num">Qty</th>' +
+    '<th class="num">Unit cost</th><th class="num">Cost</th></tr>' + rows + '</table>' +
+    '<table class="rtab" style="max-width:460px"><tr><th>Assembly subtotal</th>' +
+    '<th class="num">Cost</th></tr>' + subs +
+    '<tr class="total"><td>Estimated total (expected)</td><td class="num">' + money(t.expected) +
+    '</td></tr></table>' +
+    '<p class="rnote">' + esc(est.disclaimer) + '</p></div>';
+}
+function scheduleSections(rep){
+  let out = '';
+  for (const s of (rep.schedules || [])){
+    const head = s.columns.map(c => '<th>' + esc(c) + '</th>').join('');
+    const body = s.rows.length
+      ? s.rows.map(r => '<tr>' + r.map(c => '<td>' + esc(c) + '</td>').join('') + '</tr>').join('')
+      : '<tr><td colspan="' + s.columns.length + '">None.</td></tr>';
+    out += '<div class="rsec"><h3>' + esc(s.title) + ' (' + s.count + ')</h3>' +
+      '<table class="rtab"><tr>' + head + '</tr>' + body + '</table></div>';
+  }
+  return out;
+}
+function energySection(rep){
+  const e = rep.energy; if (!e) return '';       // skipped entirely with no climate zone
+  const t = e.targets;
+  const rows = [['Ceiling', t.ceiling], ['Walls', t.wall], ['Floor', t.floor],
+    ['Slab edge', t.slab || '—'], ['Windows', 'U-' + t.window_u]]
+    .map(p => '<tr><td>' + esc(p[0]) + '</td><td>' + esc(p[1]) + '</td></tr>').join('');
+  return '<div class="rsec"><h3>Energy &amp; climate</h3>' +
+    '<p class="rmeta">IECC climate zone ' + e.zone + ' — prescriptive envelope targets (approx.).</p>' +
+    '<table class="rtab" style="max-width:420px"><tr><th>Assembly</th><th>Target</th></tr>' +
+    rows + '</table>' +
+    '<p class="rnote">On a steel frame, run the wall insulation as continuous exterior ' +
+    'insulation — steel studs are a severe thermal bridge that guts the cavity R-value. ' +
+    'Confirm against the adopted energy code (ideally with a rater).</p></div>';
+}
+function areaSection(rep){
+  const a = rep.areas;
+  const rows = a.rooms.length
+    ? a.rooms.map(r => '<tr><td>' + esc(r.name) + '</td><td>' + esc(r.type) + '</td>' +
+        '<td class="num">' + r.level + '</td>' +
+        '<td class="num">' + trimNum(r.width) + '′ × ' + trimNum(r.length) + '′</td>' +
+        '<td class="num">' + sqft(r.area) + '</td></tr>').join('')
+    : '<tr><td colspan="5">No rooms.</td></tr>';
+  return '<div class="rsec"><h3>Areas</h3>' +
+    '<table class="rtab"><tr><th>Room</th><th>Type</th><th class="num">Level</th>' +
+    '<th class="num">Dimensions</th><th class="num">Area</th></tr>' + rows +
+    '<tr class="total"><td colspan="4">Total room area</td><td class="num">' +
+    sqft(a.total_area) + '</td></tr></table>' +
+    '<p class="rnote">Footprint ' + sqft(a.footprint_sqft) + ' · interior (conditioned) ' +
+    sqft(a.interior_sqft) + ' · habitable ' + sqft(a.habitable_sqft) + '.</p></div>';
+}
+function renderReport(p){ reportWrap.innerHTML = reportHTML(p && p.report); }
+renderReport(null);
+
+// --- Print packet (a self-contained, print-ready window) --------------------
+// Composed client-side from the payload the SPA already holds — so it carries the
+// elevations + section the server packet omits, needs no round-trip, and never
+// touches the editor text or autosave state.
+const printBtn = document.getElementById('print-btn');
+const PRINT_CSS =
+  '*{box-sizing:border-box;}' +
+  'body{font-family:Helvetica,Arial,sans-serif;color:#222;margin:0;line-height:1.4;}' +
+  '.sheet{padding:34px 42px;page-break-after:always;}' +
+  '.sheet:last-child{page-break-after:auto;}' +
+  '.cover{padding-top:120px;}' +
+  'h1{font-size:30px;margin:0 0 6px;}' +
+  'h2{font-size:19px;margin:0 0 14px;border-bottom:2px solid #8A4B12;padding-bottom:6px;}' +
+  '.tb{color:#555;font-size:15px;}' +
+  '.pnote{color:#777;font-size:12px;font-style:italic;margin-top:10px;}' +
+  '.svgwrap{border:1px solid #ddd;padding:10px;overflow-x:auto;}' +
+  '.svgwrap svg,figure svg{max-width:100%;height:auto;}' +
+  '.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}' +
+  'figure{margin:0;border:1px solid #ddd;border-radius:6px;overflow:hidden;padding:8px;}' +
+  'figcaption{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#777;margin-bottom:6px;}' +
+  '.rsec{margin:0 0 22px;}' +
+  '.rsec h3{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:#777;margin:0 0 8px;border-bottom:1px solid #ddd;padding-bottom:5px;}' +
+  '.rtab{border-collapse:collapse;width:100%;font-size:12.5px;margin:2px 0 8px;}' +
+  '.rtab th,.rtab td{text-align:left;padding:4px 9px;border-bottom:1px solid #ddd;}' +
+  '.rtab th{background:#f6f6f6;}' +
+  '.rtab td.num,.rtab th.num{text-align:right;font-variant-numeric:tabular-nums;}' +
+  '.rtab tr.grp td{font-weight:700;padding-top:10px;border-bottom:0;}' +
+  '.rtab tr.total td{font-weight:700;border-top:2px solid #222;border-bottom:0;}' +
+  '.rnote{font-size:11.5px;color:#777;font-style:italic;margin:6px 0 0;}' +
+  '.rmeta{font-size:12.5px;color:#555;margin:0 0 10px;}' +
+  '.rchips{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px;}' +
+  '.chip{font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;border:1px solid #ddd;}' +
+  '.rempty{color:#777;padding:12px 0;}' +
+  '@media print{.sheet{padding:0;}@page{margin:14mm;}}';
+
+function buildPrintDoc(p){
+  const title = p.title || 'Barndominium plan';
+  const score = p.score ? (fmt(p.score.total) + ' / 100') : '—';
+  const m = p.metrics || {};
+  const foot = m.footprint_sqft != null ? (sqft(m.footprint_sqft) + ' footprint') : '';
+  const date = new Date().toLocaleDateString();
+  const elevs = p.elevations || {};
+  const order = [['south','South'],['north','North'],['east','East'],['west','West']];
+  let elevHtml = '';
+  for (const pair of order){ if (elevs[pair[0]]) elevHtml +=
+    '<figure><figcaption>' + pair[1] + ' elevation</figcaption>' + elevs[pair[0]] + '</figure>'; }
+  if (p.section) elevHtml += '<figure><figcaption>Section</figcaption>' + p.section + '</figure>';
+  const body =
+    '<section class="sheet cover"><h1>' + esc(title) + '</h1>' +
+      '<p class="tb">Drawing packet · ' + esc(date) + ' · score ' + esc(score) +
+      (foot ? ' · ' + esc(foot) : '') + '</p></section>' +
+    '<section class="sheet"><h2>Floor plan</h2><div class="svgwrap">' + p.svg + '</div>' +
+      '<p class="pnote">Dimensions in feet — not to scale when printed; verify all dimensions.</p></section>' +
+    (elevHtml ? '<section class="sheet"><h2>Elevations &amp; section</h2><div class="grid">' +
+      elevHtml + '</div></section>' : '') +
+    '<section class="sheet"><h2>Report</h2>' + reportHTML(p.report) + '</section>';
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<title>' + esc(title) + ' — packet</title><style>' + PRINT_CSS + '</style></head><body>' +
+    body + '<script>window.onload=function(){setTimeout(function(){try{window.print();}' +
+    'catch(e){}},150);};<\/script></body></html>';
+}
+function openPrint(){
+  const p = lastGood;
+  if (!p || !p.svg){ showNotice('Compile a clean plan before printing the packet.'); return; }
+  const w = window.open('', '_blank');
+  if (!w){ showNotice('Allow pop-ups to open the printable packet.'); return; }
+  const doc = buildPrintDoc(p);
+  w.document.open(); w.document.write(doc); w.document.close();
+}
+printBtn.addEventListener('click', openPrint);
 
 // --- 2D plan pan / zoom (CSS transform) -------------------------------------
 (function(box){

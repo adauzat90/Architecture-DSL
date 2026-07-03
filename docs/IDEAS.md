@@ -208,6 +208,40 @@ levels of a multi-level plan (a level switcher); a **live coordinate/size readou
 and dimension witnesses while dragging; snapping to **sibling edges** (align to an
 adjacent room's wall, not just the 0.5 ft grid).
 
+## Report tab + print packet — DONE
+Shipped (wave 2 of the architect-lens playground review): the half of the engine
+that had no UI — cost, schedules, energy and the drawing packet — now has a
+surface. A fourth viewport **Report** tab renders from a `report` block the server
+inlines on every clean `compile_payload` (measured cheap: <1 ms and <8 KB for the
+gallery plans, so no second endpoint): the assembly **cost estimate**
+(`cost.estimate_cost` verbatim — total range, per-category breakdown, subtotals,
+$/sq ft and the planning-only disclaimer), the **door/window/room schedules**
+(`schedule._schedules` row builders), a per-room **areas** table whose total
+reconciles with `metrics.assigned_sqft`, and — gated on a declared `climate` zone,
+skipped entirely otherwise — the IECC **envelope guidance** (`energy.envelope_targets`
+/ `describe_targets`). No pricing or geometry is recomputed; a source module that
+raised would degrade to one line, never a 500 (`report_data` swallows to
+`{"error": …}`, and a non-plan source carries no block at all). The **Print** button
+opens a self-contained, print-optimised window — title block, plan sheet,
+elevations + section, the Report tables, `@media print` page breaks and an auto
+`window.print()` — composed client-side from the payload the SPA already holds (so
+it carries the elevations the server packet omits and never touches the editor or
+autosave); a `@media print` block on the app page itself makes a stray Ctrl+P print
+the active viewport tab full-width rather than the three-pane chrome. Separately,
+`packet.build_packet` is now an **Export** format (`POST /api/export` `format=packet`)
+— the dependency-free, print-ready permit HTML as a download. Tests:
+`tests/test_playground.py` pins the report shape (cost/schedule/area fields,
+count-consistent rows, area total == metrics, climate-only energy, no block on a
+bad source, `report_data` never raises), the `packet` export (content-type,
+self-contained bar the inlined-SVG namespace, plan title + SVG, typed error on a
+bad source) and the Report/Print SPA markup + no-external-references invariant.
+
+Possible follow-ups: a **regional cost multiplier / unit-cost overrides** control
+in the Report tab (the engine already takes them); wiring the server `packet`
+format into the Print button as an alternative "full permit packet" print; a
+**CSV/Markdown schedule** download straight from the Report tab (`schedules_csv` /
+`schedules_markdown` already exist).
+
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the
 `barndsl.revit/1` exchange) and a `barndsl revit FILE --out plan.json` command.
