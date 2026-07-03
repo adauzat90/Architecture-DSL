@@ -137,6 +137,16 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A kitchen's clear interior is too small to hold a sink, range and "
            "refrigerator along the counters with a comfortable ~40 in working aisle. "
            "Enlarge it or lengthen the counter run."),
+        _c("BED_CLEARANCE", I, "Bedroom too tight to furnish",
+           "A bedroom clears its area and 7 ft nominal dimension but its clear "
+           "(finish-face) shape still can't hold a queen bed (5×6.67) against a wall "
+           "with a ~24 in walk-around — needs about 7×6.67 ft clear. Catches the "
+           "narrow room that passes the area/dimension checks but not the layout; "
+           "the livability companion to the wet-room fixture checks."),
+        _c("DINING_CLEARANCE", I, "Dining room too tight to furnish",
+           "A dining room's clear interior is too small to seat a 4-person table "
+           "(~3 ft) with ~30 in of chair-pull and circulation all round (about 8 ft "
+           "clear each way). Enlarge it."),
         _c("ACCESS_ENTRY", I, "No-step entrance (accessible target)",
            "An accessible plan needs at least one no-step entrance (threshold ≤ ½ in) "
            "with a level landing (ANSI A117.1). Thresholds aren't in the geometry, so "

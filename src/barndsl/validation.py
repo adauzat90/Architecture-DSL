@@ -119,6 +119,16 @@ MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a b
 #: below for their plumbing to share one straight vertical waste stack. A mere
 #: corner touch (0) can't route a stack + wet wall; require a small real overlap.
 MIN_STACK_OVERLAP = 4.0
+#: Furniture-fit floors on the *clear* interior (ft) — the livability analogue of
+#: the wet-room fixture checks, and one step beyond BEDROOM_DIM (which only sets a
+#: 7 ft nominal side). A bedroom must hold a **queen** bed (5×6.67) against a wall
+#: with a 24 in walk-around on one long side → a 7 (bed width + access) × 6.67 (bed
+#: length) clear envelope, so a 7×10 room that clears the area/dimension checks but
+#: is too narrow for a queen still gets flagged. A dining room must seat a 4-person
+#: table (~3 ft) with 30 in of chair-pull/circulation all round → ~8 ft clear.
+BED_FURNISH_SHORT = 6.67
+BED_FURNISH_LONG = 7.0
+DINING_FURNISH_CLEAR = 8.0
 CLOSET_WALKIN_ASPECT = 4.0  # a closet skinnier than this (long:short) is "long skinny"
 MIN_WALKIN_AREA = 24.0  # a closet this big is worth shaping as a walk-in, not a strip
 #: A swing door centred on a wall with at least this much clear wall on *both*
@@ -677,6 +687,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_geometry(plan, add)
     _validate_room_programs(plan, add)
     _validate_fixtures(plan, add)
+    _validate_furniture(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_stairs(plan, add)
@@ -1005,6 +1016,47 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
                     + " fit with clear floor in front.",
                 )
             )
+
+
+def _validate_furniture(plan: Barndominium, add) -> None:
+    """Furniture-fit nudges for habitable rooms — the livability companion to the
+    wet-room fixture checks. A room can clear ``BEDROOM_AREA`` yet be the wrong
+    *shape* to arrange: a long thin bedroom that won't hold a bed with a
+    walk-around, a dining room too tight to pull a chair. Uses the clear
+    (finish-face) interior, like the fixture checks. INFO — guidance, not a gate.
+    """
+    for room in plan.rooms:
+        if room.type is RoomType.BEDROOM:
+            cw, cl = clear_dimensions(plan, room)
+            short, long = min(cw, cl), max(cw, cl)
+            if short + EPSILON < BED_FURNISH_SHORT or long + EPSILON < BED_FURNISH_LONG:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "BED_CLEARANCE",
+                        f"Bedroom '{room.id}' is {_f(cw)}×{_f(cl)} ft clear — too tight "
+                        "to place a queen bed with a walk-around (needs about "
+                        f"{_f(BED_FURNISH_LONG)}×{_f(BED_FURNISH_SHORT)} ft clear).",
+                        room=room.id,
+                        hint="Widen or reshape the room so a queen bed backs to a wall "
+                        "with a ~24 in path on one long side.",
+                    )
+                )
+        elif room.type is RoomType.DINING:
+            cw, cl = clear_dimensions(plan, room)
+            if min(cw, cl) + EPSILON < DINING_FURNISH_CLEAR:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "DINING_CLEARANCE",
+                        f"Dining room '{room.id}' is {_f(cw)}×{_f(cl)} ft clear — too "
+                        "tight to seat a table with room to pull the chairs (needs "
+                        f"about {_f(DINING_FURNISH_CLEAR)} ft clear each way).",
+                        room=room.id,
+                        hint="Enlarge it so a 4-seat table (~3 ft) has ~30 in of "
+                        "chair-pull and circulation all round.",
+                    )
+                )
 
 
 def _validate_room_programs(plan: Barndominium, add) -> None:

@@ -171,7 +171,15 @@ minimal deterministic add:
   continuous insulation — same posture as the "frame is a layout aid, not an
   engineered design" disclaimer.
 
-## 6. Furniture-fit only exists for wet rooms
+## 6. Furniture-fit only exists for wet rooms — SHIPPED
+
+**Update (2026-07-03).** Extended the clear-floor idea past the wet rooms
+(`_validate_furniture`): `BED_CLEARANCE` flags a bedroom that clears its area and
+7 ft nominal dimension but is still too narrow for a queen bed (5×6.67) with a
+24 in walk-around, and `DINING_CLEARANCE` flags a dining room too tight to seat a
+table with chair-pull. Both INFO, on the clear (finish-face) interior like the
+fixture checks. Covered by `tests/test_furniture.py`. (Living-room *seating*
+arrangement is left out — too layout-subjective for a deterministic nudge.)
 
 `BATH_CLEARANCE` and `KITCHEN_FIT` are excellent. But a bedroom that passes
 `BEDROOM_AREA` can still fail to hold a queen bed with two nightstands and a 36"

@@ -170,7 +170,10 @@ wall, and stack an upper-floor bath/kitchen/laundry over a wet room below so its
 waste stack drops straight), bedroom closets, room proportion, workable room
 sizes, **fixture
 clearances** (a bath that can't hold a toilet/lav/tub with IRC R307 clearances, a
-kitchen too tight for its appliances), bathroom ventilation, dead-end hallways,
+kitchen too tight for its appliances), **furniture fit** (a bedroom too narrow for
+a queen bed with a walk-around, a dining room too tight to pull a chair — the
+clear-floor test extended past the wet rooms), bathroom ventilation, dead-end
+hallways,
 **garage/dwelling fire separation** (a garage *or shop* common wall or the ceiling
 under habitable space above it, and the self-closing rated door between them — IRC
 R302.6 / R302.5.1), **clear-dimension** shortfalls (a room that meets a code
