@@ -1,7 +1,7 @@
 # Agent-first architecture application
 
-Status: **design** — tiers 1 (3D output), 2 (web playground) and 3 (the agent in
-the app) **shipped/DONE**; tiers 4–5 planned.
+Status: **design** — tiers 1 (3D output), 2 (web playground), 3 (the agent in
+the app) and 4 (IFC export) **shipped/DONE**; tier 5 planned.
 Context: `docs/IDEAS.md` (Revit plug-in — foundation DONE), `docs/PRODUCT_REVIEW.md`,
 `docs/REVIEW_DSL_REVIT*.md`.
 
@@ -165,12 +165,41 @@ seam into `src/barndsl/agent.py`.
   drive the whole SSE path with a scripted fake — no network, no key, no
   `anthropic` (agent-hook tests live in `tests/test_agent_loop.py`).
 
-### Tier 4 — IFC export
+### Tier 4 — IFC export — DONE
 
-`ifc.py` via IfcOpenShell (optional dependency, like `raster`): the same
-exchange lowered to IfcWall/IfcDoor/IfcWindow/IfcSlab/IfcRoof. Gets plans into
-full Revit, ArchiCAD, and every IFC viewer — the professional hand-off, and the
-final demotion of the pyRevit path to "one exporter among several."
+The same exchange lowered to IfcWall/IfcDoor/IfcWindow/IfcSlab/IfcRoof, getting
+plans into full Revit, ArchiCAD, and every IFC viewer — the professional
+hand-off, and the final demotion of the pyRevit path to "one exporter among
+several." **Shipped:** `src/barndsl/ifc.py` (`to_ifc`/`write_ifc`, `barndsl ifc`),
+tested in `tests/test_ifc.py`.
+
+**Deviation from this sketch (deliberate):** the sketch imagined `ifc.py` *via
+IfcOpenShell* as an optional dependency (like `raster`). It ships instead as a
+**hand-written, pure-Python, stdlib-only STEP (SPF) writer** — following the
+`dxf.py` precedent (the repo hand-writes DXF rather than depend on `ezdxf`) and
+the repo's zero-dep-engine ethos. The geometry is entirely extruded rectangles
+plus a few prisms, so a tiny ISO-10303-21 backbone + IFC4 entity graph is the
+better fit than a heavyweight geometry kernel. IfcOpenShell is **demoted to an
+optional test-time validation oracle** (skipif-guarded tests, an optional
+`barndsl[ifc-validate]` extra); it is never an install or runtime dependency.
+
+Schema is **IFC4** (not 2x3). The spatial hierarchy is IfcProject → IfcSite →
+IfcBuilding → one IfcBuildingStorey per level. Walls are `IfcWall` (uncut box)
+with real `IfcOpeningElement` voids (`IfcRelVoidsElement`) filled by
+`IfcDoor`/`IfcWindow` (`IfcRelFillsElement`, carrying `OverallWidth`/
+`OverallHeight`); slabs and porch slabs are `IfcSlab` (FLOOR); the roof is one
+`IfcRoof` (RoofType from gable/shed/monitor) whose planes are extruded-area-solid
+triangular/wedge **prisms** (`IfcArbitraryClosedProfileDef` swept horizontally —
+real solids every common viewer renders, so no faceted-brep fallback was needed);
+frame members are `IfcColumn`/`IfcBeam`; stairs `IfcStair`; and every room is an
+`IfcSpace` (footprint extruded to ceiling) so schedules and areas work downstream.
+A small `barndsl` `IfcPropertySet` on the building carries the design score, sq-ft
+metrics and a source hash. Units are declared **imperial** (a conversion-based
+foot = 0.3048 m), so coordinates stay in feet and map straight onto IFC's z-up
+world frame — the same pass-through the DXF and glTF exports rely on. GlobalIds
+are IFC 22-char compressed GUIDs derived deterministically with `uuid5`, and no
+wall-clock timestamp is written, so re-exporting an unchanged plan is
+byte-identical.
 
 ### Tier 5 — direct manipulation, round-tripped
 

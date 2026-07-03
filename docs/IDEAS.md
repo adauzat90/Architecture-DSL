@@ -43,10 +43,46 @@ view3d`. Tests pin glTF structural validity (accessor/bufferView bookkeeping,
 POSITION min/max, index ranges, .glb chunk padding), the geometry contract (every
 wall run → a mesh, opening cuts reduce wall volume), and a gallery export sweep.
 
-Possible follow-ups: Tier 4 IFC export (the same exchange lowered to
-IfcWall/IfcSlab/IfcRoof via an optional `ifcopenshell` dep); billboarded room
-labels in the viewer; true swept gable-wall pentagons instead of the box + infill
-approximation.
+Possible follow-ups: billboarded room labels in the viewer; true swept gable-wall
+pentagons instead of the box + infill approximation.
+
+## IFC export — DONE
+Shipped (Tier 4 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/ifc.py`
+(`to_ifc`/`write_ifc`, CLI `barndsl ifc`) lowers the same Revit-shaped exchange
+into **IFC4**, the open BIM interchange, so a plan opens in full Revit, ArchiCAD,
+BIMcollab/Solibri and every IFC viewer — the professional hand-off. **Deviation
+from the original sketch:** rather than the optional `ifcopenshell` dependency the
+design doc imagined, it is a **hand-written, pure-Python, stdlib-only STEP/SPF
+writer** (like `dxf.py` hand-writes DXF) — the geometry is all extruded rectangles
+and a few prisms, so a tiny ISO-10303-21 backbone beats a heavyweight kernel and
+keeps the engine zero-dep. `ifcopenshell` is demoted to a test-time validation
+oracle (skipif in `tests/test_ifc.py`; optional `barndsl[ifc-validate]` extra),
+never a runtime dep. IfcProject → IfcSite → IfcBuilding → per-level
+IfcBuildingStorey; walls are `IfcWall` (uncut box) with real `IfcOpeningElement`
+voids (`IfcRelVoidsElement`) filled by `IfcDoor`/`IfcWindow` (`IfcRelFillsElement`,
+real `OverallWidth`/`OverallHeight`); slabs and porch slabs are `IfcSlab` (FLOOR);
+the roof is one `IfcRoof` (RoofType from gable/shed/monitor) whose planes are
+`IfcExtrudedAreaSolid` triangular/wedge **prisms** (an `IfcArbitraryClosedProfileDef`
+swept horizontally along the ridge — real solids every viewer renders, no
+faceted-brep fallback needed); frame → `IfcColumn`/`IfcBeam`; stairs → `IfcStair`;
+and one `IfcSpace` per room (name + LongName room-id/type, footprint extruded to
+ceiling) so downstream schedules/areas work. A small `barndsl` `IfcPropertySet` on
+the building carries the design score, sq-ft metrics and a source hash. Units are
+declared **imperial** (a conversion-based foot = 0.3048 m, plus square/cubic foot),
+so coordinates stay in feet with no boundary conversion; plan x-east/y-north/z-up
+maps straight onto IFC's z-up world frame. GlobalIds are IFC's 22-char compressed
+GUIDs derived deterministically with `uuid5` (plan name + kind + id), and the file
+carries no wall-clock timestamp, so re-exporting an unchanged plan is
+byte-identical. Tests parse the SPF textually (header, reference integrity, entity
+counts vs the exchange, GUID validity/determinism, unit block, tricky-name
+escaping, gallery sweep) with an `ifcopenshell` oracle layer that opens the file,
+walks the spatial tree and tessellates the geometry.
+
+Possible follow-ups: room-type colours as `IfcStyledItem`/`IfcSurfaceStyle` on the
+spaces/floor tiles; aggregate the roof as per-plane `IfcSlab(ROOF)` under the
+`IfcRoof` instead of direct geometry (stricter model-checker conformance); IFC2x3
+output for older Revit-import paths that still prefer it; a download/export menu in
+the playground offering `.barn`/`.svg`/`.glb`/`.ifc` of the current plan.
 
 ## Web playground — DONE
 Shipped (Tier 2 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/playground.py`

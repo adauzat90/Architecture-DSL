@@ -563,6 +563,7 @@ barndsl schedule examples/cedar_ridge.barn         # room/door/window schedules 
 barndsl schedule examples/cedar_ridge.barn --format csv --out sched.csv
 barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
 barndsl gltf    examples/cedar_ridge.barn --out plan.glb  # → 3D model (glTF 2.0)
+barndsl ifc     examples/cedar_ridge.barn --out plan.ifc  # → IFC4 BIM (Revit/ArchiCAD/any IFC viewer)
 barndsl view3d  examples/cedar_ridge.barn --out plan.html # → single-file 3D viewer
 barndsl serve   examples/cedar_ridge.barn --open   # local web playground (editor + live 2D/3D)
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
@@ -602,6 +603,22 @@ orbit/pan/zoom and layer toggles (turn the roof off to look inside) — that wor
 offline by double-clicking it, no network and no dependency. Both are pure
 Python, stdlib only. Schematic by design, like the elevations: for design review,
 not construction detailing.
+
+**BIM hand-off (IFC).** `barndsl ifc plan.barn` lowers the same Revit-shaped
+exchange into **IFC4** — the open BIM interchange — so a plan opens in full Revit,
+ArchiCAD, BIMcollab/Solibri and every IFC viewer. It's the professional hand-off:
+iterate in barndsl, hand the `.ifc` to the incumbent for construction documents.
+Like the DXF and glTF exports it's **hand-written, pure Python, stdlib only** — a
+tiny ISO-10303-21 (STEP/SPF) writer, no `IfcOpenShell` dependency. Walls become
+`IfcWall` with real `IfcOpeningElement` voids filled by `IfcDoor`/`IfcWindow`
+(carrying `OverallWidth`/`OverallHeight`); levels become `IfcBuildingStorey`;
+slabs, a roof (`IfcRoof`, gable/shed/monitor), frame `IfcColumn`/`IfcBeam`, stairs
+and one `IfcSpace` per room (for schedules and areas) round it out, plus a small
+`barndsl` property set carrying the design score, sq-ft metrics and a source hash.
+Coordinates stay in **feet** (units declared imperial via a conversion-based foot),
+and the file is byte-reproducible (deterministic GlobalIds, a fixed timestamp).
+`IfcOpenShell` is used only as an optional test-time validation oracle
+(`pip install 'barndsl[ifc-validate]'`), never at runtime.
 
 **Playground.** `barndsl serve --open` starts a local web app — a DSL editor with
 live, click-to-jump diagnostics on the left and a viewport (2D plan, 3D model,
@@ -695,6 +712,7 @@ src/barndsl/
   revit.py       # lower the plan IR → Revit-shaped exchange JSON (barndsl.revit/1)
   schedule.py    # room/door/window schedules → Markdown or CSV (no Revit needed)
   dxf.py         # export the plan → DXF R12 (CAD interchange), dependency-free
+  ifc.py         # export the plan → IFC4 BIM (STEP/SPF), hand-written, dependency-free
   scaffold.py    # the starter plan `barndsl new` writes
   render.py      # annotated 2D SVG renderer (+ PNG/PDF via optional cairosvg)
   agent.py       # Claude write → compile → critique → revise loop

@@ -37,6 +37,12 @@
         is the binary container; `.gltf` writes JSON with an embedded buffer.
         Any glTF viewer opens it — no CAD licence, no plug-in.
 
+    barndsl ifc FILE.barn [--out FILE.ifc]
+        Compile, then lower the plan to IFC4 (a hand-written STEP/SPF file, no
+        IfcOpenShell dependency): walls with voided door/window openings, floor
+        and porch slabs, a roof, frame columns/beams, stairs and one IfcSpace per
+        room. Opens in full Revit, ArchiCAD, BIMcollab/Solibri and any IFC viewer.
+
     barndsl view3d FILE.barn [--out FILE.html] [--open]
         Write a single self-contained HTML file that renders the 3D model with
         orbit/pan/zoom and layer toggles. Works offline by double-clicking it.
@@ -620,6 +626,26 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_ifc(args: argparse.Namespace) -> int:
+    from .ifc import write_ifc
+    from .revit import to_revit_model
+
+    result = compile_file(args.file)
+    print(result.report(os.path.basename(args.file)))
+    if result.plan is None or result.recovered:
+        # Never emit BIM for a partial recovery — same contract as `dxf`/`gltf`.
+        return 1
+    out = args.out or f"{os.path.splitext(os.path.basename(args.file))[0]}.ifc"
+    write_ifc(result.plan, out)
+    model = to_revit_model(result.plan)
+    print(
+        f"\nIFC4: {len(model.levels)} storey(s), {len(model.walls)} wall(s), "
+        f"{len(model.openings)} opening(s), {len(model.rooms)} space(s)"
+    )
+    print(f"Wrote {out}")
+    return 0 if result.ok else 1
+
+
 def _cmd_gltf(args: argparse.Namespace) -> int:
     from .gltf import write_gltf
     from .revit import to_revit_model
@@ -1135,6 +1161,15 @@ def main(argv: list[str] | None = None) -> int:
     p_dxf.add_argument("file", help="path to a .barn DSL file")
     p_dxf.add_argument("--out", default="plan.dxf", help="output DXF path")
     p_dxf.set_defaults(func=_cmd_dxf)
+
+    p_ifc = sub.add_parser(
+        "ifc", help="export a plan to IFC4 (BIM interchange: Revit/ArchiCAD/any IFC viewer)"
+    )
+    p_ifc.add_argument("file", help="path to a .barn DSL file")
+    p_ifc.add_argument(
+        "--out", default=None, help="output path (default: FILE stem + .ifc)"
+    )
+    p_ifc.set_defaults(func=_cmd_ifc)
 
     p_gltf = sub.add_parser(
         "gltf", help="export a plan to a 3D model (glTF 2.0: .glb binary or .gltf)"
