@@ -127,6 +127,18 @@ class Direction(str, Enum):
     EAST = "east"
     WEST = "west"
 
+    def opposite(self) -> "Direction":
+        """The wall facing the other way (north↔south, east↔west)."""
+        return _OPPOSITE_DIR[self]
+
+
+_OPPOSITE_DIR: dict[Direction, Direction] = {
+    Direction.NORTH: Direction.SOUTH,
+    Direction.SOUTH: Direction.NORTH,
+    Direction.EAST: Direction.WEST,
+    Direction.WEST: Direction.EAST,
+}
+
 
 # --- Geometry ---------------------------------------------------------------
 
@@ -319,6 +331,24 @@ class Section:
 
     def as_tuple(self) -> tuple[float, float, float, float]:
         return (self.x, self.y, self.width, self.length)
+
+
+@dataclass
+class Lot:
+    """The parcel the building sits on — a rectangle in plan coordinates.
+
+    ``(x, y)`` is the south-west corner, in the *same* plan frame as the building
+    (typically negative, so the building at the origin sits inside the lot).
+    ``x``/``y`` may be ``None`` — "auto-centre the footprint in the lot" — resolved
+    lazily against the final footprint by :meth:`Barndominium.lot_box` so it doesn't
+    depend on whether wings/rooms were declared before or after the ``lot``.
+    Setbacks are declared separately and inset this to the buildable envelope.
+    """
+
+    width: float
+    length: float
+    x: float | None = None
+    y: float | None = None
 
 
 @dataclass
@@ -546,6 +576,11 @@ class Barndominium:
     #: wheelchair turning space in the bath, single-floor living, a no-step entry).
     #: Off by default so ordinary plans aren't held to an accessible standard.
     accessible: bool = False
+    #: Opt-in electrical / life-safety checklist. When set, validation emits a
+    #: one-shot ``ELECTRICAL_PLAN`` reminder for the requirements the geometry
+    #: can't place (receptacle spacing, switched lighting, stair light, exterior
+    #: door landings). Off by default so ordinary plans aren't nagged.
+    electrical: bool = False
     rooms: list[Room] = field(default_factory=list)
     interior_doors: list[InteriorDoor] = field(default_factory=list)
     exterior_doors: list[ExteriorDoor] = field(default_factory=list)
@@ -566,9 +601,21 @@ class Barndominium:
     requirements: list[Requirement] = field(default_factory=list)
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
-    #: true north. Used for solar/setback reasoning and to set Project North when
-    #: the plan is lowered to Revit.
-    orientation: float = 0.0
+    #: true north. ``None`` means **undeclared** — distinct from a declared ``0`` —
+    #: so the solar checks only run when the author actually sited the plan (the
+    #: same opt-in discipline as ``accessible``/``electrical``). Drives the
+    #: solar-glazing nudges and sets Project North when lowered to Revit.
+    orientation: float | None = None
+    #: Optional parcel the building sits on. When set, the footprint is checked
+    #: against the buildable envelope (lot inset by :attr:`setbacks`) — SETBACK.
+    lot: "Lot | None" = None
+    #: Zoning setbacks by **plan-relative** side (keys ``south``/``north``/``east``/
+    #: ``west``; ``front``/``back``/``left``/``right`` are input aliases). Feet from
+    #: the matching lot edge. Only meaningful with a :attr:`lot`.
+    setbacks: dict[str, float] = field(default_factory=dict)
+    #: The plan-relative wall that faces the street / approach (the "front"). When
+    #: set, the approach nudges check the entry and garage doors relate to it.
+    street: "Direction | None" = None
     #: Exterior wall finish hint (e.g. metal siding). ``None`` leaves the consumer
     #: to choose; carried into the Revit exchange so a metal-shell wall type can be
     #: matched. A barndominium is typically metal or board-and-batten.
@@ -690,6 +737,95 @@ class Barndominium:
         self.orientation = d % 360.0
         return self
 
+    def set_lot(
+        self,
+        width: float,
+        length: float,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+    ) -> "Barndominium":
+        """Declare the parcel (feet). ``x``/``y`` place its SW corner in the plan
+        frame; omit them to auto-centre the footprint in the lot."""
+        w = _finite("lot", "width", width)
+        length_ = _finite("lot", "length", length)
+        if w <= 0 or length_ <= 0:
+            raise ValueError("lot width and length must be positive.")
+        self.lot = Lot(
+            w,
+            length_,
+            None if x is None else _finite("lot", "x", x),
+            None if y is None else _finite("lot", "y", y),
+        )
+        return self
+
+    def set_street(self, wall: "Direction | str") -> "Barndominium":
+        """Declare which plan-relative wall faces the street / approach (the front)."""
+        self.street = Direction(wall) if isinstance(wall, str) else wall
+        return self
+
+    #: Input aliases → the plan-relative cardinal a setback side maps to.
+    _SETBACK_ALIASES = {
+        "front": "south", "back": "north", "rear": "north",
+        "left": "west", "right": "east",
+    }
+
+    def setback(
+        self,
+        *,
+        south: float | None = None,
+        north: float | None = None,
+        east: float | None = None,
+        west: float | None = None,
+        front: float | None = None,
+        back: float | None = None,
+        rear: float | None = None,
+        left: float | None = None,
+        right: float | None = None,
+    ) -> "Barndominium":
+        """Set zoning setbacks (feet) by plan-relative side. ``front``/``back``/
+        ``rear``/``left``/``right`` are accepted and normalised to the cardinal
+        (``front``=south, ``back``/``rear``=north, ``left``=west, ``right``=east)."""
+        given = {
+            "south": south, "north": north, "east": east, "west": west,
+            "front": front, "back": back, "rear": rear, "left": left, "right": right,
+        }
+        for side, dist in given.items():
+            if dist is None:
+                continue
+            key = self._SETBACK_ALIASES.get(side, side)
+            d = _finite("setback", side, dist)
+            if d < 0:
+                raise ValueError(f"setback {side} must be non-negative.")
+            self.setbacks[key] = d
+        return self
+
+    def lot_box(self) -> tuple[float, float, float, float] | None:
+        """The lot as concrete ``(x0, y0, x1, y1)`` in plan coordinates, resolving
+        an auto-centred lot against the final footprint. ``None`` if no lot."""
+        if self.lot is None:
+            return None
+        fx0, fy0, fx1, fy1 = self.bounds()
+        w, length_ = self.lot.width, self.lot.length
+        x0 = self.lot.x if self.lot.x is not None else (fx0 + fx1) / 2.0 - w / 2.0
+        y0 = self.lot.y if self.lot.y is not None else (fy0 + fy1) / 2.0 - length_ / 2.0
+        return (x0, y0, x0 + w, y0 + length_)
+
+    def buildable_envelope(self) -> tuple[float, float, float, float] | None:
+        """The lot inset by each side's setback — the box the footprint must fit
+        inside. ``None`` if no lot."""
+        box = self.lot_box()
+        if box is None:
+            return None
+        x0, y0, x1, y1 = box
+        s = self.setbacks
+        return (
+            x0 + s.get("west", 0.0),
+            y0 + s.get("south", 0.0),
+            x1 - s.get("east", 0.0),
+            y1 - s.get("north", 0.0),
+        )
+
     def finish(
         self, *, siding: str | None = None, roof: str | None = None
     ) -> "Barndominium":
@@ -713,6 +849,18 @@ class Barndominium:
         opts in — via this method or the `accessible` DSL directive.
         """
         self.accessible = bool(value)
+        return self
+
+    def mark_electrical(self, value: bool = True) -> "Barndominium":
+        """Opt in to the electrical / life-safety checklist reminder.
+
+        The DSL models rooms and openings, not receptacles, luminaires, switches
+        or exterior grade, so those code requirements can't be verified from the
+        geometry. This flag turns on a one-shot ``ELECTRICAL_PLAN`` reminder that
+        carries them onto the electrical/site plans. Off by default so an ordinary
+        plan isn't nagged — opt in via this method or the `electrical` directive.
+        """
+        self.electrical = bool(value)
         return self
 
     def program(
@@ -1221,6 +1369,14 @@ class Barndominium:
             + turndown_len * TURNDOWN_WIDTH * TURNDOWN_DEPTH
             + len(self.posts) * FOOTING_SIZE * FOOTING_SIZE * FOOTING_DEPTH
         )
+        # Glazing split by true compass sector (local import avoids the
+        # elements↔solar cycle). Uses orientation, or plan-north when unsited.
+        from .solar import wall_sector
+
+        theta = self.orientation or 0.0
+        glaze = {"south": 0.0, "east": 0.0, "west": 0.0, "north": 0.0}
+        for w in self.windows:
+            glaze[wall_sector(w.wall, theta)] += w.glazed_area
         return {
             "footprint_sqft": self.footprint_area,
             "interior_sqft": self.interior_area,
@@ -1246,4 +1402,11 @@ class Barndominium:
             "beam_count": float(len(self.beams)),
             "frame_count": float(sum(1 for b in self.beams if b.role == "frame")),
             "beam_linear_ft": sum(b.length for b in self.beams),
+            # Solar takeoff: true-north azimuth and glazing by compass sector
+            # (plan-relative when the plan declares no orientation).
+            "true_north_azimuth": float(theta),
+            "glazing_south_sqft": glaze["south"],
+            "glazing_east_sqft": glaze["east"],
+            "glazing_west_sqft": glaze["west"],
+            "glazing_north_sqft": glaze["north"],
         }

@@ -81,6 +81,7 @@ wing <W> x <L> at <x>,<y>          # optional; L/T/U footprints (repeatable)
 ceiling <H>                        # >= 7; 9–12 is typical
 floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D (default 1)
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
+electrical                         # optional; opt in to the electrical / life-safety checklist reminder
 note "free text"                   # optional; repeatable
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeatable); also:
@@ -482,6 +483,11 @@ Brief grammar (one statement per line, `#` comments):
 | `ceiling <H>` | ceiling height |
 | `floor <D>` | inter-floor assembly depth (ft); floor-to-floor = ceiling + D |
 | `accessible` | opt in to accessibility / aging-in-place nudges (ANSI A117.1) |
+| `electrical` | opt in to the electrical / life-safety checklist reminder (receptacles, lighting, stair light, door landings) |
+| `orientation <deg>` | true-north azimuth plan-north points; drives the solar-glazing nudges + compass |
+| `lot <W> x <L> [at <x>,<y>]` | the parcel (plan coords); omit `at` to auto-centre the footprint |
+| `setback <side> <ft> …` | zoning setbacks (south/north/east/west; front/back/left/right aliases) → SETBACK |
+| `street <wall>` | the wall facing the street/approach → APPROACH_ENTRY / APPROACH_GARAGE nudges |
 | `note "…"` | free text |
 | `room <id>: <type> <W> x <L> [level <n>]` | a room to place (no coordinates) |
 | `adjacent <a> <b> [<c> …]` | connect `<a>` to **each** of the rest — a hub. `adjacent hall bed1 bed2 bath` is the "rooms off a spine" idiom |

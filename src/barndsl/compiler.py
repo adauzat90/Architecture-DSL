@@ -55,7 +55,12 @@ from .validation import Issue, Severity, ValidationReport, validate
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
     "room", "door", "open", "entry", "window", "porch", "stair", "frame", "roof",
-    "orientation", "finish", "accessible"
+    "orientation", "finish", "accessible", "electrical", "lot", "setback", "street"
+)
+
+#: Setback side tokens accepted by the `setback` directive (cardinals + aliases).
+_SETBACK_SIDES = frozenset(
+    {"south", "north", "east", "west", "front", "back", "rear", "left", "right"}
 )
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
@@ -100,6 +105,7 @@ Statements:
   ceiling <H>                     # ceiling height (>= 7; 9-12 typical)
   floor <D>                       # inter-floor assembly depth (ft); floor-to-floor = ceiling + this
   accessible                      # opt-in: run accessibility / aging-in-place nudges
+  electrical                      # opt-in: emit the electrical / life-safety checklist reminder
   note "free text"                # optional design note
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
@@ -139,6 +145,12 @@ Statements:
         # axis), shed (a single slope), or monitor (a raised centre clerestory
         # aisle). pitch is rise:run (e.g. 0.333 for 4:12).
   orientation <degrees>            # compass azimuth that plan-north (+y) points (0 = true north)
+  lot <W> x <L> [at <x>,<y>]       # optional parcel (plan coords); omit `at` to auto-centre the footprint
+  setback <side> <ft> [<side> <ft> ...]
+        # zoning setbacks from the lot edges. <side> = south|north|east|west
+        # (aliases front=south, back/rear=north, left=west, right=east). Checked
+        # against the footprint → SETBACK warning.
+  street <wall>                    # the wall (n|s|e|w) that faces the street/approach → approach nudges
   finish [siding "<name>"] [roof "<name>"]  # exterior material hints (e.g. metal siding, standing-seam)
 
 <placement> is one of:
@@ -560,6 +572,50 @@ def _parse_statement(
     elif key == "accessible":
         plan.mark_accessible()
         c.expect_end()
+    elif key == "electrical":
+        plan.mark_electrical()
+        c.expect_end()
+    elif key == "lot":
+        w = c.number("lot width")
+        c.keyword("x")
+        length = c.number("lot length")
+        lot_x: float | None = None
+        lot_y: float | None = None
+        nxt = c.peek()
+        if nxt is not None and nxt.text.lower() == "at":
+            c.keyword("at")
+            lot_x = c.number("lot x")
+            lot_y = c.number("lot y")
+        c.expect_end()
+        plan.set_lot(w, length, x=lot_x, y=lot_y)
+    elif key == "setback":
+        # `setback <side> <ft> [<side> <ft> ...]` — one or more side/distance pairs.
+        kwargs: dict[str, float] = {}
+        while (tok := c.peek()) is not None:
+            side_tok = c.take("a setback side")
+            side = side_tok.text.lower()
+            if side not in _SETBACK_SIDES:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown setback side '{side_tok.text}'.",
+                    side_tok.col,
+                    end_col=side_tok.end_col,
+                    hint="Use south/north/east/west (or front/back/left/right).",
+                )
+            kwargs[side] = c.number(f"the {side} setback")
+        if not kwargs:
+            raise _ParseError(
+                "SYNTAX",
+                "`setback` needs at least one side and distance.",
+                kw.col,
+                end_col=kw.end_col,
+                hint="e.g. `setback front 40 back 25 left 15 right 15`.",
+            )
+        plan.setback(**kwargs)
+    elif key == "street":
+        street_wall = c.wall()
+        c.expect_end()
+        plan.set_street(street_wall)
     elif key == "orientation":
         # `orientation <degrees>` — azimuth (clockwise from N) that plan-north points.
         plan.orient(c.number("the orientation in degrees"))

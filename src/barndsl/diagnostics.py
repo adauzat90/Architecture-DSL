@@ -244,6 +244,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "required outside each sleeping area (IRC R315), plus smoke alarms in "
            "each bedroom, outside sleeping areas, and on every level (IRC R314). "
            "The DSL can't place alarms — confirm them on the electrical plan."),
+        _c("ELECTRICAL_PLAN", I, "Electrical / life-safety checklist",
+           "An opt-in reminder (the `electrical` directive) for code requirements "
+           "the DSL can't place from geometry: receptacle spacing (no wall point "
+           ">6 ft from an outlet, IRC E3901.2) with GFCI/AFCI protection (E3902), "
+           "switched lighting outlets at habitable rooms/halls/entries (R303.7 / "
+           "E3903), stair lighting, and a level landing at each exterior door "
+           "(R311.3). Carry these onto the construction documents."),
         # --- access ---------------------------------------------------------
         _c("NO_ENTRY", E, "No exterior door",
            "The plan has no exterior people-door — no way to enter the building. "
@@ -267,6 +274,33 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("NAT_LIGHT", W, "Insufficient natural light",
            "A habitable room's glazing on exterior walls is below 8% of floor "
            "area (R303.1)."),
+        # --- solar orientation (advisory; needs a declared `orientation`) ---
+        _c("SOLAR_WEST_GAIN", I, "Overheating west glazing",
+           "A habitable room has a lot of west-facing glass. The low afternoon sun "
+           "on a west wall is hard to shade and overheats the room. Shade it with a "
+           "deep overhang/porch or awning, cut it back, or move it to the south "
+           "face. Runs only when the plan declares an `orientation` (northern "
+           "hemisphere)."),
+        _c("SOLAR_NORTH_ONLY", I, "Room lit only from the north",
+           "A living/dining/bedroom/kitchen is glazed only to the north — little "
+           "direct sun, so it feels dim and cold in winter — while it has a sunnier "
+           "(south/east/west) exterior wall to spare. Add a window on that wall. "
+           "Offices are exempt (even north light is a valid studio choice). Runs "
+           "only when the plan declares an `orientation`."),
+        _c("SOLAR_SOUTH_UNUSED", I, "South wall left unglazed",
+           "The plan has a substantial south-facing exterior wall but almost no "
+           "south glazing — the best passive-solar face is nearly blank. South "
+           "glass gives free low-angle winter sun that a summer-blocking overhang "
+           "can shade. Runs only when the plan declares an `orientation`."),
+        _c("APPROACH_ENTRY", I, "Front door doesn't face the street",
+           "No people-door is on the wall the `street` directive names as facing "
+           "the approach — the front door is around the side or back. Runs only "
+           "when the plan declares a `street`."),
+        _c("APPROACH_GARAGE", I, "Garage faces away from the street",
+           "An overhead/garage door is on the wall opposite the `street` side, so a "
+           "vehicle would have to drive around the house to reach it. Face it toward "
+           "the approach or a side wall. Runs only when the plan declares a "
+           "`street`."),
         # --- design quality (advisory) --------------------------------------
         _c("KITCHEN_FLOW", I, "Kitchen not open to living/dining",
            "An idiomatic barndo opens the kitchen to a dining or living area."),
@@ -316,6 +350,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "An exterior (envelope or wing) measurement isn't a whole multiple of the "
            "3 ft build module. Rounding exterior dimensions to the module cuts sheet "
            "goods and framing with less waste."),
+        _c("SETBACK", W, "Footprint crosses a setback",
+           "The building footprint sits closer to a lot line than the declared "
+           "`setback` allows (or runs past the lot line entirely). Runs only when the "
+           "plan declares a `lot`; measured to the footprint bounding box (porches "
+           "and eaves aren't counted). Zoning is the authority having jurisdiction's "
+           "call — this is an advisory warning, not a hard gate."),
         _c("PRIVATE_PASSTHROUGH", W, "Routed through a private room",
            "A room is reachable only by passing through a bathroom or someone "
            "else's bedroom — a circulation defect."),
@@ -325,6 +365,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("WET_GROUP", I, "Scattered plumbing",
            "Three or more wet rooms (bath/kitchen/laundry/utility) share no "
            "walls, spreading plumbing runs out."),
+        _c("PLUMBING_STACK", I, "Upper wet room not stacked",
+           "An upper-floor wet room (bath/kitchen/laundry) sits over no wet room "
+           "on the level below, so its waste stack can't drop straight down and "
+           "must jog horizontally through the floor assembly and down through a "
+           "dry room. Stack it over a wet room below (the cross-floor analogue of "
+           "WET_GROUP)."),
         _c("CLOSET_SHAPE", I, "Long, skinny closet",
            "A closet has the floor area for a walk-in but is shaped as a narrow "
            "strip (>= 4:1). A more square footprint (under ~3:1, >= 4 ft deep) is "

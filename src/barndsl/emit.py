@@ -33,8 +33,26 @@ def emit_dsl(plan: Barndominium) -> str:
         out.append(f"floor {_n(plan.floor_depth)}")
     if plan.accessible:
         out.append("accessible")
-    if getattr(plan, "orientation", 0.0):
+    if getattr(plan, "electrical", False):
+        out.append("electrical")
+    if plan.orientation is not None:
+        # A declared `orientation 0` round-trips (distinct from undeclared/None).
         out.append(f"orientation {_n(plan.orientation)}")
+    if plan.lot is not None:
+        line = f"lot {_n(plan.lot.width)} x {_n(plan.lot.length)}"
+        if plan.lot.x is not None and plan.lot.y is not None:
+            line += f" at {_n(plan.lot.x)},{_n(plan.lot.y)}"
+        out.append(line)
+    if plan.setbacks:
+        # Canonical plan-relative cardinal order (aliases normalise to these).
+        parts = [
+            f"{side} {_n(plan.setbacks[side])}"
+            for side in ("south", "north", "east", "west")
+            if side in plan.setbacks
+        ]
+        out.append("setback " + " ".join(parts))
+    if plan.street is not None:
+        out.append(f"street {plan.street.value}")
     if getattr(plan, "siding", None) or getattr(plan, "roofing", None):
         line = "finish"
         if plan.siding:
