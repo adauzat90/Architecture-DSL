@@ -533,6 +533,28 @@ def _cmd_section(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_cost(args: argparse.Namespace) -> int:
+    import json
+
+    from .cost import estimate_cost
+
+    result = compile_file(args.file)
+    if result.plan is None:
+        print(result.report(os.path.basename(args.file)))
+        return 1
+    rates = None
+    if args.rates:
+        with open(args.rates, encoding="utf-8") as fh:
+            rates = json.load(fh)
+    report = estimate_cost(result.plan, rates)
+    if getattr(args, "json", False):
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(f"Cost estimate — {result.plan.name}\n")
+        print(report.table())
+    return 0
+
+
 def _render_pass(args: argparse.Namespace) -> "object":
     """Compile (rendering to SVG if requested) and print the report. Used by watch."""
     result = compile_file(args.file)
@@ -803,6 +825,19 @@ def main(argv: list[str] | None = None) -> int:
     p_section.add_argument("file", help="path to a .barn DSL file")
     p_section.add_argument("--out", default="section.svg", help="output SVG path")
     p_section.set_defaults(func=_cmd_section)
+
+    p_cost = sub.add_parser(
+        "cost", help="rough order-of-magnitude cost estimate from the takeoff"
+    )
+    p_cost.add_argument("file", help="path to a .barn DSL file")
+    p_cost.add_argument(
+        "--rates", default=None,
+        help="JSON file overriding any subset of the default unit rates",
+    )
+    p_cost.add_argument(
+        "--json", action="store_true", help="emit the estimate as machine-readable JSON"
+    )
+    p_cost.set_defaults(func=_cmd_cost)
 
     p_watch = sub.add_parser(
         "watch", help="recompile (and optionally re-render) on every save"

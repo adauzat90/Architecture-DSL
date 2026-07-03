@@ -488,6 +488,8 @@ barndsl build   examples/cedar_ridge.barn --json   # diagnostics + metrics as JS
 barndsl elevation examples/cedar_ridge.barn --side south   # schematic exterior elevation → SVG
 barndsl section examples/cedar_ridge.barn --out sec.svg    # schematic vertical section → SVG
 barndsl watch   examples/cedar_ridge.barn --out plan.svg  # recompile/render on save
+barndsl cost    examples/cedar_ridge.barn          # rough order-of-magnitude cost estimate
+barndsl cost    examples/cedar_ridge.barn --rates rates.json  # override any unit rates
 barndsl schedule examples/cedar_ridge.barn         # room/door/window schedules (MD)
 barndsl schedule examples/cedar_ridge.barn --format csv --out sched.csv
 barndsl dxf     examples/cedar_ridge.barn --out plan.dxf  # → DXF for CAD
@@ -509,7 +511,9 @@ and `barndsl section` draw the **vertical** dimension the floor plan can't — a
 schematic exterior elevation (roof profile + doors/windows at their true sill/head
 heights) and a transverse section (each level's floor/ceiling, vaulted
 double-heights, the roof over them), straight from the model's heights, roof form
-and pitch. No Revit, no raster dep.
+and pitch. No Revit, no raster dep. `barndsl cost` turns the quantity takeoff into
+a **rough order-of-magnitude budget** — unit cost × quantity per line item, with a
+loud "not a bid" disclaimer and a `--rates` JSON override for your market.
 
 `design` needs `ANTHROPIC_API_KEY` (see `.env.example`).
 
@@ -590,7 +594,8 @@ tests/             # no API key required
   level. The builder is unit-tested against a fake Revit API. Remaining work
   genuinely needs a live Revit: validating the calls against Revit 2025 and
   refining the experimental pieces (the gable-roof slope, the model reader).
-- Cost estimation from the material takeoff
+- ~~Cost estimation from the material takeoff~~ — **done**: `barndsl cost` (an
+  overridable rate table × the `metrics()` takeoff; see `barndsl/cost.py`)
 - More residential building types beyond barndominiums
 
 ## License

@@ -207,7 +207,15 @@ closet**, a **mechanical/utility space sized for equipment** (water heater, pane
 air handler), and a **whole-house storage ratio**. `NO_CLOSET` covers bedrooms;
 the rest of the storage/service program is invisible.
 
-## 8. Cost — still the roadmap's open item
+## 8. Cost — still the roadmap's open item — SHIPPED
+
+**Update (2026-07-03).** `barndsl cost` shipped (`barndsl/cost.py`): a transparent,
+deterministic $/quantity estimate off the `metrics()` takeoff, per line item
+(foundation, frame, roof, shell, interior finish, openings by kind, kitchen/baths,
+porch), with an overridable rate table (`--rates` JSON) and a loud "rough
+order-of-magnitude, not a bid" disclaimer. `--json` for tooling. On the worked
+example it lands at ~$100/sq ft finished — a defensible OOM. Covered by
+`tests/test_cost.py`. This closes the review: **all eight items shipped.**
 
 `metrics()` already carries `footprint_sqft`, `exterior_wall_area_sqft`,
 `roof_area_sqft`, `beam_linear_ft`, `post_count` and `foundation_concrete_yd3`.

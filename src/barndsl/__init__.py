@@ -61,6 +61,7 @@ from .layout2 import (
 )
 from .dxf import save_dxf, to_dxf
 from .render import RenderConfig, render_svg, save_render, save_svg
+from .cost import DEFAULT_RATES, CostReport, estimate_cost
 from .views import (
     elevation_svg,
     save_elevation,
@@ -151,6 +152,10 @@ __all__ = [
     "section_svg",
     "save_elevation",
     "save_section",
+    # cost estimate (rough order-of-magnitude from the takeoff)
+    "estimate_cost",
+    "CostReport",
+    "DEFAULT_RATES",
     # schedules (room/door/window, no Revit)
     "schedules_markdown",
     "schedules_csv",
