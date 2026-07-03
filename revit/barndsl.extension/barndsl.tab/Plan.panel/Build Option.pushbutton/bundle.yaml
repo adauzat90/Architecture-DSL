@@ -1,0 +1,9 @@
+title: Build Option
+tooltip: >-
+  Build ONE shortlisted candidate (from a candidates.json manifest) into the
+  Design Option currently active in Revit — so the agent shortlists and you
+  choose the scheme in the model. Each candidate's elements are identity-
+  namespaced per candidate, so rebuilding one candidate keeps it and building
+  another never purges the first. Create the option set in the UI first (Manage
+  → Design Options); the Revit API can't create option sets. See revit/README.md.
+author: barndsl

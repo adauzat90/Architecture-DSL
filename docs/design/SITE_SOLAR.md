@@ -1,6 +1,15 @@
 # Design: Site & solar — making `orientation` real
 
-> Status: **Phases 1–3 shipped** (solar; lot/setback; approach). This is the
+> **Merge note (2026-07-03):** the lot/setback half of this design was
+> **superseded** when this branch merged the trunk, which had independently
+> landed its own site model (`site <W> x <L>` + `setback front/side/rear`, with a
+> `SETBACK` check). To avoid two overlapping ways to describe a lot, this branch's
+> `lot`/cardinal-`setback` was dropped in favour of the trunk's `site`. The
+> **solar** work (compass, `SOLAR_*` glazing nudges), the **`street`/approach**
+> nudges, and the **`climate`/`overhang`** features below all shipped and remain.
+>
+> Status: **Phases 1–3 shipped** (solar; ~~lot/setback~~ → trunk's `site`;
+> approach). This is the
 > implementation plan for review item #1 in
 > [`../REVIEW_ARCHITECT.md`](../REVIEW_ARCHITECT.md): give the plan a *site* (a
 > parcel with setbacks) and a *sun* (solar-aware glazing), and turn the

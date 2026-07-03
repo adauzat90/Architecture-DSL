@@ -9,7 +9,13 @@
 
     barndsl score FILE.barn [--json]
         Compile and print the deterministic 0-100 design score (see score.py)
-        with its per-component deductions — the number an agent hill-climbs on.
+        with its per-component deductions and their causes (the worst offending
+        rooms, by name and number) — the number an agent hill-climbs on.
+
+    barndsl inspect FILE.barn [--json]
+        Compile and dump the plan's resolved geometry (see introspect.py):
+        room rectangles with exterior walls, the door/adjacency edges, unplaced
+        footprint pockets, and the free wall spans an opening can legally use.
 
     barndsl demo [--out FILE.svg]
         Compile and render the bundled example (examples/cedar_ridge.barn).
@@ -34,6 +40,12 @@
     barndsl revit-import FILE.json [--out FILE.barn]
         The reverse: reconstruct DSL source from a `barndsl.revit/1` exchange
         (e.g. one read back out of Revit). Prints the DSL, or writes it with --out.
+
+    barndsl revit-diff MODEL PLAN [--json] [--tolerance FT]
+        Report the drift between a Revit model export and the authored plan:
+        added/moved/removed/changed rooms, doors, windows and walls. Either
+        argument may be a `.barn` source or a `barndsl.revit/1` `.json` exchange.
+        Exit 0 = no drift, 1 = drift found, 2 = unreadable/uncompilable input.
 """
 
 from __future__ import annotations
@@ -77,6 +89,51 @@ def _repo_example() -> str:
     return os.path.join(repo_root, "examples", "cedar_ridge.barn")
 
 
+def _resolve_profile(args: argparse.Namespace):
+    """Resolve ``--profile`` to a Profile, or ``None`` for the default.
+
+    Exits the process with code 2 (like a bad file) on an unknown name or an
+    unreadable/invalid JSON override, printing the actionable error to stderr.
+    """
+    spec = getattr(args, "profile", None)
+    if not spec:
+        return None
+    from .profiles import load_profile
+
+    try:
+        return load_profile(spec)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _add_profile_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--profile",
+        default=None,
+        metavar="NAME_OR_JSON",
+        help="jurisdiction profile: a built-in name (default/strict/rural, alias "
+        "irc-2021) or a path to a JSON override file. Amends the code thresholds "
+        "the checks enforce. See `barndsl profiles`.",
+    )
+
+
+def _cmd_profiles(args: argparse.Namespace) -> int:
+    """List the built-in jurisdiction profiles and their thresholds."""
+    from .profiles import profiles_text
+
+    if getattr(args, "profile", None):
+        # Resolve and dump a single profile (built-in or JSON) as JSON — handy
+        # for inspecting exactly what a `--profile` argument will enforce.
+        prof = _resolve_profile(args)
+        import json
+
+        print(json.dumps(prof.to_dict(), indent=2))
+        return 0
+    print(profiles_text())
+    return 0
+
+
 def _print_metrics(plan) -> None:
     m = plan.metrics()
     print(f"  Footprint:        {m['footprint_sqft']:.0f} sq ft")
@@ -117,7 +174,7 @@ def _print_coords(plan) -> None:
 
 
 def _cmd_compile(args: argparse.Namespace) -> int:
-    result = compile_file(args.file)
+    result = compile_file(args.file, profile=_resolve_profile(args))
     if getattr(args, "json", False):
         import json
 
@@ -161,7 +218,8 @@ def _strict_rc(result, args) -> int:
 def _cmd_build(args: argparse.Namespace) -> int:
     from .render import save_render
 
-    result = compile_file(args.file)
+    profile = _resolve_profile(args)
+    result = compile_file(args.file, profile=profile)
     if result.plan is not None and getattr(args, "frame", False) and result.plan.frame_spec is None:
         # `--frame` auto-places a default post-and-beam frame even when the source
         # has no `frame` directive — recompile from the emitted DSL so the new
@@ -169,7 +227,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         from .emit import emit_dsl
 
         result.plan.frame()
-        result = compile_source(emit_dsl(result.plan), name=result.plan.name)
+        result = compile_source(emit_dsl(result.plan), name=result.plan.name, profile=profile)
 
     fmt = getattr(args, "format", None)
     out = args.out or f"barndo.{fmt or 'svg'}"
@@ -183,17 +241,23 @@ def _cmd_build(args: argparse.Namespace) -> int:
         payload["score"] = design_score(result).to_dict()
         if result.plan is not None:
             payload["metrics"] = result.plan.metrics()
-            try:
-                save_render(result.plan, out, fmt)
-                payload["out"] = out
-            except (ImportError, ValueError) as exc:
+            if result.recovered:
                 payload["out"] = None
-                payload["render_error"] = str(exc)
+                payload["render_error"] = "parse-error recovery: partial plan not rendered"
+            else:
+                try:
+                    save_render(result.plan, out, fmt)
+                    payload["out"] = out
+                except (ImportError, ValueError) as exc:
+                    payload["out"] = None
+                    payload["render_error"] = str(exc)
         print(json.dumps(payload, indent=2))
         return 0 if result.ok else 1
 
     print(result.report(os.path.basename(args.file)))
-    if result.plan is None:
+    if result.plan is None or result.recovered:
+        # A recovered partial plan is for scoring/inspecting, not for output
+        # artifacts — keep the pre-recovery contract: no render on parse errors.
         return 1
     print()
     _print_metrics(result.plan)
@@ -209,7 +273,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 def _cmd_score(args: argparse.Namespace) -> int:
     from .score import design_score
 
-    result = compile_file(args.file)
+    result = compile_file(args.file, profile=_resolve_profile(args))
     report = design_score(result)
     if getattr(args, "json", False):
         import json
@@ -221,10 +285,37 @@ def _cmd_score(args: argparse.Namespace) -> int:
     print(f"\nDesign score: {report.total:g} / 100")
     print("  Deductions:")
     for name, points in report.components.items():
-        print(f"    {name:<12} -{points:g}")
+        cause = report.details.get(name)
+        print(f"    {name:<12} -{points:g}" + (f"  — {cause}" if cause else ""))
     c = report.counts
     print(f"  Diagnostics: {c['error']} error(s), {c['warning']} warning(s), {c['info']} info(s)")
     return 0 if result.plan is not None else 1
+
+
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    """Dump the compiled plan's resolved geometry (the "geometry pack").
+
+    Prints the same summary the agent loop appends to its feedback — rooms,
+    door edges, unplaced pockets, free wall spans — or, with ``--json``, the
+    raw :func:`~barndsl.introspect.plan_summary` dict. Like ``score``, it only
+    fails (exit 1) when there is no plan at all: a plan with diagnostics is
+    exactly when you want to look up its geometry.
+    """
+    from .introspect import plan_summary, summary_text
+
+    result = compile_file(args.file)
+    if result.plan is None:
+        print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 1
+    summary = plan_summary(result.plan)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(summary, indent=2))
+        return 0
+    print(f"Plan: {result.plan.name}")
+    print(summary_text(summary))
+    return 0
 
 
 def _cmd_demo(args: argparse.Namespace) -> int:
@@ -349,7 +440,9 @@ def _cmd_revit(args: argparse.Namespace) -> int:
         result.plan.frame()
         result = compile_source(emit_dsl(result.plan), name=result.plan.name)
     print(result.report(os.path.basename(args.file)))
-    if result.plan is None:
+    if result.plan is None or result.recovered:
+        # Never emit an exchange for a partial recovery: the JSON could be
+        # imported into Revit regardless of this process's exit code.
         return 1
     from .revit import to_revit_model
 
@@ -449,7 +542,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     from .schedule import schedules_csv, schedules_markdown
 
     result = compile_file(args.file)
-    if result.plan is None:
+    if result.plan is None or result.recovered:
         print(result.report(os.path.basename(args.file)))
         return 1
 
@@ -499,7 +592,7 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
 
     result = compile_file(args.file)
     print(result.report(os.path.basename(args.file)))
-    if result.plan is None:
+    if result.plan is None or result.recovered:
         return 1
     save_dxf(result.plan, args.out)
     n_open = len(result.plan.windows) + len(result.plan.exterior_doors)
@@ -533,35 +626,13 @@ def _cmd_section(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
-def _cmd_cost(args: argparse.Namespace) -> int:
-    import json
-
-    from .cost import estimate_cost
-
-    result = compile_file(args.file)
-    if result.plan is None:
-        print(result.report(os.path.basename(args.file)))
-        return 1
-    rates = None
-    if args.rates:
-        with open(args.rates, encoding="utf-8") as fh:
-            rates = json.load(fh)
-    report = estimate_cost(result.plan, rates)
-    if getattr(args, "json", False):
-        print(json.dumps(report.to_dict(), indent=2))
-    else:
-        print(f"Cost estimate — {result.plan.name}\n")
-        print(report.table())
-    return 0
-
-
 def _render_pass(args: argparse.Namespace) -> "object":
     """Compile (rendering to SVG if requested) and print the report. Used by watch."""
     result = compile_file(args.file)
     print(result.report(os.path.basename(args.file)))
     if result.plan is not None:
         print("\n" + _program_summary(result.plan))
-        if args.out:
+        if args.out and not result.recovered:
             try:
                 save_svg(result.plan, args.out)
                 print(f"Wrote {args.out}")
@@ -593,6 +664,173 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\nstopped.")
         return 0
+
+
+def _cmd_compare(args: argparse.Namespace) -> int:
+    """Side-by-side of two plans: score, takeoff, resolved/introduced codes."""
+    from .compare import compare_plans, comparison_text
+
+    try:
+        result_a = compile_file(args.file_a)
+        result_b = compile_file(args.file_b)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    names = (os.path.basename(args.file_a), os.path.basename(args.file_b))
+    cmp = compare_plans(result_a, result_b, names)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(cmp, indent=2))
+    else:
+        print(comparison_text(cmp))
+    return 0 if result_a.plan is not None and result_b.plan is not None else 1
+
+
+def _cmd_revit_diff(args: argparse.Namespace) -> int:
+    """Report drift between a Revit model export and the authored plan.
+
+    Either argument may be a ``.barn`` source or a ``barndsl.revit/1`` ``.json``
+    exchange (sniffed by extension/content). Exit 0 = no drift, 1 = drift found,
+    2 = unreadable input or a ``.barn`` that doesn't compile cleanly (a diff
+    against a half-parsed plan is meaningless — same contract as `compare`).
+    """
+    from .revitdiff import (
+        DEFAULT_TOLERANCE,
+        DiffInputError,
+        diff_plans,
+        diff_text,
+        load_diff_input,
+    )
+
+    try:
+        model = load_diff_input(args.model)
+        authored = load_diff_input(args.plan)
+    except DiffInputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    tol = args.tolerance if args.tolerance is not None else DEFAULT_TOLERANCE
+    names = (os.path.basename(args.model), os.path.basename(args.plan))
+    try:
+        d = diff_plans(model, authored, names=names, tolerance=tol)
+    except Exception as exc:
+        # A schema-tagged exchange with a malformed body (version skew, partial
+        # export) surfaces here — an input problem, not drift: exit 2.
+        print(f"error: cannot diff these inputs: {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(d, indent=2))
+    else:
+        print(diff_text(d))
+    return 1 if d["drift"] else 0
+
+
+def _cmd_cost(args: argparse.Namespace) -> int:
+    """Assembly-based construction cost estimate from the plan's takeoff."""
+    from .cost import cost_text, estimate_cost
+
+    try:
+        result = compile_file(args.file)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if result.plan is None or result.errors:
+        # A cost estimate is a deliverable, not a diagnostic: pricing a plan
+        # that failed to compile (including the parser's partial recoveries)
+        # is misleading — fail like an unreadable file (exit 2), unlike
+        # score/compare which still show partial signal.
+        print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 2
+
+    overrides = None
+    if args.costs:
+        import json
+
+        try:
+            with open(args.costs, encoding="utf-8") as fh:
+                overrides = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"error: reading --costs: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        est = estimate_cost(result, overrides=overrides, multiplier=args.multiplier)
+    except (ValueError, TypeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(est, indent=2))
+    else:
+        print(cost_text(est))
+    return 0
+
+
+def _cmd_packet(args: argparse.Namespace) -> int:
+    """Bind score, plan, schedules, cost and diagnostics into one HTML deliverable."""
+    from .packet import save_packet
+
+    try:
+        result = compile_file(args.file)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if result.plan is None or result.errors:
+        # Same contract as `cost`: the packet is a client deliverable, and a
+        # plan with errors (or a partial recovery) must not ship as one.
+        print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 2
+
+    overrides = None
+    if args.costs:
+        import json
+
+        try:
+            with open(args.costs, encoding="utf-8") as fh:
+                overrides = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"error: reading --costs: {exc}", file=sys.stderr)
+            return 2
+
+    out = args.out or "packet.html"
+    try:
+        save_packet(result, out, costs=overrides, multiplier=args.multiplier)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Wrote {out}")
+    print("Open it in a browser and Print → Save as PDF for a paginated packet.")
+    return 0
+
+
+def _cmd_revit_log(args: argparse.Namespace) -> int:
+    """Translate a *.buildlog.json into compile-style diagnostics."""
+    from .revitlog import buildlog_issues, issues_to_dict, load_buildlog
+
+    try:
+        log = load_buildlog(args.file)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    issues = buildlog_issues(log)
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(issues_to_dict(issues), indent=2))
+    else:
+        if not issues:
+            print("Revit build clean: every element built as asked.")
+        for issue in issues:
+            print(issue)
+    # Exit like `compile --strict`: failures/skips (warnings) are the signal.
+    from .validation import Severity
+
+    return 1 if any(i.severity is not Severity.INFO for i in issues) else 0
 
 
 def _cmd_explain(args: argparse.Namespace) -> int:
@@ -661,6 +899,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit non-zero on warnings AND info nudges",
     )
+    _add_profile_flag(p_compile)
     p_compile.set_defaults(func=_cmd_compile)
 
     p_build = sub.add_parser("build", help="compile and render a .barn file to SVG/PNG/PDF")
@@ -687,6 +926,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="auto-place a default post-and-beam frame if the source has none",
     )
+    _add_profile_flag(p_build)
     p_build.set_defaults(func=_cmd_build)
 
     p_score = sub.add_parser(
@@ -698,7 +938,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="emit the score report as machine-readable JSON",
     )
+    _add_profile_flag(p_score)
     p_score.set_defaults(func=_cmd_score)
+
+    p_inspect = sub.add_parser(
+        "inspect",
+        help="dump the resolved geometry: rooms, door edges, unplaced pockets, "
+        "free wall spans",
+    )
+    p_inspect.add_argument("file", help="path to a .barn DSL file")
+    p_inspect.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the geometry summary as machine-readable JSON",
+    )
+    p_inspect.set_defaults(func=_cmd_inspect)
 
     p_demo = sub.add_parser("demo", help="compile and render the bundled example")
     p_demo.add_argument("--out", default="barndo.svg", help="output SVG path")
@@ -826,19 +1080,6 @@ def main(argv: list[str] | None = None) -> int:
     p_section.add_argument("--out", default="section.svg", help="output SVG path")
     p_section.set_defaults(func=_cmd_section)
 
-    p_cost = sub.add_parser(
-        "cost", help="rough order-of-magnitude cost estimate from the takeoff"
-    )
-    p_cost.add_argument("file", help="path to a .barn DSL file")
-    p_cost.add_argument(
-        "--rates", default=None,
-        help="JSON file overriding any subset of the default unit rates",
-    )
-    p_cost.add_argument(
-        "--json", action="store_true", help="emit the estimate as machine-readable JSON"
-    )
-    p_cost.set_defaults(func=_cmd_cost)
-
     p_watch = sub.add_parser(
         "watch", help="recompile (and optionally re-render) on every save"
     )
@@ -851,6 +1092,82 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_watch.set_defaults(func=_cmd_watch)
 
+    p_compare = sub.add_parser(
+        "compare",
+        help="side-by-side of two plans: score, takeoff, resolved/introduced codes",
+    )
+    p_compare.add_argument("file_a", help="path to scheme A (.barn)")
+    p_compare.add_argument("file_b", help="path to scheme B (.barn)")
+    p_compare.add_argument("--json", action="store_true", help="emit the comparison as JSON")
+    p_compare.set_defaults(func=_cmd_compare)
+
+    p_revit_diff = sub.add_parser(
+        "revit-diff",
+        help="report drift (moved/added/removed/changed) between a Revit model "
+        "export and the authored plan",
+    )
+    p_revit_diff.add_argument(
+        "model", help="the (edited) Revit side: a .json exchange or a .barn source"
+    )
+    p_revit_diff.add_argument(
+        "plan", help="the authored side: a .barn source or a .json exchange"
+    )
+    p_revit_diff.add_argument(
+        "--json", action="store_true", help="emit the diff as machine-readable JSON"
+    )
+    p_revit_diff.add_argument(
+        "--tolerance",
+        type=float,
+        default=None,
+        help="geometry tolerance in feet for detecting a move/resize "
+        "(default 0.5)",
+    )
+    p_revit_diff.set_defaults(func=_cmd_revit_diff)
+
+    p_cost = sub.add_parser(
+        "cost",
+        help="assembly-based construction cost estimate from the plan's takeoff",
+    )
+    p_cost.add_argument("file", help="path to a .barn DSL file")
+    p_cost.add_argument("--json", action="store_true", help="emit the estimate as JSON")
+    p_cost.add_argument(
+        "--costs",
+        default=None,
+        help="path to a JSON file overriding any subset of the default unit costs",
+    )
+    p_cost.add_argument(
+        "--multiplier",
+        type=float,
+        default=1.0,
+        help="regional cost factor scaling every unit cost (e.g. 1.15)",
+    )
+    p_cost.set_defaults(func=_cmd_cost)
+
+    p_packet = sub.add_parser(
+        "packet",
+        help="bind score, dimensioned plan, schedules, cost and diagnostics into "
+        "one print-ready HTML deliverable",
+    )
+    p_packet.add_argument("file", help="path to a .barn DSL file")
+    p_packet.add_argument(
+        "-o", "--out", default=None, help="output HTML path (default packet.html)"
+    )
+    p_packet.add_argument(
+        "--costs", default=None, help="JSON file overriding unit costs (see `cost`)"
+    )
+    p_packet.add_argument(
+        "--multiplier", type=float, default=1.0, help="regional cost factor for the estimate"
+    )
+    p_packet.set_defaults(func=_cmd_packet)
+
+    p_rlog = sub.add_parser(
+        "revit-log",
+        help="translate a *.buildlog.json from the pyRevit build into diagnostics",
+    )
+    p_rlog.add_argument("file", help="path to the *.buildlog.json sidecar")
+    p_rlog.add_argument("--json", action="store_true", help="emit diagnostics as JSON")
+    p_rlog.set_defaults(func=_cmd_revit_log)
+
     p_explain = sub.add_parser(
         "explain", help="explain a diagnostic code (or list them all)"
     )
@@ -859,8 +1176,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_explain.set_defaults(func=_cmd_explain)
 
+    p_profiles = sub.add_parser(
+        "profiles",
+        help="list the built-in jurisdiction profiles and the thresholds they set",
+    )
+    p_profiles.add_argument(
+        "--profile",
+        default=None,
+        metavar="NAME_OR_JSON",
+        help="instead of the table, dump one resolved profile (built-in name or "
+        "JSON override file) as JSON",
+    )
+    p_profiles.set_defaults(func=_cmd_profiles)
+
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except SystemExit as exc:
+        # A command signalling a fatal input error (e.g. an unresolvable
+        # --profile) raises SystemExit(code); surface it as an int return so
+        # callers/tests get the exit code uniformly, like the other commands.
+        return exc.code if isinstance(exc.code, int) else 2
 
 
 if __name__ == "__main__":  # pragma: no cover

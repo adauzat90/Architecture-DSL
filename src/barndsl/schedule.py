@@ -77,10 +77,13 @@ def door_rows(plan: Barndominium) -> list[dict]:
         )
     for xd in plan.exterior_doors:
         n += 1
+        kind = "exterior"
+        if getattr(xd, "kind", "entry") in ("double", "french", "overhead"):
+            kind += f" {xd.kind}"  # a two-leaf pair, or the sectional garage door
         rows.append(
             {
                 "mark": f"D{n}",
-                "kind": "exterior" + ("" if xd.egress else " (no-egress)"),
+                "kind": kind + ("" if xd.egress else " (no-egress)"),
                 "from": xd.room,
                 "to": f"exterior ({xd.wall.value})",
                 "width": xd.width,
@@ -90,7 +93,7 @@ def door_rows(plan: Barndominium) -> list[dict]:
 
 
 def window_rows(plan: Barndominium) -> list[dict]:
-    """One row per window — marked W1, W2… — with size, sill, and glazed area."""
+    """One row per window — marked W1, W2… — with kind, size, sill, glazed area."""
     rows: list[dict] = []
     for i, w in enumerate(plan.windows, start=1):
         rows.append(
@@ -98,6 +101,7 @@ def window_rows(plan: Barndominium) -> list[dict]:
                 "mark": f"W{i}",
                 "room": w.room,
                 "wall": w.wall.value,
+                "kind": getattr(w, "kind", "casement"),
                 "width": w.width,
                 "height": max(0.0, w.head_height - w.sill_height),
                 "sill": w.sill_height,
@@ -130,6 +134,7 @@ _WINDOW_COLS = [
     Column("Mark", lambda r: r["mark"]),
     Column("Room", lambda r: r["room"]),
     Column("Wall", lambda r: r["wall"]),
+    Column("Type", lambda r: r["kind"]),
     Column("Width", lambda r: _fmt_ft(r["width"])),
     Column("Height", lambda r: _fmt_ft(r["height"])),
     Column("Sill", lambda r: _fmt_ft(r["sill"])),

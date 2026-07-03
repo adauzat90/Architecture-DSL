@@ -177,7 +177,7 @@ def test_registry_covers_every_code_emitted_in_the_source():
     """Guard: no check ships without a registry entry (and an explanation)."""
     src_dir = Path(__file__).resolve().parent.parent / "src" / "barndsl"
     emitted: set[str] = set()
-    for fname in ("validation.py", "compiler.py", "agent.py"):
+    for fname in ("validation.py", "compiler.py", "agent.py", "revitlog.py"):
         text = (src_dir / fname).read_text()
         # The code is the string literal right after a Severity.* or in a _ParseError.
         emitted.update(re.findall(r'Severity\.\w+,\s*"([A-Z_]{3,})"', text))
@@ -1406,6 +1406,16 @@ def test_door_swing_clash_silent_when_doors_are_apart():
         doors="door living - bed width 3 offset 0.5\n"
               "door bed - closet width 2.5 into bed offset 0.5 hinge near"))
     assert "DOOR_SWING_CLASH" not in _codes(r, "info")
+
+
+def test_door_swing_clash_sees_a_french_pair():
+    # A double/french pair swings two leaves; converting the clashing door to
+    # french must NOT silence the check (review defect: double-leaf doors were
+    # invisible to DOOR_SWING_CLASH while the renderer drew swinging leaves).
+    r = compile_source(_CLASH.format(
+        doors="door living - bed french width 6 into bed offset 12 hinge far\n"
+              "door bed - closet width 2.5 into bed offset 0.5 hinge near"))
+    assert "DOOR_SWING_CLASH" in _codes(r, "info")
 
 
 def test_door_swing_clash_avoided_by_a_pocket_door():

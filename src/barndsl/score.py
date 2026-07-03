@@ -32,6 +32,13 @@ some diagnostics (AREA_UNUSED, HALL_TIGHT, ROOM_PROPORTION, NATURAL_LIGHT) on
 purpose: the info gives the step, the margin gives the *gradient* an agent can
 descend even before (or after) the threshold trips.
 
+Each non-zero continuous component also carries a **cause** in
+:attr:`ScoreReport.details` — a short string naming the worst offenders with
+numbers ("bed_3 is 2.4:1, office is 2.1:1") — so a deduction is actionable
+without cross-referencing the info list. Causes are explanation only: they
+never change the arithmetic, and the totals are exactly what they were before
+details existed.
+
     from barndsl import compile_file
     from barndsl.score import design_score
     print(design_score(compile_file("plan.barn")).total)
@@ -69,6 +76,11 @@ class ScoreReport:
     total: float
     components: dict[str, float] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
+    #: Cause strings for the non-zero continuous components, keyed by component
+    #: name in the components' own order — the worst offenders with numbers,
+    #: e.g. ``{"proportion": "bed_3 is 2.4:1, office is 2.1:1 (…)"}``.
+    #: Explanation only; the arithmetic lives entirely in ``components``.
+    details: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Stable JSON-able form (mirrors ``CompileResult.to_dict`` style)."""
@@ -76,52 +88,91 @@ class ScoreReport:
             "total": self.total,
             "components": dict(self.components),
             "counts": dict(self.counts),
+            "details": dict(self.details),
         }
 
 
-# --- continuous components (each returns points deducted, 0..weight) ---------
+# --- continuous components ----------------------------------------------------
+# Each returns ``(points deducted, cause)`` — 0..weight, and a short offender
+# string (or None when nothing deducts). The cause names the rooms/quantities
+# the penalty was computed from; it never feeds back into the number.
+
+#: How many offending rooms a cause string names before "+N more".
+_DETAIL_LIMIT = 3
 
 
-def _space_penalty(plan: Barndominium) -> float:
+def _worst(offenders: list[tuple[float, str, str]]) -> str:
+    """Join offender phrases worst-first (ties by room id), capped at
+    :data:`_DETAIL_LIMIT` with a ``+N more`` tail."""
+    offenders = sorted(offenders, key=lambda o: (-o[0], o[1]))
+    parts = [o[2] for o in offenders[:_DETAIL_LIMIT]]
+    more = len(offenders) - _DETAIL_LIMIT
+    return ", ".join(parts) + (f" +{more} more" if more > 0 else "")
+
+
+def _space_penalty(plan: Barndominium) -> tuple[float, str | None]:
     """Unassigned footprint. Coverage is a ground-floor concept (lofts sit above)."""
     footprint = plan.footprint_area
     if footprint <= 0:
-        return 0.0
+        return 0.0, None
     used = sum(r.area for r in plan.rooms if r.level == 0)
     frac = min(1.0, used / footprint)
     shortfall = max(0.0, SPACE_FULL_MARKS - frac) / SPACE_FULL_MARKS
-    return SPACE_WEIGHT * min(1.0, shortfall)
+    penalty = SPACE_WEIGHT * min(1.0, shortfall)
+    if penalty <= 0.0:
+        return penalty, None
+    return penalty, (
+        f"ground-floor rooms cover {frac * 100:.0f}% of the {footprint:.0f} sqft "
+        f"footprint ({footprint - used:.0f} sqft unassigned; free at "
+        f"{SPACE_FULL_MARKS * 100:.0f}%+)"
+    )
 
 
-def _circulation_penalty(plan: Barndominium) -> float:
+def _circulation_penalty(plan: Barndominium) -> tuple[float, str | None]:
     """Hallway share of interior area — corridors are overhead past a point."""
     interior = plan.interior_area
     if interior <= 0:
-        return 0.0
-    halls = sum(r.area for r in plan.rooms if r.type is RoomType.HALLWAY)
-    frac = halls / interior
+        return 0.0, None
+    halls = [r for r in plan.rooms if r.type is RoomType.HALLWAY]
+    frac = sum(r.area for r in halls) / interior
     band = CIRCULATION_WORST - CIRCULATION_FREE
-    return CIRCULATION_WEIGHT * min(1.0, max(0.0, (frac - CIRCULATION_FREE) / band))
+    penalty = CIRCULATION_WEIGHT * min(1.0, max(0.0, (frac - CIRCULATION_FREE) / band))
+    if penalty <= 0.0:
+        return penalty, None
+    worst = _worst([(r.area, r.id, f"{r.id} {r.area:.0f} sqft") for r in halls])
+    return penalty, (
+        f"hallways are {frac * 100:.0f}% of the interior ({worst}; free below "
+        f"{CIRCULATION_FREE * 100:.0f}%)"
+    )
 
 
-def _proportion_penalty(plan: Barndominium) -> float:
+def _proportion_penalty(plan: Barndominium) -> tuple[float, str | None]:
     """Mean habitable-room elongation past GOOD_ASPECT (halls/closets exempt)."""
     excesses: list[float] = []
+    offenders: list[tuple[float, str, str]] = []
     for r in plan.rooms:
         if r.type not in HABITABLE_TYPES:
             continue
         side = min(r.width, r.length)
         if side <= 0:
             excesses.append(WORST_ASPECT_EXCESS)  # degenerate: as bad as it gets
+            offenders.append((WORST_ASPECT_EXCESS, r.id, f"{r.id} has a zero side"))
             continue
-        excesses.append(max(0.0, max(r.width, r.length) / side - GOOD_ASPECT))
+        excess = max(0.0, max(r.width, r.length) / side - GOOD_ASPECT)
+        excesses.append(excess)
+        if excess > 0.0:
+            ratio = max(r.width, r.length) / side
+            offenders.append((excess, r.id, f"{r.id} is {ratio:.1f}:1"))
     if not excesses:
-        return 0.0
+        return 0.0, None
     mean = sum(excesses) / len(excesses)
-    return PROPORTION_WEIGHT * min(1.0, mean / WORST_ASPECT_EXCESS)
+    penalty = PROPORTION_WEIGHT * min(1.0, mean / WORST_ASPECT_EXCESS)
+    if penalty <= 0.0 or not offenders:
+        return penalty, None
+    return penalty, f"{_worst(offenders)} (past the {GOOD_ASPECT:g}:1 target)"
 
 
-def _daylight_penalty(plan: Barndominium) -> float:
+def _daylight_penalty(plan: Barndominium) -> tuple[float, str | None]:
     """Mean glazing shortfall below the 8% floor across habitable rooms.
 
     At/above 8% a room costs nothing (the floor is the target, not a ceiling);
@@ -129,15 +180,24 @@ def _daylight_penalty(plan: Barndominium) -> float:
     a gradient where the pass/fail NATURAL_LIGHT check is a step.
     """
     deficits: list[float] = []
+    offenders: list[tuple[float, str, str]] = []
     for r in plan.rooms:
         if r.type not in HABITABLE_TYPES or r.area <= 0:
             continue
         required = DAYLIGHT_RATIO * r.area
         glazed = sum(w.glazed_area for w in plan.windows_for(r.id))
-        deficits.append(max(0.0, (required - glazed) / required))
+        deficit = max(0.0, (required - glazed) / required)
+        deficits.append(deficit)
+        if deficit > 0.0:
+            offenders.append((deficit, r.id, f"{r.id} at {glazed / r.area * 100:.1f}%"))
     if not deficits:
-        return 0.0
-    return DAYLIGHT_WEIGHT * (sum(deficits) / len(deficits))
+        return 0.0, None
+    penalty = DAYLIGHT_WEIGHT * (sum(deficits) / len(deficits))
+    if penalty <= 0.0 or not offenders:
+        return penalty, None
+    return penalty, (
+        f"{_worst(offenders)} (below the {DAYLIGHT_RATIO * 100:.0f}% glazing floor)"
+    )
 
 
 # --- the score ----------------------------------------------------------------
@@ -162,11 +222,23 @@ def design_score(result) -> ScoreReport:
         "infos": min(INFO_CAP, INFO_PENALTY * counts["info"]),
     }
     plan = result.plan
-    components["space"] = _space_penalty(plan) if plan is not None else 0.0
-    components["circulation"] = _circulation_penalty(plan) if plan is not None else 0.0
-    components["proportion"] = _proportion_penalty(plan) if plan is not None else 0.0
-    components["daylight"] = _daylight_penalty(plan) if plan is not None else 0.0
+    details: dict[str, str] = {}
+    continuous = (
+        ("space", _space_penalty),
+        ("circulation", _circulation_penalty),
+        ("proportion", _proportion_penalty),
+        ("daylight", _daylight_penalty),
+    )
+    for name, penalty in continuous:
+        points, cause = penalty(plan) if plan is not None else (0.0, None)
+        components[name] = points
+        if cause is not None:
+            details[name] = cause
 
     components = {k: round(v, 2) for k, v in components.items()}
+    # A cause explains a *visible* deduction: drop any whose points rounded to 0.
+    details = {k: v for k, v in details.items() if components[k]}
     total = max(0.0, min(100.0, 100.0 - sum(components.values())))
-    return ScoreReport(total=round(total, 1), components=components, counts=counts)
+    return ScoreReport(
+        total=round(total, 1), components=components, counts=counts, details=details
+    )

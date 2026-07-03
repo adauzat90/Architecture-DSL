@@ -129,13 +129,6 @@ class _Renderer:
         ys = [fy0, fy1] + [p.y for p in plan.porches] + [
             p.y + p.length for p in plan.porches
         ]
-        # A declared lot is bigger than the footprint; grow the drawing to fit it
-        # so the building reads as sited *within* its parcel.
-        lot_box = plan.lot_box()
-        if lot_box is not None:
-            lx0, ly0, lx1, ly1 = lot_box
-            xs += [lx0, lx1]
-            ys += [ly0, ly1]
         self.min_x, self.max_x = min(xs), max(xs)
         self.min_y, self.max_y = min(ys), max(ys)
 
@@ -219,7 +212,6 @@ class _Renderer:
                 self._draw_level_block(lvl)
             self._draw_panel(multi=True)
         else:
-            self._draw_lot()
             self._draw_street()
             self._draw_porches()
             self._draw_envelope()
@@ -241,7 +233,6 @@ class _Renderer:
             size=13, anchor="start", weight="bold", fill="#333333",
         )
         if lvl == 0:
-            self._draw_lot()
             self._draw_street()
             self._draw_porches()
         self._draw_envelope()
@@ -251,41 +242,14 @@ class _Renderer:
         self._draw_doors(level=lvl)
         self._draw_stairs(lvl)
 
-    def _draw_lot(self):
-        """The parcel (dashed) and its buildable envelope — the lot inset by the
-        setbacks (dotted). Drawn behind the building so the footprint reads inside
-        it. No-op unless the plan declares a ``lot``."""
-        box = self.plan.lot_box()
-        if box is None:
-            return
-        lx0, ly0, lx1, ly1 = box
-        # sy() flips y, so the screen-top edge is the high-y (north) side.
-        self._rect(
-            self.sx(lx0), self.sy(ly1), (lx1 - lx0) * self.c.scale,
-            (ly1 - ly0) * self.c.scale, "none", "#9AA6B2", sw=1.2, dash="6,4",
-        )
-        self._text(
-            self.sx(lx0) + 3, self.sy(ly1) + 13,
-            f"LOT {self.plan.lot.width:g}×{self.plan.lot.length:g}",
-            size=10, anchor="start", fill="#7A8896",
-        )
-        env = self.plan.buildable_envelope()
-        if env is not None:
-            ex0, ey0, ex1, ey1 = env
-            if ex1 - ex0 > 0 and ey1 - ey0 > 0 and self.plan.setbacks:
-                self._rect(
-                    self.sx(ex0), self.sy(ey1), (ex1 - ex0) * self.c.scale,
-                    (ey1 - ey0) * self.c.scale, "none", "#C0553B", sw=1.0, dash="2,3",
-                )
-
     def _draw_street(self):
         """Mark the street/approach edge (a thick grey line + label) on the side the
-        `street` directive names — the lot edge if there's a lot, else the footprint
-        edge. No-op unless the plan declares a ``street``."""
+        `street` directive names — along the footprint edge. No-op unless the plan
+        declares a ``street``."""
         st = self.plan.street
         if st is None:
             return
-        x0, y0, x1, y1 = self.plan.lot_box() or self.plan.bounds()
+        x0, y0, x1, y1 = self.plan.bounds()
         col = "#8A8F98"
         if st in (Direction.SOUTH, Direction.NORTH):
             yw = y0 if st is Direction.SOUTH else y1
@@ -471,6 +435,16 @@ class _Renderer:
                 sgn = self._swing_sgn(door, a, b, edge)
                 hinge_far = getattr(door, "hinge", None) == "far"
                 self._door_symbol(ox, oy, edge.orientation, w, sgn, hinge_far)
+            elif kind in ("double", "french"):
+                # Two half-width leaves hinged at opposite jambs, meeting at
+                # the middle — the classic double-door plan symbol.
+                sgn = self._swing_sgn(door, a, b, edge)
+                half = w / 2.0
+                self._door_symbol(ox, oy, edge.orientation, half, sgn, False)
+                if edge.orientation == "v":
+                    self._door_symbol(ox, oy + half, edge.orientation, half, sgn, True)
+                else:
+                    self._door_symbol(ox + half, oy, edge.orientation, half, sgn, True)
             elif kind in ("pocket", "sliding"):
                 self._slide_symbol(ox, oy, edge.orientation, w)
             else:  # cased opening
@@ -483,17 +457,28 @@ class _Renderer:
             if level is not None and room.level != level:
                 continue
             x1, y1, x2, y2 = opening_endpoints(room, xdoor.wall, xdoor.offset, xdoor.width)
-            overhead = getattr(xdoor, "kind", "entry") == "overhead"
+            xkind = getattr(xdoor, "kind", "entry")
+            overhead = xkind == "overhead"
+            double = xkind in ("double", "french")
+            half = xdoor.width / 2.0
             if xdoor.wall in (Direction.NORTH, Direction.SOUTH):
                 if overhead:
                     sgn = 1.0 if xdoor.wall is Direction.SOUTH else -1.0
                     self._overhead_symbol(min(x1, x2), y1, "h", xdoor.width, sgn)
+                elif double:  # two half-width leaves hinged at opposite jambs
+                    lo = min(x1, x2)
+                    self._door_symbol(lo, y1, "h", half)
+                    self._door_symbol(lo + half, y1, "h", half, hinge_far=True)
                 else:
                     self._door_symbol(min(x1, x2), y1, "h", xdoor.width)
             else:
                 if overhead:
                     sgn = 1.0 if xdoor.wall is Direction.WEST else -1.0
                     self._overhead_symbol(x1, min(y1, y2), "v", xdoor.width, sgn)
+                elif double:
+                    lo = min(y1, y2)
+                    self._door_symbol(x1, lo, "v", half)
+                    self._door_symbol(x1, lo + half, "v", half, hinge_far=True)
                 else:
                     self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
 

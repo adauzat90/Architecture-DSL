@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import math
 
+from typing import Any
+
 from .elements import Barndominium, Beam, FrameSpec, Post
+from .geometry import SharedEdge, shared_edge
 
 #: Coordinates snap to this grid (ft) so repeated placement is byte-stable and
 #: posts that land on the same line dedupe cleanly.
@@ -40,8 +43,59 @@ def _even_cuts(start: float, length: float, max_step: float) -> list[float]:
     return [_snap(start + i * length / n) for i in range(n + 1)]
 
 
+def _section_aligned(sec: tuple[float, float, float, float], edge: SharedEdge) -> bool:
+    """Does ``edge`` run along ``sec``'s long axis (the direction interior
+    post lines run)? Post lines split the bents' span, so they run along the
+    long axis: east-west (``"h"``) when the block is wider than long, else
+    north-south (``"v"``)."""
+    _, _, w, l = sec
+    return edge.orientation == ("h" if w >= l else "v")
+
+
+def _edge_in_section(
+    sec: tuple[float, float, float, float], edge: SharedEdge, tol: float = 1e-6
+) -> bool:
+    """Is ``edge``'s midpoint inside (or on the boundary of) ``sec``?"""
+    x, y, w, l = sec
+    mx, my = (edge.pos, edge.mid) if edge.orientation == "v" else (edge.mid, edge.pos)
+    return x - tol <= mx <= x + w + tol and y - tol <= my <= y + l + tol
+
+
+def bearing_wall_usage(plan: Barndominium) -> "list[tuple[Any, SharedEdge, bool]]":
+    """Each **valid** declared bearing wall and whether the frame can use it.
+
+    Returns ``(spec, edge, usable)`` per ground-level ``wall ... bearing``
+    declaration whose rooms exist and share a wall. ``usable`` is True when the
+    wall runs along the long axis of the footprint block it sits in — the
+    direction an interior post line runs — so :func:`place_frame` drops interior
+    posts onto it at each bent. A bearing wall parallel to the bents' span can't
+    split that span; the validator turns it into a ``WALL_BEARING_AXIS`` info
+    rather than letting the declaration silently do nothing.
+    """
+    out: list[tuple[object, SharedEdge, bool]] = []
+    sections = plan.footprint_sections()
+    for ws in getattr(plan, "wall_specs", None) or []:
+        if "bearing" not in ws.attributes:
+            continue
+        a, b = plan.room(ws.room_a), plan.room(ws.room_b)
+        if a is None or b is None:
+            continue  # WALL_REF's problem, not the frame's
+        if getattr(a, "level", 0) != 0 or getattr(b, "level", 0) != 0:
+            continue  # the frame stands on the ground level
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue  # WALL_NOADJ's problem
+        sec = next((s for s in sections if _edge_in_section(s, edge)), None)
+        usable = sec is not None and _section_aligned(sec, edge)
+        out.append((ws, edge, usable))
+    return out
+
+
 def _frame_section(
-    plan: Barndominium, sec: tuple[float, float, float, float], spec: FrameSpec
+    plan: Barndominium,
+    sec: tuple[float, float, float, float],
+    spec: FrameSpec,
+    bearing_edges: list[SharedEdge] | None = None,
 ) -> None:
     """Place posts and beams for one rectangular footprint block."""
     x, y, w, l = sec
@@ -83,6 +137,13 @@ def _frame_section(
             add_post(lp, short_hi, "post")
         for sp in interior:  # interior support columns under the long beam
             add_post(lp, sp, "interior")
+        # A declared interior bearing wall is an authored post line: drop an
+        # interior post onto it at every bent that crosses its run, so the beam
+        # bears on the wall instead of clear-spanning over it. (Coincident posts
+        # dedupe with the auto interior lines.)
+        for edge in bearing_edges or ():
+            if edge.lo - 1e-6 <= lp <= edge.hi + 1e-6:
+                add_post(lp, edge.pos, "interior")
 
     if spec.ridge:
         # The ridge runs *along* the long axis (parallel to it), centred on the
@@ -116,6 +177,11 @@ def place_frame(plan: Barndominium, spec: FrameSpec | None = None) -> None:
     Idempotent: clears any previously placed structure and rebuilds it, so calling
     it twice (e.g. builder then compile) yields the same result. Does nothing if no
     spec is set or the footprint has no positive area.
+
+    A declared interior bearing wall (``wall a - b bearing``) that runs along its
+    footprint block's long axis is honoured as an interior **post line**: an
+    interior post lands on it at every bent crossing its run (see
+    :func:`bearing_wall_usage`).
     """
     spec = spec or plan.frame_spec
     if spec is None:
@@ -123,6 +189,13 @@ def place_frame(plan: Barndominium, spec: FrameSpec | None = None) -> None:
     plan.frame_spec = spec
     plan.posts = []
     plan.beams = []
-    for sec in plan.footprint_sections():
-        _frame_section(plan, sec, spec)
+    sections = plan.footprint_sections()
+    aligned: dict[tuple[float, float, float, float], list[SharedEdge]] = {}
+    for _ws, edge, ok in bearing_wall_usage(plan):
+        if not ok:
+            continue
+        sec = next(s for s in sections if _edge_in_section(s, edge))
+        aligned.setdefault(sec, []).append(edge)
+    for sec in sections:
+        _frame_section(plan, sec, spec, bearing_edges=aligned.get(sec))
     _dedupe_posts(plan)

@@ -214,7 +214,7 @@ def test_area_and_required_clauses_parse_and_round_trip():
 
 def test_unknown_program_noun_is_a_parse_error():
     r = compile_source(_plan("program 2 bed 1 bath 1 sauna"))
-    assert r.plan is None
+    assert r.plan is not None and not r.ok  # §1.3: bad line skipped, survivors kept
     assert any(d.code == "BAD_TYPE" for d in r.errors)
 
 

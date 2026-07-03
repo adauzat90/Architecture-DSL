@@ -153,3 +153,108 @@ def test_validate_flags_swing_into_an_unserved_room():
     door["swing_into"] = "not_a_room_it_serves"
     problems = exchange.validate(data)
     assert any("swings into" in p for p in problems)
+
+
+# --- sectioned (L/T/U + monitor) roofs ---------------------------------------
+
+
+_LSHAPE = """\
+plan "L Barn"
+envelope 40 x 24
+ceiling 9
+wing 16 x 20 at 40,0
+room living: living at 0,0 size 40 x 24
+room shop: shop at 40,0 size 16 x 20
+"""
+
+_MONITOR = """\
+plan "Monitor Barn"
+envelope 40 x 60
+ceiling 9
+roof monitor pitch 0.5
+room living: living at 0,0 size 40 x 60
+"""
+
+
+def _exchange_of(src):
+    return to_revit_model(compile_source(src).plan).to_dict()
+
+
+def test_single_rectangle_roof_carries_no_sections():
+    # A plain rectangular plan keeps the pre-sections roof shape byte-for-byte,
+    # so its roof identity/fingerprint is unchanged (never a needless recreate).
+    roof = _model_dict()["roof"]
+    assert "sections" not in roof
+    idents = [i for i in exchange.identities(_model_dict()) if i[0] == "roof"]
+    assert idents == [("roof", "roof", exchange.ROOF_IDENTITY, idents[0][3])]
+
+
+def test_lshape_roof_has_one_section_per_footprint_and_unique_identities():
+    data = exchange.load(_exchange_of(_LSHAPE))
+    assert len(data["roof"]["sections"]) == 2
+    assert exchange.validate(data) == []
+    roof_idents = [i for i in exchange.identities(data) if i[0] == "roof"]
+    assert len(roof_idents) == 2
+    keys = [k for _kind, _src, k, _fp in roof_idents]
+    assert keys == ["%s|0" % exchange.ROOF_IDENTITY, "%s|1" % exchange.ROOF_IDENTITY]
+    assert len(set(keys)) == 2  # distinct so the diff tracks each plane
+
+
+def test_monitor_roof_emits_three_plane_identities():
+    data = exchange.load(_exchange_of(_MONITOR))
+    sections = data["roof"]["sections"]
+    assert [s["role"] for s in sections] == [
+        "monitor_side", "monitor_center", "monitor_side"
+    ]
+    roof_idents = [i for i in exchange.identities(data) if i[0] == "roof"]
+    assert len(roof_idents) == 3
+    # Deterministic across re-exports (or an unchanged monitor would recreate).
+    assert exchange.identities(data) == exchange.identities(_exchange_of(_MONITOR))
+
+
+def test_monitor_side_sheds_both_rise_toward_the_centre():
+    """Review fix: each side shed's LOW (slope-defining) eave is its OUTER
+    edge, so both planes rise to the raised clerestory — previously the
+    second shed inverted (a base_height discontinuity at the seam)."""
+    data = exchange.load(_exchange_of(_MONITOR))
+    lo_side, centre, hi_side = data["roof"]["sections"]
+    # 40 x 60 envelope: long axis y, strips split along x; outline order is
+    # [south, east, north, west] — the strip eaves are west(3)/east(1).
+    assert lo_side["outline_slopes"] == [False, False, False, True]   # west = outer
+    assert hi_side["outline_slopes"] == [False, True, False, False]   # east = outer
+    # The centre gable keeps both eaves slope-defining and sits on the sheds.
+    assert centre["outline_slopes"].count(True) == 2
+    assert lo_side["base_height"] == 0.0 and hi_side["base_height"] == 0.0
+    assert centre["base_height"] > 0.0
+
+
+def test_monitor_on_an_lshape_roofs_the_envelope_not_the_bounds():
+    """Review fix: the monitor form belongs to the primary envelope block;
+    the wing gets its own gable field and the concave notch stays uncovered."""
+    src = _LSHAPE.replace("ceiling 9", "ceiling 9\nroof monitor pitch 0.5")
+    data = exchange.load(_exchange_of(src))
+    sections = data["roof"]["sections"]
+    roles = [s["role"] for s in sections]
+    assert roles == ["monitor_side", "monitor_center", "monitor_side", "field"]
+    # Monitor strips confined to the 40 x 24 envelope...
+    for s in sections[:3]:
+        xs = [p for seg in s["outline"] for p in (seg[0][0], seg[1][0])]
+        ys = [p for seg in s["outline"] for p in (seg[0][1], seg[1][1])]
+        assert max(xs) <= 40 + 1e-9 and max(ys) <= 24 + 1e-9
+    # ...and the wing field covers exactly the wing (16 x 20 at 40,0).
+    wing = sections[3]
+    xs = [p for seg in wing["outline"] for p in (seg[0][0], seg[1][0])]
+    ys = [p for seg in wing["outline"] for p in (seg[0][1], seg[1][1])]
+    assert min(xs) == 40 and max(xs) == 56 and min(ys) == 0 and max(ys) == 20
+    # The notch (x < 40, y > 24 is outside; but e.g. x=45, y=22 IS wing) — the
+    # point above the envelope's north edge on the wing side of nothing:
+    # (10, 26) lies outside every section.
+    def covered(px, py):
+        for s in sections:
+            xs = [p for seg in s["outline"] for p in (seg[0][0], seg[1][0])]
+            ys = [p for seg in s["outline"] for p in (seg[0][1], seg[1][1])]
+            if min(xs) <= px <= max(xs) and min(ys) <= py <= max(ys):
+                return True
+        return False
+    assert not covered(10, 26)
+    assert covered(45, 10)

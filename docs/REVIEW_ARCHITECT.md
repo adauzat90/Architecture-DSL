@@ -52,11 +52,12 @@ matching the codebase's `NO_LAUNDRY` decision.)
 **Update (2026-07-02).** All of [`design/SITE_SOLAR.md`](design/SITE_SOLAR.md)
 shipped (Phases 1–3): `orientation` is now real (`SOLAR_WEST_GAIN` /
 `SOLAR_NORTH_ONLY` / `SOLAR_SOUTH_UNUSED` glazing nudges, a true-north compass, a
-glazing-by-sector metrics split); the plan has a **site** — `lot` + `setback` →
-the `SETBACK` warning and the parcel drawn around the footprint; and an
-**approach** — `street <wall>` → `APPROACH_ENTRY` / `APPROACH_GARAGE`, with a
-STREET edge on the render. Remaining ideas (`latitude`/`hemisphere`, a solar
-score term, overhang-credited shading) are parked in the design doc's §7.
+glazing-by-sector metrics split); the plan has a **site** with a `SETBACK` check;
+and an **approach** — `street <wall>` → `APPROACH_ENTRY` / `APPROACH_GARAGE`.
+**Merge note:** the trunk had independently built the site model (`site` +
+`setback front/side/rear`), so on merge this branch's own `lot`/cardinal-`setback`
+was dropped in favour of the trunk's `site`; the solar, `street`, `climate` and
+`overhang` work all remain.
 
 `orientation` is in the grammar but **architecturally inert**: it only sets Revit
 project north and round-trips through `emit`. The docstring at

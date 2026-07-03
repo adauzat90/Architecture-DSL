@@ -7,9 +7,12 @@ iterating against compiler output:
 
     1. **write**    DSL source from the brief (+ prior source + diagnostics);
     2. **compile**  → plan + diagnostics (line, code, hint) + a deterministic
-       0-100 design score (see :mod:`barndsl.score`);
+       0-100 design score (see :mod:`barndsl.score`) + the resolved geometry
+       pack (see :mod:`barndsl.introspect`);
     3. **critique** the design for quality (optional, model-driven, anchored to
-       the score evidence);
+       the score evidence — with the rendered floor-plan image attached when
+       the optional ``cairosvg`` raster dependency is installed, so the critic
+       judges the drawing, not just the text);
     4. **revise**   feed the structured diagnostics + score + critique back,
        rewrite the DSL, repeat — until it compiles clean, the critic is
        satisfied AND the score clears ``target_score`` (or the cap is hit).
@@ -23,12 +26,14 @@ Requires ``anthropic`` and ``ANTHROPIC_API_KEY``. Install ``pip install 'barndsl
 
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
+from .introspect import plan_summary, summary_text
 from .score import ScoreReport, design_score
 from .validation import Issue, Severity
 
@@ -79,6 +84,16 @@ _CRITIQUE_SYSTEM = (
     "constructive but exacting.\n\n" + DSL_REFERENCE
 )
 
+#: Appended to the critique system prompt only when a rendered PNG rides along —
+#: the critic must not be told an image is attached when it isn't.
+_CRITIQUE_VISION = (
+    "\n\nA rendered floor-plan image of this plan is attached. Judge what only "
+    "a drawing shows — proportion, circulation legibility, wasted pockets, "
+    "dead-end halls, facade rhythm — and your `rationale` must cite what you "
+    "see in the drawing (e.g. \"the kitchen is an island unreachable from the "
+    "garage\"), not only the diagnostics."
+)
+
 _FENCE_RE = re.compile(r"```(?:[a-zA-Z]+)?\s*\n(.*?)```", re.DOTALL)
 
 _PROGRAM_RE = re.compile(r"^\s*program\b", re.MULTILINE)
@@ -92,14 +107,31 @@ def _extract_source(text: str) -> str:
     return text.strip() + "\n"
 
 
-def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> str:
+def render_feedback(
+    result: CompileResult,
+    score: ScoreReport | None = None,
+    *,
+    best_prior: "DesignStep | None" = None,
+) -> str:
     """Render a compact, deterministic feedback block for the revision prompt.
 
     Structured fields from :meth:`CompileResult.to_dict` — one line per
     diagnostic (``severity CODE (room) line N: message | hint: ...``) headed by
-    the score total and its non-zero per-component deductions. Token-lean by
-    design: no source snippets, no caret art — the model gets fields to act on,
-    not human formatting to scrape.
+    the score total, its non-zero per-component deductions and their cause
+    lines (:attr:`ScoreReport.details` — the worst offenders, by name and
+    number). When the compile produced a plan, the geometry pack from
+    :func:`barndsl.introspect.plan_summary` is appended — resolved room
+    rectangles with exterior walls, the door/adjacency edges, unplaced
+    footprint pockets, and the free wall spans an opening can legally use — so
+    the model reads coordinates off a table instead of re-deriving them from
+    its own source. Token-lean by design: no source snippets, no caret art —
+    the model gets fields to act on, not human formatting to scrape.
+
+    ``best_prior`` is the best *valid* iteration recorded so far (or ``None``).
+    When it is supplied and this attempt regressed against it — failed to
+    compile, or scored lower — a single ``REGRESSION`` line is added under the
+    header so the model reads the lost gradient as a regression and knows to
+    revise from that iteration, not this broken one.
     """
     if score is None:
         score = design_score(result)
@@ -108,6 +140,18 @@ def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> 
         f"Design score: {score.total:g}/100"
         + (f" — deductions: {deductions}" if deductions else " — no deductions")
     ]
+    if best_prior is not None and best_prior.score is not None:
+        broke = result.plan is None or bool(result.errors)
+        if broke or score.total < best_prior.score.total:
+            what = "does not compile" if broke else f"scored {score.total:g}"
+            lines.append(
+                f"REGRESSION: best valid iteration so far scored "
+                f"{best_prior.score.total:g} (iteration {best_prior.iteration}); "
+                f"this attempt {what} — you lost the gradient, revise from that "
+                f"iteration, not this one."
+            )
+    for name, cause in score.details.items():
+        lines.append(f"  {name} -{score.components[name]:g}: {cause}")
     for d in result.to_dict()["diagnostics"]:
         where = f" ({d['room']})" if d["room"] else ""
         loc = f" line {d['line']}" if d["line"] else ""
@@ -115,7 +159,30 @@ def render_feedback(result: CompileResult, score: ScoreReport | None = None) -> 
         if d["hint"]:
             line += f" | hint: {d['hint']}"
         lines.append(line)
+    if result.plan is not None:
+        lines.append(summary_text(plan_summary(result.plan)))
     return "\n".join(lines)
+
+
+def _plan_png(result: CompileResult) -> bytes | None:
+    """Render the compiled plan to PNG bytes for the multimodal critique.
+
+    Best-effort and silent by design: returns ``None`` (never raises) when the
+    compile produced no plan or the optional ``cairosvg`` raster dependency is
+    missing or fails — the critique then runs text-only, exactly as before.
+    cairosvg stays optional (``pip install 'barndsl[raster]'``), the same guard
+    :func:`barndsl.render.save_render` applies.
+    """
+    if result.plan is None:
+        return None
+    try:
+        import cairosvg
+
+        from .render import render_svg
+
+        return cairosvg.svg2png(bytestring=render_svg(result.plan).encode("utf-8"))
+    except Exception:
+        return None
 
 
 class CritiqueSpec(BaseModel):
@@ -151,6 +218,24 @@ def _best_step(history: list[DesignStep]) -> DesignStep:
         history,
         key=lambda s: (s.score.total if s.score is not None else -1.0, s.iteration),
     )
+
+
+def _best_valid_step(history: list[DesignStep]) -> DesignStep | None:
+    """The highest-scoring step that actually *compiled* (a plan, no errors).
+
+    Ties go to the later iteration. Returns ``None`` when nothing valid has been
+    recorded yet — used both to head off a regression (the "best prior valid"
+    reference in the feedback) and to pick a sound source to revise from when the
+    latest attempt failed to compile.
+    """
+    valid = [
+        s
+        for s in history
+        if s.result.plan is not None and not s.result.errors and s.score is not None
+    ]
+    if not valid:
+        return None
+    return max(valid, key=lambda s: (s.score.total if s.score else 0.0, s.iteration))
 
 
 @dataclass
@@ -207,9 +292,22 @@ class BarndoAgent:
     # -- single steps ------------------------------------------------------
 
     def write_source(
-        self, brief: str, prior: str | None = None, diagnostics: str | None = None
+        self,
+        brief: str,
+        prior: str | None = None,
+        diagnostics: str | None = None,
+        seed: str | None = None,
     ) -> str:
         prompt = f"Design brief:\n{brief}\n"
+        if seed and not prior:
+            prompt += (
+                "\nA deterministic layout solver produced this dimensionally "
+                "sound draft from the brief — rooms tile the envelope, interior "
+                "doors sit on shared walls, and egress/daylight windows are "
+                "placed. Start from it and improve the DESIGN (flow, adjacencies, "
+                "proportion, light, wasted space); do NOT start from scratch and "
+                "do not regress its geometry:\n```barn\n" + seed + "```\n"
+            )
         if prior:
             prompt += f"\nYour previous DSL:\n```barn\n{prior}```\n"
         if diagnostics:
@@ -245,11 +343,29 @@ class BarndoAgent:
             "`rationale` cite the specific diagnostics and score components that "
             "justify your verdict."
         )
+        # Give the critic eyes: attach the rendered plan when it can be
+        # rasterised, and only then claim (in the system prompt) that it was.
+        png = _plan_png(result)
+        system = _CRITIQUE_SYSTEM
+        content: str | list = prompt
+        if png is not None:
+            system = _CRITIQUE_SYSTEM + _CRITIQUE_VISION
+            content = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64.b64encode(png).decode("ascii"),
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ]
         resp = self.client.messages.parse(
             model=self.model,
             max_tokens=8000,
-            system=_CRITIQUE_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
+            system=system,
+            messages=[{"role": "user", "content": content}],
             output_format=CritiqueSpec,
         )
         crit = resp.parsed_output
@@ -268,13 +384,42 @@ class BarndoAgent:
         critique: bool = True,
         on_step=None,
         target_score: float | None = DEFAULT_TARGET_SCORE,
+        seed_with_solver=None,
     ) -> DesignResult:
+        """Run the write → compile → score → critique → revise loop.
+
+        ``seed_with_solver`` opts into seeding the loop from the deterministic
+        layout engines (:mod:`barndsl.layout`/:mod:`barndsl.layout2`). ``design``
+        itself only receives a free-text ``brief``, which the solver can't
+        consume, so the caller passes an explicit solver program: a
+        :class:`~barndsl.layout2.LayoutBrief2`, a
+        :class:`~barndsl.layout.LayoutBrief`, or a textual brief (parsed as a v2
+        brief). The best solver candidate is recorded as **iteration 0** — the
+        floor best-iteration-wins must beat — and its DSL is handed to the first
+        generation prompt as a dimensionally sound draft to refine rather than a
+        blank page. Falsy (the default) leaves the loop exactly as it was; if the
+        solver produces nothing that compiles, seeding is silently skipped.
+        """
         history: list[DesignStep] = []
         source: str | None = None
         feedback: str | None = None
 
+        # Candidate 0: the deterministic solver's best plan, if one was requested
+        # and it compiles. Recorded as iteration 0 so best-iteration-wins can
+        # return it, and its source seeds the first generation prompt.
+        seed_source: str | None = None
+        if seed_with_solver:
+            seed_step = _solver_seed_step(seed_with_solver)
+            if seed_step is not None:
+                history.append(seed_step)
+                seed_source = seed_step.source
+                if on_step:
+                    on_step(seed_step)
+
         for i in range(1, max_iterations + 1):
-            source = self.write_source(brief, prior=source, diagnostics=feedback)
+            source = self.write_source(
+                brief, prior=source, diagnostics=feedback, seed=seed_source
+            )
             result = compile_source(source, name=None)
             # The program nudge is folded before scoring: it is deterministic
             # (a pure function of the source), so the score stays a contract —
@@ -299,7 +444,42 @@ class BarndoAgent:
                 done = False
             if done or i == max_iterations:
                 break
-            feedback = render_feedback(result, score)
+            # Flag a regression against the best valid iteration *before* this one,
+            # so a broken or lower-scoring round reads as a regression.
+            feedback = render_feedback(
+                result, score, best_prior=_best_valid_step(history[:-1])
+            )
+            # When the latest attempt failed to compile, revise from the best
+            # valid source instead of stranding the model on non-compiling code.
+            # The feedback must stay coherent with the source it is shown
+            # against: the prompt captions it as "feedback on it", so pair the
+            # best valid source with ITS OWN diagnostics and quote the broken
+            # attempt's fatal lines separately, clearly attributed.
+            if result.plan is None or result.errors:
+                best_valid = _best_valid_step(history)
+                if best_valid is not None:
+                    source = best_valid.source
+                    fatal = []
+                    for d in result.to_dict()["diagnostics"]:
+                        if d["severity"] != "error":
+                            continue
+                        loc = f" line {d['line']}" if d["line"] else ""
+                        fatal.append(f"error {d['code']}{loc}: {d['message']}")
+                    bv_score = best_valid.score
+                    assert bv_score is not None  # _best_valid_step filters on it
+                    feedback = (
+                        f"NOTE: your newest attempt (iteration {i}) did not "
+                        f"compile and was DISCARDED. The DSL shown above is "
+                        f"your best valid iteration ({best_valid.iteration}, "
+                        f"scored {bv_score.total:g}); the feedback "
+                        f"below describes THAT source. Improve it — and do "
+                        f"not repeat the discarded attempt's mistakes.\n"
+                        + render_feedback(best_valid.result, best_valid.score)
+                        + "\n\nFatal diagnostics from the discarded attempt "
+                        "(these describe the discarded source, NOT the DSL "
+                        "shown above):\n"
+                        + "\n".join(fatal)
+                    )
 
         best = _best_step(history)
         return DesignResult(best.source, best.result, history)
@@ -344,14 +524,110 @@ def _fold_program_nudge(result: CompileResult) -> None:
     )
 
 
+def _solver_candidate_sources(spec) -> list[str]:
+    """Emit DSL for each solver candidate derived from ``spec``.
+
+    ``spec`` is a program the deterministic engines can solve — a
+    :class:`barndsl.layout2.LayoutBrief2` (run through the space-filling
+    topologies), a :class:`barndsl.layout.LayoutBrief` (the v1 greedy engine), or
+    a textual brief (parsed as a v2 brief). Enumerates engines × topologies the
+    way the CLI does, capped at the three v2 topologies (bands · slice · dual) so
+    runtime stays bounded — every one is near-free (no API call). Returns one DSL
+    string per topology that produced a plan; any failure is skipped, so seeding
+    always degrades gracefully to "no seed".
+    """
+    from .emit import emit_dsl
+    from .layout import LayoutBrief, solve_layout
+    from .layout2 import LayoutBrief2, parse_brief2, solve_layout2
+
+    if isinstance(spec, str):
+        try:
+            spec = parse_brief2(spec)
+        except Exception:
+            return []
+
+    results = []
+    if isinstance(spec, LayoutBrief2):
+        for engine in ("bands", "slice", "dual"):
+            try:
+                out = solve_layout2(spec, engine=engine)
+            except Exception:
+                continue
+            if out is not None and out.plan is not None:
+                results.append(out)
+    elif isinstance(spec, LayoutBrief):
+        try:
+            out = solve_layout(spec)
+        except Exception:
+            out = None
+        if out is not None and out.plan is not None:
+            results.append(out)
+    else:
+        return []
+
+    sources: list[str] = []
+    for out in results:
+        try:
+            src = emit_dsl(out.plan)
+        except Exception:
+            continue
+        # The emitter writes no `program` statement, which would dock the seed
+        # the missing-program nudge and depress the floor below what its
+        # geometry earns. Declare the intent the plan itself delivers — the
+        # counts come from the same metrics() PROGRAM_MISMATCH checks against,
+        # so the derived line is guaranteed consistent.
+        if not any(
+            line.strip().startswith("program ")
+            for line in src.splitlines()
+        ):
+            m = out.plan.metrics()
+            beds, baths = int(m["bedroom_count"]), int(m["bathroom_count"])
+            if beds:
+                stmt = f"program {beds} bed"
+                if baths:
+                    stmt += f" {baths} bath"
+                src = stmt + "\n" + src
+        sources.append(src)
+    return sources
+
+
+def _solver_seed_step(spec) -> DesignStep | None:
+    """The solver's best compiling candidate, as iteration 0 — or ``None``.
+
+    Each candidate is compiled, folded through the same ``program`` nudge the
+    loop applies (so its score is directly comparable to the LLM's iterations),
+    and scored with :func:`design_score`; the highest-scoring one that actually
+    compiles (a plan, no errors) wins. Returns ``None`` when the solver yields
+    nothing that compiles, so the loop then proceeds exactly as it does today.
+    """
+    best: DesignStep | None = None
+    for src in _solver_candidate_sources(spec):
+        try:
+            result = compile_source(src, name=None)
+        except Exception:
+            continue
+        if result.plan is None or result.errors:
+            continue
+        _fold_program_nudge(result)
+        score = design_score(result)
+        if best is None or best.score is None or score.total > best.score.total:
+            best = DesignStep(0, result.source, result, None, score)
+    return best
+
+
 def design(
     brief: str,
     model: str = DEFAULT_MODEL,
     max_iterations: int = 3,
     on_step=None,
     target_score: float | None = DEFAULT_TARGET_SCORE,
+    seed_with_solver=None,
 ) -> DesignResult:
     """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``."""
     return BarndoAgent(model=model).design(
-        brief, max_iterations=max_iterations, on_step=on_step, target_score=target_score
+        brief,
+        max_iterations=max_iterations,
+        on_step=on_step,
+        target_score=target_score,
+        seed_with_solver=seed_with_solver,
     )

@@ -28,7 +28,6 @@ from .elements import (
     ExteriorDoor,
     FrameSpec,
     InteriorDoor,
-    Lot,
     Porch,
     Post,
     ProgramSpec,
@@ -61,7 +60,6 @@ from .layout2 import (
 )
 from .dxf import save_dxf, to_dxf
 from .render import RenderConfig, render_svg, save_render, save_svg
-from .cost import DEFAULT_RATES, CostReport, estimate_cost
 from .views import (
     elevation_svg,
     save_elevation,
@@ -88,8 +86,21 @@ from .revit import (
     to_revit_model,
 )
 from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
+from .compare import compare_plans, comparison_text
+from .revitdiff import diff_plans, diff_text
+from .cost import cost_text, estimate_cost
+from .packet import build_packet, save_packet
+from .introspect import plan_summary, summary_text
+from .revitlog import buildlog_issues
 from .score import ScoreReport, design_score
 from .structure import place_frame
+from .profiles import (
+    DEFAULT as DEFAULT_PROFILE,
+    Profile,
+    get_profile,
+    load_profile,
+    profiles_text,
+)
 from .validation import Issue, Severity, ValidationReport, clear_dimensions, validate
 
 __all__ = [
@@ -102,7 +113,6 @@ __all__ = [
     "ExteriorDoor",
     "Window",
     "Porch",
-    "Lot",
     "Stair",
     "ProgramSpec",
     "Post",
@@ -134,9 +144,30 @@ __all__ = [
     "Issue",
     "Severity",
     "clear_dimensions",
+    # jurisdiction profiles (amendable code thresholds)
+    "Profile",
+    "DEFAULT_PROFILE",
+    "load_profile",
+    "get_profile",
+    "profiles_text",
     # design score (deterministic 0-100, for agents to hill-climb on)
     "design_score",
     "ScoreReport",
+    # resolved-geometry introspection (the geometry pack behind `barndsl inspect`)
+    "buildlog_issues",
+    "compare_plans",
+    "comparison_text",
+    # revit-diff: drift between a Revit model export and the authored plan
+    "diff_plans",
+    "diff_text",
+    "plan_summary",
+    "summary_text",
+    # construction cost estimate (assembly takeoff → budget)
+    "estimate_cost",
+    "cost_text",
+    # permit-sketch packet (one HTML deliverable binding the above)
+    "build_packet",
+    "save_packet",
     # fixtures / appliances (seeds + clearance)
     "Fixture",
     "fixtures_for",
@@ -152,10 +183,6 @@ __all__ = [
     "section_svg",
     "save_elevation",
     "save_section",
-    # cost estimate (rough order-of-magnitude from the takeoff)
-    "estimate_cost",
-    "CostReport",
-    "DEFAULT_RATES",
     # schedules (room/door/window, no Revit)
     "schedules_markdown",
     "schedules_csv",

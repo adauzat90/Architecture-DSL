@@ -39,6 +39,7 @@ from .constants import (
     FOOTING_DEPTH,
     FOOTING_SIZE,
     INTERIOR_WALL_THICKNESS,
+    PLUMBING_WALL_THICKNESS,
     MAX_RISER_HEIGHT,
     MIN_STAIR_WIDTH,
     MIN_TREAD_DEPTH,
@@ -48,6 +49,8 @@ from .constants import (
     TURNDOWN_WIDTH,
 )
 from .elements import (
+    DOUBLE_LEAF_KINDS,
+    WINDOW_KINDS,
     Barndominium,
     Direction,
     Room,
@@ -125,6 +128,12 @@ class RevitWall:
     profile: str = "flat"
     apex: tuple[float, float] | None = None
     apex_height: float = 0.0
+    #: Declared wall kind from a matching `wall` statement: ``"plumbing"``,
+    #: ``"bearing"`` or ``"rated"`` (one of :data:`_WALL_KIND_PRECEDENCE` when a
+    #: statement declares several). ``None`` — and the JSON key absent — for an
+    #: ordinary wall, so old documents are byte-identical. Lets the consumer's
+    #: ``config.json`` map declared walls to real named wall types.
+    kind: str | None = None
 
     @property
     def orientation(self) -> str:
@@ -156,7 +165,11 @@ class RevitOpening:
 
     id: str
     category: str  # "door" | "window" | "cased_opening"
-    kind: str  # swing | pocket | sliding | cased | exterior | overhead | window
+    #: Doors: swing | pocket | sliding | double | french | cased | exterior |
+    #: overhead. Windows: the window kind (casement | slider | fixed |
+    #: double-hung; older documents wrote the generic "window", which imports
+    #: as the casement default).
+    kind: str
     level: int
     location: tuple[float, float]
     width: float
@@ -200,6 +213,11 @@ class RevitRoom:
     #: carrying it lets the exchange and the Revit room schedule report one number.
     clear_width: float = 0.0
     clear_length: float = 0.0
+    #: The declared ``zone`` this room belongs to (directly or via a suite one
+    #: zone lists) — the builder writes it to the room's "barndsl zone"
+    #: parameter so native schedules can group by zone. ``None`` — key absent —
+    #: when the plan declares no zones (older documents stay byte-identical).
+    zone: "str | None" = None
     clear_area: float = 0.0
     #: Finished ceiling height (ft) for this room — its own override or the plan
     #: default — and whether it's vaulted (open to the roof, no flat ceiling).
@@ -313,6 +331,41 @@ class RevitModel:
     orientation: float = 0.0
     siding: str | None = None
     roofing: str | None = None
+    #: Optional lot block ``{"width", "length", "setbacks": {...}}`` carried from
+    #: a declared ``site``/``setback``. ``None`` — and the JSON key absent — when
+    #: no site is declared, so undeclared documents stay byte-identical and the
+    #: builder can place the model relative to a survey point when it is present.
+    site: dict | None = None
+    # --- exchange v2 round-trip intent (all optional/additive) ----------------
+    # These carry declared *intent* that the geometry alone can't reconstruct, so
+    # a plan that went through Revit and back still knows what it was meant to be
+    # (the declared program in particular keeps ``PROGRAM_MISMATCH`` guarding
+    # edits made after a round-trip). Each rides in the ``plan`` block and is
+    # emitted **only when non-default**, so a plan that declares none of them
+    # produces a byte-identical ``plan`` block to before.
+    #: Roof form (``"gable"``/``"shed"``/``"monitor"``); the JSON key is absent
+    #: for the default gable so old documents stay byte-identical.
+    roof_style: str = "gable"
+    #: Authored roof pitch override (rise:run); ``None`` — key absent — uses the
+    #: default. Distinct from the *effective* pitch in the geometric ``roof``
+    #: block, so a plan with no override round-trips back to ``None`` (a fixed
+    #: point under emit).
+    roof_pitch: float | None = None
+    #: Free-text plan notes; empty string — key absent — when none authored.
+    notes: str = ""
+    #: Accessibility / aging-in-place opt-in; ``False`` — key absent — by default.
+    accessible: bool = False
+    #: Declared program ``{"beds", "baths"?, "required"?, "min_area"?}`` from a
+    #: ``program`` statement; ``None`` — key absent — when none declared.
+    program: dict | None = None
+    #: Declared frame spec ``{"bay", "span", "post", "ridge"}`` (the *request*,
+    #: not the placed members — those ride ``structure``); ``None`` — key absent
+    #: — when no frame is declared.
+    frame: dict | None = None
+    #: Declared ``suite`` / ``zone`` groupings, each ``[{"id", "members"}, ...]``
+    #: in declaration order; ``None`` — key absent — when none declared.
+    suites: list | None = None
+    zones: list | None = None
 
     def to_dict(self) -> dict:
         """A JSON-serialisable dict — the ``barndsl.revit/1`` exchange document."""
@@ -330,6 +383,18 @@ class RevitModel:
                 "orientation": self.orientation,
                 "siding": self.siding,
                 "roofing": self.roofing,
+                # Exchange v2 declared intent — each key present only when it is
+                # non-default, so a plan declaring none of them keeps a
+                # byte-identical `plan` block (and none of these fields is
+                # fingerprinted, so element rebuild diffs are unaffected).
+                **({"roof_style": self.roof_style} if self.roof_style != "gable" else {}),
+                **({"roof_pitch": self.roof_pitch} if self.roof_pitch is not None else {}),
+                **({"notes": self.notes} if self.notes else {}),
+                **({"accessible": True} if self.accessible else {}),
+                **({"program": self.program} if self.program is not None else {}),
+                **({"frame": self.frame} if self.frame is not None else {}),
+                **({"suites": self.suites} if self.suites else {}),
+                **({"zones": self.zones} if self.zones else {}),
             },
             "levels": [asdict(l) for l in self.levels],
             "walls": [
@@ -344,6 +409,9 @@ class RevitModel:
                     "profile": w.profile,
                     "apex": list(w.apex) if w.apex is not None else None,
                     "apex_height": w.apex_height,
+                    # Only a declared wall carries a kind; the key is absent
+                    # otherwise so undeclared documents stay byte-identical.
+                    **({"kind": w.kind} if w.kind is not None else {}),
                 }
                 for w in self.walls
             ],
@@ -383,6 +451,7 @@ class RevitModel:
                     "clear_area": r.clear_area,
                     "ceiling_height": r.ceiling_height,
                     "vaulted": r.vaulted,
+                    **({"zone": r.zone} if r.zone is not None else {}),
                 }
                 for r in self.rooms
             ],
@@ -430,6 +499,9 @@ class RevitModel:
                 }
                 for fx in self.fixtures
             ],
+            # Only a declared site carries a block; the key is absent otherwise so
+            # undeclared documents stay byte-identical.
+            **({"site": self.site} if self.site is not None else {}),
         }
 
     def to_json(self, indent: int | None = 2) -> str:
@@ -439,7 +511,7 @@ class RevitModel:
 # --- wall extraction ---------------------------------------------------------
 
 
-def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
+def _walls_one_axis(rooms, sections, vertical, height, level, idgen, declared=()):
     """Derive deduplicated wall runs along one axis for a single level.
 
     ``vertical`` selects walls at constant ``x`` (running north-south); otherwise
@@ -450,7 +522,10 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
     line). Each atomic interval between consecutive breakpoints is a wall when a
     room touches it; it is *interior* when rooms sit on both sides and *exterior*
     when the empty side falls outside the footprint. Contiguous like-classified
-    intervals merge into one wall.
+    intervals merge into one wall — "like-classified" includes the declared
+    wall attributes (``declared``, from :func:`_declared_edges`), so a
+    plumbing/rated/bearing segment starts its own run instead of tagging (or
+    being swallowed by) a colinear neighbour.
     """
     # Accessors that swap meaning between the two axes. "line" is the constant
     # coordinate of an edge; "run" is the coordinate it varies along.
@@ -484,8 +559,10 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
             on_neg = any(run_lo(r) - TOL <= mid <= run_hi(r) + TOL for r in neg)
             seg = None
             if on_pos or on_neg:
+                attrs = frozenset()
                 if on_pos and on_neg:
                     exterior = False  # partition between two rooms
+                    attrs = _segment_attrs(declared, c, mid)
                 else:
                     # Probe just past the empty side; outside the footprint ⇒ exterior.
                     if vertical:
@@ -495,15 +572,19 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
                         px = mid
                         py = c - _PROBE if on_pos else c + _PROBE
                     exterior = not point_in_footprint(sections, px, py)
-                seg = (a, b, exterior)
+                seg = (a, b, exterior, attrs)
 
             if seg is None:
                 if run is not None:
                     walls.append(_make_wall(idgen, level, vertical, c, run, height))
                     run = None
                 continue
-            if run is not None and run[2] == seg[2] and abs(run[1] - seg[0]) <= TOL:
-                run = (run[0], seg[1], seg[2])  # extend the contiguous run
+            if (
+                run is not None
+                and run[2:] == seg[2:]  # same classification AND declared attrs
+                and abs(run[1] - seg[0]) <= TOL
+            ):
+                run = (run[0], seg[1], seg[2], seg[3])  # extend the contiguous run
             else:
                 if run is not None:
                     walls.append(_make_wall(idgen, level, vertical, c, run, height))
@@ -515,12 +596,15 @@ def _walls_one_axis(rooms, sections, vertical, height, level, idgen):
 
 
 def _make_wall(idgen, level, vertical, c, run, height):
-    lo, hi, exterior = run
+    lo, hi, exterior, attrs = run
     if vertical:
         start, end = (c, lo), (c, hi)
     else:
         start, end = (lo, c), (hi, c)
     thickness = EXTERIOR_WALL_THICKNESS if exterior else INTERIOR_WALL_THICKNESS
+    kind = next((k for k in _WALL_KIND_PRECEDENCE if k in attrs), None)
+    if "plumbing" in attrs:
+        thickness = max(thickness, PLUMBING_WALL_THICKNESS)
     return RevitWall(
         id=next(idgen),
         level=level,
@@ -529,15 +613,63 @@ def _make_wall(idgen, level, vertical, c, run, height):
         height=float(height),
         exterior=exterior,
         thickness=thickness,
+        kind=kind,
     )
 
 
 def _extract_walls(plan: Barndominium, level: int, height: float, idgen) -> list[RevitWall]:
     rooms = [r for r in plan.rooms if getattr(r, "level", 0) == level]
     sections = plan.footprint_sections()
-    walls = _walls_one_axis(rooms, sections, True, height, level, idgen)
-    walls += _walls_one_axis(rooms, sections, False, height, level, idgen)
+    walls = _walls_one_axis(
+        rooms, sections, True, height, level, idgen, _declared_edges(plan, level, True)
+    )
+    walls += _walls_one_axis(
+        rooms, sections, False, height, level, idgen, _declared_edges(plan, level, False)
+    )
     return walls
+
+
+#: When one `wall` statement declares several attributes the exchange carries a
+#: single ``kind`` — picked in this order (life-safety first, then structure,
+#: then plumbing), documented so the mapping is deterministic.
+_WALL_KIND_PRECEDENCE = ("rated", "bearing", "plumbing")
+
+
+def _declared_edges(plan: Barndominium, level: int, vertical: bool) -> list[tuple]:
+    """The declared ``wall`` statements' shared edges on one level and axis.
+
+    Returns ``(const_coord, lo, hi, attributes)`` tuples so the wall extraction
+    can tag each *atomic* segment before contiguous runs merge — a declared
+    kind therefore never bleeds past its own shared edge onto a colinear
+    neighbour's wall, and two statements on distinct colinear edges each keep
+    their own kind. Overlapping declarations on the same physical edge union
+    their attributes (the exchange's single ``kind`` then follows
+    :data:`_WALL_KIND_PRECEDENCE`, so ``rated`` beats ``plumbing`` regardless
+    of declaration order).
+    """
+    want = "v" if vertical else "h"
+    out = []
+    for ws in getattr(plan, "wall_specs", None) or []:
+        a, b = plan.room(ws.room_a), plan.room(ws.room_b)
+        if a is None or b is None or a.id == b.id:
+            continue  # WALL_REF's problem
+        if getattr(a, "level", 0) != level or getattr(b, "level", 0) != level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None or edge.orientation != want:
+            continue  # WALL_NOADJ's problem (or the other axis)
+        if ws.attributes:
+            out.append((edge.pos, edge.lo, edge.hi, frozenset(ws.attributes)))
+    return out
+
+
+def _segment_attrs(declared: list[tuple], c: float, mid: float) -> frozenset:
+    """The union of declared attributes covering one atomic segment."""
+    attrs: set[str] = set()
+    for pos, lo, hi, a in declared:
+        if abs(pos - c) <= 1e-4 and lo - TOL <= mid <= hi + TOL:
+            attrs |= a
+    return frozenset(attrs)
 
 
 # --- opening hosting ---------------------------------------------------------
@@ -699,24 +831,25 @@ def plan_stair_runs(x: float, y: float, width: float, length: float, rise: float
 # --- roof & structural grids -------------------------------------------------
 
 
-def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PITCH) -> dict:
-    """A gable-roof plan over the building's bounding box (pure, no Revit).
+def _roof_over_rect(
+    minx: float,
+    miny: float,
+    maxx: float,
+    maxy: float,
+    style: str,
+    pitch: float,
+    low_edge: "str | None" = None,
+) -> dict:
+    """The gable/shed roof geometry over one rectangle (pure, no Revit).
 
-    The ridge runs the **long** axis at the centre; the two eaves are the long
-    edges. ``rise`` is the ridge height above the eaves for the given ``pitch``
-    (rise:run) over half the short span. The outline is the bounding rectangle —
-    a simplification for L/T/U footprints (a gable over the bounds), which the
-    builder can refine. ``slope_angle`` is the eave-edge slope in **radians**, and
-    ``outline_slopes`` is a bool per outline segment flagging the eave edges (the
-    ones the builder makes slope-defining). Returns ``{top_level, pitch, rise,
-    slope_angle, ridge, eaves, outline, outline_slopes, gable_axis}``; coordinates
-    are ``[x, y]`` in feet.
+    Factored out of :func:`roof_plan` so it serves both the whole-building
+    bounding roof *and* each per-footprint-section roof (and each monitor
+    strip). Returns ``{style, pitch, rise, slope_angle, ridge, eaves, outline,
+    outline_slopes, gable_axis}`` — the same keys the single roof always
+    carried, so a plain rectangular plan's roof block is byte-identical to
+    before. The ridge runs the rectangle's **long** axis; ``outline_slopes``
+    flags the eave (slope-defining) edges.
     """
-    style = getattr(plan, "roof_style", "gable")
-    override = getattr(plan, "roof_pitch", None)
-    if override:
-        pitch = float(override)
-    minx, miny, maxx, maxy = plan.bounds()
     w, l = maxx - minx, maxy - miny
     long_is_y = l >= w
     span = min(w, l)
@@ -757,14 +890,26 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
     if style == "shed":
         # A shed slopes as one plane from a low eave up to a high eave; only the
         # low eave is slope-defining (the other long edge is the high wall).
-        seen_eave = False
-        for i, is_eave in enumerate(outline_slopes):
-            if is_eave and not seen_eave:
-                seen_eave = True  # keep the first eave slope-defining
-            elif is_eave:
-                outline_slopes[i] = False
+        # ``low_edge`` pins WHICH side is low ("min"/"max" of the short axis) —
+        # a monitor's side sheds must both rise toward the raised centre, so
+        # the caller names the outer edge. None keeps the historical pick (the
+        # first eave in outline order) so plain shed plans stay byte-identical.
+        if low_edge is None:
+            seen_eave = False
+            for i, is_eave in enumerate(outline_slopes):
+                if is_eave and not seen_eave:
+                    seen_eave = True  # keep the first eave slope-defining
+                elif is_eave:
+                    outline_slopes[i] = False
+        else:
+            # Outline order: [south(0), east(1), north(2), west(3)]. The eaves
+            # for gable_axis "x" are south/north; for "y" they are west/east.
+            want = {
+                ("x", "min"): 0, ("x", "max"): 2,
+                ("y", "min"): 3, ("y", "max"): 1,
+            }[(gable_axis, low_edge)]
+            outline_slopes = [i == want for i in range(4)]
     return {
-        "top_level": top_level,
         "style": style,
         "pitch": pitch,
         "rise": rise,
@@ -775,6 +920,116 @@ def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PI
         "outline_slopes": outline_slopes,
         "gable_axis": gable_axis,
     }
+
+
+def _monitor_sections(
+    minx: float, miny: float, maxx: float, maxy: float, pitch: float, top_level: int
+) -> list[dict]:
+    """The three roof planes of a **monitor** (raised-centre-aisle) barn.
+
+    A monitor silhouette is a low side shed on each flank rising to a raised
+    central gable (the clerestory aisle). The short span is split into quarters:
+    the outer quarters are shed roofs (low eave outside, rising inward), and the
+    central half is a gable **raised** by the side sheds' rise so it sits atop
+    the clerestory. Each section carries ``role`` (``monitor_side`` /
+    ``monitor_center``) and ``base_height`` (feet the plane's eave sits above the
+    plate) so the builder can lift the centre plane. The clerestory *stub walls*
+    that close the gap under the raised gable are a manual refinement — not built
+    here (documented in the extension README).
+    """
+    w, l = maxx - minx, maxy - miny
+    long_is_y = l >= w
+    span = min(w, l)
+    quarter = span / 4.0
+    side_rise = quarter * pitch  # the side sheds' rise = the clerestory height
+    out: list[dict] = []
+    # Both side sheds must rise TOWARD the raised centre: each shed's low eave
+    # is its OUTER edge ("min" for the first strip, "max" for the last).
+    if long_is_y:
+        strips = [
+            (minx, minx + quarter, "monitor_side", "shed", 0.0, "min"),
+            (minx + quarter, maxx - quarter, "monitor_center", "gable", side_rise, None),
+            (maxx - quarter, maxx, "monitor_side", "shed", 0.0, "max"),
+        ]
+        for a, b, role, st, base, low in strips:
+            sec = _roof_over_rect(a, miny, b, maxy, st, pitch, low_edge=low)
+            sec.update({"role": role, "base_height": base, "top_level": top_level})
+            out.append(sec)
+    else:
+        strips = [
+            (miny, miny + quarter, "monitor_side", "shed", 0.0, "min"),
+            (miny + quarter, maxy - quarter, "monitor_center", "gable", side_rise, None),
+            (maxy - quarter, maxy, "monitor_side", "shed", 0.0, "max"),
+        ]
+        for a, b, role, st, base, low in strips:
+            sec = _roof_over_rect(minx, a, maxx, b, st, pitch, low_edge=low)
+            sec.update({"role": role, "base_height": base, "top_level": top_level})
+            out.append(sec)
+    return out
+
+
+def _roof_sections(plan: Barndominium, style: str, pitch: float, top_level: int):
+    """Per-plane roof sections, or ``None`` when a single bounding roof suffices.
+
+    * A **monitor** plan decomposes into three planes (see
+      :func:`_monitor_sections`), so the namesake barn form reaches Revit as real
+      roof planes instead of a plain gable over the bounds.
+    * An **L/T/U** plan (more than one footprint section) roofs *each footprint
+      rectangle* — mirroring the slab/foundation pass — so the roof covers the
+      wing and no longer spans the notch.
+    * A plain rectangular gable/shed plan returns ``None``: the single bounding
+      roof stays exactly as before, so its emitted roof data (and its
+      fingerprint) is byte-identical and it is never needlessly recreated.
+    """
+    if style == "monitor":
+        # The monitor form belongs to the PRIMARY envelope block — spanning the
+        # bounding box would roof the concave notch of an L/T/U plan, the exact
+        # defect per-section roofs exist to fix. Wings get plain gable fields.
+        sections = plan.footprint_sections()
+        ex, ey, ew, el = sections[0]
+        out = _monitor_sections(ex, ey, ex + ew, ey + el, pitch, top_level)
+        for sx, sy, sw, sl in sections[1:]:
+            sec = _roof_over_rect(sx, sy, sx + sw, sy + sl, "gable", pitch)
+            sec.update({"role": "field", "base_height": 0.0, "top_level": top_level})
+            out.append(sec)
+        return out
+    sections = plan.footprint_sections()
+    if len(sections) <= 1:
+        return None
+    out = []
+    for sx, sy, sw, sl in sections:
+        sec = _roof_over_rect(sx, sy, sx + sw, sy + sl, style, pitch)
+        sec.update({"role": "field", "base_height": 0.0, "top_level": top_level})
+        out.append(sec)
+    return out
+
+
+def roof_plan(plan: Barndominium, top_level: int, pitch: float = DEFAULT_ROOF_PITCH) -> dict:
+    """A roof plan over the building (pure, no Revit).
+
+    The top-level block is the roof over the building's **bounding box** — the
+    ridge on the long axis, eaves on the long edges, ``outline``/
+    ``outline_slopes`` for a footprint roof — kept as the backward-compatible
+    single-roof shape (and the fallback for a consumer that ignores sections).
+    Coordinates are ``[x, y]`` in feet; ``slope_angle`` is in radians.
+
+    When the form needs more than one plane the block additionally carries a
+    **``sections``** list (see :func:`_roof_sections`): one richer roof per
+    footprint rectangle for an L/T/U plan (so the wing is covered, not the
+    notch), or the three planes of a monitor. The key is **absent** for a plain
+    rectangular gable/shed plan, so those documents stay byte-identical.
+    """
+    style = getattr(plan, "roof_style", "gable")
+    override = getattr(plan, "roof_pitch", None)
+    if override:
+        pitch = float(override)
+    minx, miny, maxx, maxy = plan.bounds()
+    roof = {"top_level": top_level}
+    roof.update(_roof_over_rect(minx, miny, maxx, maxy, style, pitch))
+    sections = _roof_sections(plan, style, pitch, top_level)
+    if sections:
+        roof["sections"] = sections
+    return roof
 
 
 def foundation_plan(plan: Barndominium) -> dict:
@@ -929,6 +1184,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         lvl_walls = _extract_walls(plan, i, height, wall_ids)
         walls_by_level[i] = lvl_walls
         walls.extend(lvl_walls)
+    # Declared wall attributes (`wall a - b plumbing|bearing|rated`) were
+    # applied per atomic segment inside the extraction, so kinds never bleed
+    # across colinear neighbours and each declaration keeps its own run.
 
     # Openings, hosted onto the walls just derived.
     op_ids = _ids("o")
@@ -970,15 +1228,19 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             continue
         orientation, pos, lo, hi, lvl = geom
         host = _find_host(walls_by_level.get(lvl, []), orientation, pos, lo, hi)
-        overhead = getattr(xd, "kind", "entry") == "overhead"
+        xkind = getattr(xd, "kind", "entry")
+        overhead = xkind == "overhead"
+        if overhead:
+            out_kind = "overhead"  # so the consumer picks a garage-door family
+        elif xkind in DOUBLE_LEAF_KINDS:
+            out_kind = xkind  # "double"/"french": a two-leaf exterior pair
+        else:
+            out_kind = "exterior"  # a single people-door, the historical kind
         openings.append(
             RevitOpening(
                 id=next(op_ids),
                 category="door",
-                # An overhead (sectional garage) door keeps its kind so the
-                # consumer can pick a garage-door family; a people-door stays
-                # the historical "exterior".
-                kind="overhead" if overhead else "exterior",
+                kind=out_kind,
                 level=lvl,
                 location=_location(orientation, pos, lo, hi),
                 width=float(hi - lo),
@@ -1007,7 +1269,10 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
             RevitOpening(
                 id=next(op_ids),
                 category="window",
-                kind="window",
+                # The window kind (casement/slider/fixed/double-hung) folds into
+                # `kind` so the consumer can map families; the category stays
+                # "window", which is what the builder switches on.
+                kind=getattr(w, "kind", "casement"),
                 level=lvl,
                 location=_location(orientation, pos, lo, hi),
                 width=float(hi - lo),
@@ -1019,6 +1284,17 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                 host_wall=host,
             )
         )
+
+    # Map each room to its declared zone (first-declared wins; suite members
+    # inherit the zone that lists their suite). Empty when no zones declared.
+    suite_members = {
+        s.id: s.members for s in (getattr(plan, "suites", None) or [])
+    }
+    zone_of: dict[str, str] = {}
+    for z in getattr(plan, "zones", None) or []:
+        for m in z.members:
+            for rid in suite_members.get(m, (m,)):
+                zone_of.setdefault(rid, z.id)
 
     rooms = []
     for r in plan.rooms:
@@ -1043,6 +1319,7 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                     else height
                 ),
                 vaulted=bool(getattr(r, "vaulted", False)),
+                zone=zone_of.get(r.id),
             )
         )
 
@@ -1185,7 +1462,87 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         orientation=float(getattr(plan, "orientation", None) or 0.0),
         siding=getattr(plan, "siding", None),
         roofing=getattr(plan, "roofing", None),
+        site=_site_block(plan),
+        roof_style=getattr(plan, "roof_style", "gable"),
+        roof_pitch=getattr(plan, "roof_pitch", None),
+        notes=getattr(plan, "notes", "") or "",
+        accessible=bool(getattr(plan, "accessible", False)),
+        program=_program_block(plan),
+        frame=_frame_block(plan),
+        suites=[
+            {"id": st.id, "members": list(st.members)}
+            for st in (getattr(plan, "suites", None) or [])
+        ] or None,
+        zones=[
+            {"id": z.id, "members": list(z.members)}
+            for z in (getattr(plan, "zones", None) or [])
+        ] or None,
     )
+
+
+def _program_block(plan: Barndominium) -> dict | None:
+    """The exchange's optional ``program`` block from a declared ``program``.
+
+    Mirrors :class:`~barndsl.elements.ProgramSpec` so ``exchange_to_plan`` can
+    call :meth:`Barndominium.program` and restore the declared intent (the
+    reason ``PROGRAM_MISMATCH`` still guards edits made after a round-trip).
+    ``None`` — key absent — when no program is declared.
+    """
+    ps = getattr(plan, "program_spec", None)
+    if ps is None:
+        return None
+    block: dict = {"beds": int(ps.beds)}
+    if ps.baths is not None:
+        block["baths"] = int(ps.baths)
+    if ps.required:
+        # RoomType keys → their string values, which ``program(requires=...)``
+        # feeds back through ``RoomType(...)`` on restore.
+        block["required"] = {t.value: int(n) for t, n in ps.required.items()}
+    if ps.min_area is not None:
+        block["min_area"] = float(ps.min_area)
+    return block
+
+
+def _frame_block(plan: Barndominium) -> dict | None:
+    """The exchange's optional ``frame`` block from a declared ``frame``.
+
+    Carries the frame *request* (:class:`~barndsl.elements.FrameSpec`), not the
+    placed posts/beams (those ride ``structure``), so re-placing on import
+    regenerates the skeleton deterministically. ``None`` — key absent — when no
+    frame is declared.
+    """
+    fs = getattr(plan, "frame_spec", None)
+    if fs is None:
+        return None
+    return {
+        "bay": float(fs.bay),
+        "span": float(fs.span),
+        "post": float(fs.post),
+        "ridge": bool(fs.ridge),
+    }
+
+
+def _site_block(plan: Barndominium) -> dict | None:
+    """The exchange's optional ``site`` block from a declared ``site``/``setback``.
+
+    ``None`` when no lot dimensions are declared, so the key stays absent (old
+    documents are byte-identical). Only declared setback edges appear, so the
+    reverse path restores exactly what was authored.
+    """
+    ss = getattr(plan, "site_spec", None)
+    if ss is None or not ss.has_dims:
+        return None
+    block: dict = {"width": float(ss.width), "length": float(ss.length)}
+    setbacks: dict = {}
+    if ss.front is not None:
+        setbacks["front"] = float(ss.front)
+    if ss.side is not None:
+        setbacks["side"] = float(ss.side)
+    if ss.rear is not None:
+        setbacks["rear"] = float(ss.rear)
+    if setbacks:
+        block["setbacks"] = setbacks
+    return block
 
 
 def to_revit_json(plan: Barndominium, indent: int | None = 2) -> str:
@@ -1205,6 +1562,304 @@ def to_revit_json(plan: Barndominium, indent: int | None = 2) -> str:
 
 class RevitImportError(ValueError):
     """The exchange can't be reconstructed into a plan."""
+
+
+# --- units normalisation -----------------------------------------------------
+#
+# The exchange's *canonical* internal unit is the decimal foot, and EMISSION is
+# always feet (``to_dict`` writes ``"units": "feet"``) so fingerprints never
+# move. ACCEPTANCE, though, allows metric: a document that declares metric units
+# is normalised to feet here, at load time, before anything reads a coordinate —
+# so every downstream reader (this module *and* the pyRevit builder) works purely
+# in feet and needs no unit awareness of its own.
+#
+# The conversion is **schema-driven**: :data:`_UNIT_FIELDS` names every field of
+# every exchange record as a length / area / volume / point-list / pass-through.
+# Walking a record against its table, an *unknown numeric* field (a length added
+# to the exchange without a table entry) raises loudly instead of silently
+# importing an unconverted — and therefore geometrically corrupt — value. Angles
+# and ratios (``orientation``, ``roof_pitch``, ``pitch``, ``slope_angle``) are
+# deliberately marked ``skip``; areas convert by the *square* of the factor.
+#
+# This table is duplicated verbatim in the pyRevit extension's loader
+# (``revit/barndsl.extension/lib/barndsl_revit/exchange.py``), which cannot import
+# this module (it runs under pyRevit's engine, isolated from ``src``).
+# ``tests/test_revit_units.py`` asserts the two copies stay byte-for-byte in sync.
+
+#: 1 m = 1/0.3048 ft, rounded to 6 decimals. Plenty for a sub-1e-6 round-trip and
+#: tidier than the full expansion (3 m → 9.84252 ft, not 9.842519685…). The area
+#: factor is this squared; the volume factor (only ``concrete_yd3``) is cubed.
+FOOT_PER_METER = round(1.0 / 0.3048, 6)  # 3.28084
+
+#: Accepted ``units`` spellings. Canonical is feet; the metric aliases normalise
+#: to feet. Anything else is rejected, naming the value and the supported set.
+_FEET_UNITS = frozenset(("feet",))
+_METER_UNITS = frozenset(("meters", "metres", "m"))
+
+#: Per-record field classification, shared with the extension loader (keep in
+#: sync). Values: "len" (×factor), "area" (×factor²), "vol" (×factor³), "pts" (a
+#: flat coordinate list, each ×factor), "rects" (a list of flat coordinate
+#: lists), "skip" (leave unchanged — strings, bools, indices, counts, angles,
+#: ratios). Container fields (nested dicts / segment lists) are marked "skip"
+#: here and handled structurally by the walker below.
+_UNIT_FIELDS = {
+    "plan": {
+        "name": "skip", "ceiling_height": "len", "floor_depth": "len",
+        "floor_to_floor": "len", "envelope_width": "len", "envelope_length": "len",
+        "wings": "rects", "orientation": "skip", "siding": "skip", "roofing": "skip",
+        "roof_style": "skip", "roof_pitch": "skip", "notes": "skip",
+        "accessible": "skip", "program": "skip", "frame": "skip",
+        "suites": "skip", "zones": "skip",
+    },
+    "program": {"beds": "skip", "baths": "skip", "required": "skip", "min_area": "area"},
+    "frame": {"bay": "len", "span": "len", "post": "len", "ridge": "skip"},
+    "level": {"index": "skip", "name": "skip", "elevation": "len", "height": "len"},
+    "wall": {
+        "id": "skip", "level": "skip", "start": "pts", "end": "pts", "height": "len",
+        "exterior": "skip", "thickness": "len", "profile": "skip", "apex": "pts",
+        "apex_height": "len", "kind": "skip",
+    },
+    "opening": {
+        "id": "skip", "category": "skip", "kind": "skip", "level": "skip",
+        "location": "pts", "width": "len", "height": "len", "sill": "len",
+        "exterior": "skip", "egress": "skip", "rooms": "skip", "host_wall": "skip",
+        "swing_into": "skip", "hinge": "skip",
+    },
+    "room": {
+        "id": "skip", "name": "skip", "type": "skip", "level": "skip", "point": "pts",
+        "area": "area", "x": "len", "y": "len", "width": "len", "length": "len",
+        "clear_width": "len", "clear_length": "len", "clear_area": "area",
+        "ceiling_height": "len", "vaulted": "skip", "zone": "skip",
+    },
+    "column": {
+        "point": "pts", "size": "len", "role": "skip", "level": "skip",
+        "base": "len", "top": "len",
+    },
+    "framing": {
+        "start": "pts", "end": "pts", "role": "skip", "level": "skip",
+        "z": "len", "size": "len",
+    },
+    "area": {
+        "id": "skip", "kind": "skip", "x": "len", "y": "len", "width": "len",
+        "length": "len", "level": "skip", "meta": "skip",
+    },
+    "meta": {
+        "covered": "skip", "from_level": "skip", "to_level": "skip",
+        "rise": "len", "plan": "skip",
+    },
+    "stairplan": {
+        "risers": "skip", "riser_height": "len", "tread": "len", "layout": "skip",
+        "fits": "skip", "runs": "skip", "landings": "skip",
+    },
+    "stairrun": {"start": "pts", "end": "pts", "width": "len", "risers": "skip"},
+    "landing": {"x": "len", "y": "len", "width": "len", "length": "len"},
+    "slab": {"level": "skip", "x": "len", "y": "len", "width": "len", "length": "len"},
+    "grid": {"label": "skip", "start": "pts", "end": "pts"},
+    "roof": {
+        "top_level": "skip", "style": "skip", "pitch": "skip", "rise": "len",
+        "slope_angle": "skip", "gable_axis": "skip", "outline_slopes": "skip",
+        "ridge": "skip", "eaves": "skip", "outline": "skip", "sections": "skip",
+        "role": "skip", "base_height": "len",
+    },
+    "foundation": {
+        "top": "len", "slab_thickness": "len", "sections": "rects", "edge": "skip",
+        "footings": "skip", "concrete_yd3": "vol",
+    },
+    "edge": {"width": "len", "depth": "len", "segments": "skip"},
+    "footing": {"point": "pts", "size": "len", "depth": "len", "role": "skip"},
+    "fixture": {
+        "id": "skip", "kind": "skip", "room": "skip", "level": "skip", "x": "len",
+        "y": "len", "width": "len", "length": "len", "wall": "skip", "point": "pts",
+    },
+    "site": {"width": "len", "length": "len", "setbacks": "skip"},
+    "setbacks": {"front": "len", "side": "len", "rear": "len"},
+}
+
+
+def _scale(v, f):
+    """Multiply a scalar length by ``f`` (a non-number — ``None``, a bool — passes)."""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v * f
+    return v
+
+
+def _scale_list(v, f):
+    """Multiply each number of a flat coordinate list by ``f`` (``None`` passes)."""
+    if v is None:
+        return v
+    return [_scale(x, f) for x in v]
+
+
+def _convert_record(rec, table, factor, where):
+    """Convert one flat record in place against its field ``table``.
+
+    Any key not in the table whose value is numeric raises :class:`RevitImportError`
+    — the deliberate "fails loudly" contract, so a future length field added to the
+    exchange can't slip through unconverted. Non-numeric extras pass through.
+    """
+    if not isinstance(rec, dict):
+        return
+    for k in list(rec.keys()):
+        kind = table.get(k)
+        if kind is None:
+            v = rec[k]
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                raise RevitImportError(
+                    "unit conversion: unknown numeric field %r in a %s record "
+                    "(the units table needs an entry for it)" % (k, where)
+                )
+            continue
+        if kind == "len":
+            rec[k] = _scale(rec[k], factor)
+        elif kind == "area":
+            rec[k] = _scale(rec[k], factor * factor)
+        elif kind == "vol":
+            rec[k] = _scale(rec[k], factor * factor * factor)
+        elif kind == "pts":
+            rec[k] = _scale_list(rec[k], factor)
+        elif kind == "rects":
+            v = rec[k]
+            if v is not None:
+                rec[k] = [_scale_list(x, factor) for x in v]
+        # "skip": intentionally unchanged
+
+
+def _convert_seg(seg, factor):
+    """Scale a ``{"start": [x, y], "end": [x, y]}`` segment in place."""
+    if isinstance(seg, dict):
+        if seg.get("start") is not None:
+            seg["start"] = _scale_list(seg["start"], factor)
+        if seg.get("end") is not None:
+            seg["end"] = _scale_list(seg["end"], factor)
+
+
+def _convert_outline(outline, factor):
+    """Scale a list of ``[[x, y], [x, y]]`` segments (roof / turndown edge)."""
+    if not outline:
+        return outline
+    return [[_scale_list(pt, factor) for pt in seg] for seg in outline]
+
+
+def _convert_roof(roof, factor):
+    """Scale a roof (or roof-section) dict in place, recursing into sub-planes."""
+    _convert_record(roof, _UNIT_FIELDS["roof"], factor, "roof")
+    _convert_seg(roof.get("ridge"), factor)
+    for e in roof.get("eaves", []) or []:
+        _convert_seg(e, factor)
+    if roof.get("outline"):
+        roof["outline"] = _convert_outline(roof["outline"], factor)
+    for sec in roof.get("sections", []) or []:
+        _convert_roof(sec, factor)
+
+
+def _convert_foundation(found, factor):
+    """Scale a foundation block in place (slab/turndown/footings)."""
+    _convert_record(found, _UNIT_FIELDS["foundation"], factor, "foundation")
+    edge = found.get("edge")
+    if isinstance(edge, dict):
+        _convert_record(edge, _UNIT_FIELDS["edge"], factor, "foundation edge")
+        if edge.get("segments"):
+            edge["segments"] = _convert_outline(edge["segments"], factor)
+    for ft in found.get("footings", []) or []:
+        _convert_record(ft, _UNIT_FIELDS["footing"], factor, "footing")
+
+
+def _convert_area(area, factor):
+    """Scale an area (porch / stair) and its ``meta`` (incl. the stair plan)."""
+    _convert_record(area, _UNIT_FIELDS["area"], factor, "area")
+    meta = area.get("meta")
+    if isinstance(meta, dict):
+        _convert_record(meta, _UNIT_FIELDS["meta"], factor, "area meta")
+        sp = meta.get("plan")
+        if isinstance(sp, dict):
+            _convert_record(sp, _UNIT_FIELDS["stairplan"], factor, "stair plan")
+            for run in sp.get("runs", []) or []:
+                _convert_record(run, _UNIT_FIELDS["stairrun"], factor, "stair run")
+            for land in sp.get("landings", []) or []:
+                _convert_record(land, _UNIT_FIELDS["landing"], factor, "stair landing")
+
+
+def _convert_document(data, factor):
+    """Convert every length/area in an exchange dict in place by ``factor``.
+
+    The schema-driven walker (see :data:`_UNIT_FIELDS`). Used to normalise a
+    metric document to feet (``factor = FOOT_PER_METER``); the tests also drive
+    it with the reciprocal to synthesise a metric document from a feet one.
+    """
+    plan = data.get("plan")
+    if isinstance(plan, dict):
+        _convert_record(plan, _UNIT_FIELDS["plan"], factor, "plan")
+        prog = plan.get("program")
+        if isinstance(prog, dict):
+            _convert_record(prog, _UNIT_FIELDS["program"], factor, "program")
+        fr = plan.get("frame")
+        if isinstance(fr, dict):
+            _convert_record(fr, _UNIT_FIELDS["frame"], factor, "frame")
+    for lv in data.get("levels", []) or []:
+        _convert_record(lv, _UNIT_FIELDS["level"], factor, "level")
+    for w in data.get("walls", []) or []:
+        _convert_record(w, _UNIT_FIELDS["wall"], factor, "wall")
+    for o in data.get("openings", []) or []:
+        _convert_record(o, _UNIT_FIELDS["opening"], factor, "opening")
+    for r in data.get("rooms", []) or []:
+        _convert_record(r, _UNIT_FIELDS["room"], factor, "room")
+    struct = data.get("structure")
+    if isinstance(struct, dict):
+        for c in struct.get("columns", []) or []:
+            _convert_record(c, _UNIT_FIELDS["column"], factor, "column")
+        for f in struct.get("framing", []) or []:
+            _convert_record(f, _UNIT_FIELDS["framing"], factor, "framing")
+    for a in data.get("areas", []) or []:
+        _convert_area(a, factor)
+    for s in data.get("slabs", []) or []:
+        _convert_record(s, _UNIT_FIELDS["slab"], factor, "slab")
+    for g in data.get("grids", []) or []:
+        _convert_record(g, _UNIT_FIELDS["grid"], factor, "grid")
+    roof = data.get("roof")
+    if isinstance(roof, dict):
+        _convert_roof(roof, factor)
+    found = data.get("foundation")
+    if isinstance(found, dict):
+        _convert_foundation(found, factor)
+    for fx in data.get("fixtures", []) or []:
+        _convert_record(fx, _UNIT_FIELDS["fixture"], factor, "fixture")
+    site = data.get("site")
+    if isinstance(site, dict):
+        _convert_record(site, _UNIT_FIELDS["site"], factor, "site")
+        sb = site.get("setbacks")
+        if isinstance(sb, dict):
+            _convert_record(sb, _UNIT_FIELDS["setbacks"], factor, "setback")
+    return data
+
+
+def normalize_exchange_units(data: dict) -> dict:
+    """Return an exchange in feet, ready for reconstruction.
+
+    A ``feet`` document (the only unit the producer ever emits) passes through
+    **untouched** — the byte-identical path, no conversion, so nothing perturbs a
+    fingerprint. A metric document (``meters`` / ``metres`` / ``m``) is
+    deep-copied and every length/area normalised to feet by :func:`_convert_document`
+    (its ``units`` then rewritten to ``feet``). Any other value raises
+    :class:`RevitImportError`, naming it and the supported set.
+    """
+    units = data.get("units", "feet")
+    if units in _FEET_UNITS:
+        return data
+    if units in _METER_UNITS:
+        import copy
+
+        out = copy.deepcopy(data)
+        _convert_document(out, FOOT_PER_METER)
+        out["units"] = "feet"
+        return out
+    raise RevitImportError(
+        "unsupported units %r (expected feet %s or metric %s)"
+        % (units, sorted(_FEET_UNITS), sorted(_METER_UNITS))
+    )
 
 
 def _infer_exterior_wall(room: Room, location, width: float, tol: float = 1e-3):
@@ -1240,16 +1895,23 @@ def exchange_to_plan(data: dict) -> Barndominium:
 
     The inverse of :func:`to_revit_model`. Rebuilds the envelope/wings, rooms,
     interior and exterior doors, windows, porches and stairs by re-deriving each
-    opening's wall and offset from its geometry. Frame/program/notes aren't
-    carried in the exchange, so they aren't restored. Raises
-    :class:`RevitImportError` on a document that isn't this schema.
+    opening's wall and offset from its geometry. The exchange-v2 declared intent
+    — roof style/pitch, notes, the accessibility opt-in, the ``program`` and the
+    ``frame`` request — round-trips too when present (each is an optional key, so
+    an older document without it still loads). The declared program surviving the
+    trip is what keeps ``PROGRAM_MISMATCH`` guarding edits made in Revit. A
+    metric document (``units`` = ``meters``/``metres``/``m``) is normalised to
+    feet before reconstruction; ``feet`` passes through untouched. Raises
+    :class:`RevitImportError` on a document that isn't this schema or whose units
+    are unsupported.
     """
     if not isinstance(data, dict) or data.get("schema") != EXCHANGE_SCHEMA:
         raise RevitImportError(
             "not a %s exchange (got schema %r)" % (EXCHANGE_SCHEMA, (data or {}).get("schema"))
         )
-    if data.get("units", "feet") != "feet":
-        raise RevitImportError("unsupported units %r" % data.get("units"))
+    # Normalise units to feet up front: feet passes through untouched, a metric
+    # document is converted, anything else raises. Everything below reads feet.
+    data = normalize_exchange_units(data)
 
     from .elements import Barndominium
 
@@ -1266,9 +1928,63 @@ def exchange_to_plan(data: dict) -> Barndominium:
         plan.orient(float(pinfo["orientation"]))
     if pinfo.get("siding") or pinfo.get("roofing"):
         plan.finish(siding=pinfo.get("siding"), roof=pinfo.get("roofing"))
+    site = data.get("site")
+    if (
+        isinstance(site, dict)
+        and site.get("width") is not None
+        and site.get("length") is not None
+    ):
+        plan.site(float(site["width"]), float(site["length"]))
+        setbacks = site.get("setbacks") or {}
+        if setbacks:
+            plan.setback(
+                front=setbacks.get("front"),
+                side=setbacks.get("side"),
+                rear=setbacks.get("rear"),
+            )
+    # Roof form/pitch intent. The *effective* pitch lives in the geometric roof
+    # block, but the authored **override** rides `plan.roof_pitch` — carry it so
+    # a plan with no override round-trips back to the default (a fixed point),
+    # rather than freezing the default number as an override.
+    roof_style = pinfo.get("roof_style")
+    roof_pitch = pinfo.get("roof_pitch")
+    if roof_style is not None or roof_pitch is not None:
+        plan.roof(roof_style or "gable", pitch=roof_pitch)
+    if pinfo.get("notes"):
+        plan.note(str(pinfo["notes"]))
+    if pinfo.get("accessible"):
+        plan.mark_accessible(True)
+    prog = pinfo.get("program")
+    if isinstance(prog, dict) and prog.get("beds") is not None:
+        plan.program(
+            int(prog["beds"]),
+            prog.get("baths"),
+            requires={k: int(v) for k, v in (prog.get("required") or {}).items()},
+            min_area=prog.get("min_area"),
+        )
+
+    for st in pinfo.get("suites", []) or []:
+        if st.get("members"):
+            plan.suite(st["id"], *st["members"])
+    for z in pinfo.get("zones", []) or []:
+        if z.get("members"):
+            plan.zone(z["id"], *z["members"])
+
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))
+
+    # The frame *request* re-places the post-and-beam skeleton (posts/beams
+    # aren't stored directly). Placed after the footprint (envelope + wings) is
+    # complete so the placer sees the whole building.
+    frame = pinfo.get("frame")
+    if isinstance(frame, dict):
+        plan.frame(
+            bay=float(frame.get("bay", 12.0)),
+            span=float(frame.get("span", 40.0)),
+            post=float(frame.get("post", feet(0.5))),
+            ridge=bool(frame.get("ridge", True)),
+        )
 
     # Rooms first — openings resolve against them.
     plan_ceiling = float(pinfo.get("ceiling_height", feet(9)))
@@ -1289,6 +2005,38 @@ def exchange_to_plan(data: dict) -> Barndominium:
             vaulted=bool(r.get("vaulted", False)),
         )
 
+    # Declared wall kinds ride the wall segments; re-derive the room pair each
+    # tagged segment separates so `wall a - b ...` statements survive the trip
+    # (a plumbing-thickness hint on a rated segment restores both attributes).
+    specs: dict[tuple[str, str], set[str]] = {}
+    for w in data.get("walls", []):
+        kind = w.get("kind")
+        if not kind or w.get("exterior"):
+            continue
+        (sx, sy), (ex, ey) = w.get("start", (0.0, 0.0)), w.get("end", (0.0, 0.0))
+        vertical = abs(sx - ex) <= 1e-9
+        orientation = "v" if vertical else "h"
+        const = sx if vertical else sy
+        lo, hi = sorted((sy, ey) if vertical else (sx, ex))
+        lvl_rooms = [r for r in plan.rooms if getattr(r, "level", 0) == w.get("level", 0)]
+        for i, ra in enumerate(lvl_rooms):
+            for rb in lvl_rooms[i + 1 :]:
+                edge = shared_edge(ra, rb)
+                if (
+                    edge is None
+                    or edge.orientation != orientation
+                    or abs(edge.pos - const) > 1e-4
+                ):
+                    continue
+                if min(hi, edge.hi) - max(lo, edge.lo) <= TOL:
+                    continue
+                attrs = specs.setdefault((ra.id, rb.id), set())
+                attrs.add(kind)
+                if float(w.get("thickness", 0.0)) >= PLUMBING_WALL_THICKNESS - 1e-9:
+                    attrs.add("plumbing")
+    for (ra_id, rb_id), attrs in specs.items():
+        plan.wall(ra_id, rb_id, *sorted(attrs))
+
     for o in data.get("openings", []):
         rooms = o.get("rooms", [])
         width = float(o.get("width", 0.0))
@@ -1301,9 +2049,15 @@ def exchange_to_plan(data: dict) -> Barndominium:
             if wall is None:
                 continue
             head = float(o.get("sill", 0.0)) + float(o.get("height", 0.0))
+            # Window kind round-trips; an old document's generic "window" (or a
+            # missing kind) falls back to the casement default.
+            wkind = o.get("kind")
+            if wkind not in WINDOW_KINDS:
+                wkind = "casement"
             plan.add_window(
                 room.id, wall, width=width, offset=max(0.0, offset),
                 sill_height=float(o.get("sill", 0.0)), head_height=head,
+                kind=wkind,
             )
         elif o.get("exterior"):
             room = plan.room(rooms[0]) if rooms else None
@@ -1312,13 +2066,20 @@ def exchange_to_plan(data: dict) -> Barndominium:
             wall, offset = _infer_exterior_wall(room, loc, width)
             if wall is None:
                 continue
-            overhead = o.get("kind") == "overhead"
+            raw_kind = o.get("kind")
+            overhead = raw_kind == "overhead"
+            if overhead:
+                dkind = "overhead"
+            elif raw_kind in DOUBLE_LEAF_KINDS:
+                dkind = raw_kind  # a double/french pair round-trips its kind
+            else:
+                dkind = "entry"  # the historical "exterior" single door
             plan.entrance(
                 room.id, wall, width=width, offset=max(0.0, offset),
                 egress=bool(o.get("egress", True)),
                 # An overhead door round-trips its kind and panel height;
                 # entrance() re-forces egress=False for it.
-                kind="overhead" if overhead else "entry",
+                kind=dkind,
                 height=(
                     float(o["height"])
                     if overhead and o.get("height") is not None
