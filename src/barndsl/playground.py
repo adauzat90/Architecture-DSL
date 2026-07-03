@@ -51,6 +51,18 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
     ``{source, line, changed, ...compile_payload(new_source)}``. A refused edit
     (unknown room, malformed) is a normal ``200`` with ``{"error": {kind, message}}``
     — bad edits are ordinary UX, not failures; only malformed/oversize JSON is ``400``.
+``POST /api/export``
+    body ``{"source": "...", "format": "svg|dxf|glb|ifc|viewer"}`` → the compiled
+    artifact as a file download: the right ``Content-Type`` and a
+    ``Content-Disposition`` attachment filename derived from the plan name. Binary
+    formats (``glb``) stream as bytes. The plan is compiled once and reused; a
+    source with errors (or a recovered parse) is refused with a normal ``200`` and
+    a typed ``{"error": {kind, message}}`` (matching ``/api/edit``) — the SPA
+    disables the menu on a bad compile, so this is a backstop. Unknown format or
+    malformed/oversize JSON is ``400``. No exporter is re-implemented: it reuses
+    :func:`barndsl.render.render_svg`, :func:`barndsl.dxf.to_dxf`,
+    :func:`barndsl.gltf.to_glb`, :func:`barndsl.ifc.to_ifc` and
+    :func:`barndsl.viewer.viewer_html`.
 
 The server is stateless apart from a single-job design lock: it writes no files
 and holds no session. The frontend keeps the last good render when the current
@@ -69,11 +81,14 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .compiler import DSL_REFERENCE, compile_source
+from .dxf import to_dxf
 from .edits import EditError, apply_edit, edit_from_json, opening_overlays
-from .gltf import build_scene
+from .gltf import build_scene, to_glb
+from .ifc import to_ifc
 from .render import ROOM_COLORS, render_svg
+from .scaffold import starter_dsl
 from .score import design_score
-from .viewer import RENDERER_JS, _LAYER_LABELS, scene_json
+from .viewer import RENDERER_JS, _LAYER_LABELS, scene_json, viewer_html
 from .views import elevation_svg, section_svg
 
 #: Maximum accepted request body (bytes) for POST /api/compile — a generous cap
@@ -179,6 +194,41 @@ def compile_payload(source: str) -> dict:
     return payload
 
 
+# --- the export endpoint ------------------------------------------------------
+
+#: The formats ``POST /api/export`` can produce. Order is the SPA menu order.
+EXPORT_FORMATS = ("svg", "dxf", "glb", "ifc", "viewer")
+
+
+def _plan_slug(name: str) -> str:
+    """A filesystem-safe slug for a plan name (mirrors the CLI's ``_slugify``)."""
+    slug = "".join(c.lower() if c.isalnum() else "_" for c in (name or "").strip())
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug.strip("_") or "barndo"
+
+
+def export_artifact(fmt: str, plan: Any) -> tuple[bytes, str, str]:
+    """Render ``plan`` into ``fmt`` → ``(body_bytes, content_type, filename)``.
+
+    Reuses the standalone exporters verbatim; ``fmt`` must be in
+    :data:`EXPORT_FORMATS` (the caller validates). Binary formats return raw
+    bytes; text formats are UTF-8 (DXF R12 is ASCII, matching :func:`~barndsl.dxf.save_dxf`).
+    """
+    slug = _plan_slug(plan.name)
+    if fmt == "svg":
+        return render_svg(plan).encode("utf-8"), "image/svg+xml; charset=utf-8", f"{slug}.svg"
+    if fmt == "dxf":
+        return (to_dxf(plan).encode("ascii", "replace"),
+                "application/dxf; charset=ascii", f"{slug}.dxf")
+    if fmt == "glb":
+        return to_glb(plan), "model/gltf-binary", f"{slug}.glb"
+    if fmt == "ifc":
+        return to_ifc(plan).encode("utf-8"), "application/x-step; charset=utf-8", f"{slug}.ifc"
+    # viewer: the self-contained single-file 3D viewer ("share with a client").
+    return viewer_html(plan).encode("utf-8"), "text/html; charset=utf-8", f"{slug}-3d.html"
+
+
 # --- the design (agent) endpoint ---------------------------------------------
 
 #: A design job (brief → best plan) as an injectable callable. The default drives
@@ -281,6 +331,17 @@ class _Handler(BaseHTTPRequestHandler):
     def _html(self, html: str, status: int = 200) -> None:
         self._send(status, html.encode("utf-8"), "text/html; charset=utf-8")
 
+    def _download(self, body: bytes, ctype: str, filename: str) -> None:
+        """Send ``body`` as a file download (attachment ``Content-Disposition``)."""
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
     # -- routing --
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
@@ -336,7 +397,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
-        if path not in ("/api/compile", "/api/edit", "/api/design", "/api/design/cancel"):
+        if path not in (
+            "/api/compile", "/api/edit", "/api/export", "/api/design", "/api/design/cancel"
+        ):
             self._json({"error": "not found"}, status=404)
             return
         data = self._read_json_body()
@@ -346,6 +409,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_compile(data)
         elif path == "/api/edit":
             self._handle_edit(data)
+        elif path == "/api/export":
+            self._handle_export(data)
         elif path == "/api/design":
             self._handle_design(data)
         else:
@@ -393,6 +458,46 @@ class _Handler(BaseHTTPRequestHandler):
         payload["changed"] = result.changed
         payload["summary"] = result.summary
         self._json(payload)
+
+    def _handle_export(self, data: object) -> None:
+        """Compile ``source`` once and stream the requested artifact as a download.
+
+        A source with errors (or a recovered parse) is refused with a normal 200
+        and a typed ``error`` (matching :meth:`_handle_edit`) — the SPA gates the
+        menu on a clean compile, so this is a backstop, not the primary guard.
+        An unknown format or a malformed envelope is 400.
+        """
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("source"), str)
+            or not isinstance(data.get("format"), str)
+        ):
+            self._json(
+                {"error": 'expected {"source": "<dsl>", "format": "svg|dxf|glb|ifc|viewer"}'},
+                status=400,
+            )
+            return
+        fmt = data["format"]
+        if fmt not in EXPORT_FORMATS:
+            self._json({"error": f"unknown format: {fmt!r}"}, status=400)
+            return
+        try:
+            result = compile_source(data["source"])
+        except Exception as exc:  # a real bug — bad DSL never reaches here
+            self._json({"error": f"internal error: {exc}"}, status=500)
+            return
+        if result.plan is None or result.recovered or not result.ok:
+            self._json({"error": {
+                "kind": "compile_error",
+                "message": "fix the plan's errors before exporting",
+            }})
+            return
+        try:
+            body, ctype, filename = export_artifact(fmt, result.plan)
+        except Exception as exc:  # an exporter that lowers oddly must not leak a 500-less path
+            self._json({"error": f"internal error: {exc}"}, status=500)
+            return
+        self._download(body, ctype, filename)
 
     # -- the agent (design) endpoint --
     def _handle_cancel(self, data: object) -> None:
@@ -529,11 +634,15 @@ class _PlaygroundServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(
-        self, address: tuple[str, int], initial_source: str, designer: Designer | None = None
+        self,
+        address: tuple[str, int],
+        initial_source: str,
+        designer: Designer | None = None,
+        from_file: bool = False,
     ):
         super().__init__(address, _Handler)
         self.initial_source = initial_source
-        self.app_html = render_app(initial_source)
+        self.app_html = render_app(initial_source, from_file=from_file)
         self.examples = load_examples()
         self.designer = designer
         self.design_lock = threading.Lock()
@@ -546,17 +655,21 @@ def make_server(
     port: int = 8787,
     initial_source: str | None = None,
     designer: Designer | None = None,
+    from_file: bool = False,
 ) -> _PlaygroundServer:
     """Build (but do not start) the playground server bound to ``host:port``.
 
     ``port=0`` binds an ephemeral port (used by the tests). ``initial_source``
-    preloads the editor; ``None`` uses :func:`default_source`. ``designer``
-    overrides the agent loop driver (tests inject a keyless fake); ``None`` uses
-    the real Claude agent, imported lazily only when a design job runs. Localhost
-    by default — this is a local tool, so it never binds ``0.0.0.0`` implicitly.
+    preloads the editor; ``None`` uses :func:`default_source`. ``from_file`` marks
+    that ``initial_source`` came from an explicit ``FILE`` argument, so the SPA
+    prefers it over a newer autosaved session (see :func:`render_app`).
+    ``designer`` overrides the agent loop driver (tests inject a keyless fake);
+    ``None`` uses the real Claude agent, imported lazily only when a design job
+    runs. Localhost by default — this is a local tool, so it never binds
+    ``0.0.0.0`` implicitly.
     """
     source = initial_source if initial_source is not None else default_source()
-    return _PlaygroundServer((host, port), source, designer=designer)
+    return _PlaygroundServer((host, port), source, designer=designer, from_file=from_file)
 
 
 def run(
@@ -564,9 +677,10 @@ def run(
     host: str = "127.0.0.1",
     port: int = 8787,
     open_browser: bool = False,
+    from_file: bool = False,
 ) -> int:
     """Start the playground and serve until interrupted. Returns a process code."""
-    httpd = make_server(host, port, initial_source=initial_source)
+    httpd = make_server(host, port, initial_source=initial_source, from_file=from_file)
     url = f"http://{host}:{httpd.server_address[1]}/"
     print(f"barndsl playground → {url}  (Ctrl-C to stop)")
     if open_browser:
@@ -591,18 +705,27 @@ def _js_string(s: str) -> str:
     return json.dumps(s).replace("</", "<\\/")
 
 
-def render_app(initial_source: str) -> str:
+def render_app(initial_source: str, from_file: bool = False) -> str:
     """Return the playground SPA HTML with the renderer and starter source inlined.
 
     Placeholders are filled by :meth:`str.replace` (not ``str.format``) so the
     embedded CSS/JS braces need no escaping. The 3D view embeds the exact same
     :data:`~barndsl.viewer.RENDERER_JS` the single-file viewer uses.
+
+    ``from_file`` records whether ``initial_source`` came from an explicit ``FILE``
+    argument (``barndsl serve plan.barn``). The SPA reads it to resolve autosave
+    restore: with a file it keeps the file on screen and merely *offers* any newer
+    autosaved session (never clobbering it silently); without one it restores the
+    autosaved session outright. The scaffold starter is embedded too, so the
+    "New plan" button needs no round-trip.
     """
     return (
         _APP_HTML
         .replace("__RENDERER_JS__", RENDERER_JS)
         .replace("__LAYER_LABELS__", json.dumps(_LAYER_LABELS))
         .replace("__INITIAL_SOURCE__", _js_string(initial_source))
+        .replace("__INITIAL_FROM_FILE__", "true" if from_file else "false")
+        .replace("__SCAFFOLD_SOURCE__", _js_string(starter_dsl("My Barndo")))
     )
 
 
@@ -630,7 +753,8 @@ _APP_HTML = r"""<!doctype html>
   html, body { margin:0; height:100%; overflow:hidden;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
     background:var(--bg); color:var(--ink); }
-  header { display:flex; align-items:center; gap:14px; padding:9px 16px;
+  body { display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:14px; padding:9px 16px; flex:none;
     background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
   .brand { font-weight:700; font-size:15px; letter-spacing:.2px; }
   .brand span { color:var(--accent); font-weight:600; }
@@ -644,7 +768,40 @@ _APP_HTML = r"""<!doctype html>
   .examples { font-size:12px; color:var(--faint); display:flex; gap:6px; align-items:center; }
   select { font:inherit; font-size:12.5px; padding:4px 8px; border-radius:7px;
     border:1px solid var(--line); background:var(--panel); color:var(--ink); }
-  main { display:flex; height:calc(100% - 44px); }
+  .toolbar { display:flex; gap:6px; align-items:center; }
+  .tbtn { font:inherit; font-size:12.5px; font-weight:600; padding:5px 11px; border-radius:7px;
+    border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer;
+    white-space:nowrap; }
+  .tbtn:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  .tbtn:disabled { opacity:.45; cursor:default; }
+  /* export dropdown (viewport header) */
+  .menu { position:relative; }
+  .menu-list { position:absolute; right:0; top:calc(100% + 4px); z-index:20; min-width:190px;
+    background:var(--panel); border:1px solid var(--line); border-radius:9px;
+    box-shadow:0 6px 22px rgba(20,30,50,.18); padding:5px; }
+  .menu-list[hidden] { display:none; }
+  .menu-item { display:block; width:100%; text-align:left; font:inherit; font-size:12.5px;
+    padding:7px 10px; border:0; border-radius:6px; background:transparent; color:var(--ink);
+    cursor:pointer; }
+  .menu-item:hover { background:rgba(127,127,127,.12); }
+  .menu-item small { display:block; color:var(--faint); font-size:11px; margin-top:1px; }
+  .menu-item .fmt { color:var(--faint); font:11px ui-monospace,Menlo,Consolas,monospace; }
+  /* dismissible non-modal notice bar */
+  #notice { display:flex; align-items:center; gap:12px; padding:8px 16px; font-size:12.5px;
+    background:rgba(209,135,63,.12); border-bottom:1px solid var(--line); color:var(--ink); }
+  #notice[hidden] { display:none; }
+  #notice .notice-msg { flex:1; min-width:0; }
+  #notice button.na { font:inherit; font-size:12px; font-weight:600; padding:4px 11px;
+    border-radius:7px; border:1px solid var(--accent); background:transparent; color:var(--accent);
+    cursor:pointer; white-space:nowrap; }
+  #notice button.na.ghost { border-color:var(--line); color:var(--muted); }
+  #notice button.nx { font:inherit; font-size:16px; line-height:1; padding:0 6px; border:0;
+    background:transparent; color:var(--muted); cursor:pointer; }
+  .drop-hint { position:absolute; inset:0; z-index:9; display:none; align-items:center;
+    justify-content:center; background:rgba(209,135,63,.14); border:2px dashed var(--accent);
+    color:var(--accent); font-weight:700; font-size:14px; pointer-events:none; }
+  .editor-wrap.dragover .drop-hint { display:flex; }
+  main { display:flex; flex:1; min-height:0; }
   .agent { width:308px; flex:none; display:flex; flex-direction:column;
     background:var(--panel); border-right:1px solid var(--line); min-width:0;
     transition:width .16s ease; }
@@ -751,6 +908,7 @@ _APP_HTML = r"""<!doctype html>
     background:transparent; color:var(--muted); border-radius:8px 8px 0 0;
     border-bottom:2px solid transparent; }
   .tab.active { color:var(--ink); font-weight:600; border-bottom-color:var(--accent); }
+  .tabs .menu { align-self:center; margin-bottom:4px; }
   .viewport { flex:1; position:relative; overflow:hidden; background:var(--bg); }
   .viewport.stale .pane { opacity:.45; filter:saturate(.7); transition:opacity .15s; }
   .pane { position:absolute; inset:0; display:none; }
@@ -809,10 +967,21 @@ _APP_HTML = r"""<!doctype html>
   <div id="score-chip" class="chip" title="">score</div>
   <div id="metrics"></div>
   <div class="spacer"></div>
+  <div class="toolbar">
+    <button class="tbtn" id="new-btn" title="Start a new plan from the scaffold">New</button>
+    <button class="tbtn" id="open-btn" title="Open a .barn file (Ctrl/Cmd+O)">Open</button>
+    <button class="tbtn" id="save-btn" title="Download the source as .barn (Ctrl/Cmd+S)">Save</button>
+    <input type="file" id="file-input" accept=".barn,.txt" hidden>
+  </div>
   <label class="examples">example
     <select id="example-select"><option value="">loading…</option></select>
   </label>
 </header>
+<div id="notice" hidden>
+  <span class="notice-msg" id="notice-msg"></span>
+  <span id="notice-actions"></span>
+  <button class="nx" id="notice-dismiss" title="Dismiss" aria-label="Dismiss">×</button>
+</div>
 <main>
   <section class="agent" id="agent-pane">
     <div class="agent-head">
@@ -832,10 +1001,11 @@ _APP_HTML = r"""<!doctype html>
     </div>
   </section>
   <section class="left">
-    <div class="editor-wrap">
+    <div class="editor-wrap" id="editor-wrap">
       <div class="gutter" id="gutter"></div>
       <textarea id="editor" spellcheck="false" autocapitalize="off"
         autocomplete="off" wrap="off"></textarea>
+      <div class="drop-hint">Drop a .barn file to open</div>
     </div>
     <div class="diagnostics" id="diagnostics"></div>
   </section>
@@ -844,6 +1014,19 @@ _APP_HTML = r"""<!doctype html>
       <button class="tab active" data-tab="plan">2D plan</button>
       <button class="tab" data-tab="three">3D</button>
       <button class="tab" data-tab="views">Elevations</button>
+      <div class="spacer"></div>
+      <div class="menu">
+        <button class="tbtn" id="export-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
+        <div class="menu-list" id="export-menu" hidden>
+          <button class="menu-item" data-fmt="barn">Source <span class="fmt">.barn</span></button>
+          <button class="menu-item" data-fmt="svg">2D plan <span class="fmt">.svg</span></button>
+          <button class="menu-item" data-fmt="dxf">CAD drawing <span class="fmt">.dxf</span></button>
+          <button class="menu-item" data-fmt="glb">3D model <span class="fmt">.glb</span></button>
+          <button class="menu-item" data-fmt="ifc">BIM model <span class="fmt">.ifc</span></button>
+          <button class="menu-item" data-fmt="viewer">3D viewer <span class="fmt">.html</span>
+            <small>self-contained — share with a client</small></button>
+        </div>
+      </div>
     </div>
     <div class="viewport" id="viewport">
       <div class="pane active" id="pane-plan">
@@ -869,6 +1052,10 @@ _APP_HTML = r"""<!doctype html>
 <script>
 const LAYER_LABELS = __LAYER_LABELS__;
 const INITIAL_SOURCE = __INITIAL_SOURCE__;
+const INITIAL_FROM_FILE = __INITIAL_FROM_FILE__;   // server started with an explicit FILE arg
+const SCAFFOLD_SOURCE = __SCAFFOLD_SOURCE__;        // "New plan" starter
+const LS_SOURCE = 'barndsl.playground.source';
+const LS_SAVED_AT = 'barndsl.playground.savedAt';
 
 const editor = document.getElementById('editor');
 const gutter = document.getElementById('gutter');
@@ -950,6 +1137,8 @@ function applyResult(p){
     planSvg.innerHTML = '';
   }
   refreshEditData(good ? p : null);
+  autosave();                          // persist whatever is now in the editor
+  updateExportState(!!p.ok);           // export needs a clean compile (ok, not just rendered)
 }
 
 // --- header (title / score / metrics) ---------------------------------------
@@ -1076,8 +1265,7 @@ fetch('/api/examples').then(r => r.json()).then(list => {
   }
   sel.addEventListener('change', () => {
     const opt = sel.selectedOptions[0];
-    if (opt && opt.dataset.src != null){ editor.value = opt.dataset.src;
-      renderGutter(); compile(); }
+    if (opt && opt.dataset.src != null){ hideNotice(); setSource(opt.dataset.src); }
   });
 }).catch(() => {});
 
@@ -1152,6 +1340,8 @@ async function sendDesign(){
   if (running || !agentAvailable) return;
   const brief = briefEl.value.trim();
   if (!brief) return;
+  autosaveOff = false;   // a design run is a deliberate action — resume autosave
+  hideNotice();
   addMsg('msg-user', brief);
   briefEl.value = '';
   const body = { brief, iterations: 3 };
@@ -1473,6 +1663,7 @@ function cancelDrag(){ if (!drag) return; drag = null; removeGhost(); buildOverl
 // -- apply a sequence of edits atomically (from the client's view) --
 async function applyEdits(edits){
   if (!edits.length){ buildOverlay(); return; }
+  autosaveOff = false;   // a layout edit is a deliberate action — resume autosave
   const before = editor.value;
   let src = before, p = null;
   try {
@@ -1513,10 +1704,192 @@ document.addEventListener('keydown', e => {
 });
 initEdit();
 
+// --- workspace: autosave / open / save / new / export -----------------------
+const noticeEl = document.getElementById('notice');
+const noticeMsg = document.getElementById('notice-msg');
+const noticeActions = document.getElementById('notice-actions');
+const noticeDismiss = document.getElementById('notice-dismiss');
+const newBtn = document.getElementById('new-btn');
+const openBtn = document.getElementById('open-btn');
+const saveBtn = document.getElementById('save-btn');
+const fileInput = document.getElementById('file-input');
+const exportBtn = document.getElementById('export-btn');
+const exportMenu = document.getElementById('export-menu');
+const editorWrap = document.getElementById('editor-wrap');
+
+let savedSource = INITIAL_SOURCE;   // last text persisted to localStorage (beforeunload baseline)
+let checkpoint = INITIAL_SOURCE;    // last deliberate known state (New confirms if we've drifted)
+let lastCompileOk = false;          // did the last compile pass cleanly? (gates compiled exports)
+let autosaveOff = false;            // suppressed while offering a newer session over a FILE arg
+
+// -- dismissible, non-modal notice bar --
+function showNotice(msg, actions){
+  noticeMsg.textContent = msg;
+  noticeActions.innerHTML = '';
+  for (const a of (actions || [])){
+    const b = document.createElement('button');
+    b.className = 'na' + (a.ghost ? ' ghost' : '');
+    b.textContent = a.label;
+    b.addEventListener('click', () => { hideNotice(); if (a.fn) a.fn(); });
+    noticeActions.appendChild(b);
+  }
+  noticeEl.hidden = false;
+}
+function hideNotice(){ noticeEl.hidden = true; noticeActions.innerHTML = ''; }
+noticeDismiss.addEventListener('click', hideNotice);
+
+// -- autosave to localStorage (called on every applyResult) --
+function autosave(){
+  if (autosaveOff) return;
+  try {
+    localStorage.setItem(LS_SOURCE, editor.value);
+    localStorage.setItem(LS_SAVED_AT, String(Date.now()));
+    savedSource = editor.value;      // now safely persisted → beforeunload stays quiet
+  } catch (e){ /* private mode / quota: leave savedSource stale so beforeunload warns */ }
+}
+function readSaved(){ try { return localStorage.getItem(LS_SOURCE); } catch (e){ return null; } }
+
+// -- one funnel for programmatic source replacement (open / new / example) --
+function setSource(src){ checkpoint = src; editor.value = src; renderGutter(); compile(); }
+
+// -- export menu --
+function updateExportState(ok){
+  lastCompileOk = ok;
+  exportBtn.title = ok ? 'Export the current plan'
+    : 'Only the .barn source exports until the plan compiles cleanly';
+}
+function toggleExportMenu(show){
+  const open = show == null ? exportMenu.hidden : show;
+  exportMenu.hidden = !open;
+  exportBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) exportMenu.querySelectorAll('.menu-item').forEach(it => {
+    const dis = it.getAttribute('data-fmt') !== 'barn' && !lastCompileOk;
+    it.disabled = dis;
+    it.title = dis ? 'Fix the plan’s errors to export this format' : '';
+    it.style.opacity = dis ? '.45' : '';
+    it.style.cursor = dis ? 'default' : 'pointer';
+  });
+}
+exportBtn.addEventListener('click', e => { e.stopPropagation(); toggleExportMenu(); });
+document.addEventListener('click', e => {
+  if (!exportMenu.hidden && !e.target.closest('.menu')) toggleExportMenu(false);
+});
+exportMenu.addEventListener('click', e => {
+  const item = e.target.closest('.menu-item'); if (!item || item.disabled) return;
+  toggleExportMenu(false); doExport(item.getAttribute('data-fmt'));
+});
+
+function planSlug(){
+  const s = (titleEl.textContent || '').trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return s || 'barndo';
+}
+function downloadBlob(blob, name){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click();
+  a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+function downloadSource(){
+  const src = editor.value;
+  downloadBlob(new Blob([src], { type:'text/plain' }), planSlug() + '.barn');
+  checkpoint = src; autosave();      // downloaded → a known, persisted state
+}
+async function doExport(fmt){
+  if (fmt === 'barn'){ downloadSource(); return; }
+  if (!lastCompileOk){ showNotice('Fix the plan’s errors before exporting ' + fmt + '.'); return; }
+  try {
+    const resp = await fetch('/api/export', { method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ source: editor.value, format: fmt }) });
+    if ((resp.headers.get('Content-Type') || '').indexOf('application/json') >= 0){
+      let m = 'the server refused it';
+      try { const j = await resp.json(); m = (j.error && (j.error.message || j.error)) || m; } catch (e){}
+      showNotice('Export failed: ' + m); return;
+    }
+    const blob = await resp.blob();
+    let name = planSlug() + '.' + fmt;
+    const mm = /filename="?([^"]+)"?/.exec(resp.headers.get('Content-Disposition') || '');
+    if (mm) name = mm[1];
+    downloadBlob(blob, name);
+  } catch (err){ showNotice('Export failed: ' + String(err)); }
+}
+
+// -- open (file picker + drag/drop, read client-side) --
+function openText(text){ autosaveOff = false; hideNotice(); setSource(text); }
+function readFileInto(f){
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => openText(String(rd.result || ''));
+  rd.readAsText(f);
+}
+openBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  readFileInto(fileInput.files && fileInput.files[0]);
+  fileInput.value = '';              // let the same file be re-opened
+});
+['dragenter','dragover'].forEach(ev => editorWrap.addEventListener(ev, e => {
+  if (e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0){
+    e.preventDefault(); editorWrap.classList.add('dragover'); }
+}));
+['dragleave','dragend'].forEach(ev => editorWrap.addEventListener(ev, e => {
+  if (e.target === editorWrap) editorWrap.classList.remove('dragover'); }));
+editorWrap.addEventListener('drop', e => {
+  e.preventDefault(); editorWrap.classList.remove('dragover');
+  readFileInto(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
+});
+
+// -- new plan (scaffold; confirm via the notice if the user has drifted) --
+function newPlan(){ autosaveOff = false; hideNotice(); setSource(SCAFFOLD_SOURCE); }
+newBtn.addEventListener('click', () => {
+  if (editor.value.trim() && editor.value !== checkpoint){
+    showNotice('Start a new plan? The current one is replaced (it stays autosaved in this browser).',
+      [{ label:'New plan', fn:newPlan }, { label:'Keep editing', ghost:true }]);
+  } else { newPlan(); }
+});
+
+// -- save (download .barn) --
+saveBtn.addEventListener('click', downloadSource);
+
+// -- keyboard: Ctrl/Cmd+S = Save, Ctrl/Cmd+O = Open --
+document.addEventListener('keydown', e => {
+  if (!(e.metaKey || e.ctrlKey)) return;
+  const k = e.key.toLowerCase();
+  if (k === 's'){ e.preventDefault(); downloadSource(); }
+  else if (k === 'o'){ e.preventDefault(); fileInput.click(); }
+});
+
+// -- warn on leave only when the editor differs from the persisted copy --
+window.addEventListener('beforeunload', e => {
+  if (editor.value !== savedSource){ e.preventDefault(); e.returnValue = ''; return ''; }
+});
+
+// -- the first user edit ends any "we kept your file" suppression --
+editor.addEventListener('input', () => { if (autosaveOff){ autosaveOff = false; autosave(); } });
+
 // --- boot -------------------------------------------------------------------
-editor.value = INITIAL_SOURCE;
-renderGutter();
-compile();
+(function boot(){
+  const saved = readSaved();
+  const hasNewer = saved != null && saved !== INITIAL_SOURCE;
+  if (hasNewer && INITIAL_FROM_FILE){
+    // The FILE argument wins on screen, but never clobber the autosaved session:
+    // keep it in localStorage and merely offer it through the notice.
+    autosaveOff = true;                 // this compile must not overwrite the saved copy
+    savedSource = INITIAL_SOURCE; checkpoint = INITIAL_SOURCE;
+    editor.value = INITIAL_SOURCE; renderGutter(); compile();
+    showNotice('Showing the file you opened — a newer autosaved session is also available.',
+      [{ label:'Restore session', fn: () => { autosaveOff = false; setSource(saved); } }]);
+  } else if (hasNewer){
+    // No FILE argument → restore the autosaved session outright.
+    savedSource = saved; checkpoint = saved;
+    editor.value = saved; renderGutter(); compile();
+    showNotice('Restored your last session — Load example or New plan to start over.',
+      [{ label:'New plan', fn:newPlan }]);
+  } else {
+    savedSource = INITIAL_SOURCE; checkpoint = INITIAL_SOURCE;
+    editor.value = INITIAL_SOURCE; renderGutter(); compile();
+  }
+})();
 </script>
 </body>
 </html>

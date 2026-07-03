@@ -631,6 +631,18 @@ dependency, no CDN, and it works offline** (nothing is uploaded anywhere). The 3
 tab reuses the same inline WebGL renderer `barndsl view3d` writes. `barndsl serve
 plan.barn` preloads a file; `--port` picks the port.
 
+*Work that persists and leaves.* The editor autosaves to the browser
+(`localStorage`) on the same debounce, so a reload restores your last session (and
+if you started with a `FILE` argument it keeps that file on screen and *offers*
+the newer session rather than clobbering it). **New** starts from the scaffold,
+**Open** reads a `.barn`/`.txt` file client-side (drag-and-drop onto the editor
+works too), and **Save** (Ctrl/Cmd+S; **Open** is Ctrl/Cmd+O) downloads the source
+as `<plan>.barn`. The viewport's **Export** menu turns the current plan into any of
+the build artifacts — `.barn` source, `SVG` plan, `DXF`, `GLB`, `IFC`, or the
+self-contained **3D viewer** HTML to share with a client — via `POST /api/export`,
+reusing the same exporters as the CLI (disabled with a reason until the plan
+compiles cleanly).
+
 *Edit mode.* Toggle **Edit layout** on the 2D plan tab for direct manipulation:
 an interactive overlay (room-palette colours, id labels) where you drag a room to
 move it (0.5 ft grid snap), drag its edge/corner handles to resize it (3 ft

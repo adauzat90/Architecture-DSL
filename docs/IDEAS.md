@@ -92,8 +92,11 @@ walks the spatial tree and tessellates the geometry.
 Possible follow-ups: room-type colours as `IfcStyledItem`/`IfcSurfaceStyle` on the
 spaces/floor tiles; aggregate the roof as per-plane `IfcSlab(ROOF)` under the
 `IfcRoof` instead of direct geometry (stricter model-checker conformance); IFC2x3
-output for older Revit-import paths that still prefer it; a download/export menu in
-the playground offering `.barn`/`.svg`/`.glb`/`.ifc` of the current plan.
+output for older Revit-import paths that still prefer it. ~~A download/export menu
+in the playground offering `.barn`/`.svg`/`.glb`/`.ifc` of the current plan.~~ —
+DONE: the viewport's **Export** menu offers `.barn`, `SVG`, `DXF`, `GLB`, `IFC` and
+the self-contained 3D viewer `.html` via `POST /api/export`, reusing these
+exporters unchanged (see the Web playground entry).
 
 ## Web playground — DONE
 Shipped (Tier 2 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/playground.py`

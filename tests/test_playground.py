@@ -72,6 +72,18 @@ def _request(srv, method, path, body=None):
     return resp.status, data
 
 
+def _request_full(srv, method, path, body=None):
+    """Like :func:`_request` but also returns the response headers (for downloads)."""
+    conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    conn.request(method, path, body=body, headers=headers)
+    resp = conn.getresponse()
+    data = resp.read()
+    hdrs = dict(resp.getheaders())
+    conn.close()
+    return resp.status, hdrs, data
+
+
 def _compile(srv, source):
     status, data = _request(srv, "POST", "/api/compile", json.dumps({"source": source}))
     return status, json.loads(data)
@@ -276,3 +288,126 @@ def test_app_contains_edit_mode_markup_and_no_external_refs():
     # still no external network references (the offline guarantee holds)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+# --- the export endpoint -----------------------------------------------------
+
+
+def _export(srv, source, fmt):
+    return _request_full(
+        srv, "POST", "/api/export", json.dumps({"source": source, "format": fmt})
+    )
+
+
+def test_export_svg_returns_svg_with_attachment(server):
+    status, hdrs, data = _export(server, CLEAN, "svg")
+    assert status == 200
+    assert data.lstrip().startswith(b"<svg")
+    assert hdrs["Content-Type"].startswith("image/svg+xml")
+    assert "attachment; filename=" in hdrs["Content-Disposition"]
+    assert hdrs["Content-Disposition"].endswith('.svg"')
+
+
+def test_export_dxf_returns_dxf_header(server):
+    status, hdrs, data = _export(server, CLEAN, "dxf")
+    assert status == 200
+    # DXF R12 opens with a SECTION/HEADER group (group code 0, value SECTION).
+    assert data.startswith(b"0\nSECTION")
+    assert b"AC1009" in data or b"HEADER" in data
+    assert hdrs["Content-Disposition"].endswith('.dxf"')
+
+
+def test_export_glb_streams_binary_magic(server):
+    status, hdrs, data = _export(server, CLEAN, "glb")
+    assert status == 200
+    assert data[:4] == b"glTF"          # glTF binary container magic
+    assert hdrs["Content-Type"] == "model/gltf-binary"
+    assert hdrs["Content-Disposition"].endswith('.glb"')
+    # bytes, not JSON: the body is not decodable/parseable as a JSON object
+    with pytest.raises(UnicodeDecodeError):
+        data.decode("ascii")
+
+
+def test_export_ifc_returns_step_file(server):
+    status, hdrs, data = _export(server, CLEAN, "ifc")
+    assert status == 200
+    assert data.startswith(b"ISO-10303-21")
+    assert hdrs["Content-Disposition"].endswith('.ifc"')
+
+
+def test_export_viewer_returns_self_contained_html(server):
+    status, hdrs, data = _export(server, CLEAN, "viewer")
+    assert status == 200
+    html = data.decode("utf-8")
+    assert html.lstrip().lower().startswith("<!doctype")
+    assert "function mountScene(" in html          # the shared inline renderer
+    assert "http://" not in html and "https://" not in html
+    assert hdrs["Content-Type"].startswith("text/html")
+    assert hdrs["Content-Disposition"].endswith('.html"')
+
+
+def test_export_filename_derives_from_plan_name(server):
+    status, hdrs, _ = _export(server, CLEAN, "svg")
+    # cedar_ridge's plan name slugs into the download filename.
+    assert 'filename="cedar' in hdrs["Content-Disposition"].lower()
+
+
+def test_export_erroring_source_is_typed_error_not_500(server):
+    # A plan with a code error (renders, but ok=False) is refused with a typed
+    # error and a normal 200 — never a 500 and never a half-built artifact.
+    status, hdrs, data = _export(server, WITH_ERROR, "glb")
+    assert status == 200
+    body = json.loads(data)
+    assert body["error"]["kind"] == "compile_error"
+    assert "Content-Disposition" not in hdrs
+
+
+def test_export_parse_recovered_source_is_typed_error(server):
+    status, _, data = _export(server, 'plan "x"\nenvelope not a number\n', "svg")
+    assert status == 200
+    assert json.loads(data)["error"]["kind"] == "compile_error"
+
+
+def test_export_unknown_format_is_400(server):
+    status, _, data = _export(server, CLEAN, "png")
+    assert status == 400
+    assert json.loads(data)["error"]
+
+
+def test_export_malformed_json_is_400(server):
+    status, _, _ = _request_full(server, "POST", "/api/export", "{not json")
+    assert status == 400
+
+
+def test_export_missing_format_is_400(server):
+    status, _, _ = _request_full(server, "POST", "/api/export", json.dumps({"source": CLEAN}))
+    assert status == 400
+
+
+def test_export_oversize_body_is_400(server):
+    status, _, _ = _request_full(server, "POST", "/api/export", "x" * (MAX_BODY + 1000))
+    assert status == 400
+
+
+# --- the workspace SPA markup (autosave / open / save / new / export) ---------
+
+
+def test_app_contains_workspace_controls_and_localstorage_keys():
+    html = render_app(CLEAN)
+    for token in ("id=\"export-btn\"", "id=\"export-menu\"", "id=\"open-btn\"",
+                  "id=\"save-btn\"", "id=\"new-btn\"", "id=\"file-input\"",
+                  "id=\"notice\"", "function doExport(", "function autosave(",
+                  "beforeunload", "data-fmt=\"viewer\"", "data-fmt=\"glb\""):
+        assert token in html, token
+    # the autosave/restore localStorage keys are referenced by the SPA
+    assert "barndsl.playground.source" in html
+    assert "barndsl.playground.savedAt" in html
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_from_file_flag_flows_into_the_spa():
+    # The FILE-argument flag reaches the SPA so restore can prefer the file.
+    assert "const INITIAL_FROM_FILE = true;" in render_app(CLEAN, from_file=True)
+    assert "const INITIAL_FROM_FILE = false;" in render_app(CLEAN, from_file=False)
