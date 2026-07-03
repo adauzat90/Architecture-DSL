@@ -2803,6 +2803,7 @@ def _validate_requirements(plan: Barndominium, add) -> None:
         a = plan.room(req.a)
         assert a is not None  # checked above
         if req.kind == "adjacent":
+            assert req.b is not None  # two-room kinds always carry b
             b = plan.room(req.b)
             assert b is not None
             if shared_edge(a, b) is None:
@@ -2825,6 +2826,7 @@ def _validate_requirements(plan: Barndominium, add) -> None:
                     )
                 )
         elif req.kind == "separate":
+            assert req.b is not None  # two-room kinds always carry b
             b = plan.room(req.b)
             assert b is not None
             edge = shared_edge(a, b)  # None across levels: trivially separate
