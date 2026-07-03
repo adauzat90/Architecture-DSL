@@ -28,6 +28,7 @@ from .elements import (
     ExteriorDoor,
     FrameSpec,
     InteriorDoor,
+    Lot,
     Porch,
     Post,
     ProgramSpec,
@@ -60,6 +61,12 @@ from .layout2 import (
 )
 from .dxf import save_dxf, to_dxf
 from .render import RenderConfig, render_svg, save_render, save_svg
+from .views import (
+    elevation_svg,
+    save_elevation,
+    save_section,
+    section_svg,
+)
 from .schedule import (
     door_rows,
     room_rows,
@@ -94,6 +101,7 @@ __all__ = [
     "ExteriorDoor",
     "Window",
     "Porch",
+    "Lot",
     "Stair",
     "ProgramSpec",
     "Post",
@@ -138,6 +146,11 @@ __all__ = [
     "save_svg",
     "save_render",
     "RenderConfig",
+    # vertical views (elevations + section)
+    "elevation_svg",
+    "section_svg",
+    "save_elevation",
+    "save_section",
     # schedules (room/door/window, no Revit)
     "schedules_markdown",
     "schedules_csv",

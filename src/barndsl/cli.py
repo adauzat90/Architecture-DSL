@@ -508,6 +508,31 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_elevation(args: argparse.Namespace) -> int:
+    from .views import save_elevation
+
+    result = compile_file(args.file)
+    print(result.report(os.path.basename(args.file)))
+    if result.plan is None:
+        return 1
+    out = args.out or f"elevation-{args.side}.svg"
+    save_elevation(result.plan, args.side, out)
+    print(f"\nWrote {out} ({args.side} elevation)")
+    return 0 if result.ok else 1
+
+
+def _cmd_section(args: argparse.Namespace) -> int:
+    from .views import save_section
+
+    result = compile_file(args.file)
+    print(result.report(os.path.basename(args.file)))
+    if result.plan is None:
+        return 1
+    save_section(result.plan, args.out)
+    print(f"\nWrote {args.out} (section)")
+    return 0 if result.ok else 1
+
+
 def _render_pass(args: argparse.Namespace) -> "object":
     """Compile (rendering to SVG if requested) and print the report. Used by watch."""
     result = compile_file(args.file)
@@ -760,6 +785,24 @@ def main(argv: list[str] | None = None) -> int:
     p_dxf.add_argument("file", help="path to a .barn DSL file")
     p_dxf.add_argument("--out", default="plan.dxf", help="output DXF path")
     p_dxf.set_defaults(func=_cmd_dxf)
+
+    p_elev = sub.add_parser(
+        "elevation", help="render a schematic exterior elevation (one face) to SVG"
+    )
+    p_elev.add_argument("file", help="path to a .barn DSL file")
+    p_elev.add_argument(
+        "--side", choices=("north", "south", "east", "west"), default="south",
+        help="which face to draw (default: south)",
+    )
+    p_elev.add_argument("--out", default=None, help="output SVG path (default elevation-<side>.svg)")
+    p_elev.set_defaults(func=_cmd_elevation)
+
+    p_section = sub.add_parser(
+        "section", help="render a schematic transverse section to SVG"
+    )
+    p_section.add_argument("file", help="path to a .barn DSL file")
+    p_section.add_argument("--out", default="section.svg", help="output SVG path")
+    p_section.set_defaults(func=_cmd_section)
 
     p_watch = sub.add_parser(
         "watch", help="recompile (and optionally re-render) on every save"
