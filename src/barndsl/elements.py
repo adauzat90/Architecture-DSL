@@ -509,6 +509,8 @@ class ProgramSpec:
     baths: int | None = None
     required: dict[RoomType, int] = field(default_factory=dict)
     min_area: float | None = None
+    #: Minimum whole-house dedicated-storage area (closets + pantry), sq ft.
+    min_storage: float | None = None
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
@@ -897,6 +899,7 @@ class Barndominium:
         *,
         requires: dict[RoomType | str, int] | None = None,
         min_area: float | None = None,
+        min_storage: float | None = None,
     ) -> "Barndominium":
         """Declare the intended program (bedroom / bathroom counts and more).
 
@@ -923,7 +926,10 @@ class Barndominium:
         ma = None if min_area is None else float(min_area)
         if ma is not None and ma < 0:
             raise ValueError("program area must be non-negative.")
-        self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma)
+        ms = None if min_storage is None else float(min_storage)
+        if ms is not None and ms < 0:
+            raise ValueError("program storage must be non-negative.")
+        self.program_spec = ProgramSpec(b, ba, required=req, min_area=ma, min_storage=ms)
         return self
 
     def require(

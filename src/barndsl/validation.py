@@ -295,6 +295,13 @@ def _f(value: float) -> str:
 #: Public, shared living spaces — bedrooms ideally don't open straight onto these.
 PUBLIC_TYPES = {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
 BATH_TYPES = {RoomType.BATHROOM, RoomType.HALF_BATH}
+#: Dedicated-storage rooms, for the whole-house storage ratio (LOW_STORAGE) and
+#: the `program storage <sqft>` minimum.
+STORAGE_TYPES = {RoomType.CLOSET, RoomType.PANTRY}
+#: Below this fraction of conditioned interior area in dedicated storage, a plan is
+#: storage-poor. Conservative — set below the worked gallery's floor so a curated,
+#: reasonably-storaged plan never trips it; it catches a home with almost no closets.
+LOW_STORAGE_RATIO = 0.025
 #: Rooms with plumbing fixtures — cheaper to build when clustered on a wet wall.
 WET_TYPES = {
     RoomType.BATHROOM,
@@ -688,6 +695,7 @@ def validate(plan: Barndominium) -> ValidationReport:
     _validate_room_programs(plan, add)
     _validate_fixtures(plan, add)
     _validate_furniture(plan, add)
+    _validate_storage(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_stairs(plan, add)
@@ -1057,6 +1065,30 @@ def _validate_furniture(plan: Barndominium, add) -> None:
                         "chair-pull and circulation all round.",
                     )
                 )
+
+
+def _validate_storage(plan: Barndominium, add) -> None:
+    """Flag a storage-poor plan — dedicated storage (closets + pantry) below a small
+    fraction of the conditioned area. Deterministic and unconditional, but the floor
+    is conservative (below the worked gallery), so it only catches a home with almost
+    no closets. INFO. For a specific target, declare `program ... storage <sqft>`.
+    """
+    interior = plan.interior_area
+    if interior <= EPSILON:
+        return
+    storage = sum(r.area for r in plan.rooms if r.type in STORAGE_TYPES)
+    if storage / interior < LOW_STORAGE_RATIO:
+        add(
+            Issue(
+                Severity.INFO,
+                "LOW_STORAGE",
+                f"Dedicated storage (closets + pantry) is {storage:.0f} sq ft — "
+                f"{storage / interior * 100:.1f}% of the conditioned area, a "
+                "storage-poor plan.",
+                hint="Add closets or a pantry — a linen closet by the baths, a coat "
+                "closet at the entry, a walk-in pantry off the kitchen.",
+            )
+        )
 
 
 def _validate_room_programs(plan: Barndominium, add) -> None:
@@ -2798,6 +2830,13 @@ def _validate_program(plan: Barndominium, add) -> None:
         if math.isfinite(interior) and interior + EPSILON < spec.min_area:
             mismatches.append(
                 f"{_f(spec.min_area)} sq ft declared but {interior:.0f} placed"
+            )
+    if spec.min_storage is not None:
+        storage = sum(r.area for r in plan.rooms if r.type in STORAGE_TYPES)
+        if storage + EPSILON < spec.min_storage:
+            mismatches.append(
+                f"{_f(spec.min_storage)} sq ft of storage declared but "
+                f"{storage:.0f} placed"
             )
     if not mismatches:
         return

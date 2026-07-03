@@ -79,6 +79,8 @@ def emit_dsl(plan: Barndominium) -> str:
             line += f" {n} {rtype.value}"
         if spec.min_area is not None:
             line += f" area {_n(spec.min_area)}"
+        if spec.min_storage is not None:
+            line += f" storage {_n(spec.min_storage)}"
         out.append(line)
     for req in getattr(plan, "requirements", None) or []:
         # Declared spatial intent rides next to `program` — the plan's contract

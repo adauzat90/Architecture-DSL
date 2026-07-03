@@ -108,8 +108,9 @@ Statements:
   accessible                      # opt-in: run accessibility / aging-in-place nudges
   electrical                      # opt-in: emit the electrical / life-safety checklist reminder
   note "free text"                # optional design note
-  program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
-                                  #   bed/bath = exact counts; other types = at-least; area = min interior sq ft
+  program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
+                                  #   bed/bath = exact counts; other types = at-least; area = min interior;
+                                  #   storage = min closet+pantry sq ft
   require adjacent <room_a> <room_b>    # the two rooms must share a wall
   require separate <room_a> <room_b>    # the two rooms must NOT share a wall
   require exterior <room> [<wall>]      # the room needs an exterior wall (optionally that side)
@@ -697,10 +698,15 @@ def _parse_statement(
         baths = None
         requires: dict[RoomType | str, int] = {}
         min_area = None
+        min_storage = None
         while (tok := c.peek()) is not None:
             if tok.text.lower() == "area":
                 c.take("area")
                 min_area = c.number("the minimum area")
+                continue
+            if tok.text.lower() == "storage":
+                c.take("storage")
+                min_storage = c.number("the minimum storage area")
                 continue
             n = c.count("a room count")
             noun = c.take("a room type")
@@ -711,7 +717,7 @@ def _parse_statement(
                     f"Unknown program room type '{noun.text}'.",
                     noun.col,
                     end_col=noun.end_col,
-                    hint=f"Use 'bed', 'bath', 'area', or a room type: {_TYPES}.",
+                    hint=f"Use 'bed', 'bath', 'area', 'storage', or a room type: {_TYPES}.",
                 )
             if cat == "bed":
                 beds = n
@@ -720,7 +726,9 @@ def _parse_statement(
             else:
                 requires[cat] = requires.get(cat, 0) + n
         c.expect_end()
-        plan.program(beds, baths, requires=requires, min_area=min_area)
+        plan.program(
+            beds, baths, requires=requires, min_area=min_area, min_storage=min_storage
+        )
         assert plan.program_spec is not None  # just set by plan.program(...)
         plan.program_spec.line = lineno
         plan.program_spec.col = kw.col

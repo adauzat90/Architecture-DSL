@@ -411,6 +411,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A bedroom has no closet reached by a door from it — either none "
            "abuts it, or one abuts but with no door into it (e.g. a neighbour's "
            "closet)."),
+        _c("LOW_STORAGE", I, "Storage-poor plan",
+           "Dedicated storage (closets + pantry) is below a small fraction of the "
+           "conditioned floor area — the whole-house storage the review flagged as "
+           "invisible, now visible. Conservative floor (below the worked gallery), "
+           "so it only catches a home with almost no closets. Declare a specific "
+           "target with `program ... storage <sqft>`."),
         _c("MASTER_ENSUITE", I, "No private ensuite",
            "On a floor with two or more full bathrooms, no bedroom has a private "
            "(ensuite) bath — every bath is shared. The primary bedroom should get "

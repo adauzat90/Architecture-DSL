@@ -188,7 +188,18 @@ idea to a **bed block + circulation path** in bedrooms and a **seating/dining
 clearance** in living/dining catches the "meets area, doesn't furnish" plan — the
 same clear-floor geometry already computed for baths.
 
-## 7. Program completeness — residential staples not modeled
+## 7. Program completeness — residential staples not modeled — SHIPPED
+
+**Update (2026-07-03).** Whole-house **storage** is now first-class: an
+unconditional `LOW_STORAGE` info flags a storage-poor plan (closets + pantry below
+a conservative fraction of the conditioned area — set below the worked gallery so
+curated plans are untouched), and `program … storage <sqft>` lets the brief
+declare a storage minimum, checked via the existing `PROGRAM_MISMATCH`. The
+service/linen/coat **spaces** themselves are declarable as room-type counts in
+`program` (e.g. `program 3 bed 2 bath 1 utility 1 pantry`) — deliberately *not*
+guessed as hard checks, matching the codebase's `NO_LAUNDRY` decision (a mechanical
+space is often just a closet; guessing nags good plans). Covered by
+`tests/test_storage.py`.
 
 `program`/`require` is a strong mechanism, but the standard non-bedroom
 storage/service spaces have no first-class checks: **linen closet**, **coat/entry

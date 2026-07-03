@@ -49,7 +49,7 @@ floor <D>                          # optional; inter-floor assembly depth (ft). 
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
 electrical                         # optional; opt in to the electrical / life-safety checklist reminder
 note "free text"
-program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional; intent, checked vs the rooms
+program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional; intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional; spatial intent, checked vs the plan
 require exterior <room> [<wall>]              #   (also: require area <room> >= <sqft>)
 room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
@@ -173,7 +173,8 @@ clearances** (a bath that can't hold a toilet/lav/tub with IRC R307 clearances, 
 kitchen too tight for its appliances), **furniture fit** (a bedroom too narrow for
 a queen bed with a walk-around, a dining room too tight to pull a chair — the
 clear-floor test extended past the wet rooms), bathroom ventilation, dead-end
-hallways,
+hallways, **storage** (a storage-poor plan with almost no closets; or a declared
+`program … storage <sqft>` minimum that isn't met),
 **garage/dwelling fire separation** (a garage *or shop* common wall or the ceiling
 under habitable space above it, and the self-closing rated door between them — IRC
 R302.6 / R302.5.1), **clear-dimension** shortfalls (a room that meets a code

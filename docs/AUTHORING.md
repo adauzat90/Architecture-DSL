@@ -83,7 +83,7 @@ floor <D>                          # optional; inter-floor assembly depth (ft). 
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
 electrical                         # optional; opt in to the electrical / life-safety checklist reminder
 note "free text"                   # optional; repeatable
-program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]  # optional intent, checked vs the rooms
+program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeatable); also:
 require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
 
