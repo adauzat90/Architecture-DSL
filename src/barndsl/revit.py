@@ -1315,7 +1315,7 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                 clear_length=float(clear_l),
                 clear_area=float(clear_w * clear_l),
                 ceiling_height=float(
-                    rch if (rch := getattr(r, "ceiling_height", None)) is not None
+                    r.ceiling_height if r.ceiling_height is not None
                     else height
                 ),
                 vaulted=bool(getattr(r, "vaulted", False)),

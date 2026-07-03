@@ -44,9 +44,9 @@ def emit_dsl(plan: Barndominium) -> str:
         out.append(line)
     if getattr(plan, "roof_style", "gable") != "gable" or getattr(plan, "roof_pitch", None):
         line = f"roof {getattr(plan, 'roof_style', 'gable')}"
-        rp = getattr(plan, "roof_pitch", None)
-        if rp:
-            line += f" pitch {_n(rp)}"
+        pitch = getattr(plan, "roof_pitch", None)
+        if pitch:
+            line += f" pitch {_n(pitch)}"
         out.append(line)
     ss = getattr(plan, "site_spec", None)
     if ss is not None and ss.has_dims:
@@ -111,9 +111,9 @@ def emit_dsl(plan: Barndominium) -> str:
             )
             if getattr(r, "level", 0):
                 line += f" level {r.level}"
-            rch = getattr(r, "ceiling_height", None)
-            if rch is not None:
-                line += f" ceiling {_n(rch)}"
+            ceiling_height = getattr(r, "ceiling_height", None)
+            if ceiling_height is not None:
+                line += f" ceiling {_n(ceiling_height)}"
             if getattr(r, "vaulted", False):
                 line += " vaulted"
             out.append(line)

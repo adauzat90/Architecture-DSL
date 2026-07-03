@@ -59,6 +59,31 @@ from .compiler import compile_file, compile_source
 from .render import save_svg
 
 
+def _harden_stdio() -> None:
+    """Make stdout/stderr resilient to the ambient encoding.
+
+    Reports, diagnostics and the Revit-exchange summary contain intentional
+    non-ASCII glyphs (em dashes, arrows, ``≥``/``≤``, fractions). When output is
+    piped, redirected to a file, or run on a legacy Windows console, Python picks
+    the locale encoding (e.g. cp1252) with ``errors="strict"`` and a single such
+    glyph raises ``UnicodeEncodeError``, aborting the command. Switch both
+    streams to UTF-8 so capable terminals render the glyphs and pipes get valid
+    bytes; fall back to replacing unencodable characters if UTF-8 is refused, so
+    the command never dies on an encoding error.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # not a TextIOWrapper (e.g. captured/replaced)
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (ValueError, OSError):
+                pass
+
+
 def _repo_example() -> str:
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     return os.path.join(repo_root, "examples", "cedar_ridge.barn")
@@ -404,7 +429,11 @@ def _cmd_design(args: argparse.Namespace) -> int:
 
 
 def _cmd_revit(args: argparse.Namespace) -> int:
-    result = compile_file(args.file)
+    try:
+        result = compile_file(args.file)
+    except OSError as exc:
+        print(f"error: cannot read {args.file}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     if result.plan is not None and getattr(args, "frame", False) and result.plan.frame_spec is None:
         from .emit import emit_dsl
 
@@ -418,8 +447,12 @@ def _cmd_revit(args: argparse.Namespace) -> int:
     from .revit import to_revit_model
 
     model = to_revit_model(result.plan)
-    with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write(model.to_json())
+    try:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(model.to_json())
+    except OSError as exc:
+        print(f"error: cannot write {args.out}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     n_ext = sum(1 for w in model.walls if w.exterior)
     print(
         f"\nRevit exchange: {len(model.levels)} level(s), {len(model.walls)} wall(s) "
@@ -437,8 +470,15 @@ def _cmd_revit_import(args: argparse.Namespace) -> int:
 
     from .revit import RevitImportError, exchange_to_plan
 
-    with open(args.file, encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        with open(args.file, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        print(f"error: cannot read {args.file}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as exc:
+        print(f"error: {args.file} is not valid JSON: {exc}", file=sys.stderr)
+        return 2
     try:
         plan = exchange_to_plan(data)
     except RevitImportError as exc:
@@ -801,6 +841,7 @@ window living west width 8 offset 10
 
 
 def main(argv: list[str] | None = None) -> int:
+    _harden_stdio()
     parser = argparse.ArgumentParser(
         prog="barndsl",
         description="DSL compiler and agentic workflow for barndominium floor plans.",
