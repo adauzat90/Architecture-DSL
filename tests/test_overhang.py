@@ -14,7 +14,6 @@ from __future__ import annotations
 import pytest
 
 from barndsl import barndominium, compile_source, emit_dsl
-from barndsl import Direction as D, RoomType as T
 from barndsl.views import elevation_svg
 
 
