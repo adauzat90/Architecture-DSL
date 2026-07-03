@@ -45,6 +45,12 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
 ``POST /api/design/cancel``
     body ``{"id": "<job>"}`` → set the running job's cancel flag; the loop stops
     between rounds and the stream ends with a ``cancelled`` error.
+``POST /api/edit``
+    body ``{"source": "...", "edit": {...}}`` → apply one surgical DSL text edit
+    (:mod:`barndsl.edits`: move/resize a room, slide an opening) and return
+    ``{source, line, changed, ...compile_payload(new_source)}``. A refused edit
+    (unknown room, malformed) is a normal ``200`` with ``{"error": {kind, message}}``
+    — bad edits are ordinary UX, not failures; only malformed/oversize JSON is ``400``.
 
 The server is stateless apart from a single-job design lock: it writes no files
 and holds no session. The frontend keeps the last good render when the current
@@ -63,8 +69,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .compiler import DSL_REFERENCE, compile_source
+from .edits import EditError, apply_edit, edit_from_json, opening_overlays
 from .gltf import build_scene
-from .render import render_svg
+from .render import ROOM_COLORS, render_svg
 from .score import design_score
 from .viewer import RENDERER_JS, _LAYER_LABELS, scene_json
 from .views import elevation_svg, section_svg
@@ -154,6 +161,19 @@ def compile_payload(source: str) -> dict:
                 side: elevation_svg(plan, side) for side in _ELEVATION_SIDES
             }
             payload["section"] = section_svg(plan)
+            # Compact overlay data for Tier 5 edit mode — the frontend draws its
+            # interactive SVG from these (not the static plan SVG).
+            payload["rooms"] = [
+                {
+                    "id": r.id, "type": r.type.value,
+                    "x": r.x, "y": r.y, "w": r.width, "l": r.length,
+                    "level": r.level, "color": ROOM_COLORS.get(r.type, "#f0f0f0"),
+                    "line": result.room_lines.get(r.id),
+                }
+                for r in plan.rooms
+            ]
+            payload["openings"] = opening_overlays(plan)
+            payload["levels"] = plan.levels()
         except Exception as exc:  # a plan that lowers oddly must not 500 the API
             payload["render_error"] = str(exc)
     return payload
@@ -228,7 +248,7 @@ def _done_event(result: Any) -> dict:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Routes the four playground endpoints; everything else is 404.
+    """Routes the playground endpoints; everything else is 404.
 
     Reads config (the precomputed app HTML, cached examples) off the owning
     :class:`_PlaygroundServer`. No filesystem paths are ever served.
@@ -316,7 +336,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
-        if path not in ("/api/compile", "/api/design", "/api/design/cancel"):
+        if path not in ("/api/compile", "/api/edit", "/api/design", "/api/design/cancel"):
             self._json({"error": "not found"}, status=404)
             return
         data = self._read_json_body()
@@ -324,6 +344,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/compile":
             self._handle_compile(data)
+        elif path == "/api/edit":
+            self._handle_edit(data)
         elif path == "/api/design":
             self._handle_design(data)
         else:
@@ -338,6 +360,38 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # a real bug — bad DSL never reaches here
             self._json({"error": f"internal error: {exc}"}, status=500)
             return
+        self._json(payload)
+
+    def _handle_edit(self, data: object) -> None:
+        """Apply one surgical DSL edit and return the recompiled payload.
+
+        A refused edit is a normal 200 with a typed ``error`` (bad edits are UX,
+        not 500s); only a malformed envelope is 400.
+        """
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("source"), str)
+            or not isinstance(data.get("edit"), dict)
+        ):
+            self._json({"error": 'expected {"source": "<dsl>", "edit": {...}}'}, status=400)
+            return
+        edit = edit_from_json(data["edit"])
+        if isinstance(edit, EditError):
+            self._json({"error": {"kind": edit.kind, "message": edit.message}})
+            return
+        try:
+            result = apply_edit(data["source"], edit)
+        except Exception as exc:  # a real bug — refused edits return typed errors
+            self._json({"error": f"internal error: {exc}"}, status=500)
+            return
+        if result.error is not None:
+            self._json({"error": {"kind": result.error.kind, "message": result.error.message}})
+            return
+        payload = compile_payload(result.source)
+        payload["source"] = result.source
+        payload["line"] = result.line
+        payload["changed"] = result.changed
+        payload["summary"] = result.summary
         self._json(payload)
 
     # -- the agent (design) endpoint --
@@ -722,6 +776,30 @@ _APP_HTML = r"""<!doctype html>
   .views-grid figcaption { font-size:11.5px; color:var(--faint); padding:7px 10px;
     border-bottom:1px solid var(--line); text-transform:uppercase; letter-spacing:.4px; }
   .views-grid .svgbox { height:220px; cursor:default; }
+
+  /* --- Tier 5: edit mode --- */
+  #pane-plan.active { display:flex; flex-direction:column; }
+  .edit-bar { display:flex; align-items:center; gap:12px; padding:6px 12px; flex:none;
+    background:var(--panel); border-bottom:1px solid var(--line); font-size:12.5px; }
+  .edit-toggle { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none;
+    font-weight:600; color:var(--muted); }
+  .edit-toggle input { accent-color:var(--accent); }
+  .edit-bar button { font:inherit; font-size:12px; padding:4px 11px; border-radius:7px;
+    border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer; }
+  .edit-bar button:disabled { opacity:.45; cursor:default; }
+  .edit-note { font-size:11.5px; color:var(--faint); margin-left:auto; text-align:right; }
+  .edit-note.err { color:var(--err); }
+  .plan-body { position:relative; flex:1; min-height:0; }
+  .edit-layer { position:absolute; inset:0; background:var(--bg); }
+  .edit-layer svg { width:100%; height:100%; display:block; touch-action:none;
+    -webkit-user-select:none; user-select:none; }
+  .ov-room { cursor:move; }
+  .ov-open { cursor:grab; }
+  .ov-handle { fill:var(--accent2); stroke:#fff; }
+  .h-e, .h-w { cursor:ew-resize; } .h-n, .h-s { cursor:ns-resize; }
+  .h-ne, .h-sw { cursor:nesw-resize; } .h-nw, .h-se { cursor:nwse-resize; }
+  @keyframes lineflash { from { background:rgba(209,135,63,.55); } to { background:transparent; } }
+  .gln.flash { animation:lineflash 1s ease-out; }
 </style>
 </head>
 <body>
@@ -768,7 +846,17 @@ _APP_HTML = r"""<!doctype html>
       <button class="tab" data-tab="views">Elevations</button>
     </div>
     <div class="viewport" id="viewport">
-      <div class="pane active" id="pane-plan"><div class="svgbox" id="plan-svg"></div></div>
+      <div class="pane active" id="pane-plan">
+        <div class="edit-bar">
+          <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
+          <button id="undo-btn" disabled title="Undo last edit (Ctrl/Cmd+Z)">↶ Undo</button>
+          <span class="edit-note" id="edit-note"></span>
+        </div>
+        <div class="plan-body">
+          <div class="svgbox" id="plan-svg"></div>
+          <div class="edit-layer" id="edit-layer" hidden></div>
+        </div>
+      </div>
       <div class="pane" id="pane-three">
         <canvas id="three-canvas"></canvas>
         <div id="three-panel"><div class="hd">Layers</div><div id="three-toggles"></div></div>
@@ -861,6 +949,7 @@ function applyResult(p){
   } else {
     planSvg.innerHTML = '';
   }
+  refreshEditData(good ? p : null);
 }
 
 // --- header (title / score / metrics) ---------------------------------------
@@ -1117,6 +1206,7 @@ function onEvent(kind, ev){
     iterRow(ev); applyIteration(ev);
   } else if (kind === 'done'){
     clearStatus();
+    if (ev.source != null && ev.source !== editor.value){ pushUndo(editor.value); }
     if (ev.source != null){ editor.value = ev.source; renderGutter(); }
     if (ev.payload) applyResult(ev.payload);
     hasResult = true;
@@ -1165,6 +1255,263 @@ function initAgent(){
   });
 }
 initAgent();
+
+// --- Tier 5: direct-manipulation edit mode ----------------------------------
+// An interactive SVG overlay drawn from the payload's `rooms`/`openings`. Drags
+// become surgical DSL text edits (POST /api/edit) so the source stays the source
+// of truth; the editor text and viewport swap to the server's rewritten source.
+const editChk = document.getElementById('edit-mode');
+const editLayer = document.getElementById('edit-layer');
+const undoBtn = document.getElementById('undo-btn');
+const editNoteEl = document.getElementById('edit-note');
+const editLevel = 0;                 // the overlay edits level 0 (see the note)
+let editMode = false, editReady = false;
+let editRooms = [], editOpens = [], editLevels = [0];
+let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
+const undoStack = [];
+
+function snap(v){ return Math.round(v * 2) / 2; }          // 0.5 ft grid
+function Y(py){ return ov.MID - py; }                       // plan y (north up) → svg y
+function roomById(id){ return editRooms.find(r => r.id === id); }
+function openByKey(k){ return editOpens.find(o => o.key === k); }
+function roomLine(id){ const r = roomById(id); return r ? r.line : null; }
+function editNote(msg, isErr){ editNoteEl.textContent = msg || '';
+  editNoteEl.className = 'edit-note' + (isErr ? ' err' : ''); }
+
+function initEdit(){
+  // Parse an inline <svg> so the SVG namespace comes from the DOM (no namespace
+  // URL literal in the page — the app stays free of external-looking references).
+  editLayer.innerHTML = '<svg preserveAspectRatio="xMidYMid meet"></svg>';
+  svgEl = editLayer.firstChild;
+  svgEl.addEventListener('pointerdown', onDown);
+  svgEl.addEventListener('pointermove', onMove);
+  svgEl.addEventListener('pointerup', onUp);
+  svgEl.addEventListener('pointercancel', cancelDrag);
+  editChk.addEventListener('change', () => {
+    editMode = editChk.checked; editLayer.hidden = !editMode;
+    planSvg.style.display = editMode ? 'none' : '';
+    if (editMode) buildOverlay(); else { selectedRoomId = null; editNote(''); }
+  });
+  undoBtn.addEventListener('click', doUndo);
+}
+
+function refreshEditData(p){
+  if (p && p.rooms){
+    editRooms = p.rooms.filter(r => r.level === editLevel);
+    editOpens = (p.openings || []).filter(o => o.level === editLevel);
+    editLevels = p.levels || [0]; editReady = true;
+  }
+  if (editMode) buildOverlay();
+}
+
+function buildOverlay(){
+  if (!editMode || !svgEl) return;
+  if (!editRooms.length){ svgEl.innerHTML = '';
+    editNote(editReady ? 'No rooms on level 0 to edit.' : 'Fix the errors to edit the layout.', !editReady);
+    return; }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of editRooms){ minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.l); }
+  const pad = 3, W = (maxX - minX) + 2 * pad, H = (maxY - minY) + 2 * pad;
+  ov = { minX, minY, maxX, maxY, MID: minY + maxY };
+  svgEl.setAttribute('viewBox', (minX - pad) + ' ' + (minY - pad) + ' ' + W + ' ' + H);
+  const fs = Math.max(1.1, Math.min(2.4, Math.min(W, H) * 0.05));
+  const hs = Math.max(0.8, Math.min(2.2, Math.min(W, H) * 0.032));
+  let s = '';
+  for (const r of editRooms){
+    const sel = r.id === selectedRoomId;
+    s += '<rect class="ov-room" data-room="' + esc(r.id) + '" x="' + r.x + '" y="' + Y(r.y + r.l) +
+      '" width="' + r.w + '" height="' + r.l + '" fill="' + r.color + '" stroke="' +
+      (sel ? '#2F6FB0' : '#2b2b2b') + '" stroke-width="' + (sel ? 2.4 : 1) +
+      '" vector-effect="non-scaling-stroke"/>' +
+      '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) - fs * 0.1) + '" text-anchor="middle" ' +
+      'font-size="' + fs + '" fill="#333" style="pointer-events:none">' + esc(r.id) + '</text>' +
+      '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) + fs * 1.05) + '" text-anchor="middle" ' +
+      'font-size="' + (fs * 0.72) + '" fill="#777" style="pointer-events:none">' +
+      trimNum(r.w) + '×' + trimNum(r.l) + '</text>';
+  }
+  for (const o of editOpens){
+    const seg = openSeg(o, o.offset);
+    const col = o.kind === 'window' ? '#2F6FB0' : '#c0392b';
+    s += '<line class="ov-open" data-okey="' + esc(o.key) + '" x1="' + seg[0].x + '" y1="' + Y(seg[0].y) +
+      '" x2="' + seg[1].x + '" y2="' + Y(seg[1].y) + '" stroke="' + col +
+      '" stroke-width="4.5" vector-effect="non-scaling-stroke" stroke-linecap="round"/>';
+  }
+  const r = roomById(selectedRoomId);
+  if (r){
+    const pts = [['sw', r.x, r.y], ['s', r.x + r.w / 2, r.y], ['se', r.x + r.w, r.y],
+      ['e', r.x + r.w, r.y + r.l / 2], ['ne', r.x + r.w, r.y + r.l], ['n', r.x + r.w / 2, r.y + r.l],
+      ['nw', r.x, r.y + r.l], ['w', r.x, r.y + r.l / 2]];
+    for (const p of pts){
+      s += '<rect class="ov-handle h-' + p[0] + '" data-handle="' + p[0] + '" data-room="' + esc(r.id) +
+        '" x="' + (p[1] - hs / 2) + '" y="' + (Y(p[2]) - hs / 2) + '" width="' + hs + '" height="' + hs +
+        '" vector-effect="non-scaling-stroke"/>';
+    }
+  }
+  svgEl.innerHTML = s;
+  editNote(editLevels.length > 1
+    ? ('Editing level 0 of ' + editLevels.length + ' — drag rooms, handles & openings.') : '');
+}
+
+function openSeg(o, off){
+  const dx = o.bx - o.ax, dy = o.by - o.ay, len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  return [{ x: o.ax + ux * off, y: o.ay + uy * off },
+          { x: o.ax + ux * (off + o.width), y: o.ay + uy * (off + o.width) }];
+}
+function projOffset(o, P){
+  const dx = o.bx - o.ax, dy = o.by - o.ay, len = Math.hypot(dx, dy) || 1;
+  return ((P.x - o.ax) * dx + (P.y - o.ay) * dy) / len;
+}
+function toPlan(e){
+  const pt = svgEl.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  const loc = pt.matrixTransform(svgEl.getScreenCTM().inverse());
+  return { x: loc.x, y: ov.MID - loc.y };
+}
+function resizeCalc(d, P){
+  let x = d.cur.x, y = d.cur.y, x2 = d.cur.x + d.cur.w, y2 = d.cur.y + d.cur.l;
+  const px = snap(P.x), py = snap(P.y);
+  if (d.h.indexOf('e') >= 0) x2 = Math.max(x + 3, px);   // 3 ft minimum dimension
+  if (d.h.indexOf('w') >= 0) x = Math.min(x2 - 3, px);
+  if (d.h.indexOf('n') >= 0) y2 = Math.max(y + 3, py);
+  if (d.h.indexOf('s') >= 0) y = Math.min(y2 - 3, py);
+  return { x, y, w: x2 - x, l: y2 - y };
+}
+
+// -- ghost (the live drag preview) --
+function addGhost(d){
+  removeGhost();
+  const NS = svgEl.namespaceURI;
+  if (d.kind === 'open'){
+    ghostEl = document.createElementNS(NS, 'line');
+    ghostEl.setAttribute('stroke', '#d1873f'); ghostEl.setAttribute('stroke-width', '5.5');
+    ghostEl.setAttribute('stroke-linecap', 'round'); ghostEl.setAttribute('stroke-dasharray', '3 2');
+    placeGhostLine(d.o, d.offset);
+  } else {
+    ghostEl = document.createElementNS(NS, 'rect');
+    ghostEl.setAttribute('fill', 'rgba(209,135,63,.18)'); ghostEl.setAttribute('stroke', '#d1873f');
+    ghostEl.setAttribute('stroke-width', '2'); ghostEl.setAttribute('stroke-dasharray', '4 3');
+    placeGhostRect(d.cur.x, d.cur.y, d.cur.w, d.cur.l);
+  }
+  ghostEl.setAttribute('vector-effect', 'non-scaling-stroke');
+  ghostEl.setAttribute('pointer-events', 'none');
+  svgEl.appendChild(ghostEl);
+}
+function removeGhost(){ if (ghostEl && ghostEl.parentNode) ghostEl.parentNode.removeChild(ghostEl); ghostEl = null; }
+function placeGhostRect(x, y, w, l){ if (!ghostEl) return;
+  ghostEl.setAttribute('x', x); ghostEl.setAttribute('y', Y(y + l));
+  ghostEl.setAttribute('width', w); ghostEl.setAttribute('height', l); }
+function placeGhostLine(o, off){ if (!ghostEl) return; const seg = openSeg(o, off);
+  ghostEl.setAttribute('x1', seg[0].x); ghostEl.setAttribute('y1', Y(seg[0].y));
+  ghostEl.setAttribute('x2', seg[1].x); ghostEl.setAttribute('y2', Y(seg[1].y)); }
+
+// -- pointer interactions --
+function onDown(e){
+  if (!editMode) return;
+  const P = toPlan(e);
+  const handleEl = e.target.closest('[data-handle]');
+  const openEl = e.target.closest('[data-okey]');
+  const roomEl = e.target.closest('[data-room]');
+  if (handleEl){
+    const id = handleEl.getAttribute('data-room'), r = roomById(id); if (!r) return;
+    drag = { kind:'resize', id, h:handleEl.getAttribute('data-handle'), P,
+      cur:{ x:r.x, y:r.y, w:r.w, l:r.l }, calc:{ x:r.x, y:r.y, w:r.w, l:r.l }, moved:false };
+  } else if (openEl){
+    const o = openByKey(openEl.getAttribute('data-okey')); if (!o) return;
+    drag = { kind:'open', o, P, offset:o.offset, moved:false };
+  } else if (roomEl){
+    const id = roomEl.getAttribute('data-room'), r = roomById(id); if (!r) return;
+    if (id !== selectedRoomId){ selectedRoomId = id; buildOverlay(); }
+    drag = { kind:'move', id, P, cur:{ x:r.x, y:r.y, w:r.w, l:r.l },
+      calc:{ x:r.x, y:r.y, w:r.w, l:r.l }, moved:false };
+  } else { return; }
+  addGhost(drag);
+  try { svgEl.setPointerCapture(e.pointerId); } catch(_){}
+  e.preventDefault();
+}
+function onMove(e){
+  if (!drag) return;
+  const P = toPlan(e);
+  if (drag.kind === 'move'){
+    const nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
+    drag.calc = { x:nx, y:ny, w:drag.cur.w, l:drag.cur.l };
+    if (nx !== drag.cur.x || ny !== drag.cur.y) drag.moved = true;
+    placeGhostRect(nx, ny, drag.cur.w, drag.cur.l);
+  } else if (drag.kind === 'resize'){
+    const c = resizeCalc(drag, P); drag.calc = c;
+    if (c.x !== drag.cur.x || c.y !== drag.cur.y || c.w !== drag.cur.w || c.l !== drag.cur.l) drag.moved = true;
+    placeGhostRect(c.x, c.y, c.w, c.l);
+  } else {
+    const o = drag.o;
+    const off = Math.max(o.min, Math.min(o.max, snap(projOffset(o, P) - o.width / 2)));
+    drag.offset = off; if (Math.abs(off - o.offset) > 1e-9) drag.moved = true;
+    placeGhostLine(o, off);
+  }
+}
+function onUp(e){
+  if (!drag) return;
+  const d = drag; drag = null; removeGhost();
+  try { svgEl.releasePointerCapture(e.pointerId); } catch(_){}
+  if (d.kind === 'move'){
+    if (!d.moved){ const ln = roomLine(d.id); if (ln) jumpToLine(ln); return; }
+    applyEdits([{ kind:'move_room', room:d.id, x:d.calc.x, y:d.calc.y }]);
+  } else if (d.kind === 'resize'){
+    if (!d.moved) return;
+    const edits = [];
+    if (d.calc.w !== d.cur.w || d.calc.l !== d.cur.l)
+      edits.push({ kind:'resize_room', room:d.id, w:d.calc.w, l:d.calc.l });
+    if (d.calc.x !== d.cur.x || d.calc.y !== d.cur.y)
+      edits.push({ kind:'move_room', room:d.id, x:d.calc.x, y:d.calc.y });
+    applyEdits(edits);
+  } else {
+    if (!d.moved) return;
+    applyEdits([{ kind:'move_opening', opening:d.o.kind, key:d.o.key, offset:d.offset }]);
+  }
+}
+function cancelDrag(){ if (!drag) return; drag = null; removeGhost(); buildOverlay(); }
+
+// -- apply a sequence of edits atomically (from the client's view) --
+async function applyEdits(edits){
+  if (!edits.length){ buildOverlay(); return; }
+  const before = editor.value;
+  let src = before, p = null;
+  try {
+    for (const ed of edits){
+      const resp = await fetch('/api/edit', { method:'POST',
+        headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ source:src, edit:ed }) });
+      p = await resp.json();
+      if (p.error) throw new Error(p.error.message || 'edit rejected');
+      src = p.source;
+    }
+  } catch (err){
+    editNote(String(err.message || err), true);
+    buildOverlay();                        // restore positions from the unchanged data
+    return;
+  }
+  pushUndo(before);                        // snapshot the pre-edit source for undo
+  editor.value = src; renderGutter();
+  applyResult(p);
+  if (p.line) flashLine(p.line);
+  editNote('');
+}
+function flashLine(ln){
+  const el = gutter.children[ln - 1]; if (!el) return;
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+
+// -- undo stack (programmatic textarea replacement breaks native undo) --
+function pushUndo(v){ undoStack.push(v); if (undoStack.length > 50) undoStack.shift(); updateUndo(); }
+function updateUndo(){ undoBtn.disabled = !undoStack.length; }
+function doUndo(){ if (!undoStack.length) return;
+  editor.value = undoStack.pop(); renderGutter(); updateUndo(); compile(); }
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape'){ cancelDrag(); return; }
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey){
+    if (document.activeElement !== editor && document.activeElement !== briefEl){
+      e.preventDefault(); doUndo(); }
+  }
+});
+initEdit();
 
 // --- boot -------------------------------------------------------------------
 editor.value = INITIAL_SOURCE;

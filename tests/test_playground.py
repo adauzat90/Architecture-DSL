@@ -204,3 +204,75 @@ def test_compile_payload_is_pure_and_never_raises():
     assert "svg" not in p
     good = compile_payload(CLEAN)
     assert good["ok"] is True and good["scene"]["nodes"]
+
+
+def test_compile_payload_carries_edit_overlay_arrays():
+    # Tier 5: the payload gains compact rooms/openings arrays for the edit overlay.
+    p = compile_payload(CLEAN)
+    assert p["rooms"] and all({"id", "x", "y", "w", "l", "level", "color"} <= set(r) for r in p["rooms"])
+    assert p["openings"] and all({"kind", "key", "offset", "ax", "by"} <= set(o) for o in p["openings"])
+    assert p["levels"] == sorted(set(p["levels"]))
+
+
+# --- the edit endpoint (Tier 5, direct manipulation) -------------------------
+
+
+def _edit(srv, source, edit):
+    status, data = _request(
+        srv, "POST", "/api/edit", json.dumps({"source": source, "edit": edit})
+    )
+    return status, json.loads(data)
+
+
+def test_edit_happy_path_changes_exactly_one_line_and_recompiles(server):
+    p = compile_payload(CLEAN)
+    room = p["rooms"][0]
+    status, res = _edit(
+        server, CLEAN,
+        {"kind": "move_room", "room": room["id"], "x": room["x"] + 2, "y": room["y"]},
+    )
+    assert status == 200
+    assert res["changed"] is True and res["line"]
+    assert res["source"] != CLEAN
+    before, after = CLEAN.split("\n"), res["source"].split("\n")
+    assert len(before) == len(after)
+    changed = [i for i in range(len(before)) if before[i] != after[i]]
+    assert changed == [res["line"] - 1]
+    # the response is a full recompiled payload (viewport updates from it)
+    assert "svg" in res and res["rooms"]
+
+
+def test_edit_unknown_room_is_200_with_typed_error(server):
+    status, res = _edit(server, CLEAN, {"kind": "move_room", "room": "nope", "x": 1, "y": 1})
+    assert status == 200
+    assert res["error"]["kind"] == "unknown_room"
+    assert "svg" not in res  # no recompiled payload on a refused edit
+
+
+def test_edit_malformed_kind_is_200_with_typed_error(server):
+    status, res = _edit(server, CLEAN, {"kind": "explode"})
+    assert status == 200
+    assert res["error"]["kind"] == "malformed"
+
+
+def test_edit_missing_edit_field_is_400(server):
+    status, _ = _request(server, "POST", "/api/edit", json.dumps({"source": CLEAN}))
+    assert status == 400
+
+
+def test_edit_malformed_json_is_400(server):
+    status, _ = _request(server, "POST", "/api/edit", "{not json")
+    assert status == 400
+
+
+# --- the edit-mode SPA markup ------------------------------------------------
+
+
+def test_app_contains_edit_mode_markup_and_no_external_refs():
+    html = render_app(CLEAN)
+    for token in ("id=\"edit-mode\"", "id=\"edit-layer\"", "id=\"undo-btn\"",
+                  "function buildOverlay(", "function applyEdits(", "move_opening"):
+        assert token in html, token
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html

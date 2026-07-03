@@ -159,6 +159,41 @@ status line; letting the user pick `iterations` / `target_score` / model from th
 pane; **resumable** streams (an `EventSource` reconnect with a job cursor) so a
 dropped tab can rejoin a running job; a **thread transcript** export.
 
+## Direct manipulation — DONE
+Shipped (Tier 5 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/edits.py`
+(`apply_edit`) plus an **Edit layout** overlay in the 2D plan tab of the
+playground. Viewport gestures — drag a room, resize it by its edge/corner
+handles, slide a door/window/entry along its wall — become **surgical DSL text
+edits**, so the source stays the source of truth. The engine is a pure function
+over source *text* (not `emit.py`/`exchange_to_plan` regeneration, which would
+flatten comments, spacing and statement order): it compiles the source to find the
+one statement to touch, re-tokenizes only that line, and rewrites the changed
+tokens with every other byte preserved (inline `# comments` on the touched line
+survive; a no-op is byte-identical; a relative placement stays relative unless the
+coordinates truly change, then converts to absolute; unknown/malformed edits are
+typed errors, never exceptions). `POST /api/edit` (`{source, edit}`) applies one
+edit and returns the recompiled `compile_payload`; a refused edit is a normal 200
+with `{error:{kind,message}}`. The element→line map is a minimal
+`CompileResult.room_lines` addition (openings already carry `.line`); the overlay
+is drawn client-side from compact `rooms`/`openings` payload arrays (room-palette
+colours, id labels) with 0.5 ft grid snap, a 3 ft minimum-dimension guard, an undo
+stack of source snapshots (button / Ctrl-Cmd-Z), a click-to-jump-to-line select,
+and level-0 editing on multi-level plans. Tests: `tests/test_edits.py` (the
+preservation/idempotence/typed-error guarantees + a gallery sweep) and the
+`/api/edit` + SPA-markup cases in `tests/test_playground.py`.
+
+Genuine follow-ups: **adjacency-preserving drags** — when a moved room stays flush
+against its former anchor, emit an updated *relative* placement (`east-of foo align
+… offset …`) instead of converting to absolute, so the author's intent survives;
+**wall-attribute editing** from the overlay (toggle a shared wall plumbing /
+bearing / rated, add/remove a `wall` statement); **multi-select** + group move /
+align / distribute (one batched edit set, one undo entry); dragging to **create**
+(rubber-band a new `room`, drop a new window/door onto a wall) and **delete**;
+editing **porches / stairs / wings** (not just rooms and openings) and the upper
+levels of a multi-level plan (a level switcher); a **live coordinate/size readout**
+and dimension witnesses while dragging; snapping to **sibling edges** (align to an
+adjacent room's wall, not just the 0.5 ft grid).
+
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the
 `barndsl.revit/1` exchange) and a `barndsl revit FILE --out plan.json` command.

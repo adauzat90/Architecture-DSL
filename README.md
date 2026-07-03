@@ -631,6 +631,17 @@ dependency, no CDN, and it works offline** (nothing is uploaded anywhere). The 3
 tab reuses the same inline WebGL renderer `barndsl view3d` writes. `barndsl serve
 plan.barn` preloads a file; `--port` picks the port.
 
+*Edit mode.* Toggle **Edit layout** on the 2D plan tab for direct manipulation:
+an interactive overlay (room-palette colours, id labels) where you drag a room to
+move it (0.5 ft grid snap), drag its edge/corner handles to resize it (3 ft
+minimum), and drag a door/window/entry marker to slide it along its wall. Every
+gesture is round-tripped as a **surgical DSL text edit** — only the one statement
+changes, comments and formatting untouched — so the text stays the source of
+truth (`POST /api/edit`, engine in `barndsl.edits`). Clicking a room scrolls the
+editor to its line; a small undo stack (button, or Ctrl/Cmd+Z when the editor
+isn't focused) reverts applied edits and agent results; a rejected edit restores
+the drag and shows the reason inline. Multi-level plans edit level 0.
+
 *Agent chat pane.* When the agent extra is installed and a key is set — `pip
 install 'barndsl[agent]'` and `export ANTHROPIC_API_KEY=…` — a chat pane lights
 up on the left: type a brief and Claude runs the `agent.py`

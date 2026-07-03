@@ -1285,6 +1285,10 @@ class CompileResult:
     #: True when parse-error recovery skipped statements: ``plan`` (if any) is
     #: PARTIAL — good enough to score and inspect, not to build or export from.
     recovered: bool = False
+    #: Map of room id -> the 1-based source line of its ``room`` statement, for
+    #: tools that rewrite the text surgically (see :mod:`barndsl.edits`). Empty
+    #: for a plan built through the Python API rather than compiled from text.
+    room_lines: dict[str, int] = field(default_factory=dict)
 
     @property
     def errors(self) -> list[Issue]:
@@ -1460,7 +1464,7 @@ def compile_source(
     # empty/garbage input scores a flat zero with no misleading semantic cascade;
     # see score.py's plan-None handling).
     if skipped and not plan.rooms:
-        return CompileResult(None, diagnostics, source)
+        return CompileResult(None, diagnostics, source, room_lines=dict(smap.room_line))
 
     # Derive the structural frame (if requested) before checks, so the validator
     # and renderer see the placed posts/beams. On a partial (statements-skipped)
@@ -1506,7 +1510,9 @@ def compile_source(
                 if iss.col is None and iss.room in smap.room_col:
                     iss.col, iss.end_col = smap.room_col[iss.room]
         diagnostics.extend(report.issues)
-    return CompileResult(plan, diagnostics, source, recovered=skipped)
+    return CompileResult(
+        plan, diagnostics, source, recovered=skipped, room_lines=dict(smap.room_line)
+    )
 
 
 def compile_file(path: str, profile: "Profile | None" = None) -> CompileResult:

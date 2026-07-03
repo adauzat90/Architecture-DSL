@@ -1,7 +1,11 @@
 # Agent-first architecture application
 
-Status: **design** — tiers 1 (3D output), 2 (web playground), 3 (the agent in
-the app) and 4 (IFC export) **shipped/DONE**; tier 5 planned.
+Status: **all five tiers shipped** — 1 (3D output), 2 (web playground), 3 (the
+agent in the app), 4 (IFC export) and 5 (direct manipulation, round-tripped) are
+**DONE**. The roadmap is complete: the design application described by the thesis
+below — a DSL shared by human and agent, a compiler that validates every change,
+and viewports that are pure functions of the source (now including *editable*
+viewports whose gestures flow back into the text) — exists end to end.
 Context: `docs/IDEAS.md` (Revit plug-in — foundation DONE), `docs/PRODUCT_REVIEW.md`,
 `docs/REVIEW_DSL_REVIT*.md`.
 
@@ -201,10 +205,29 @@ are IFC 22-char compressed GUIDs derived deterministically with `uuid5`, and no
 wall-clock timestamp is written, so re-exporting an unchanged plan is
 byte-identical.
 
-### Tier 5 — direct manipulation, round-tripped
+### Tier 5 — direct manipulation, round-tripped — DONE
 
-Viewport edits (drag a wall, resize a room) emitted as DSL edits, so the text
-stays the source of truth. `exchange_to_plan` is the existing proof.
+Viewport edits (drag a room, resize it, slide a door/window along its wall)
+emitted as DSL edits, so the text stays the source of truth. **Shipped:**
+`src/barndsl/edits.py` (`apply_edit`) and an **Edit layout** overlay in the 2D
+plan tab of `src/barndsl/playground.py` (`POST /api/edit`), tested in
+`tests/test_edits.py` and `tests/test_playground.py`.
+
+**The key architectural decision:** the edit engine is a **pure function over
+source *text***, not model→DSL regeneration. `revit.py`'s `exchange_to_plan` (and
+`emit.py`) prove the inverse mapping works, but regenerating the whole source from
+the model would flatten the author's comments, spacing and statement order — so it
+is deliberately the *wrong* tool here. Instead each gesture compiles the source to
+locate the one statement to touch, re-tokenizes only that line, rewrites the tokens
+that actually changed, and returns the source with every other byte preserved. The
+guarantees are test-pinned: only the target line changes (inline `# comments`
+survive), a no-op is byte-identical (and a relative placement stays relative unless
+the coordinates truly change — a real move converts it to absolute), and unknown /
+malformed edits are typed errors, never exceptions or 500s. The element→line map is
+a minimal `CompileResult.room_lines` addition (openings already carry their source
+line); the overlay is drawn by the frontend from compact `rooms`/`openings` arrays
+in the compile payload, with 0.5 ft grid snap, a 3 ft minimum-dimension guard, an
+undo stack of source snapshots, and level-0 editing on multi-level plans.
 
 ## Non-goals
 
