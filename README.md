@@ -614,6 +614,18 @@ dependency, no CDN, and it works offline** (nothing is uploaded anywhere). The 3
 tab reuses the same inline WebGL renderer `barndsl view3d` writes. `barndsl serve
 plan.barn` preloads a file; `--port` picks the port.
 
+*Agent chat pane.* When the agent extra is installed and a key is set — `pip
+install 'barndsl[agent]'` and `export ANTHROPIC_API_KEY=…` — a chat pane lights
+up on the left: type a brief and Claude runs the `agent.py`
+compile-critique-revise loop, streaming each round's score and diagnostics back
+as it goes (the editor and viewport update live so you watch the design evolve),
+then lands the **best-scoring** iteration in the editor. Follow-up messages ("make
+the kitchen bigger") send the current plan as the seed, so the conversation
+refines it. A **Stop** button aborts between rounds; the pane collapses to keep
+the editor roomy on small screens. Without the extra or the key the pane stays
+disabled with that one-line hint and the rest of the playground works unchanged —
+the key's value is never sent anywhere or logged.
+
 **Cost estimate.** `barndsl cost plan.barn` turns the takeoff into a transparent,
 assembly-based budget: every line is `quantity × unit cost` with the quantity's
 source named (slab, exterior/interior walls, roof, windows/doors/garage doors,

@@ -588,3 +588,102 @@ def test_revision_reverts_to_the_best_valid_source_after_a_broken_round():
     assert 'plan "Stillwater Cottage"' in revision  # CLEAN is carried forward
     # Nothing above the attribution claims the shown (valid) source failed.
     assert "does not compile" not in revision.split("Fatal diagnostics")[0]
+
+
+# -- refinement seed (seed_source) --------------------------------------------
+
+
+def test_seed_source_refines_the_current_plan_in_the_first_prompt():
+    """`seed_source` primes round 1 as a revision of the caller's plan: it rides
+    the first prompt as the "previous" DSL plus its own diagnostics."""
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design(
+        "make the kitchen bigger", max_iterations=1, target_score=None, seed_source=MEDIOCRE
+    )
+
+    first = client.stream_prompts[0]
+    assert "Your previous DSL:" in first
+    assert 'plan "Mediocre"' in first  # the seed source is shown as the prior
+    assert "Design score:" in first  # …with its diagnostics as feedback
+    # It is NOT recorded as a competing iteration 0 — refinement may reshape the
+    # design, and must not be vetoed by best-iteration-wins.
+    assert [s.iteration for s in result.history] == [1]
+
+
+def test_seed_source_default_is_todays_fresh_generation():
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    assert "Your previous DSL:" not in client.stream_prompts[0]
+
+
+# -- cancellation + phase hook ------------------------------------------------
+
+
+def test_cancel_stops_the_loop_between_rounds():
+    """`cancel` is polled at the top of each round; once true the loop stops and
+    hands back the best iteration recorded so far."""
+    client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    calls = {"n": 0}
+
+    def cancel() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1  # allow round 1, then cancel before round 2
+
+    result = _agent(client).design(
+        "a home", max_iterations=3, target_score=None, cancel=cancel
+    )
+    assert [s.iteration for s in result.history] == [1]  # round 2 never ran
+    assert result.best_iteration == 1
+
+
+def test_cancel_before_the_first_round_returns_an_empty_result():
+    client = FakeClient(sources=[CLEAN])
+    result = _agent(client).design(
+        "x", max_iterations=2, target_score=None, cancel=lambda: True
+    )
+    assert result.history == [] and result.iterations == 0
+    assert result.best_iteration == 0  # nothing recorded, but no exception
+
+
+def test_on_phase_narrates_writing_compiling_and_critiquing():
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    phases: list[tuple[str, int]] = []
+    _agent(client).design(
+        "a cottage", max_iterations=1, target_score=None,
+        on_phase=lambda phase, rnd: phases.append((phase, rnd)),
+    )
+    assert ("writing", 1) in phases
+    assert ("compiling", 1) in phases
+    assert ("critiquing", 1) in phases  # CLEAN builds a plan, so the critic runs
+
+
+# -- availability probe -------------------------------------------------------
+
+
+def test_agent_availability_true_when_anthropic_and_key_present(monkeypatch):
+    from barndsl.agent import agent_availability
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-never-used")
+    available, reason = agent_availability()
+    assert available is True and reason is None
+
+
+def test_agent_availability_reports_a_missing_key(monkeypatch):
+    from barndsl.agent import agent_availability
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    available, reason = agent_availability()
+    assert available is False
+    assert reason is not None and "ANTHROPIC_API_KEY" in reason
+
+
+def test_agent_availability_reports_a_missing_dependency(monkeypatch):
+    import sys
+
+    from barndsl.agent import agent_availability
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")  # key present, so the extra is the gap
+    monkeypatch.setitem(sys.modules, "anthropic", None)  # `import anthropic` fails
+    available, reason = agent_availability()
+    assert available is False
+    assert reason is not None and "barndsl[agent]" in reason

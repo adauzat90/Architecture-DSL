@@ -79,12 +79,49 @@ malformed → 400, oversize rejected, unknown path → 404 serving no files), th
 no-external-references invariant, and the shared-renderer refactor (the viewer
 stays self-contained; the app embeds the same asset).
 
-Possible follow-ups: **Tier 3 — the agent in the app** (`agent.py`'s compile-fix
-loop behind a conversation pane, streaming intermediate renders); a **static
-Pyodide build** as an alternative zero-backend deploy target (the engine is pure
-Python + pydantic, so Pyodide can run it entirely client-side — trades the local
-server for a heavier first load); a shareable-plan permalink (source in the URL
-hash); side-by-side scheme compare (`compare_plans`) in the UI.
+Possible follow-ups: a **static Pyodide build** as an alternative zero-backend
+deploy target (the engine is pure Python + pydantic, so Pyodide can run it
+entirely client-side — trades the local server for a heavier first load); a
+shareable-plan permalink (source in the URL hash); side-by-side scheme compare
+(`compare_plans`) in the UI.
+
+## Agent in the playground — DONE
+Shipped (Tier 3 of `docs/design/AGENT_FIRST_APP.md`): `agent.py`'s
+compile-critique-revise loop behind a conversation pane in the playground, its
+intermediate renders streamed live. `POST /api/design` (`{brief, source?,
+iterations?}`) is a **Server-Sent Events** stream — a `status` opener, one
+`iteration` per round carrying the round's score, diagnostic counts and the FULL
+`compile_payload` (so the editor + viewport update as each round lands and the
+user watches the design evolve), and a final `done` carrying the **best-scoring**
+iteration (not the last — a regressed final round is never handed back). Errors
+are structured `error` frames with a `kind` (unavailable / missing_dependency /
+api_error / cancelled). `GET /api/agent` probes availability
+(`agent.agent_availability`: `anthropic` importable **and** `ANTHROPIC_API_KEY`
+set — only the key's *presence*, never its value) so the SPA lights up or disables
+the pane with the one-line install hint. A `source` in the body seeds the loop, so
+follow-up briefs refine the current plan instead of starting fresh. One job at a
+time (409); `POST /api/design/cancel {id}` sets a cancel flag the loop polls
+between rounds (also tripped when the SSE connection drops), and the **Stop**
+button uses it. The compile endpoint stays responsive throughout
+(`ThreadingHTTPServer`, one shared design lock).
+
+The seam into `agent.py` stays minimal and keyless-testable: `design()` gained
+three keyword-only hooks — `seed_source` (refine the caller's plan; primes round 1
+as a revision, *not* recorded as a competing iteration so an edit that trades a
+point for the user's request isn't vetoed by best-iteration-wins), `cancel` (a
+`() -> bool` polled per round), and `on_phase(phase, round)` (narrates
+writing/compiling/critiquing) — all defaulting to no-ops, so existing callers and
+tests are untouched. `stdlib`-only server; `anthropic` imported lazily only when a
+design job runs; the injectable `make_server(designer=…)` lets the tests exercise
+the whole SSE path with a scripted fake — no network, no key, no `anthropic`
+(`tests/test_playground_agent.py`, plus the hook tests in
+`tests/test_agent_loop.py`).
+
+Possible follow-ups: a **diff view** of what a refinement changed (source diff +
+score delta, reusing `compare_plans`); **per-phase token/latency** surfaced in the
+status line; letting the user pick `iterations` / `target_score` / model from the
+pane; **resumable** streams (an `EventSource` reconnect with a job cursor) so a
+dropped tab can rejoin a running job; a **thread transcript** export.
 
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the

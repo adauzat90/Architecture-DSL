@@ -27,7 +27,9 @@ Requires ``anthropic`` and ``ANTHROPIC_API_KEY``. Install ``pip install 'barndsl
 from __future__ import annotations
 
 import base64
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
@@ -41,6 +43,28 @@ DEFAULT_MODEL = "claude-opus-4-8"
 
 #: Below this score the design is not "done" even if the critic is satisfied.
 DEFAULT_TARGET_SCORE = 90.0
+
+#: The one-liner both the CLI and the playground surface when the agent can't run.
+AGENT_INSTALL_HINT = "pip install 'barndsl[agent]' and set ANTHROPIC_API_KEY"
+
+
+def agent_availability() -> tuple[bool, str | None]:
+    """Whether the Claude agent can run here — ``(available, reason)``.
+
+    Two gates, checked in order: the optional ``anthropic`` package must import,
+    and ``ANTHROPIC_API_KEY`` must be set. Returns ``(True, None)`` when both
+    hold, otherwise ``(False, <actionable reason>)``. The key's *value* is never
+    read into the reason or returned anywhere — only its presence is probed — so
+    this is safe to serve to a browser. Shared by the CLI ``design`` command and
+    the playground's ``/api/agent`` probe so the two never diverge.
+    """
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        return False, f"the agent extra is not installed — {AGENT_INSTALL_HINT}"
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return False, f"ANTHROPIC_API_KEY is not set — {AGENT_INSTALL_HINT}"
+    return True, None
 
 _DESIGN_RULES = """\
 DESIGN RULES the compiler enforces (write DSL that satisfies them):
@@ -385,6 +409,10 @@ class BarndoAgent:
         on_step=None,
         target_score: float | None = DEFAULT_TARGET_SCORE,
         seed_with_solver=None,
+        *,
+        seed_source: str | None = None,
+        cancel: Callable[[], bool] | None = None,
+        on_phase: Callable[[str, int], None] | None = None,
     ) -> DesignResult:
         """Run the write → compile → score → critique → revise loop.
 
@@ -399,6 +427,22 @@ class BarndoAgent:
         generation prompt as a dimensionally sound draft to refine rather than a
         blank page. Falsy (the default) leaves the loop exactly as it was; if the
         solver produces nothing that compiles, seeding is silently skipped.
+
+        ``seed_source`` (keyword-only) turns the loop into a **refinement**: the
+        caller's current DSL is fed to round 1 as the "previous" source with its
+        own diagnostics, so "make the kitchen bigger" revises that plan instead
+        of starting from a blank page. Unlike the solver seed it is *not* scored
+        as a competing iteration — refinement intentionally reshapes the design
+        per the new brief, and must not be vetoed by best-iteration-wins if the
+        edit trades a point of score for the user's request. Default ``None``
+        leaves the loop unchanged.
+
+        ``cancel`` (keyword-only) is polled once at the top of every round; when
+        it returns true the loop stops and hands back the best iteration so far.
+        ``on_phase`` (keyword-only) is called with ``(phase, round)`` — phase one
+        of ``"writing" | "compiling" | "critiquing"`` — as each round advances,
+        so a UI can narrate the loop between the coarser ``on_step`` results.
+        Both default ``None`` (no behaviour change, no calls).
         """
         history: list[DesignStep] = []
         source: str | None = None
@@ -407,26 +451,44 @@ class BarndoAgent:
         # Candidate 0: the deterministic solver's best plan, if one was requested
         # and it compiles. Recorded as iteration 0 so best-iteration-wins can
         # return it, and its source seeds the first generation prompt.
-        seed_source: str | None = None
+        solver_seed: str | None = None
         if seed_with_solver:
             seed_step = _solver_seed_step(seed_with_solver)
             if seed_step is not None:
                 history.append(seed_step)
-                seed_source = seed_step.source
+                solver_seed = seed_step.source
                 if on_step:
                     on_step(seed_step)
 
+        # Refinement: revise the caller's current plan. Prime round 1 with it as
+        # the "prior" source plus its diagnostics so the first write is a revision.
+        if seed_source is not None:
+            source = seed_source
+            seed_result = compile_source(seed_source, name=None)
+            _fold_program_nudge(seed_result)
+            feedback = render_feedback(seed_result)
+
         for i in range(1, max_iterations + 1):
+            if cancel is not None and cancel():
+                break
+            if on_phase is not None:
+                on_phase("writing", i)
             source = self.write_source(
-                brief, prior=source, diagnostics=feedback, seed=seed_source
+                brief, prior=source, diagnostics=feedback, seed=solver_seed
             )
+            if on_phase is not None:
+                on_phase("compiling", i)
             result = compile_source(source, name=None)
             # The program nudge is folded before scoring: it is deterministic
             # (a pure function of the source), so the score stays a contract —
             # and a missing `program` line now costs points the loop can win back.
             _fold_program_nudge(result)
             score = design_score(result)
-            crit = self.critique(result, score) if (critique and result.plan is not None) else None
+            crit = None
+            if critique and result.plan is not None:
+                if on_phase is not None:
+                    on_phase("critiquing", i)
+                crit = self.critique(result, score)
             # Fold the architect's review into the diagnostic stream as INFO, so
             # design feedback travels the same channel as the compiler's errors.
             # (After scoring: the critique is model-driven, the score is not.)
@@ -481,6 +543,11 @@ class BarndoAgent:
                         + "\n".join(fatal)
                     )
 
+        if not history:
+            # Cancelled before any round was recorded: still return a well-formed
+            # result (the refinement seed, or an empty compile) rather than raise.
+            src = seed_source or ""
+            return DesignResult(src, compile_source(src, name=None), history)
         best = _best_step(history)
         return DesignResult(best.source, best.result, history)
 
@@ -622,6 +689,10 @@ def design(
     on_step=None,
     target_score: float | None = DEFAULT_TARGET_SCORE,
     seed_with_solver=None,
+    *,
+    seed_source: str | None = None,
+    cancel: Callable[[], bool] | None = None,
+    on_phase: Callable[[str, int], None] | None = None,
 ) -> DesignResult:
     """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``."""
     return BarndoAgent(model=model).design(
@@ -630,4 +701,7 @@ def design(
         on_step=on_step,
         target_score=target_score,
         seed_with_solver=seed_with_solver,
+        seed_source=seed_source,
+        cancel=cancel,
+        on_phase=on_phase,
     )

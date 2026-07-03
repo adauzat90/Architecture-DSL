@@ -45,7 +45,10 @@
         Start the local web playground: a DSL editor with live diagnostics and a
         2D-plan / 3D / elevations viewport, served from a stdlib http.server on
         127.0.0.1 (no new dependency, works offline). An optional FILE preloads
-        the editor; `--open` launches a browser.
+        the editor; `--open` launches a browser. When the agent extra is
+        installed (`pip install 'barndsl[agent]'`) and ANTHROPIC_API_KEY is set,
+        a chat pane lights up on the left: a brief in, the Claude compile-critique
+        -revise loop streamed live, the best-scoring plan landed in the editor.
 
     barndsl revit FILE.barn [--out FILE.json] [--frame]
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
@@ -398,10 +401,11 @@ def _cmd_layout(args: argparse.Namespace) -> int:
 
 
 def _cmd_design(args: argparse.Namespace) -> int:
-    try:
-        from .agent import BarndoAgent
-    except ImportError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    from .agent import BarndoAgent, agent_availability
+
+    available, reason = agent_availability()
+    if not available:
+        print(f"error: {reason}", file=sys.stderr)
         return 2
 
     def on_step(step) -> None:
@@ -1156,7 +1160,9 @@ def main(argv: list[str] | None = None) -> int:
     p_view3d.set_defaults(func=_cmd_view3d)
 
     p_serve = sub.add_parser(
-        "serve", help="start the local web playground (editor, live diagnostics, 2D/3D)"
+        "serve",
+        help="start the local web playground (editor, live diagnostics, 2D/3D; "
+        "agent chat pane when barndsl[agent] + ANTHROPIC_API_KEY are present)",
     )
     p_serve.add_argument(
         "file", nargs="?", default=None, help="optional .barn file to preload the editor"

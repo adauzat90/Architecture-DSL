@@ -7,10 +7,9 @@ the installed compiler directly, so there is no Pyodide, no CDN, and it works
 fully offline. (A static Pyodide build is a possible later deploy target; see the
 IDEAS follow-ups.)
 
-The shell is Tier 2 of ``docs/design/AGENT_FIRST_APP.md``: the editor on the
-left with inline diagnostics, the viewport on the right (2D plan, the shared
-inline WebGL 3D renderer, elevations + section). No agent pane yet — that is
-Tier 3.
+The shell is Tiers 2–3 of ``docs/design/AGENT_FIRST_APP.md``: an agent chat pane
+on the left, the DSL editor with inline diagnostics in the middle, the viewport
+on the right (2D plan, the shared inline WebGL 3D renderer, elevations + section).
 
 Routes (the *only* routes; there is no static-file serving or directory listing):
 
@@ -29,16 +28,38 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
 ``GET /api/reference``
     the DSL grammar reference (:data:`~barndsl.compiler.DSL_REFERENCE`) for the
     help panel.
+``GET /api/agent``
+    ``{available, reason}`` — whether the Claude agent can run here
+    (:func:`barndsl.agent.agent_availability`: ``anthropic`` importable and
+    ``ANTHROPIC_API_KEY`` set). The key's value is never read or returned; only
+    its presence is probed. The SPA lights up (or disables, with the reason) the
+    chat pane from this.
+``POST /api/design``
+    body ``{"brief": "...", "source"?: "...", "iterations"?: N}`` → a
+    **Server-Sent Events** stream of the ``agent.py`` compile-critique-revise
+    loop: ``status`` phase updates, one ``iteration`` per round (round, score,
+    counts and the FULL :func:`compile_payload` so the viewport evolves live),
+    a final ``done`` (the best-scoring iteration, not the last), or a structured
+    ``error`` (``kind`` ∈ unavailable/missing_dependency/api_error/cancelled).
+    ``source`` seeds a refinement of the current plan; one job at a time (409).
+``POST /api/design/cancel``
+    body ``{"id": "<job>"}`` → set the running job's cancel flag; the loop stops
+    between rounds and the stream ends with a ``cancelled`` error.
 
-The server is stateless: it writes no files and holds no session. The frontend
-keeps the last good render when the current source is broken.
+The server is stateless apart from a single-job design lock: it writes no files
+and holds no session. The frontend keeps the last good render when the current
+source is broken.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
+import uuid
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import urlsplit
 
 from .compiler import DSL_REFERENCE, compile_source
@@ -138,6 +159,71 @@ def compile_payload(source: str) -> dict:
     return payload
 
 
+# --- the design (agent) endpoint ---------------------------------------------
+
+#: A design job (brief → best plan) as an injectable callable. The default drives
+#: :class:`barndsl.agent.BarndoAgent`; tests pass a fake so the endpoint is
+#: exercised with no ``anthropic``, no key and no network. It receives the brief
+#: plus the refinement seed, the round cap and the three loop hooks, and returns a
+#: :class:`~barndsl.agent.DesignResult`.
+Designer = Callable[..., Any]
+
+
+def _default_designer(
+    brief: str,
+    *,
+    seed_source: str | None,
+    max_iterations: int,
+    on_step: Callable[[Any], None],
+    on_phase: Callable[[str, int], None],
+    cancel: Callable[[], bool],
+) -> Any:
+    """Run the real Claude loop. Imported lazily so ``anthropic`` stays optional."""
+    from .agent import BarndoAgent
+
+    return BarndoAgent().design(
+        brief,
+        max_iterations=max_iterations,
+        seed_source=seed_source,
+        on_step=on_step,
+        on_phase=on_phase,
+        cancel=cancel,
+    )
+
+
+def _iteration_event(step: Any, rounds: int) -> dict:
+    """The ``iteration`` SSE payload for one design step.
+
+    Carries the round number, the step's score (total + counts + components),
+    the compact diagnostic counts, and — reusing :func:`compile_payload` — the
+    FULL render payload for that round's source, so the frontend drops it into
+    the editor and viewport and the user watches the design evolve live.
+    """
+    payload = compile_payload(step.source)
+    counts = payload.get("counts") or {"error": 0, "warning": 0, "info": 0}
+    return {
+        "round": step.iteration,
+        "rounds": rounds,
+        "source": step.source,
+        "score": step.score.to_dict() if step.score is not None else None,
+        "counts": counts,
+        "payload": payload,
+    }
+
+
+def _done_event(result: Any) -> dict:
+    """The ``done`` SSE payload: the best-scoring iteration and its render."""
+    payload = compile_payload(result.source)
+    return {
+        "round": result.best_iteration,
+        "iterations": result.iterations,
+        "source": result.source,
+        "score": result.score.to_dict(),
+        "counts": payload.get("counts") or {"error": 0, "warning": 0, "info": 0},
+        "payload": payload,
+    }
+
+
 # --- the HTTP server ---------------------------------------------------------
 
 
@@ -149,6 +235,11 @@ class _Handler(BaseHTTPRequestHandler):
     """
 
     server_version = "barndsl-playground"
+
+    #: Returned by :meth:`_read_json_body` when it has already sent a 4xx — the
+    #: caller must stop, but ``None`` is a *valid* parsed body (``null``), so the
+    #: error path needs a distinct sentinel.
+    _BODY_ERROR = object()
 
     def log_message(self, *args) -> None:  # keep the console quiet
         pass
@@ -180,26 +271,32 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(server.examples)
         elif path == "/api/reference":
             self._json({"reference": DSL_REFERENCE})
+        elif path == "/api/agent":
+            if server.designer is not None:  # an injected loop needs no anthropic/key
+                self._json({"available": True, "reason": None})
+            else:
+                from .agent import agent_availability
+
+                available, reason = agent_availability()
+                self._json({"available": available, "reason": reason})
         else:
             self._json({"error": "not found"}, status=404)
 
     def do_HEAD(self) -> None:
         self.do_GET()
 
-    def do_POST(self) -> None:
-        path = urlsplit(self.path).path
-        if path != "/api/compile":
-            self._json({"error": "not found"}, status=404)
-            return
+    def _read_json_body(self) -> object:
+        """Read and parse the JSON request body, or send a 400 and return the
+        :attr:`_BODY_ERROR` sentinel. Enforces the ``MAX_BODY`` cap."""
         raw = self.headers.get("Content-Length")
         if raw is None:
             self._json({"error": "missing Content-Length"}, status=400)
-            return
+            return self._BODY_ERROR
         try:
             length = int(raw)
         except ValueError:
             self._json({"error": "bad Content-Length"}, status=400)
-            return
+            return self._BODY_ERROR
         if length < 0 or length > MAX_BODY:
             # Drain the (bounded) oversize body first so a localhost client sees a
             # clean 400 rather than a broken pipe; skip only absurd declared sizes.
@@ -208,15 +305,31 @@ class _Handler(BaseHTTPRequestHandler):
                     self.rfile.read(length)
                 except OSError:
                     pass
-            self._json({"error": f"request too large (max {MAX_BODY} bytes)"},
-                       status=400)
-            return
+            self._json({"error": f"request too large (max {MAX_BODY} bytes)"}, status=400)
+            return self._BODY_ERROR
         body = self.rfile.read(length)
         try:
-            data = json.loads(body or b"{}")
+            return json.loads(body or b"{}")
         except (ValueError, UnicodeDecodeError):
             self._json({"error": "malformed JSON"}, status=400)
+            return self._BODY_ERROR
+
+    def do_POST(self) -> None:
+        path = urlsplit(self.path).path
+        if path not in ("/api/compile", "/api/design", "/api/design/cancel"):
+            self._json({"error": "not found"}, status=404)
             return
+        data = self._read_json_body()
+        if data is self._BODY_ERROR:
+            return
+        if path == "/api/compile":
+            self._handle_compile(data)
+        elif path == "/api/design":
+            self._handle_design(data)
+        else:
+            self._handle_cancel(data)
+
+    def _handle_compile(self, data: object) -> None:
         if not isinstance(data, dict) or not isinstance(data.get("source"), str):
             self._json({"error": 'expected {"source": "<dsl>"}'}, status=400)
             return
@@ -227,31 +340,169 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json(payload)
 
+    # -- the agent (design) endpoint --
+    def _handle_cancel(self, data: object) -> None:
+        """Set the running design job's cancel flag (if the id matches)."""
+        server: _PlaygroundServer = self.server  # type: ignore[assignment]
+        job_id = data.get("id") if isinstance(data, dict) else None
+        with server.jobs_lock:
+            job = server.current_job
+            if job is not None and (job_id is None or job_id == job["id"]):
+                job["cancel"].set()
+                self._json({"cancelled": True, "id": job["id"]})
+                return
+        self._json({"cancelled": False}, status=404)
+
+    def _handle_design(self, data: object) -> None:
+        """Run one design job and stream it as Server-Sent Events.
+
+        Validates the brief, enforces one-job-at-a-time (409), then streams the
+        loop: ``status`` phase updates, an ``iteration`` per round, and a final
+        ``done`` or a structured ``error``. The agent (and ``anthropic``) is only
+        imported here, so importing the playground never needs the extra.
+        """
+        if not isinstance(data, dict):
+            self._json({"error": 'expected {"brief": "<text>"}'}, status=400)
+            return
+        brief = data.get("brief")
+        if not isinstance(brief, str) or not brief.strip():
+            self._json({"error": 'expected {"brief": "<text>"}'}, status=400)
+            return
+        seed = data.get("source")
+        if seed is not None and not isinstance(seed, str):
+            self._json({"error": '"source" must be a string'}, status=400)
+            return
+        seed_source = seed or None  # empty editor → a fresh generation, no seed
+        rounds = data.get("iterations", 3)
+        if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 8:
+            rounds = 3
+
+        server: _PlaygroundServer = self.server  # type: ignore[assignment]
+        if not server.design_lock.acquire(blocking=False):
+            self._json({"error": "a design job is already running"}, status=409)
+            return
+        cancel = threading.Event()
+        job_id = uuid.uuid4().hex
+        with server.jobs_lock:
+            server.current_job = {"id": job_id, "cancel": cancel}
+        try:
+            self._stream_design(server, brief, seed_source, rounds, cancel, job_id)
+        finally:
+            with server.jobs_lock:
+                server.current_job = None
+            server.design_lock.release()
+
+    def _open_sse(self) -> None:
+        """Send the SSE response headers (200, ``text/event-stream``)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _sse(self, cancel: threading.Event, event: str, payload: object) -> None:
+        """Write one SSE frame; a broken pipe (client gone) sets ``cancel``."""
+        frame = f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+        try:
+            self.wfile.write(frame)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            cancel.set()  # the client closed the stream — stop between rounds
+
+    def _stream_design(
+        self,
+        server: "_PlaygroundServer",
+        brief: str,
+        seed_source: str | None,
+        rounds: int,
+        cancel: threading.Event,
+        job_id: str,
+    ) -> None:
+        if server.designer is not None:  # an injected loop needs no anthropic/key
+            available, reason = True, None
+        else:
+            from .agent import agent_availability
+
+            available, reason = agent_availability()
+        self._open_sse()
+        self._sse(cancel, "status", {"job": job_id, "phase": "starting",
+                                     "round": 0, "rounds": rounds})
+        if not available:
+            self._sse(cancel, "error", {"kind": "unavailable", "message": reason})
+            return
+
+        def on_phase(phase: str, rnd: int) -> None:
+            self._sse(cancel, "status", {"phase": phase, "round": rnd, "rounds": rounds})
+
+        def on_step(step: Any) -> None:
+            self._sse(cancel, "iteration", _iteration_event(step, rounds))
+
+        designer: Designer = server.designer or _default_designer
+        try:
+            result = designer(
+                brief,
+                seed_source=seed_source,
+                max_iterations=rounds,
+                on_step=on_step,
+                on_phase=on_phase,
+                cancel=cancel.is_set,
+            )
+        except ImportError as exc:  # anthropic vanished between probe and call
+            self._sse(cancel, "error", {"kind": "missing_dependency", "message": str(exc)})
+            return
+        except Exception as exc:  # network / API / model error — never leak a key
+            self._sse(cancel, "error", {"kind": "api_error", "message": str(exc)})
+            return
+
+        if cancel.is_set():
+            self._sse(cancel, "error", {"kind": "cancelled", "message": "design cancelled"})
+            return
+        self._sse(cancel, "done", _done_event(result))
+
 
 class _PlaygroundServer(ThreadingHTTPServer):
-    """A threaded HTTP server holding the (immutable) app HTML and examples."""
+    """A threaded HTTP server holding the (immutable) app HTML and examples.
+
+    Its only mutable state is the single design job: ``design_lock`` admits one
+    ``/api/design`` at a time (compile stays responsive on other threads), and
+    ``current_job`` (guarded by ``jobs_lock``) lets ``/api/design/cancel`` reach
+    the running job's cancel event. ``designer`` is the injectable loop driver —
+    the real Claude agent by default, a fake in tests.
+    """
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], initial_source: str):
+    def __init__(
+        self, address: tuple[str, int], initial_source: str, designer: Designer | None = None
+    ):
         super().__init__(address, _Handler)
         self.initial_source = initial_source
         self.app_html = render_app(initial_source)
         self.examples = load_examples()
+        self.designer = designer
+        self.design_lock = threading.Lock()
+        self.jobs_lock = threading.Lock()
+        self.current_job: dict | None = None
 
 
 def make_server(
-    host: str = "127.0.0.1", port: int = 8787, initial_source: str | None = None
-) -> ThreadingHTTPServer:
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    initial_source: str | None = None,
+    designer: Designer | None = None,
+) -> _PlaygroundServer:
     """Build (but do not start) the playground server bound to ``host:port``.
 
     ``port=0`` binds an ephemeral port (used by the tests). ``initial_source``
-    preloads the editor; ``None`` uses :func:`default_source`. Localhost by
-    default — this is a local tool, so it never binds ``0.0.0.0`` implicitly.
+    preloads the editor; ``None`` uses :func:`default_source`. ``designer``
+    overrides the agent loop driver (tests inject a keyless fake); ``None`` uses
+    the real Claude agent, imported lazily only when a design job runs. Localhost
+    by default — this is a local tool, so it never binds ``0.0.0.0`` implicitly.
     """
     source = initial_source if initial_source is not None else default_source()
-    return _PlaygroundServer((host, port), source)
+    return _PlaygroundServer((host, port), source, designer=designer)
 
 
 def run(
@@ -340,7 +591,63 @@ _APP_HTML = r"""<!doctype html>
   select { font:inherit; font-size:12.5px; padding:4px 8px; border-radius:7px;
     border:1px solid var(--line); background:var(--panel); color:var(--ink); }
   main { display:flex; height:calc(100% - 44px); }
-  .left { width:44%; min-width:320px; display:flex; flex-direction:column;
+  .agent { width:308px; flex:none; display:flex; flex-direction:column;
+    background:var(--panel); border-right:1px solid var(--line); min-width:0;
+    transition:width .16s ease; }
+  .agent.collapsed { width:38px; }
+  .agent.collapsed .thread, .agent.collapsed .composer, .agent.collapsed .agent-title,
+  .agent.collapsed .agent-sub { display:none; }
+  .agent-head { display:flex; align-items:center; gap:8px; padding:9px 12px;
+    border-bottom:1px solid var(--line); }
+  .agent.collapsed .agent-head { padding:9px 7px; justify-content:center; }
+  .agent-title { font-weight:700; font-size:13px; }
+  .agent-title span { color:var(--accent2); }
+  .agent-sub { font-size:11px; color:var(--faint); margin-left:auto; }
+  #agent-collapse { font:inherit; font-size:15px; line-height:1; cursor:pointer;
+    border:1px solid var(--line); background:transparent; color:var(--muted);
+    border-radius:7px; width:24px; height:24px; padding:0; flex:none; }
+  #agent-collapse:hover { color:var(--ink); }
+  .thread { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column;
+    gap:10px; font-size:12.5px; }
+  .msg-user, .msg-agent { padding:8px 11px; border-radius:10px; line-height:1.45;
+    max-width:100%; word-wrap:break-word; overflow-wrap:anywhere; }
+  .msg-user { align-self:flex-end; background:var(--accent2); color:#fff;
+    border-bottom-right-radius:3px; }
+  .msg-agent { align-self:flex-start; background:rgba(127,127,127,.12);
+    border-bottom-left-radius:3px; }
+  .msg-agent.err { background:rgba(200,69,47,.14); color:var(--err); }
+  .msg-status { align-self:flex-start; font-size:11.5px; color:var(--muted);
+    display:flex; align-items:center; gap:7px; }
+  .msg-status .spin { width:9px; height:9px; border-radius:50%;
+    border:2px solid var(--line); border-top-color:var(--accent); flex:none;
+    animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .iter-row { align-self:stretch; display:flex; align-items:center; gap:8px;
+    padding:6px 9px; border:1px solid var(--line); border-radius:9px;
+    background:var(--panel); font-size:12px; }
+  .iter-row .rn { font-weight:600; color:var(--muted); white-space:nowrap; }
+  .iter-row .sc { font-weight:700; padding:2px 8px; border-radius:20px;
+    border:1px solid var(--line); }
+  .iter-row .sc.good { color:var(--okc); } .iter-row .sc.mid { color:var(--warn); }
+  .iter-row .sc.low { color:var(--err); }
+  .iter-row .ct { color:var(--faint); font:11px ui-monospace,Menlo,Consolas,monospace;
+    margin-left:auto; }
+  .iter-row.win { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .composer { border-top:1px solid var(--line); padding:10px; display:flex;
+    flex-direction:column; gap:8px; }
+  #brief { width:100%; min-height:58px; max-height:160px; resize:vertical; border:1px
+    solid var(--line); border-radius:9px; background:var(--editor); color:var(--ink);
+    padding:8px 10px; font:inherit; font-size:12.5px; outline:none; }
+  #brief:disabled { opacity:.55; }
+  .composer-row { display:flex; gap:8px; }
+  .composer-row button { font:inherit; font-size:12.5px; font-weight:600; padding:7px 14px;
+    border-radius:8px; border:1px solid var(--line); cursor:pointer; }
+  #send-btn { background:var(--accent2); color:#fff; border-color:transparent; flex:1; }
+  #send-btn:disabled { opacity:.5; cursor:default; }
+  #stop-btn { background:transparent; color:var(--err); border-color:var(--err); }
+  .agent-note { font-size:11px; color:var(--faint); line-height:1.4; }
+  .agent-note.bad { color:var(--warn); }
+  .left { width:36%; min-width:280px; display:flex; flex-direction:column;
     border-right:1px solid var(--line); }
   .right { flex:1; display:flex; flex-direction:column; min-width:0; }
 
@@ -429,6 +736,23 @@ _APP_HTML = r"""<!doctype html>
   </label>
 </header>
 <main>
+  <section class="agent" id="agent-pane">
+    <div class="agent-head">
+      <button id="agent-collapse" title="collapse the agent pane">‹</button>
+      <div class="agent-title">agent <span>chat</span></div>
+      <div class="agent-sub" id="agent-sub"></div>
+    </div>
+    <div class="thread" id="thread"></div>
+    <div class="composer">
+      <textarea id="brief" spellcheck="false"
+        placeholder="Describe the barndo you want — e.g. &quot;3 bed 2 bath, open kitchen, 2-car shop bay, ~1800 sq ft&quot;. Then Design."></textarea>
+      <div class="composer-row">
+        <button id="send-btn">Design</button>
+        <button id="stop-btn" hidden>Stop</button>
+      </div>
+      <div class="agent-note" id="agent-note"></div>
+    </div>
+  </section>
   <section class="left">
     <div class="editor-wrap">
       <div class="gutter" id="gutter"></div>
@@ -667,6 +991,180 @@ fetch('/api/examples').then(r => r.json()).then(list => {
       renderGutter(); compile(); }
   });
 }).catch(() => {});
+
+// --- agent chat pane --------------------------------------------------------
+const agentPane = document.getElementById('agent-pane');
+const thread = document.getElementById('thread');
+const briefEl = document.getElementById('brief');
+const sendBtn = document.getElementById('send-btn');
+const stopBtn = document.getElementById('stop-btn');
+const agentNote = document.getElementById('agent-note');
+const agentSub = document.getElementById('agent-sub');
+const collapseBtn = document.getElementById('agent-collapse');
+
+let agentAvailable = false;
+let running = false;
+let jobId = null;
+let hasResult = false;   // has the agent landed a plan in this conversation yet?
+let statusEl = null;     // the live status bubble shown while a job streams
+
+const PHASE_LABEL = { starting:'starting', writing:'writing DSL', compiling:'compiling',
+  critiquing:'critiquing', revising:'revising' };
+
+collapseBtn.addEventListener('click', () => {
+  const collapsed = agentPane.classList.toggle('collapsed');
+  collapseBtn.textContent = collapsed ? '›' : '‹';
+  collapseBtn.title = (collapsed ? 'expand' : 'collapse') + ' the agent pane';
+});
+
+function addMsg(cls, text){
+  const el = document.createElement('div');
+  el.className = cls; el.textContent = text;
+  thread.appendChild(el); thread.scrollTop = thread.scrollHeight;
+  return el;
+}
+function setStatus(text){
+  if (!statusEl){
+    statusEl = document.createElement('div');
+    statusEl.className = 'msg-status';
+    statusEl.innerHTML = '<span class="spin"></span><span class="txt"></span>';
+    thread.appendChild(statusEl);
+  }
+  statusEl.querySelector('.txt').textContent = text;
+  thread.scrollTop = thread.scrollHeight;
+}
+function clearStatus(){ if (statusEl){ statusEl.remove(); statusEl = null; } }
+
+function iterRow(ev){
+  const row = document.createElement('div');
+  row.className = 'iter-row'; row.dataset.round = ev.round;
+  const t = ev.score ? ev.score.total : null;
+  const c = ev.counts || { error:0, warning:0, info:0 };
+  row.innerHTML = '<span class="rn">round ' + ev.round + '</span>' +
+    (t == null ? '<span class="sc">—</span>'
+               : '<span class="sc ' + scoreClass(t) + '">' + fmt(t) + '</span>') +
+    '<span class="ct">' + (c.error | 0) + 'e ' + (c.warning | 0) + 'w ' +
+    (c.info | 0) + 'i</span>';
+  thread.appendChild(row); thread.scrollTop = thread.scrollHeight;
+}
+function applyIteration(ev){
+  if (ev.source != null){ editor.value = ev.source; renderGutter(); }
+  if (ev.payload) applyResult(ev.payload);   // viewport evolves live per round
+}
+
+function setRunning(on){
+  running = on;
+  sendBtn.disabled = on || !agentAvailable;
+  briefEl.disabled = on || !agentAvailable;
+  stopBtn.hidden = !on; stopBtn.disabled = false;
+}
+
+async function sendDesign(){
+  if (running || !agentAvailable) return;
+  const brief = briefEl.value.trim();
+  if (!brief) return;
+  addMsg('msg-user', brief);
+  briefEl.value = '';
+  const body = { brief, iterations: 3 };
+  // Follow-ups refine the current editor plan; the first brief starts fresh.
+  if (hasResult) body.source = editor.value;
+  setRunning(true); clearStatus(); setStatus('starting'); jobId = null;
+  try {
+    const resp = await fetch('/api/design', { method:'POST',
+      headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+    if (resp.status === 409){ clearStatus();
+      addMsg('msg-agent err', 'A design job is already running — please wait.'); return; }
+    if (!resp.ok || !resp.body){ clearStatus();
+      addMsg('msg-agent err', 'Design request failed (' + resp.status + ').'); return; }
+    await readSSE(resp.body.getReader());
+  } catch (err){
+    clearStatus(); addMsg('msg-agent err', 'Connection error: ' + String(err));
+  } finally {
+    setRunning(false); jobId = null;
+  }
+}
+
+async function readSSE(reader){
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;){
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream:true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0){
+      const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+      handleFrame(frame);
+    }
+  }
+}
+function handleFrame(frame){
+  let event = 'message', data = '';
+  for (const line of frame.split('\n')){
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) data += line.slice(5).trim();
+  }
+  if (!data) return;
+  let ev; try { ev = JSON.parse(data); } catch (e){ return; }
+  onEvent(event, ev);
+}
+function onEvent(kind, ev){
+  if (kind === 'status'){
+    if (ev.job) jobId = ev.job;
+    const label = PHASE_LABEL[ev.phase] || ev.phase;
+    setStatus(ev.round ? (label + ' — round ' + ev.round + ' of ' + ev.rounds) : label);
+  } else if (kind === 'iteration'){
+    iterRow(ev); applyIteration(ev);
+  } else if (kind === 'done'){
+    clearStatus();
+    if (ev.source != null){ editor.value = ev.source; renderGutter(); }
+    if (ev.payload) applyResult(ev.payload);
+    hasResult = true;
+    const win = thread.querySelector('.iter-row[data-round="' + ev.round + '"]');
+    if (win) win.classList.add('win');
+    const t = ev.score ? fmt(ev.score.total) : '—';
+    addMsg('msg-agent', 'Landed the best plan (round ' + ev.round + ' of ' +
+      ev.iterations + ', score ' + t + '/100). Edit it, or send a follow-up to refine.');
+  } else if (kind === 'error'){
+    clearStatus();
+    const msg = ev.kind === 'cancelled' ? 'Stopped.'
+      : (ev.message || 'The agent hit an error.') + (ev.kind ? '  (' + ev.kind + ')' : '');
+    addMsg('msg-agent err', msg);
+  }
+}
+
+sendBtn.addEventListener('click', sendDesign);
+briefEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)){ e.preventDefault(); sendDesign(); }
+});
+stopBtn.addEventListener('click', () => {
+  if (!jobId) return;
+  stopBtn.disabled = true;
+  fetch('/api/design/cancel', { method:'POST',
+    headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ id: jobId }) })
+    .catch(() => {});
+});
+
+function initAgent(){
+  fetch('/api/agent').then(r => r.json()).then(a => {
+    agentAvailable = !!a.available;
+    if (agentAvailable){
+      agentSub.textContent = 'ready';
+      agentNote.textContent = 'Describe a plan, or send a follow-up to refine the current one. ⌘/Ctrl+Enter to send.';
+      setRunning(false);
+    } else {
+      agentSub.textContent = 'off';
+      briefEl.disabled = true; sendBtn.disabled = true;
+      agentNote.className = 'agent-note bad';
+      agentNote.textContent = a.reason || "pip install 'barndsl[agent]' and set ANTHROPIC_API_KEY";
+    }
+  }).catch(() => {
+    briefEl.disabled = true; sendBtn.disabled = true;
+    agentNote.className = 'agent-note bad';
+    agentNote.textContent = 'agent status unavailable';
+  });
+}
+initAgent();
 
 // --- boot -------------------------------------------------------------------
 editor.value = INITIAL_SOURCE;

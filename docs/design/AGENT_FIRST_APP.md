@@ -1,7 +1,7 @@
 # Agent-first architecture application
 
-Status: **design** — tiers 1 (3D output) and 2 (web playground) **shipped/DONE**;
-tiers 3–5 planned.
+Status: **design** — tiers 1 (3D output), 2 (web playground) and 3 (the agent in
+the app) **shipped/DONE**; tiers 4–5 planned.
 Context: `docs/IDEAS.md` (Revit plug-in — foundation DONE), `docs/PRODUCT_REVIEW.md`,
 `docs/REVIEW_DSL_REVIT*.md`.
 
@@ -132,11 +132,38 @@ was factored into `viewer.RENDERER_JS` (a shared `mountScene()` asset both embed
 so the two never diverge. Tested in `tests/test_playground.py`. (A static Pyodide
 build remains a possible later deploy target — see `docs/IDEAS.md`.)
 
-### Tier 3 — the agent in the app
+### Tier 3 — the agent in the app — DONE
 
 `agent.py`'s loop behind a conversation UI: brief in, validated plan out,
 diagnostics-driven rewrites behind the scenes, every iteration scored and the
 best returned. Streaming the intermediate renders makes the loop legible.
+**Shipped:** a chat pane in `src/barndsl/playground.py` and a small, keyless
+seam into `src/barndsl/agent.py`.
+
+* `POST /api/design` (`{brief, source?, iterations?}`) is a **Server-Sent
+  Events** stream of the compile-critique-revise loop: a `status` opener, one
+  `iteration` per round carrying its score, diagnostic counts and the FULL
+  `compile_payload` (the editor + viewport update live, so the user watches the
+  design evolve), and a final `done` with the **best-scoring** iteration — a
+  regressed final round is never returned. Failures are structured `error`
+  frames (`kind` ∈ unavailable / missing_dependency / api_error / cancelled).
+* `GET /api/agent` probes availability (`agent.agent_availability`: `anthropic`
+  importable **and** `ANTHROPIC_API_KEY` set — only the key's *presence*, never
+  its value) so the SPA enables or disables the pane with the install hint.
+* **Refinement:** a `source` in the body seeds the loop, so follow-up briefs
+  ("make the kitchen bigger") revise the current plan. In `agent.py`, `design()`
+  gained keyword-only `seed_source` (primes round 1 as a revision, *not* scored
+  as a competing iteration), `cancel` (a `() -> bool` polled between rounds) and
+  `on_phase(phase, round)` — all default no-ops, so existing callers/tests are
+  untouched.
+* **Cancellation:** one job at a time (409); `POST /api/design/cancel {id}` sets
+  a flag the loop polls between rounds (also tripped when the SSE connection
+  drops); the **Stop** button drives it. The compile endpoint stays responsive
+  throughout (`ThreadingHTTPServer` + one design lock).
+* stdlib-only server; `anthropic` imported lazily only when a design job runs;
+  the injectable `make_server(designer=…)` lets `tests/test_playground_agent.py`
+  drive the whole SSE path with a scripted fake — no network, no key, no
+  `anthropic` (agent-hook tests live in `tests/test_agent_loop.py`).
 
 ### Tier 4 — IFC export
 
