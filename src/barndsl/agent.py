@@ -37,6 +37,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
+from .compiler import _KEYWORDS as _STMT_KEYWORDS
 from .introspect import plan_summary, summary_text
 from .score import ScoreReport, design_score
 from .validation import Issue, Severity
@@ -187,6 +188,70 @@ DESIGN RULES the compiler enforces (write DSL that satisfies them):
 - Idiomatic barndo: open-concept living/kitchen/dining, plus a shop/garage bay.
 """
 
+#: Placement craft distilled from the authoring guide. The grammar reference
+#: says what is *legal*; this says what *works* — the anchor rule and the
+#: tile-then-connect idiom are where a model that free-hands `at x,y`
+#: coordinates loses whole iterations to overlap and shared-wall errors.
+_PLACEMENT_CRAFT = """\
+HOW TO PLACE ROOMS (craft that keeps plans compiling first try):
+- PREFER RELATIVE ANCHORS over `at x,y`. Abutting rooms automatically share a
+  wall — exactly what an interior `door` requires. Hand-placed coordinates are
+  where overlap and no-shared-wall errors come from (one foot off, or touching
+  only at a corner, shares nothing).
+- THE ANCHOR RULE — an anchor sets BOTH coordinates: `east-of`/`west-of` butt
+  that wall and COPY the reference room's y; `north-of`/`south-of` stack on
+  that wall and COPY its x. Chaining in one direction (a row or a column) is
+  safe; branching a second column off a room already off the spine collides.
+  For a hallway spine, hang EVERY served room directly off the spine, one room
+  deep. `align near|far|center` / `offset <n>` slide a room along the shared
+  wall; two anchors (one horizontal + one vertical) pin a corner.
+- TILE, THEN CONNECT. Place rooms so neighbours abut and the envelope fills
+  with little waste; then add one `door` per adjacency people actually walk.
+- EGRESS FIRST. Give every bedroom its exterior-wall window as you place it —
+  a missing egress window is the most common hard error.
+- Habitable rooms (living/kitchen/dining/bed/office) go on the PERIMETER so
+  they can take real windows; bury halls, baths, closets, storage inside.
+- A bath gets a `door` (privacy); use `open` for kitchen/living/dining flow.
+- Doors read best swung `into` the room they serve, hinged near a corner
+  (`into <room> hinge near`), and backed to the wall's end with `offset`.
+"""
+
+#: A complete plan that compiles 0 errors / 0 warnings / 0 infos and scores
+#: 100/100 — pinned by a test so it can never rot against the grammar. One
+#: worked example anchors the output format better than any instruction,
+#: especially for non-Claude models driven through a compat gateway.
+_EXAMPLE_PLAN = """\
+plan "Maple Two-Bed"
+envelope 51 x 30
+ceiling 10
+program 2 bed 1 bath
+
+room living:  living   at 0,0            size 20 x 30
+room kitchen: kitchen  east-of living    size 22 x 14
+room bath:    bathroom east-of kitchen   size 9 x 14
+room hall:    hallway  north-of kitchen  size 31 x 4
+room bed1:    bedroom  north-of hall     size 11 x 12
+room c1:      closet   east-of bed1      size 4 x 12
+room bed2:    bedroom  east-of c1        size 11 x 12
+room c2:      closet   east-of bed2      size 5 x 12
+
+open living - kitchen width 8
+door living - hall width 3
+door hall - bath width 2.67 offset 5.83 into bath hinge near
+door hall - bed1 width 2.67 offset 0.5 into bed1 hinge near
+door hall - bed2 width 2.67 offset 0.5 into bed2 hinge near
+door bed1 - c1 width 2.5 offset 0.5 into bed1 hinge near
+door bed2 - c2 width 2.5 offset 0.5 into bed2 hinge near
+entry living south width 3 offset 8
+entry living west width 3 offset 24
+
+window living west width 14 offset 8
+window kitchen south width 8 offset 6
+window bath east width 4 offset 5
+window bed1 north width 4 offset 3
+window bed2 north width 4 offset 3
+"""
+
 _GENERATE_SYSTEM = (
     "You are an expert residential designer specialising in barndominiums. You "
     "describe floor plans by writing source code in the barndsl architecture "
@@ -195,12 +260,20 @@ _GENERATE_SYSTEM = (
     + DSL_REFERENCE
     + "\n"
     + _DESIGN_RULES
-    + "\nYou MUST declare the brief's program as a `program` statement derived "
+    + "\n"
+    + _PLACEMENT_CRAFT
+    + "\nA COMPLETE EXAMPLE that compiles with zero errors, zero warnings, zero "
+    "infos and scores 100/100 — note the relative anchors, the hall spine with "
+    "every bedroom hung one room deep off it, the `open` core, the closets, and "
+    "the second exterior door:\n```barn\n" + _EXAMPLE_PLAN + "```\n"
+    "\nYou MUST declare the brief's program as a `program` statement derived "
     "from the brief — grammar: `program <n> bed [<m> bath] [<k> <type> ...] "
     "[area <sqft>]` (e.g. `program 3 bed 2 bath area 1800`) — so the compiler "
     "checks the plan delivers what was asked, not what you remembered.\n"
-    "\nAlways reply with ONLY the DSL source (optionally inside a ```barn code "
-    "block). Do not add prose before or after."
+    "\nOUTPUT FORMAT (strict): reply with exactly ONE ```barn code block "
+    "containing the COMPLETE plan source — every line, never a diff, a "
+    "fragment, or two alternatives. No prose, headings, or commentary outside "
+    "the block; if you must reason first, keep it out of the final answer."
 )
 
 _CRITIQUE_SYSTEM = (
@@ -225,7 +298,9 @@ _CRITIQUE_JSON = (
     '{"satisfied": true|false, "assessment": "<one-paragraph overall judgement>", '
     '"rationale": "<which diagnostics and score components justify the verdict>", '
     '"suggestions": ["<specific, actionable change>", ...]}\n'
-    "Set `suggestions` to [] when satisfied is true."
+    "Set `suggestions` to [] when satisfied is true. Give AT MOST 5 suggestions, "
+    "ordered most-impactful first — five changes the designer will actually make "
+    "beat a dozen that scatter the next revision."
 )
 
 #: Appended to the critique system prompt only when a rendered PNG rides along —
@@ -244,10 +319,33 @@ _PROGRAM_RE = re.compile(r"^\s*program\b", re.MULTILINE)
 
 
 def _extract_source(text: str) -> str:
-    """Pull the DSL out of a model reply (strip a code fence if present)."""
+    """Pull the DSL out of a model reply.
+
+    Three tiers, most-structured first: the longest fenced code block (the
+    output contract asks for exactly one, but a chatty model sometimes fences
+    an extra snippet in its commentary — longest wins); else the span from the
+    first to the last line that starts with a DSL statement keyword or a ``#``
+    comment, which trims the "Here is the plan:" / "This design provides…"
+    prose a compat-gateway model wraps around unfenced source; else the whole
+    reply. The trim only cuts leading/trailing chatter — interior lines are
+    kept verbatim, so a stray mid-plan remark still surfaces as a compiler
+    diagnostic on its own line rather than being silently dropped.
+    """
     blocks = _FENCE_RE.findall(text)
     if blocks:
         return max(blocks, key=len).strip() + "\n"
+    lines = text.splitlines()
+
+    def _is_statement(line: str) -> bool:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return True
+        first = stripped.split(None, 1)[0] if stripped else ""
+        return first in _STMT_KEYWORDS
+
+    starts = [i for i, ln in enumerate(lines) if _is_statement(ln)]
+    if starts:
+        return "\n".join(lines[starts[0] : starts[-1] + 1]).strip() + "\n"
     return text.strip() + "\n"
 
 
@@ -507,18 +605,47 @@ class BarndoAgent:
                 "points went). Fix EVERY error, address warnings where "
                 "reasonable, and raise the score:\n\n" + diagnostics + "\n"
             )
-        prompt += "\nReturn the complete, revised DSL source."
+        if prior or seed:
+            prompt += (
+                "\nReturn the COMPLETE revised source (every line — never a diff "
+                "or a fragment) as one ```barn block. Make the smallest revision "
+                "that fixes the diagnostics: keep every line that already works, "
+                "and do not restructure or rename rooms unless a diagnostic "
+                "demands it."
+            )
+        else:
+            prompt += (
+                "\nReturn the complete plan source as one ```barn block."
+            )
 
-        with self.client.messages.stream(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=_GENERATE_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-            thinking={"type": "adaptive"},
-        ) as stream:
-            msg = stream.get_final_message()
-        text = "".join(b.text for b in msg.content if b.type == "text")
-        return _extract_source(text)
+        # One silent retry on an empty reply, then fail loudly. An empty body is
+        # what a compat gateway returns when the model id doesn't resolve, and
+        # what a reasoning model returns when it burns the whole token cap
+        # thinking — both are configuration problems the caller must see, not a
+        # blank plan the loop grinds against for max_iterations rounds.
+        for attempt in (1, 2):
+            with self.client.messages.stream(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=_GENERATE_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+                thinking={"type": "adaptive"},
+            ) as stream:
+                msg = stream.get_final_message()
+            text = "".join(b.text for b in msg.content if b.type == "text")
+            if text.strip():
+                return _extract_source(text)
+            logger.warning(
+                "Model %r returned an empty reply (attempt %d, stop_reason=%s).",
+                self.model, attempt, getattr(msg, "stop_reason", None),
+            )
+        raise RuntimeError(
+            f"Model {self.model!r} returned no text twice in a row "
+            f"(stop_reason={getattr(msg, 'stop_reason', None)!r}). If you are on "
+            "a non-Anthropic gateway (ANTHROPIC_BASE_URL), check that "
+            "BARNDSL_MODEL names a model the gateway actually serves, and that "
+            "BARNDSL_MAX_TOKENS leaves a reasoning model room to think AND emit."
+        )
 
     def critique(self, result: CompileResult, score: ScoreReport | None = None) -> CritiqueSpec:
         if score is None:
@@ -770,7 +897,10 @@ def _fold_critique(result: CompileResult, crit: CritiqueSpec | None) -> None:
     """
     if crit is None or crit.satisfied:
         return
-    for s in crit.suggestions:
+    # Cap what rides into the next prompt: the critic is asked for at most five
+    # suggestions, but a chatty model (DeepSeek returns 7-12 a round) ignores
+    # that, and a dozen INFO lines scatter the revision instead of focusing it.
+    for s in crit.suggestions[:5]:
         result.diagnostics.append(
             Issue(Severity.INFO, "DESIGN", s, hint="Architect's review (design quality).")
         )
