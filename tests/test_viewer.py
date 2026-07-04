@@ -91,3 +91,96 @@ def test_gallery_plans_render_a_viewer():
         html = viewer_html(plan)
         assert plan.name in html
         assert "http" not in html
+
+
+# --- first-person walk-support block ----------------------------------------
+
+from barndsl.gltf import build_scene  # noqa: E402
+from barndsl.viewer import scene_json  # noqa: E402
+
+WALK_PLAN = """\
+plan "Walk Test"
+envelope 30 x 20
+ceiling 9
+room a: living at 0,0 size 15 x 20
+room b: bedroom at 15,0 size 15 x 20
+door a - b width 3 offset 8
+entry a south width 3 offset 4
+window b east width 4 offset 8
+"""
+
+
+def _walk(src=WALK_PLAN):
+    return scene_json(build_scene(_plan(src)))["walk"]
+
+
+def test_walk_block_has_the_four_sections():
+    w = _walk()
+    assert {"segments", "floors", "stairs", "spawn", "eyeHeight"} <= set(w)
+    assert w["segments"] and w["floors"]  # a real plan has walls and a floor
+    assert w["eyeHeight"] > 4  # a standing eye height
+
+
+def test_walk_door_gap_splits_a_wall_into_two_segments():
+    # The a/b partition is a vertical run at x=15; the 3 ft interior door punches a
+    # walkable gap, so it must arrive as two collinear segments with a ~3 ft gap.
+    segs = [s for s in _walk()["segments"] if abs(s["x0"] - 15) < 1e-6 and abs(s["x1"] - 15) < 1e-6]
+    assert len(segs) == 2
+    segs.sort(key=lambda s: min(s["y0"], s["y1"]))
+    gap = max(segs[0]["y0"], segs[0]["y1"])
+    gap_end = min(segs[1]["y0"], segs[1]["y1"])
+    assert abs((gap_end - gap) - 3.0) < 1e-3  # the door width
+
+
+def test_walk_window_does_not_split_its_wall():
+    # A window is not a walkable gap: the east exterior wall of room b (x=30) stays
+    # one segment despite the 4 ft window on it.
+    segs = [s for s in _walk()["segments"] if abs(s["x0"] - 30) < 1e-6 and abs(s["x1"] - 30) < 1e-6]
+    assert len(segs) == 1
+
+
+def test_walk_spawn_sits_inside_the_footprint():
+    w = _walk()
+    sp = w["spawn"]
+    inside = any(
+        r[0] - 0.01 <= sp["x"] <= r[0] + r[2] + 0.01 and r[1] - 0.01 <= sp["y"] <= r[1] + r[3] + 0.01
+        for f in w["floors"] if f["level"] == 0 for r in f["rects"]
+    )
+    assert inside
+    fx, fy = sp["face"]
+    assert abs((fx * fx + fy * fy) - 1.0) < 1e-3  # a unit facing vector
+
+
+def test_walk_stair_record_carries_both_floor_elevations():
+    with open(os.path.join(EXAMPLES, "gallery", "two_story.barn"), encoding="utf-8") as fh:
+        plan = compile_source(fh.read()).plan
+    w = scene_json(build_scene(plan))["walk"]
+    assert w["stairs"], "the two-story plan has a stair"
+    st = w["stairs"][0]
+    assert {"fromElevation", "toElevation", "fromLevel", "toLevel", "dir"} <= set(st)
+    assert st["fromElevation"] != st["toElevation"]  # it actually climbs
+    assert len(w["floors"]) >= 2  # both storeys carry a floor
+
+
+def test_walk_block_is_deterministic():
+    plan = _plan(WALK_PLAN)
+    a = json.dumps(scene_json(build_scene(plan))["walk"], sort_keys=True)
+    b = json.dumps(scene_json(build_scene(plan))["walk"], sort_keys=True)
+    assert a == b
+
+
+def test_walk_block_does_not_disturb_glb_or_ifc_bytes():
+    # The walk block is viewer/scene-JSON only; the glTF and IFC exporters build
+    # from the same scene but must be untouched byte-for-byte.
+    import hashlib
+
+    from barndsl.gltf import to_glb
+    from barndsl.ifc import to_ifc
+
+    plan = _plan(WALK_PLAN)
+    scene_json(build_scene(plan))  # exercising the walk path must have no side effects
+    g1 = hashlib.sha256(to_glb(plan)).hexdigest()
+    i1 = hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest()
+    scene_json(build_scene(plan))
+    assert hashlib.sha256(to_glb(plan)).hexdigest() == g1
+    assert hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest() == i1

@@ -1658,6 +1658,14 @@ const SHORTCUTS = [
 ];
 let helpRefLines = null;   // cached parsed reference lines (fetched once)
 
+//: 3D-view tips, shown in the help panel (the first-person walkthrough in particular).
+const THREE_TIPS = [
+  'Walk mode: on the 3D tab, click Walk (or press Enter) to step inside at eye height.',
+  'WASD or the arrow keys move relative to where you look; the mouse looks around; ' +
+    'Shift runs. You slide along walls and pass through doorways.',
+  'Walk up the stairs to reach the upper floor; Esc (or leaving the tab) exits back to orbit.',
+];
+
 //: Edit-mode direct-manipulation tips (drag behaviours), shown in the help panel.
 const EDIT_TIPS = [
   'Drag a room to move it; drag its handles to resize. Edges snap to neighbours.',
@@ -1671,6 +1679,8 @@ function renderShortcuts(){
   let h = '<h5>Keyboard shortcuts</h5>';
   for (const [label, keys] of SHORTCUTS)
     h += '<div class="sc"><span>' + esc(label) + '</span><kbd>' + esc(keys) + '</kbd></div>';
+  h += '<h5>3D view</h5>';
+  for (const tip of THREE_TIPS) h += '<div class="sc-tip">' + esc(tip) + '</div>';
   h += '<h5>Edit mode</h5>';
   for (const tip of EDIT_TIPS) h += '<div class="sc-tip">' + esc(tip) + '</div>';
   helpShortcuts.innerHTML = h;
@@ -1783,6 +1793,9 @@ function selectTab(tab){
   document.querySelectorAll('.pane').forEach(p =>
     p.classList.toggle('active', p.id === 'pane-' + tab));
   if (tab === 'three') showThree();
+  // Leaving the 3D tab must drop out of walk mode cleanly (release pointer lock,
+  // unhook its key/mouse listeners) — the renderer restores the orbit camera.
+  else if (ctrl && ctrl.exitWalk) ctrl.exitWalk();
   // A pane has no measurable size while hidden, so Fit is deferred until it shows.
   if (tab === 'plan'){ planNeedsFit = false; planZoom.refit(); }
 }

@@ -118,7 +118,10 @@ from any `.barn` file, no CAD license, no plug-in, no API key. **Shipped:**
    controls, layer toggles, and the plan title/score. Works by double-clicking
    the file. (Three.js from CDN with a clear offline fallback message, or a
    minimal embedded renderer — implementation's choice; single-file output is
-   the requirement.)
+   the requirement.) **Shipped:** a first-person **walk mode** (Walk pill / Enter
+   key) over the same renderer — WASD + mouse look at eye height, wall-sliding
+   collision, walk-up stairs — driven by a `walk` block in `scene_json` and
+   shared by the single-file viewer and the playground 3D tab.
 
 ### Tier 2 — web playground — DONE
 

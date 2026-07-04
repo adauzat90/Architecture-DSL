@@ -222,6 +222,23 @@ def test_compile_payload_is_pure_and_never_raises():
     assert good["ok"] is True and good["scene"]["nodes"]
 
 
+def test_compile_payload_scene_carries_the_walk_block():
+    # First-person walk mode reads its collision/floor/stair/spawn data from the
+    # scene JSON the playload ships, so it must ride along automatically.
+    p = compile_payload(CLEAN)
+    walk = p["scene"]["walk"]
+    assert {"segments", "floors", "stairs", "spawn", "eyeHeight"} <= set(walk)
+
+
+def test_app_wires_and_documents_walk_mode():
+    # The SPA embeds the walk-mode entry points and its help panel documents it,
+    # and leaving the 3D tab exits walk mode cleanly.
+    html = render_app(CLEAN)
+    assert "enterWalk" in html and "exitWalk" in html  # from the shared renderer
+    assert "ctrl.exitWalk" in html                     # tab-switch cleanup hook
+    assert "Walk mode" in html                          # help-panel THREE_TIPS line
+
+
 def test_compile_payload_carries_edit_overlay_arrays():
     # Tier 5: the payload gains compact rooms/openings arrays for the edit overlay.
     p = compile_payload(CLEAN)
