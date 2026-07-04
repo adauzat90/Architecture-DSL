@@ -237,6 +237,27 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("DOOR_BLOCKS_HALL", I, "Door swings into a hallway",
            "A door swings into a hallway and, open, its leaf leaves under a 3 ft "
            "passage beside it — it blocks circulation. Swing it into the room."),
+        _c("DOOR_HITS_FIXTURE", W, "Door swing crowds out a fixture",
+           "A door's swing arc eats the wall run a wet room or kitchen needs to "
+           "place a fixture (toilet, tub, lavatory, sink, range, refrigerator) that "
+           "the room otherwise has the floor area for — keeping the leaf's path "
+           "clear drops it. This is the gap BATH_CLEARANCE (capacity only, "
+           "door-blind) can't see. Move the door along the wall, swing it the other "
+           "way (`into <room>` / `hinge near|far`), make it a pocket/sliding door, "
+           "or enlarge the room."),
+        _c("DOOR_SWING_INWARD", W, "Exterior door can't clear inward",
+           "An exterior door swings inward (the residential default), but the room "
+           "is too shallow for its leaf to fully open. Deepen the room, narrow the "
+           "door, or use an out-swing or sliding door."),
+        _c("DOOR_SWING_PRIVACY", I, "Private-room door swings out",
+           "A bedroom or bathroom door is set to swing out into circulation. It "
+           "should open into the private room so the leaf screens the view on entry "
+           "and folds flat against a wall rather than sweeping the corridor."),
+        _c("DOOR_SWING_UNSET", I, "Private-room door swing not pinned",
+           "A bedroom or bathroom door has no `into` direction and its default "
+           "geometric swing opens out of the room. Pin it with `into <room>` so it "
+           "reliably opens into the private space (and stays that way if the layout "
+           "shifts)."),
         _c("DOOR_NARROW", W, "Door too narrow",
            "A swinging interior door is below the 30 in minimum clear width."),
         _c("DOOR_SIZE", I, "Non-standard door width",

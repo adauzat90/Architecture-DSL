@@ -143,6 +143,10 @@ def _wall_rect(wall: str, x0: float, y0: float, cw: float, cl: float, cursor: fl
     return x0 + cw - d, y0 + cursor, d, width
 
 
+#: How far (ft) to nudge a fixture along its wall when a door swing blocks it.
+_KEEPOUT_STEP = 0.5
+
+
 def _rects_overlap(a, b, tol: float = 1e-6) -> bool:
     ax, ay, aw, al = a
     bx, by, bw, bl = b
@@ -152,37 +156,55 @@ def _rects_overlap(a, b, tol: float = 1e-6) -> bool:
 
 
 def _place_perimeter(
-    x0: float, y0: float, cw: float, cl: float, kinds: list[str]
+    x0: float, y0: float, cw: float, cl: float, kinds: list[str],
+    keepouts: tuple = (),
 ) -> list[Fixture]:
     """Lay ``kinds`` along the clear-box perimeter (longer wall first), wrapping to
-    the next wall when the current one runs out — the deterministic seed layout."""
+    the next wall when the current one runs out — the deterministic seed layout.
+
+    ``keepouts`` are ``(x, y, w, l)`` door-swing rectangles a fixture must stay
+    clear of; a blocked spot slides the fixture along the wall until it clears (or
+    wraps to the next wall), so the placer never parks a fixture in a door's arc."""
     walls = _walls(cw, cl)
     placed: list[Fixture] = []
     wi = 0
     cursor = 0.0
     for kind in kinds:
         spec = FIXTURES[kind]
+        # Advance to a wall with room for this fixture's width (leave the corner),
+        # nudging past any spot a door swings through.
+        wall = fx = fy = fw = fl = None
         while wi < len(walls):
             _, run = walls[wi]
-            if cursor + spec.width <= run + 1e-9:
-                break
-            wi += 1
-            cursor = 0.0
-        if wi >= len(walls):
+            if cursor + spec.width > run + 1e-9:
+                wi += 1
+                cursor = 0.0
+                continue
+            wname = walls[wi][0]
+            tx, ty, tw, tl = _wall_rect(wname, x0, y0, cw, cl, cursor, spec.width, spec.depth)
+            if any(_rects_overlap((tx, ty, tw, tl), b) for b in keepouts):
+                cursor += _KEEPOUT_STEP  # a door swings here; slide along the wall
+                continue
+            wall, fx, fy, fw, fl = wname, tx, ty, tw, tl
+            break
+        if wall is None:
             break  # ran out of perimeter; the fit check reports the shortfall
-        wall = walls[wi][0]
-        fx, fy, fw, fl = _wall_rect(wall, x0, y0, cw, cl, cursor, spec.width, spec.depth)
         placed.append(Fixture(kind, fx, fy, fw, fl, wall))
         cursor += spec.width
     return placed
 
 
-def plan_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
+def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = True) -> list[Fixture]:
     """Place ``room``'s **auto-seed** fixtures against its walls (deterministic).
 
     The historical seed placement (bath/kitchen/laundry), kept for callers that
     only want the auto-seeds. The combined authored-plus-seed layout the exchange,
     the plan drawing and the 3D model consume is :func:`resolve_room_fixtures`.
+
+    ``avoid_doors`` (the default) slides fixtures clear of every hinged door's
+    swing; pass ``False`` for the door-blind placement the swing-crowding check
+    (DOOR_HITS_FIXTURE) diffs against to tell when a door — not just a small room —
+    drops a fixture.
     """
     kinds = fixtures_for(room.type)
     if not kinds:
@@ -190,7 +212,8 @@ def plan_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
     x0, y0, cw, cl = clear_box(plan, room)
     if cw <= 0 or cl <= 0:
         return []
-    return _place_perimeter(x0, y0, cw, cl, kinds)
+    keepouts = tuple(_door_swing_rects(plan, room)) if avoid_doors else ()
+    return _place_perimeter(x0, y0, cw, cl, kinds, keepouts)
 
 
 def _quarter_turns(rotation: float) -> int:
