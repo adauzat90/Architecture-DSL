@@ -78,7 +78,17 @@ PALETTE: dict[str, Material] = {
     "drywall": Material("drywall", "#E7E3DA", 0.90, 0.0, "none", 1.0),
     "glass": Material("glass", "#AFC7D6", 0.10, 0.0, "none", 1.0),
     "timber_frame": Material("timber frame", "#8A5E2E", 0.70, 0.0, "plank", 1.2),
+    # --- fixtures & furnishings ----------------------------------------------
+    "porcelain": Material("porcelain", "#F3F4F2", 0.20, 0.0, "none", 1.0),
+    "stainless": Material("stainless steel", "#C4C8CC", 0.35, 0.80, "none", 1.0),
+    "fabric": Material("upholstery", "#9BA3A8", 0.95, 0.0, "speckle", 0.25),
 }
+
+#: Fixture/furnishing materials the 3D exporter lowers each fixture kind onto.
+FIXTURE_PORCELAIN = PALETTE["porcelain"]
+FIXTURE_STAINLESS = PALETTE["stainless"]
+FIXTURE_FABRIC = PALETTE["fabric"]
+FIXTURE_WOOD = PALETTE["wood_plank"]
 
 #: The barndominium defaults, used when a finish hint is unset. A metal shell and a
 #: standing-seam metal roof are the archetypal barndominium finishes.

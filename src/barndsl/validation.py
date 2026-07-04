@@ -942,6 +942,10 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_suites_zones(plan, add)
     _validate_structure(plan, add)
     _validate_finishes(plan, add)
+    # Local import: fixtures.py imports clear_box from this module.
+    from .fixtures import validate_fixtures
+
+    validate_fixtures(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
         add(

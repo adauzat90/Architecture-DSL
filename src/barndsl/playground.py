@@ -87,6 +87,7 @@ from .cost import estimate_cost
 from .dxf import to_dxf
 from .edits import EditError, apply_edit, edit_from_json, opening_overlays
 from .energy import describe_targets, envelope_targets
+from .fixtures import resolve_room_fixtures
 from .gltf import build_scene, to_glb
 from .ifc import to_ifc
 from .packet import build_packet
@@ -244,6 +245,18 @@ def compile_payload(source: str) -> dict:
                 }
                 for s in plan.stairs
             ]
+            # Fixtures (authored + surviving seeds) as world rects for the edit
+            # overlay. ``line`` is the source line of an explicit fixture (null for
+            # a seed — a drag on it inserts a `fixture` line instead of rewriting).
+            fixtures: list[dict] = []
+            for room in plan.rooms:
+                for f in resolve_room_fixtures(plan, room):
+                    fixtures.append({
+                        "id": f.id, "kind": f.kind, "room": room.id, "level": room.level,
+                        "x": f.x, "y": f.y, "w": f.width, "l": f.length,
+                        "wall": f.wall, "seed": f.seed, "line": f.source_line,
+                    })
+            payload["fixtures"] = fixtures
             # The Report tab's data — cost, schedules, areas and (if the plan
             # declares one) the climate envelope. Cheap enough to inline: for the
             # gallery plans it adds <1 ms and <8 KB to the compile payload (measured),
@@ -1090,6 +1103,11 @@ _APP_HTML = r"""<!doctype html>
   .ov-room { cursor:move; }
   .ov-open { cursor:grab; }
   .ov-handle { fill:var(--accent2); stroke:#fff; }
+  /* fixtures/furniture — draggable; a seed is dashed until a drag authors it */
+  .ov-fixture { cursor:move; fill:rgba(90,90,90,.08); stroke:#5a5a5a; stroke-width:1; }
+  .ov-fixture.seed { fill:rgba(90,90,90,.04); stroke:#9a9a9a; stroke-dasharray:2 2; }
+  .ov-fixture:hover { stroke:var(--accent); }
+  .ov-fix-t { fill:var(--muted); }
   /* other-level rooms: dimmed, non-interactive outlines you align the floor to */
   .ov-under { fill:none; stroke:var(--faint); stroke-dasharray:3 2; opacity:.5;
     pointer-events:none; }
@@ -1228,6 +1246,9 @@ _APP_HTML = r"""<!doctype html>
     font-size:12px; }
   .help-shortcuts kbd { font:11px ui-monospace,Menlo,Consolas,monospace; background:var(--gutter);
     border:1px solid var(--line); border-radius:5px; padding:1px 6px; color:var(--muted); }
+  .help-shortcuts .sc-tip { font-size:12px; line-height:1.5; color:var(--muted); padding:3px 0;
+    border-top:1px solid var(--line); }
+  .help-shortcuts .sc-tip:first-of-type { border-top:none; }
   .help-ref .rline { font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
     white-space:pre-wrap; color:var(--ink); padding:1px 0; }
   .help-ref .rline.head { color:var(--accent); font-weight:700; margin-top:12px;
@@ -1637,10 +1658,21 @@ const SHORTCUTS = [
 ];
 let helpRefLines = null;   // cached parsed reference lines (fetched once)
 
+//: Edit-mode direct-manipulation tips (drag behaviours), shown in the help panel.
+const EDIT_TIPS = [
+  'Drag a room to move it; drag its handles to resize. Edges snap to neighbours.',
+  'Drag a door or window along its wall to re-position it.',
+  'Drag a fixture to move it. An authored fixture rewrites its `at x,y`; a dashed ' +
+    'auto-seed (bath/kitchen/laundry) becomes an authored `fixture` line where you drop it.',
+  'Add fixtures in the DSL: `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]`.',
+  'Every drag is one surgical text edit and joins the Undo stack.',
+];
 function renderShortcuts(){
   let h = '<h5>Keyboard shortcuts</h5>';
   for (const [label, keys] of SHORTCUTS)
     h += '<div class="sc"><span>' + esc(label) + '</span><kbd>' + esc(keys) + '</kbd></div>';
+  h += '<h5>Edit mode</h5>';
+  for (const tip of EDIT_TIPS) h += '<div class="sc-tip">' + esc(tip) + '</div>';
   helpShortcuts.innerHTML = h;
 }
 function isHelpHeading(line){
@@ -2259,8 +2291,8 @@ const planBody = document.querySelector('.plan-body');
 const levelSwitch = document.getElementById('level-switch');
 let editLevel = 0;                   // the floor the overlay currently edits
 let editMode = false, editReady = false;
-let editRooms = [], editOpens = [], editLevels = [0];
-let allRooms = [], allOpens = [], allStairs = [];   // every level — the dimmed underlay
+let editRooms = [], editOpens = [], editLevels = [0], editFixtures = [];
+let allRooms = [], allOpens = [], allStairs = [], allFixtures = [];   // every level — the dimmed underlay
 let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
 const undoStack = [];
 
@@ -2310,7 +2342,9 @@ function renderLevelSwitcher(){
 function applyLevelFilter(){
   editRooms = allRooms.filter(r => r.level === editLevel);
   editOpens = allOpens.filter(o => o.level === editLevel);
+  editFixtures = allFixtures.filter(f => f.level === editLevel);
 }
+function fixtureByKey(k){ return editFixtures.find(f => f.id === k); }
 function setEditLevel(lvl){
   if (editLevels.indexOf(lvl) < 0 || lvl === editLevel) return;
   editLevel = lvl; selectedRoomId = null;
@@ -2321,6 +2355,7 @@ function setEditLevel(lvl){
 function refreshEditData(p){
   if (p && p.rooms){
     allRooms = p.rooms; allOpens = p.openings || []; allStairs = p.stairs || [];
+    allFixtures = p.fixtures || [];
     editLevels = p.levels || [0];
     if (editLevels.indexOf(editLevel) < 0) editLevel = editLevels[0] || 0;  // clamp
     applyLevelFilter(); editReady = true;
@@ -2367,6 +2402,16 @@ function buildOverlay(){
       '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) + fs * 1.05) + '" text-anchor="middle" ' +
       'font-size="' + (fs * 0.72) + '" fill="#777" style="pointer-events:none">' +
       trimNum(r.w) + '×' + trimNum(r.l) + '</text>';
+  }
+  // Fixtures on this floor — draggable. A seed is dashed (a drag materialises it
+  // into an authored `fixture` line); an authored fixture is solid.
+  for (const f of editFixtures){
+    s += '<rect class="ov-fixture' + (f.seed ? ' seed' : '') + '" data-fixkey="' + esc(f.id) +
+      '" x="' + f.x + '" y="' + Y(f.y + f.l) + '" width="' + f.w + '" height="' + f.l +
+      '" vector-effect="non-scaling-stroke"/>' +
+      '<text class="ov-fix-t" x="' + (f.x + f.w / 2) + '" y="' + (Y(f.y + f.l / 2) + fs * 0.28) +
+      '" text-anchor="middle" font-size="' + (fs * 0.6) + '" style="pointer-events:none">' +
+      esc(f.kind.replace(/_/g, ' ')) + '</text>';
   }
   for (const o of editOpens){
     const seg = openSeg(o, o.offset);
@@ -2518,8 +2563,12 @@ function onDown(e){
   const P = toPlan(e);
   const handleEl = e.target.closest('[data-handle]');
   const openEl = e.target.closest('[data-okey]');
+  const fixEl = e.target.closest('[data-fixkey]');
   const roomEl = e.target.closest('[data-room]');
-  if (handleEl){
+  if (fixEl){
+    const f = fixtureByKey(fixEl.getAttribute('data-fixkey')); if (!f) return;
+    drag = { kind:'fixture', f, P, cur:{ x:f.x, y:f.y, w:f.w, l:f.l }, calc:{ x:f.x, y:f.y }, moved:false };
+  } else if (handleEl){
     const id = handleEl.getAttribute('data-room'), r = roomById(id); if (!r) return;
     drag = { kind:'resize', id, h:handleEl.getAttribute('data-handle'), P,
       cur:{ x:r.x, y:r.y, w:r.w, l:r.l }, calc:{ x:r.x, y:r.y, w:r.w, l:r.l }, moved:false };
@@ -2568,6 +2617,14 @@ function onMove(e){
       (dw && dl ? '  ' : '') + (dl ? (dl > 0 ? '+' : '') + trimNum(dl) + "' l" : '');
     showDim(trimNum(c.w) + ' × ' + trimNum(c.l) +
       (delta ? '<span class="delta">' + delta + '</span>' : ''), e);
+  } else if (drag.kind === 'fixture'){
+    const nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
+    drag.calc = { x:nx, y:ny };
+    if (nx !== drag.cur.x || ny !== drag.cur.y) drag.moved = true;
+    placeGhostRect(nx, ny, drag.cur.w, drag.cur.l);
+    const rm = allRooms.find(r => r.id === drag.f.room);
+    const lx = nx - (rm ? rm.x : 0), ly = ny - (rm ? rm.y : 0);
+    showDim(esc(drag.f.kind.replace(/_/g, ' ')) + ' — at ' + trimNum(lx) + ', ' + trimNum(ly), e);
   } else {
     const o = drag.o;
     const off = Math.max(o.min, Math.min(o.max, snap(projOffset(o, P) - o.width / 2)));
@@ -2591,6 +2648,14 @@ function onUp(e){
     if (d.calc.x !== d.cur.x || d.calc.y !== d.cur.y)
       edits.push({ kind:'move_room', room:d.id, x:d.calc.x, y:d.calc.y });
     applyEdits(edits);
+  } else if (d.kind === 'fixture'){
+    if (!d.moved){ if (d.f.line) jumpToLine(d.f.line); return; }
+    const rm = allRooms.find(r => r.id === d.f.room);
+    const lx = d.calc.x - (rm ? rm.x : 0), ly = d.calc.y - (rm ? rm.y : 0);
+    if (d.f.seed)   // materialise the seed into an authored `fixture` line
+      applyEdits([{ kind:'add_fixture', room:d.f.room, fkind:d.f.kind, wall:d.f.wall, x:lx, y:ly }]);
+    else            // rewrite the explicit fixture's `at x,y`
+      applyEdits([{ kind:'move_fixture', key:d.f.id, x:lx, y:ly }]);
   } else {
     if (!d.moved) return;
     applyEdits([{ kind:'move_opening', opening:d.o.kind, key:d.o.key, offset:d.offset }]);

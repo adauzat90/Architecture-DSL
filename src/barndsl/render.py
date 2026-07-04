@@ -41,6 +41,10 @@ WALL = "#2b2b2b"
 WINDOW_COLOR = "#2F6FB0"
 DIM_COLOR = "#888888"
 TEXT_COLOR = "#222222"
+# Fixtures/furniture: thin dark outlines, drafting style — subtle so the plan
+# stays readable (no fill, or a whisper of one).
+FIXTURE_COLOR = "#5a5a5a"
+FIXTURE_FILL = "#00000008"
 # Structural overlay (post-and-beam frame).
 BEAM_COLOR = "#B5651D"  # frame/bent beams — a steel/timber rust tone
 RIDGE_COLOR = "#8A4B12"  # ridge member, slightly darker
@@ -217,6 +221,7 @@ class _Renderer:
             self._draw_porches()
             self._draw_envelope()
             self._draw_rooms()
+            self._draw_fixtures()
             self._draw_structure()
             self._draw_windows()
             self._draw_doors()
@@ -238,6 +243,7 @@ class _Renderer:
             self._draw_porches()
         self._draw_envelope()
         self._draw_rooms(level=lvl)
+        self._draw_fixtures(level=lvl)
         self._draw_structure(level=lvl)
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
@@ -374,6 +380,116 @@ class _Renderer:
             else:
                 self._text(cx, cy - 4, r.display_name, size=12, weight="bold")
                 self._text(cx, cy + 11, f"{r.area:.0f} sq ft", size=10, fill="#555555")
+
+    def _draw_fixtures(self, level: int | None = None):
+        """Draw each room's fixtures/furniture as thin architectural glyphs — over
+        the room fill, under the labels/openings, each in a ``data-fixture`` group.
+
+        Placement comes from :func:`barndsl.fixtures.resolve_room_fixtures` (authored
+        fixtures plus surviving auto-seeds), so the plan, the 3D model and the Revit
+        exchange all agree on where each fixture sits."""
+        from .fixtures import resolve_room_fixtures
+
+        for r in self.plan.rooms:
+            if level is not None and r.level != level:
+                continue
+            for f in resolve_room_fixtures(self.plan, r):
+                self._fixture_glyph(f)
+
+    def _fx_ellipse(self, cx, cy, rx, ry, sw=0.8, fill="none"):
+        self.parts.append(
+            f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{rx:.1f}" ry="{ry:.1f}" '
+            f'fill="{fill}" stroke="{FIXTURE_COLOR}" stroke-width="{sw}" />'
+        )
+
+    def _fixture_glyph(self, f) -> None:
+        """One fixture's glyph, in a ``data-fixture`` group, from its world box."""
+        x = self.sx(f.x)
+        y = self.sy(f.y + f.length)  # screen top-left (NW corner)
+        w = f.width * self.c.scale
+        h = f.length * self.c.scale
+        if w < 2 or h < 2:
+            return
+        self.parts.append(f'<g data-fixture="{escape(f.id or f.kind)}">')
+        # `back` names the screen edge the fixture backs onto (its wall), so tanks,
+        # pillows and sofa-backs land on the correct side. World S is screen-bottom.
+        back = {"S": "bottom", "N": "top", "W": "left", "E": "right"}.get(f.wall, "bottom")
+        self._glyph_body(f.kind, x, y, w, h, back)
+        self.parts.append("</g>")
+
+    def _glyph_body(self, kind, x, y, w, h, back):
+        cx, cy = x + w / 2, y + h / 2
+        rr = min(w, h) * 0.12  # a small corner radius for furniture
+
+        def band(depth):
+            """The (x,y,w,h) of a strip of ``depth`` fraction on the ``back`` edge."""
+            if back == "bottom":
+                return x, y + h * (1 - depth), w, h * depth
+            if back == "top":
+                return x, y, w, h * depth
+            if back == "left":
+                return x, y, w * depth, h
+            return x + w * (1 - depth), y, w * depth, h  # right
+
+        if kind == "toilet":
+            bx, by, bw, bh = band(0.32)  # tank
+            self._rect(bx, by, bw, bh, "none", FIXTURE_COLOR, 0.8)
+            # bowl ellipse centred in the remaining depth
+            if back in ("bottom", "top"):
+                ey = y + h * 0.34 if back == "bottom" else y + h * 0.66
+                self._fx_ellipse(cx, ey, w * 0.32, h * 0.28)
+            else:
+                ex = x + w * 0.66 if back == "left" else x + w * 0.34
+                self._fx_ellipse(ex, cy, w * 0.28, h * 0.32)
+        elif kind == "tub":
+            self._rect(x, y, w, h, "none", FIXTURE_COLOR, 0.9, rx=rr)
+            self._fx_ellipse(cx, cy, w * 0.36, h * 0.36)
+            self._fx_ellipse(cx, cy, 1.4, 1.4)  # drain
+        elif kind == "shower":
+            self._rect(x, y, w, h, "none", FIXTURE_COLOR, 0.9)
+            self._line(x, y, x + w, y + h, FIXTURE_COLOR, 0.7)
+            self._line(x + w, y, x, y + h, FIXTURE_COLOR, 0.7)
+        elif kind in ("lavatory", "sink"):
+            self._rect(x, y, w, h, "none", FIXTURE_COLOR, 0.8)
+            self._fx_ellipse(cx, cy, w * 0.3, h * 0.3)
+        elif kind == "range":
+            self._rect(x, y, w, h, "none", FIXTURE_COLOR, 0.8)
+            for gx in (0.3, 0.7):
+                for gy in (0.3, 0.7):
+                    self._fx_ellipse(x + w * gx, y + h * gy, min(w, h) * 0.13, min(w, h) * 0.13)
+        elif kind == "refrigerator":
+            self._rect(x, y, w, h, "none", FIXTURE_COLOR, 0.8)
+            # door split line down the middle of the depth axis
+            if back in ("bottom", "top"):
+                self._line(cx, y, cx, y + h, FIXTURE_COLOR, 0.7)
+            else:
+                self._line(x, cy, x + w, cy, FIXTURE_COLOR, 0.7)
+        elif kind in ("washer", "dryer"):
+            self._rect(x, y, w, h, "none", FIXTURE_COLOR, 0.8)
+            self._fx_ellipse(cx, cy, min(w, h) * 0.3, min(w, h) * 0.3)
+        elif kind == "water_heater":
+            self._fx_ellipse(cx, cy, w * 0.45, h * 0.45)
+        elif kind in ("bed_queen", "bed_twin"):
+            self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9, rx=rr)
+            bx, by, bw, bh = band(0.24)  # pillow band at the head
+            self._rect(bx, by, bw, bh, "none", FIXTURE_COLOR, 0.7)
+            # a turned-down fold line across the foot
+            if back == "bottom":
+                self._line(x, y + h * 0.24, x + w, y + h * 0.24, FIXTURE_COLOR, 0.6)
+            elif back == "top":
+                self._line(x, y + h * 0.76, x + w, y + h * 0.76, FIXTURE_COLOR, 0.6)
+            elif back == "left":
+                self._line(x + w * 0.24, y, x + w * 0.24, y + h, FIXTURE_COLOR, 0.6)
+            else:
+                self._line(x + w * 0.76, y, x + w * 0.76, y + h, FIXTURE_COLOR, 0.6)
+        elif kind in ("sofa", "armchair"):
+            self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9, rx=rr)
+            bx, by, bw, bh = band(0.24)  # back cushion band
+            self._rect(bx, by, bw, bh, "none", FIXTURE_COLOR, 0.7)
+        else:
+            # tables / desk / dresser / wardrobe / counter / island / other:
+            # a plain rounded rectangle reads as casework.
+            self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9, rx=rr)
 
     def _draw_structure(self, level: int = 0):
         """Overlay the post-and-beam frame: beam centrelines + solid posts.

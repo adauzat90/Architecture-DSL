@@ -70,6 +70,10 @@ from .constants import SLAB_THICKNESS
 from .elements import Barndominium, RoomType
 from .geometry import TOL
 from .materials import (
+    FIXTURE_FABRIC,
+    FIXTURE_PORCELAIN,
+    FIXTURE_STAINLESS,
+    FIXTURE_WOOD,
     FRAME_MATERIAL,
     OPENING_MATERIAL,
     PALETTE,
@@ -199,7 +203,7 @@ class Scene:
     nodes: list[MeshNode] = field(default_factory=list)
 
     #: Layer order (parents in the glTF scene, and the viewer's toggle order).
-    LAYERS = ("floors", "walls", "openings", "roof", "frame", "porches", "stairs")
+    LAYERS = ("floors", "walls", "openings", "roof", "frame", "porches", "stairs", "fixtures")
 
     def node(
         self, name: str, layer: str, material: Material, tint: str | None = None
@@ -617,6 +621,155 @@ def _add_stairs(scene: Scene) -> None:
                              land["x"] + land["width"], land["y"] + land["length"], top))
 
 
+# --- fixture / furniture massing ---------------------------------------------
+#
+# Each fixture becomes a small stack of axis-aligned boxes on its room's floor —
+# recognisable, not detailed. A wall-backed fixture reads front-to-back from the
+# wall it backs to (its "front" faces into the room); a free-standing piece is
+# symmetric. Materials come from the palette: porcelain plumbing, stainless
+# appliances, fabric upholstery, wood casework.
+
+#: base body material per fixture kind.
+_FIXTURE_MATERIAL: dict[str, Material] = {
+    "toilet": FIXTURE_PORCELAIN, "lavatory": FIXTURE_PORCELAIN, "tub": FIXTURE_PORCELAIN,
+    "shower": FIXTURE_PORCELAIN, "sink": FIXTURE_PORCELAIN,
+    "refrigerator": FIXTURE_STAINLESS, "range": FIXTURE_STAINLESS,
+    "washer": FIXTURE_STAINLESS, "dryer": FIXTURE_STAINLESS, "water_heater": FIXTURE_STAINLESS,
+    "sofa": FIXTURE_FABRIC, "armchair": FIXTURE_FABRIC,
+    "bed_queen": FIXTURE_WOOD, "bed_twin": FIXTURE_WOOD,
+    "dining_table": FIXTURE_WOOD, "coffee_table": FIXTURE_WOOD, "desk": FIXTURE_WOOD,
+    "dresser": FIXTURE_WOOD, "kitchen_island": FIXTURE_WOOD, "counter": FIXTURE_WOOD,
+    "wardrobe": FIXTURE_WOOD,
+}
+
+#: a light countertop / lid material (island & counter tops) and a dark cooktop.
+_FIXTURE_TOP = PALETTE["drywall"]
+_FIXTURE_COOKTOP = PALETTE["standing_seam"]
+
+
+def _add_fixtures(scene: Scene) -> None:
+    model = scene.model
+    elev = {lvl.index: lvl.elevation for lvl in model.levels}
+    for fx in model.fixtures:
+        z = elev.get(fx.level, 0.0)
+        _fixture_massing(scene, fx, z)
+
+
+def _fixture_massing(scene: Scene, fx, z: float) -> None:
+    x0, y0 = fx.x, fx.y
+    x1, y1 = fx.x + fx.width, fx.y + fx.length
+    mat = _FIXTURE_MATERIAL.get(fx.kind, FIXTURE_WOOD)
+    body = scene.node(f"fixture:{fx.id or fx.kind}", "fixtures", mat)
+    add = body.add_box
+    wall = fx.wall
+
+    def frac(a: float, b: float, lo: float, hi: float) -> tuple[float, float]:
+        """A sub-interval of ``[a, b]`` at fractions ``[lo, hi]``."""
+        return a + (b - a) * lo, a + (b - a) * hi
+
+    # `back`/`front` split along the depth axis, measured from the backing wall.
+    def depth_split(lo: float, hi: float) -> tuple[float, float, float, float]:
+        """The footprint sub-box spanning ``[lo, hi]`` fraction from the wall."""
+        if wall == "S":
+            ya, yb = frac(y0, y1, lo, hi)
+            return x0, ya, x1, yb
+        if wall == "N":
+            ya, yb = frac(y1, y0, lo, hi)
+            return x0, yb, x1, ya
+        if wall == "W":
+            xa, xb = frac(x0, x1, lo, hi)
+            return xa, y0, xb, y1
+        if wall == "E":
+            xa, xb = frac(x1, x0, lo, hi)
+            return xb, y0, xa, y1
+        # free-standing: split along the longer footprint axis, from the low end.
+        if (x1 - x0) >= (y1 - y0):
+            xa, xb = frac(x0, x1, lo, hi)
+            return xa, y0, xb, y1
+        ya, yb = frac(y0, y1, lo, hi)
+        return x0, ya, x1, yb
+
+    k = fx.kind
+    if k == "toilet":
+        bx0, by0, bx1, by1 = depth_split(0.0, 0.42)  # tank against the wall
+        add(Box(bx0, by0, z, bx1, by1, z + 2.5))
+        bx0, by0, bx1, by1 = depth_split(0.42, 1.0)  # bowl
+        add(_inset(bx0, by0, bx1, by1, 0.15, z, z + 1.3))
+    elif k == "lavatory" or k == "sink":
+        add(Box(x0, y0, z, x1, y1, z + 2.8))
+        basin = scene.node(f"fixture:{fx.id}:basin", "fixtures", FIXTURE_PORCELAIN)
+        basin.add_box(_inset(x0, y0, x1, y1, 0.25, z + 2.6, z + 2.85))
+    elif k == "tub":
+        add(Box(x0, y0, z, x1, y1, z + 0.5))  # apron
+        add(Box(x0, y0, z + 0.5, x1, y1, z + 2.0))  # a solid tub body (rim height)
+        inner = scene.node(f"fixture:{fx.id}:basin", "fixtures", FIXTURE_PORCELAIN)
+        inner.add_box(_inset(x0, y0, x1, y1, 0.35, z + 0.9, z + 1.95))
+    elif k == "shower":
+        add(Box(x0, y0, z, x1, y1, z + 0.4))  # pan / curb
+        # a back panel up the backing wall (or the low-x side when free-standing).
+        bx0, by0, bx1, by1 = depth_split(0.0, 0.12)
+        add(Box(bx0, by0, z + 0.4, bx1, by1, z + 6.5))
+    elif k == "refrigerator":
+        add(Box(x0, y0, z, x1, y1, z + 5.8))
+        door = scene.node(f"fixture:{fx.id}:door", "fixtures", FIXTURE_STAINLESS)
+        dx0, dy0, dx1, dy1 = depth_split(0.9, 1.0)  # a shallow front face proud
+        door.add_box(Box(dx0, dy0, z + 0.6, dx1, dy1, z + 5.6))
+    elif k == "range":
+        add(Box(x0, y0, z, x1, y1, z + 2.95))
+        top = scene.node(f"fixture:{fx.id}:cooktop", "fixtures", _FIXTURE_COOKTOP)
+        top.add_box(Box(x0, y0, z + 2.95, x1, y1, z + 3.05))  # a darker cooktop lid
+    elif k in ("washer", "dryer"):
+        add(Box(x0, y0, z, x1, y1, z + 3.0))
+        door = scene.node(f"fixture:{fx.id}:door", "fixtures", _FIXTURE_COOKTOP)
+        dx0, dy0, dx1, dy1 = depth_split(0.9, 1.0)
+        door.add_box(_inset(dx0, dy0, dx1, dy1, 0.25, z + 1.2, z + 2.6))
+    elif k == "water_heater":
+        add(Box(x0, y0, z, x1, y1, z + 4.6))
+    elif k in ("kitchen_island", "counter"):
+        add(Box(x0, y0, z, x1, y1, z + 2.9))  # cabinet body
+        top = scene.node(f"fixture:{fx.id}:top", "fixtures", _FIXTURE_TOP)
+        top.add_box(_inset(x0, y0, x1, y1, -0.08, z + 2.9, z + 3.05))  # a proud lighter top
+    elif k == "dresser":
+        add(Box(x0, y0, z, x1, y1, z + 3.0))
+    elif k == "wardrobe":
+        add(Box(x0, y0, z, x1, y1, z + 6.0))
+    elif k in ("bed_queen", "bed_twin"):
+        add(Box(x0, y0, z, x1, y1, z + 1.0))  # platform
+        mat_box = scene.node(f"fixture:{fx.id}:mattress", "fixtures", FIXTURE_FABRIC)
+        mat_box.add_box(_inset(x0, y0, x1, y1, 0.08, z + 1.0, z + 1.8))
+        px0, py0, px1, py1 = depth_split(0.0, 0.2)  # pillows at the head (wall side)
+        mat_box.add_box(_inset(px0, py0, px1, py1, 0.15, z + 1.8, z + 2.15))
+    elif k in ("sofa", "armchair"):
+        add(Box(x0, y0, z, x1, y1, z + 1.4))  # seat
+        bx0, by0, bx1, by1 = depth_split(0.0, 0.2)  # back against the wall
+        add(Box(bx0, by0, z + 1.4, bx1, by1, z + 2.7))
+        # arms down the two sides perpendicular to the wall.
+        if wall in ("S", "N", ""):
+            add(Box(x0, y0, z + 1.4, x0 + 0.5, y1, z + 2.2))
+            add(Box(x1 - 0.5, y0, z + 1.4, x1, y1, z + 2.2))
+        else:
+            add(Box(x0, y0, z + 1.4, x1, y0 + 0.5, z + 2.2))
+            add(Box(x0, y1 - 0.5, z + 1.4, x1, y1, z + 2.2))
+    elif k in ("dining_table", "coffee_table", "desk"):
+        top_z = 2.4 if k != "coffee_table" else 1.4
+        add(Box(x0, y0, z + top_z - 0.2, x1, y1, z + top_z))  # top slab
+        _legs(add, x0, y0, x1, y1, z, top_z - 0.2)
+    else:  # any unmapped kind: a plain block, so it still reads as *something*.
+        add(Box(x0, y0, z, x1, y1, z + 2.5))
+
+
+def _inset(x0, y0, x1, y1, d, z0, z1) -> Box:
+    """A box inset (or, negative ``d``, expanded) by ``d`` ft on all four sides."""
+    return Box(x0 + d, y0 + d, z0, x1 - d, y1 - d, z1)
+
+
+def _legs(add, x0, y0, x1, y1, z, top: float, s: float = 0.2) -> None:
+    """Four corner legs from the floor to ``z + top`` under a table/desk slab."""
+    for cx in (x0, x1 - s):
+        for cy in (y0, y1 - s):
+            add(Box(cx, cy, z, cx + s, cy + s, z + top))
+
+
 def build_scene(plan: Barndominium) -> Scene:
     """Lower ``plan`` into the intermediate box/quad :class:`Scene` (pure)."""
     model = to_revit_model(plan)
@@ -627,6 +780,7 @@ def build_scene(plan: Barndominium) -> Scene:
     _add_frame(scene)
     _add_porches(scene)
     _add_stairs(scene)
+    _add_fixtures(scene)
     return scene
 
 

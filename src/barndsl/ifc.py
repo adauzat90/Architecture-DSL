@@ -341,6 +341,16 @@ _STAIR_TYPE = {
     "overrun": "STRAIGHT_RUN_STAIR",
 }
 
+#: Nominal fixture heights (ft) for the IfcFurnishingElement box massing.
+_FIXTURE_HEIGHT = {
+    "toilet": 2.5, "lavatory": 2.85, "sink": 3.0, "tub": 2.0, "shower": 6.5,
+    "refrigerator": 5.8, "range": 3.05, "washer": 3.0, "dryer": 3.0,
+    "water_heater": 4.6, "kitchen_island": 3.05, "counter": 3.05,
+    "bed_queen": 2.15, "bed_twin": 2.15, "sofa": 2.7, "armchair": 2.7,
+    "dining_table": 2.4, "coffee_table": 1.4, "desk": 2.4, "dresser": 3.0,
+    "wardrobe": 6.0,
+}
+
 
 # --- the builder -------------------------------------------------------------
 
@@ -710,6 +720,30 @@ class _Builder:
                     )
         return solids
 
+    def _fixtures(self, owner: Ref, context: Ref) -> None:
+        """One IfcFurnishingElement per fixture — a simple box on its room's floor.
+
+        The exchange already resolves each fixture's footprint (authored placements
+        plus surviving auto-seeds); here each becomes a plain box solid at a nominal
+        height, with a deterministic GUID from its id, contained on its storey."""
+        s = self.spf
+        elev = {lvl.index: lvl.elevation for lvl in self.model.levels}
+        for fx in self.model.fixtures:
+            z = elev.get(fx.level, 0.0)
+            h = _FIXTURE_HEIGHT.get(fx.kind, 2.5)
+            solid = _box_solid(
+                self.spf, fx.x, fx.y, z, fx.x + fx.width, fx.y + fx.length, z + h
+            )
+            placement = s.add(
+                "IFCLOCALPLACEMENT", self.storey_placement.get(fx.level, self.wcs), self.wcs
+            )
+            product = s.add(
+                "IFCFURNISHINGELEMENT", self.guid("fixture", fx.id), owner,
+                f"{fx.kind} ({fx.room})", None, None,
+                placement, self._shape(context, [solid]), fx.id,
+            )
+            self._place(fx.level, product)
+
     def _spaces(self, owner: Ref, context: Ref) -> None:
         """One IfcSpace per room, aggregated under its storey (schedules/areas)."""
         s = self.spf
@@ -810,6 +844,7 @@ class _Builder:
         self._roof(owner, body_ctx)
         self._frame(owner, body_ctx)
         self._stairs(owner, body_ctx)
+        self._fixtures(owner, body_ctx)
         self._spaces(owner, body_ctx)
         self._properties(owner)
 

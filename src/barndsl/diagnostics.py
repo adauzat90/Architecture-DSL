@@ -198,6 +198,25 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "clear area — so a plan can compile clean yet build short. Grow the room "
            "by roughly a wall thickness so the clear dimension still meets the "
            "minimum."),
+        # --- fixtures & furnishings (the `fixture` statement) ----------------
+        _c("FIXTURE_ROOM", E, "Fixture references unknown room",
+           "A `fixture` statement places a fixture `in` a room id that doesn't "
+           "exist — a mistyped id would otherwise place nothing. Reference a room "
+           "that's defined."),
+        _c("FIXTURE_OOB", W, "Fixture outside the room",
+           "An author-placed fixture's footprint extends past its room's clear "
+           "(finish-face) interior. Its `at` is room-local feet from the SW corner; "
+           "move it inward or grow the room. Auto-seeded fixtures are fitted "
+           "automatically, so only explicit `fixture` placements are checked."),
+        _c("FIXTURE_OVERLAP", W, "Fixtures overlap",
+           "Two fixtures occupy the same floor — an author-placed one overlaps "
+           "another fixture (a seed or another placement). Slide one along its "
+           "wall, or back it to a different wall."),
+        _c("FIXTURE_DOOR", I, "Fixture blocks a door swing",
+           "An author-placed fixture sits in the clear floor a hinged door swings "
+           "through, so the door can't fully open past it. Keep the swing clear — "
+           "slide the fixture off the door approach, or swing the door the other "
+           "way."),
         # --- doors ----------------------------------------------------------
         _c("SELF_DOOR", E, "Door to self",
            "An interior door connects a room to itself."),

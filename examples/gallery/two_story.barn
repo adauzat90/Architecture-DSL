@@ -21,6 +21,10 @@ room laundry: laundry  at 27,22 size 12 x 11
 # --- upper floor (level 1) ---
 room loft: loft at 0,0 size 24 x 18 level 1
 
+# A queen bed against the bedroom's north wall (its head to the outside wall);
+# the bath/kitchen/laundry fixtures auto-seed with no `fixture` line at all.
+fixture bed_queen in bed wall N
+
 # --- vertical circulation: along the west wall, clear of the kitchen doorway ---
 stair flight at 0,3 size 4 x 12 from 0 to 1
 

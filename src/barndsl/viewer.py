@@ -52,6 +52,7 @@ _LAYER_LABELS = {
     "porches": "Porches",
     "openings": "Openings",
     "stairs": "Stairs",
+    "fixtures": "Fixtures",
 }
 
 
