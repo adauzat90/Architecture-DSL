@@ -217,6 +217,63 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "through, so the door can't fully open past it. Keep the swing clear — "
            "slide the fixture off the door approach, or swing the door the other "
            "way."),
+        _c("FIXTURE_TOILET_CLEARANCE", W, "Toilet clearance below IRC R307.1",
+           "An author-placed toilet has less than 15 in from its centreline to the "
+           "nearest side wall or fixture, or less than 21 in of clear floor in "
+           "front (IRC R307.1). Give the water closet a 30 in bay (15 in each side "
+           "of centre) and 21 in in front — slide it along the wall or widen the "
+           "room. Only explicit `fixture toilet` placements are checked; the "
+           "auto-seed is fitted for you."),
+        _c("FIXTURE_FRONT", I, "Fixture's clear-floor strip is blocked",
+           "An author-placed fixture's approach — the clear floor it needs in front "
+           "of its face (the `front` clearance in the catalog) — is cut off by a "
+           "wall or overlapped by another fixture, so you can't use or stand at it. "
+           "A free-standing piece (table, island) instead wants ~2 ft of walkway on "
+           "at least one long side. Slide it clear, or move it toward the centre."),
+        _c("FIXTURE_ROOM_TYPE", I, "Fixture in an unusual room type",
+           "An author-placed fixture sits in a room type it isn't usually found in "
+           "— a toilet/tub/shower/lavatory outside a bath or laundry, a "
+           "range/refrigerator/island outside a kitchen, a bed outside a bedroom or "
+           "loft. Often a typo in the room id or type; if it's deliberate, ignore "
+           "the note. Storage/utility placements (a water heater in a utility, a "
+           "washer in a mudroom, a desk anywhere) are never flagged."),
+        _c("FIXTURE_BACKING", I, "Wall-backed fixture floats mid-floor",
+           "An author-placed piece that normally backs to a wall (toilet, vanity, "
+           "tub, shower, sink, range, fridge, counter, wardrobe, dresser, water "
+           "heater, washer, dryer) sits more than ~0.5 ft off every wall of its "
+           "room. Back it to a wall with `at`, or drop the coordinates and give it "
+           "`wall N|S|E|W` to auto-place against a wall."),
+        _c("FIXTURE_EGRESS", W, "Fixture blocks a bedroom escape window",
+           "A tall author-placed piece (refrigerator, wardrobe, water heater) parks "
+           "over a bedroom's emergency-escape window, so no one could get out "
+           "through it (IRC R310). Keep the egress window clear — move the fixture "
+           "to another wall."),
+        _c("RANGE_WINDOW", W, "Range under an operable window",
+           "A range/cooktop sits directly under a window that opens. A draft "
+           "through the sash can blow out a burner, and a curtain hangs over the "
+           "flame — common code and NKBA practice keep a cooktop out from under an "
+           "openable window. Slide the range along the wall, clear of the sash "
+           "(a fixed, non-opening window overhead is fine)."),
+        _c("RANGE_LANDING", I, "No landing surface beside the range",
+           "A range has no counter, sink, island or refrigerator within 1 ft to "
+           "either side to set a hot pan down (NKBA wants a landing surface flanking "
+           "the cooktop). Add a `fixture counter` next to the range. Only fires when "
+           "the kitchen already has other casework placed to compare against."),
+        _c("KITCHEN_TRIANGLE", I, "Kitchen work triangle too spread out",
+           "The sink–range–refrigerator work triangle (centre to centre) sums to "
+           "more than ~26 ft, so the cook walks marathons between the three "
+           "stations (NKBA keeps each leg ~4–9 ft, the perimeter ~13–26 ft). Draw "
+           "the three appliances closer together. A compact, efficient galley is "
+           "not flagged; a genuinely cramped kitchen is caught by KITCHEN_FIT."),
+        _c("DRYER_VENT", I, "Dryer far from an exterior wall",
+           "A dryer is more than ~10 ft from any exterior wall of its room (or its "
+           "room has none), so the exhaust duct runs long and bendy — lint collects "
+           "and airflow drops, a fire risk and an efficiency loss. Put the laundry "
+           "on an exterior wall, or keep the dryer near one."),
+        _c("FIXTURE_STAIR", W, "Fixture on a stair footprint",
+           "A fixture's footprint overlaps a stair's run or landing on the same "
+           "level, so it fouls the flight. Keep the stair and its landing clear — "
+           "slide the fixture off the footprint, or run the stair along a wall."),
         # --- doors ----------------------------------------------------------
         _c("SELF_DOOR", E, "Door to self",
            "An interior door connects a room to itself."),

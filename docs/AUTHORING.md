@@ -431,6 +431,13 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `STAIR_BLOCKS_DOOR` — a `stair` footprint intrudes on the clear floor in front
   of a door, so you'd step off the flight straight into a swinging door. Place the
   stair along a wall, clear of door approaches.
+- Placed fixtures (the `fixture` statement — judged over the resolved layout, seeds
+  plus authored pieces): `FIXTURE_TOILET_CLEARANCE` — a toilet with under 15 in
+  from its centreline to the nearest wall/fixture or under 21 in of clear floor in
+  front (IRC R307.1). `RANGE_WINDOW` — a cooktop under an operable window (a draft
+  blows out a burner; curtains hang over the flame). `FIXTURE_EGRESS` — a tall
+  piece (fridge/wardrobe/water heater) parked over a bedroom's escape window
+  (IRC R310). `FIXTURE_STAIR` — a fixture on a stair's run/landing footprint.
 - `STAIR_GEOMETRY` / `STAIR_OOB` / `STAIR_LEVELS` (errors), `STAIR_RUN` /
   `STAIR_FLOAT` — a stair with bad geometry, too short a run, or landing in no room.
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
@@ -478,6 +485,16 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `GARAGE_NO_ENTRY` — a `garage` that abuts the house but has no interior
   people-door into it (you'd have to go outside to get in).
 - `AREA_UNUSED` — a lot of footprint is unallocated.
+- Placed-fixture nudges (authored `fixture` pieces only — the auto-placer fits its
+  own seeds): `FIXTURE_OOB` / `FIXTURE_OVERLAP` / `FIXTURE_DOOR` (past the room,
+  overlapping, in a door swing); `FIXTURE_FRONT` — the clear-floor strip in front
+  of a fixture (or a walkway beside a free-standing piece) is blocked;
+  `FIXTURE_BACKING` — a wall-backed piece (vanity, range, dresser…) floating off
+  every wall; `FIXTURE_ROOM_TYPE` — a fixture in a surprising room type (a tub in a
+  living room). Plan-level infos judged over seeds *and* authored pieces:
+  `RANGE_LANDING` — no counter/sink/fridge beside the cooktop (NKBA);
+  `KITCHEN_TRIANGLE` — a sink–range–fridge triangle over ~26 ft (appliances too
+  scattered); `DRYER_VENT` — a dryer more than ~10 ft from any exterior wall.
 
 > These checks are approximate (loosely IRC-based) and are **not** a substitute
 > for a licensed designer or the authority having jurisdiction.
