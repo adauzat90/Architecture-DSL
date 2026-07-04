@@ -48,8 +48,14 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
     between rounds and the stream ends with a ``cancelled`` error.
 ``POST /api/edit``
     body ``{"source": "...", "edit": {...}}`` → apply one surgical DSL text edit
-    (:mod:`barndsl.edits`: move/resize a room, slide an opening) and return
-    ``{source, line, changed, ...compile_payload(new_source)}``. A refused edit
+    (:mod:`barndsl.edits`) and return
+    ``{source, line, changed, ...compile_payload(new_source)}``. The edit
+    vocabulary spans the viewport gestures (move/resize a room, slide an opening or
+    fixture, materialise a seed) and the graphical design panel's form controls:
+    ``set_room_type``, ``rename_room``, ``add_room`` / ``delete_room``,
+    ``add_opening`` / ``delete_opening`` / ``set_opening``, ``delete_fixture`` /
+    ``set_fixture`` and ``set_plan`` — each rewriting the fewest bytes it can. A
+    refused edit
     (unknown room, malformed) is a normal ``200`` with ``{"error": {kind, message}}``
     — bad edits are ordinary UX, not failures; only malformed/oversize JSON is ``400``.
 ``POST /api/export``
