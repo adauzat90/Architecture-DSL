@@ -69,20 +69,30 @@ from dataclasses import dataclass, field
 from .constants import SLAB_THICKNESS
 from .elements import Barndominium, RoomType
 from .geometry import TOL
-from .render import BEAM_COLOR, ROOM_COLORS
+from .materials import (
+    FRAME_MATERIAL,
+    OPENING_MATERIAL,
+    PALETTE,
+    PORCH_MATERIAL,
+    SLAB_MATERIAL,
+    STAIR_MATERIAL,
+    Material,
+    floor_material,
+    roof_material,
+    wall_material,
+)
+from .render import ROOM_COLORS
 from .revit import RevitModel, RevitOpening, RevitWall, to_revit_model
 from .wallheights import gable_line, is_gable_end, roof_plate, wall_top_intervals
 
-# --- materials (hex colours; converted to linear baseColorFactor on emit) -----
-
-WALL_COLOR = "#DAD5C8"      # warm off-white plaster/siding shell
-ROOF_COLOR = "#8A5A3B"      # weathered metal/shingle brown
-LINTEL_COLOR = "#B4A88F"    # header/sill boxes over & under openings
-FRAME_COLOR = BEAM_COLOR    # post-and-beam frame, reusing the plan palette
-PORCH_COLOR = "#C9D2B4"     # porch deck (a muted PORCH tint)
-POST_COLOR = "#7A5A2E"      # porch posts
-STAIR_COLOR = "#C9B892"     # stair treads
-SLAB_COLOR = "#CFCBC2"      # structural floor slab (neutral)
+# --- materials ---------------------------------------------------------------
+#
+# Every surface carries a real :class:`~barndsl.materials.Material` (base colour +
+# roughness/metallic + procedural pattern) rather than a bare hex string. Room
+# floors additionally carry a *tint* — the per-room-type colour from
+# :data:`barndsl.render.ROOM_COLORS` — which modulates the floor material's base
+# colour so the drawing set still reads as one system (a tiled bath floor is a
+# little cooler than a tiled kitchen). See :func:`_effective_linear`.
 
 #: A thin visible thickness (ft) for floor tiles that only need to read as a
 #: coloured surface, not a structural slab.
@@ -121,12 +131,16 @@ class MeshNode:
 
     Geometry is built with :meth:`add_box`/:meth:`add_quad`; the :class:`Scene`
     transforms every vertex and normal into glTF space when it serialises.
+    ``tint`` is an optional ``#rrggbb`` that modulates the material's base colour
+    (room floors carry their per-room-type tint here); ``None`` uses the material
+    colour verbatim.
     """
 
-    def __init__(self, name: str, layer: str, material: str):
+    def __init__(self, name: str, layer: str, material: Material, tint: str | None = None):
         self.name = name
         self.layer = layer
-        self.material = material  # a hex colour string
+        self.material = material
+        self.tint = tint
         self.positions: list[tuple[float, float, float]] = []
         self.normals: list[tuple[float, float, float]] = []
         self.indices: list[int] = []
@@ -187,8 +201,10 @@ class Scene:
     #: Layer order (parents in the glTF scene, and the viewer's toggle order).
     LAYERS = ("floors", "walls", "openings", "roof", "frame", "porches", "stairs")
 
-    def node(self, name: str, layer: str, material: str) -> MeshNode:
-        n = MeshNode(name, layer, material)
+    def node(
+        self, name: str, layer: str, material: Material, tint: str | None = None
+    ) -> MeshNode:
+        n = MeshNode(name, layer, material, tint)
         self.nodes.append(n)
         return n
 
@@ -451,7 +467,7 @@ def _add_roof(scene: Scene) -> None:
     top = roof["top_level"]
     plate = plan.level_elevation(top) + plan.ceiling_height
     oh = float(getattr(plan, "overhang", 0.0) or 0.0)
-    node = scene.node("roof", "roof", ROOF_COLOR)
+    node = scene.node("roof", "roof", roof_material(plan))
     sections = roof.get("sections")
     if sections:
         for sec in sections:
@@ -463,23 +479,29 @@ def _add_roof(scene: Scene) -> None:
 # --- assembly of every layer -------------------------------------------------
 
 
-def _floor_material(rtype: str) -> str:
-    try:
-        return ROOM_COLORS[RoomType(rtype)]
-    except (ValueError, KeyError):
-        return ROOM_COLORS[RoomType.OTHER]
+def _room_tint(rtype) -> str:
+    """The per-room-type tint (a `#rrggbb`) that modulates the floor material."""
+    return ROOM_COLORS.get(rtype, ROOM_COLORS[RoomType.OTHER])
 
 
 def _add_floors(scene: Scene) -> None:
     model = scene.model
+    rooms_by_id = {r.id: r for r in scene.plan.rooms}
     elev = {lvl.index: lvl.elevation for lvl in model.levels}
     for i, s in enumerate(model.slabs):
         z = elev.get(s.level, 0.0)
-        node = scene.node(f"slab:{s.level}.{i}", "floors", SLAB_COLOR)
+        node = scene.node(f"slab:{s.level}.{i}", "floors", SLAB_MATERIAL)
         node.add_box(Box(s.x, s.y, z - SLAB_THICKNESS, s.x + s.width, s.y + s.length, z))
     for r in model.rooms:
         z = elev.get(r.level, 0.0)
-        node = scene.node(f"room:{r.id}", "floors", _floor_material(r.type))
+        # Resolve the floor finish from the authored room (its `floor` hint / type),
+        # then wash it with the room-type tint so the floors read as one palette.
+        room = rooms_by_id.get(r.id)
+        if room is not None:
+            mat, tint = floor_material(room), _room_tint(room.type)
+        else:  # defensive: a slab with no authored room keeps the wood default
+            mat, tint = PALETTE["wood_plank"], None
+        node = scene.node(f"room:{r.id}", "floors", mat, tint)
         node.add_box(Box(r.x, r.y, z, r.x + r.width, r.y + r.length, z + FLOOR_TILE_THICKNESS))
 
 
@@ -492,10 +514,11 @@ def _add_walls(scene: Scene) -> None:
             hosted.setdefault(o.host_wall, []).append(o)
     plate = roof_plate(model)
     gl = gable_line(model)
+    wall_mat = wall_material(scene.plan)
     for w in model.walls:
         base = elev.get(w.level, 0.0)
         ops = hosted.get(w.id, [])
-        node = scene.node(f"wall:{w.id}", "walls", WALL_COLOR)
+        node = scene.node(f"wall:{w.id}", "walls", wall_mat)
         intervals = wall_top_intervals(w, model)
         for box in wall_solids(w, ops, base, intervals):
             node.add_box(box)
@@ -511,7 +534,7 @@ def _add_walls(scene: Scene) -> None:
         # Lintel / sill boxes ride the openings layer so they can be toggled apart.
         lintels = _opening_boxes(w, ops, base)
         if lintels:
-            onode = scene.node(f"opening:{w.id}", "openings", LINTEL_COLOR)
+            onode = scene.node(f"opening:{w.id}", "openings", OPENING_MATERIAL)
             for box in lintels:
                 onode.add_box(box)
 
@@ -520,13 +543,13 @@ def _add_frame(scene: Scene) -> None:
     model = scene.model
     for i, c in enumerate(model.columns):
         s = c.size or 0.5
-        node = scene.node(f"post:{i}", "frame", FRAME_COLOR)
+        node = scene.node(f"post:{i}", "frame", FRAME_MATERIAL)
         node.add_box(Box(c.point[0] - s / 2, c.point[1] - s / 2, c.base,
                          c.point[0] + s / 2, c.point[1] + s / 2, c.top))
     for i, b in enumerate(model.framing):
         s = b.size or 0.5
         (x0, y0), (x1, y1) = b.start, b.end
-        node = scene.node(f"beam:{i}", "frame", FRAME_COLOR)
+        node = scene.node(f"beam:{i}", "frame", FRAME_MATERIAL)
         if abs(x1 - x0) >= abs(y1 - y0):  # runs east-west
             node.add_box(Box(min(x0, x1), (y0 + y1) / 2 - s / 2, b.z - s / 2,
                              max(x0, x1), (y0 + y1) / 2 + s / 2, b.z + s / 2))
@@ -541,7 +564,7 @@ def _add_porches(scene: Scene) -> None:
     for a in scene.model.areas:
         if a.kind != "porch":
             continue
-        node = scene.node(f"porch:{a.id}", "porches", PORCH_COLOR)
+        node = scene.node(f"porch:{a.id}", "porches", PORCH_MATERIAL)
         node.add_box(Box(a.x, a.y, -SLAB_THICKNESS, a.x + a.width, a.y + a.length, 0.0))
         if a.meta.get("covered"):
             s = 0.5
@@ -549,7 +572,7 @@ def _add_porches(scene: Scene) -> None:
                 (a.x, a.y), (a.x + a.width, a.y),
                 (a.x, a.y + a.length), (a.x + a.width, a.y + a.length),
             ]
-            posts = scene.node(f"porch:{a.id}:posts", "porches", POST_COLOR)
+            posts = scene.node(f"porch:{a.id}:posts", "porches", FRAME_MATERIAL)
             for cx, cy in corners:
                 px = min(max(cx - s / 2, a.x), a.x + a.width - s)
                 py = min(max(cy - s / 2, a.y), a.y + a.length - s)
@@ -567,7 +590,7 @@ def _add_stairs(scene: Scene) -> None:
         base = elev.get(a.meta.get("from_level", a.level), 0.0)
         rh = float(sp.get("riser_height", 0.0))
         tread = float(sp.get("tread", 0.0))
-        node = scene.node(f"stair:{a.id}", "stairs", STAIR_COLOR)
+        node = scene.node(f"stair:{a.id}", "stairs", STAIR_MATERIAL)
         for run in sp.get("runs", []):
             (sx, sy), (ex, ey) = run["start"], run["end"]
             width = float(run["width"])
@@ -621,6 +644,21 @@ def hex_to_linear(hex_color: str) -> list[float]:
     return [_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b), 1.0]
 
 
+def effective_linear(material: Material, tint: str | None = None) -> list[float]:
+    """The material's linear ``[r, g, b, 1]`` base colour, modulated by ``tint``.
+
+    With no tint this is just the material colour; a tint (a room-type ``#rrggbb``)
+    multiplies it channel-wise in linear space — the room palette washes over the
+    floor finish rather than replacing it, so a tiled bath and a tiled kitchen
+    share a material yet still read as different rooms.
+    """
+    base = hex_to_linear(material.color)
+    if not tint:
+        return base
+    t = hex_to_linear(tint)
+    return [base[0] * t[0], base[1] * t[1], base[2] * t[2], 1.0]
+
+
 # --- glTF space transform ----------------------------------------------------
 
 
@@ -642,19 +680,27 @@ def _build_gltf(plan: Barndominium) -> tuple[dict, bytes]:
     scene = build_scene(plan)
     live = [n for n in scene.nodes if not n.empty]
 
-    # Deduplicate materials by colour, in first-seen order.
-    mat_index: dict[str, int] = {}
+    # Deduplicate materials by (palette id, tint), in first-seen order. The tint
+    # only distinguishes room floors sharing a finish; every other surface has no
+    # tint, so untinted materials collapse to one entry each as before.
+    def mat_key(n: MeshNode) -> tuple[str, str]:
+        return (n.material.name, n.tint or "")
+
+    mat_index: dict[tuple[str, str], int] = {}
     materials: list[dict] = []
     for n in live:
-        if n.material not in mat_index:
-            mat_index[n.material] = len(materials)
+        key = mat_key(n)
+        if key not in mat_index:
+            mat_index[key] = len(materials)
+            mat = n.material
+            name = mat.name if not n.tint else f"{mat.name} ({n.tint})"
             materials.append(
                 {
-                    "name": n.material,
+                    "name": name,
                     "pbrMetallicRoughness": {
-                        "baseColorFactor": hex_to_linear(n.material),
-                        "metallicFactor": 0.0,
-                        "roughnessFactor": 0.85,
+                        "baseColorFactor": effective_linear(mat, n.tint),
+                        "metallicFactor": mat.metallic,
+                        "roughnessFactor": mat.roughness,
                     },
                     "doubleSided": True,
                 }
@@ -722,7 +768,7 @@ def _build_gltf(plan: Barndominium) -> tuple[dict, bytes]:
                     {
                         "attributes": {"POSITION": pos_acc, "NORMAL": nrm_acc},
                         "indices": idx_acc,
-                        "material": mat_index[n.material],
+                        "material": mat_index[mat_key(n)],
                     }
                 ],
             }

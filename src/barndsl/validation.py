@@ -941,6 +941,7 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_walls(plan, add)
     _validate_suites_zones(plan, add)
     _validate_structure(plan, add)
+    _validate_finishes(plan, add)
 
     if not plan.metrics()["bathroom_count"]:
         add(
@@ -953,6 +954,30 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
         )
 
     return ValidationReport(issues)
+
+
+def _validate_finishes(plan: Barndominium, add) -> None:
+    """Teach on an unrecognised per-room ``floor`` finish (never blocking).
+
+    A floor hint is free text fuzzy-matched to the material palette; a name that
+    matches nothing still builds (it silently inherits the room's default finish),
+    so a friendly WARNING points the author at the vocabulary rather than letting
+    the typo pass unseen."""
+    from .materials import known_floor_names, match_floor
+
+    for room in plan.rooms:
+        hint = getattr(room, "floor", None)
+        if hint and match_floor(hint) is None:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "FLOOR_FINISH",
+                    f"Room '{room.id}' floor finish {hint!r} matched no known "
+                    "material; it will use the default for its room type.",
+                    room=room.id,
+                    hint="Try one of: " + ", ".join(known_floor_names()) + ".",
+                )
+            )
 
 
 def _site_footprint_bounds(plan: Barndominium) -> tuple[float, float, float, float]:

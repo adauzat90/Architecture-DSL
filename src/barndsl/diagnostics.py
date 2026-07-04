@@ -100,6 +100,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two rooms share an id; ids must be unique."),
         _c("NO_BATH", W, "No bathroom",
            "The plan has no bathroom or half-bath."),
+        _c("FLOOR_FINISH", W, "Unrecognised floor finish",
+           "A room's `floor \"...\"` hint matched no material in the 3D palette, "
+           "so it falls back to the default finish for its room type. Not "
+           "blocking — pick a recognised name (tile, concrete, wood/plank, "
+           "carpet, ...) to control the 3D floor material."),
         # --- site / setbacks (the `site` / `setback` statements) -------------
         _c("SETBACK", E, "Footprint violates the setbacks",
            "The building footprint (envelope + wings + porches) doesn't fit "

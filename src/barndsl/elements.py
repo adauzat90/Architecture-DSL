@@ -168,6 +168,10 @@ class Room:
     #: A vaulted / cathedral room open to the roof — no flat ceiling plane. Its
     #: usable height rises to the ridge, so a flat ceiling isn't built for it.
     vaulted: bool = False
+    #: Optional free-text floor-finish hint (e.g. "tile", "polished concrete",
+    #: "wood plank"), fuzzy-matched to the 3D material palette (see
+    #: :mod:`barndsl.materials`). ``None`` inherits a default finish by room type.
+    floor: str | None = None
     #: How the room was placed, for diagnostics — e.g. "east_of kitchen" for a
     #: relative anchor, or None for an absolute position. Not serialised.
     placement: str | None = None
@@ -1197,6 +1201,7 @@ class Barndominium:
         level: int | float = 0,
         ceiling_height: float | None = None,
         vaulted: bool = False,
+        floor: str | None = None,
         east_of: str | None = None,
         west_of: str | None = None,
         north_of: str | None = None,
@@ -1254,7 +1259,9 @@ class Barndominium:
         self.rooms.append(
             Room(
                 room_id, type, x, y, width, length, label, level,
-                ceiling_height=ch, vaulted=bool(vaulted), placement=placement,
+                ceiling_height=ch, vaulted=bool(vaulted),
+                floor=(str(floor) if floor is not None else None),
+                placement=placement,
             )
         )
         return self

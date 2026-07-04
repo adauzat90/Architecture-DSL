@@ -124,9 +124,11 @@ Statements:
   require area <room> >= <sqft>         # the room's nominal area must be at least sqft
         # declared spatial intent, like `program`: each unmet requirement is a
         # REQUIRE_UNMET warning (never blocking); an unknown room id is an error.
-  room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted]
+  room <id>: <type> <placement> size <W> x <L> [level <n>] [ceiling <h>] [vaulted] [floor "<finish>"]
         # `ceiling <h>` overrides the plan ceiling for this room (a tray or a
         # taller great room); `vaulted` makes it open to the roof (no flat ceiling).
+        # `floor "<finish>"` sets the 3D floor material (e.g. "tile", "polished
+        # concrete", "wood plank"); unset picks a default by room type.
   wall <id_a> - <id_b> plumbing|bearing|rated   # one or more attributes
         # declared attributes of the SHARED wall between two abutting rooms:
         # plumbing = a 2x6 wet wall (satisfies the wet-room grouping nudge when a
@@ -831,7 +833,9 @@ def _parse_statement(
         level = 0
         ceiling_h = None
         vaulted = False
-        # Optional room suffixes in any order: `level <n>`, `ceiling <h>`, `vaulted`.
+        floor_finish = None
+        # Optional room suffixes in any order: `level <n>`, `ceiling <h>`,
+        # `vaulted`, `floor "<finish>"`.
         while (tok := c.peek()) is not None:
             opt = tok.text.lower()
             if opt == "level":
@@ -843,13 +847,17 @@ def _parse_statement(
             elif opt == "vaulted":
                 c.keyword("vaulted")
                 vaulted = True
+            elif opt == "floor":
+                c.keyword("floor")
+                floor_finish = c.take("a floor finish (quoted)").text
             else:
                 break
         c.expect_end()
         try:
             plan.add_room(
                 rid, rtype, width=w, length=length, level=level,
-                ceiling_height=ceiling_h, vaulted=vaulted, **place_kwargs
+                ceiling_height=ceiling_h, vaulted=vaulted, floor=floor_finish,
+                **place_kwargs
             )
         except ValueError as exc:
             col = ref_tok.col if ref_tok else rid_tok.col

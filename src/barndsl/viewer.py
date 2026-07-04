@@ -4,16 +4,27 @@
 build step — that opens the plan's 3D model by double-clicking it. The scene is
 the same box/quad lowering :mod:`barndsl.gltf` builds (via :func:`build_scene`),
 serialised into a compact inline JSON blob, and rendered by a small inline WebGL
-renderer: orbit / pan / zoom, one directional light with Lambert shading, and a
-layer-toggle panel (walls, roof, frame, floors, porches, openings, stairs — the
-roof toggle lets you look inside). No textures, no external dependencies.
+renderer: orbit / pan / zoom, a directional light with a sky-fill term and a
+roughness/metallic specular, procedural surface textures, and a layer-toggle panel
+(walls, roof, frame, floors, porches, openings, stairs — the roof toggle lets you
+look inside). No external dependencies.
+
+Each surface carries a material from :mod:`barndsl.materials` — base colour,
+roughness/metallic, and a procedural ``pattern`` (ribbed metal, board-and-batten,
+shingle courses, plank flooring, tile, concrete speckle). The renderer draws one
+small **detail texture per pattern** on an offscreen canvas at load time (no
+network) and maps it **triplanarly** in the shader — the projection plane is
+chosen by the dominant world-normal axis, so the mostly axis-aligned boxes and
+sloped roof quads texture correctly without any UV arrays in the scene JSON.
+Pattern scale is in feet, matching the world units, so ribs and planks read at
+true size.
 
 The renderer is inline WebGL rather than a Three.js CDN import precisely because
 the geometry is trivial — axis-aligned boxes and a handful of sloped quads — so a
-~one-directional-light Lambert shader is all it takes, and the file stays offline
-and self-contained (the property the design doc asks for). Styling is light and
-clean, consistent with a design tool; the plan title and a few key metrics
-(square footage, bed/bath) sit in a header.
+compact single-pass shader is all it takes, and the file stays offline and
+self-contained (the property the design doc asks for). Styling is light and clean,
+consistent with a design tool; the plan title and a few key metrics (square
+footage, bed/bath) sit in a header.
 
 The WebGL renderer itself lives in :data:`RENDERER_JS` — a single JavaScript
 function, ``mountScene(canvas, labels, togglesEl)``, shared verbatim by this
@@ -30,7 +41,7 @@ from __future__ import annotations
 import json
 
 from .elements import Barndominium
-from .gltf import Scene, _to_gltf, build_scene, hex_to_linear
+from .gltf import Scene, _to_gltf, build_scene, effective_linear
 
 #: Human labels for the layer toggles, in display order.
 _LAYER_LABELS = {
@@ -48,9 +59,12 @@ def scene_json(scene: Scene) -> dict:
     """The scene as inline-renderable JSON: one entry per non-empty node.
 
     Vertices/normals are pre-transformed into the glTF y-up frame and flattened;
-    colours are linear-space RGB so the shader can light them directly. This is
-    the exact blob the viewer embeds and the playground returns, so the shared
-    :data:`RENDERER_JS` renderer draws both from one code path.
+    colours are linear-space RGB so the shader can light them directly. Each node
+    also carries its material's ``roughness``/``metallic`` factors and a procedural
+    ``pattern`` (with ``patternScale`` in feet) the shared renderer turns into a
+    triplanar-mapped texture. This is the exact blob the viewer embeds and the
+    playground returns, so the shared :data:`RENDERER_JS` renderer draws both from
+    one code path.
     """
     nodes = []
     for n in scene.nodes:
@@ -62,11 +76,16 @@ def scene_json(scene: Scene) -> dict:
             verts.extend(_to_gltf(p))
         for v in n.normals:
             norms.extend(_to_gltf(v))
+        mat = n.material
         nodes.append(
             {
                 "name": n.name,
                 "layer": n.layer,
-                "color": hex_to_linear(n.material)[:3],
+                "color": effective_linear(mat, n.tint)[:3],
+                "roughness": round(mat.roughness, 3),
+                "metallic": round(mat.metallic, 3),
+                "pattern": mat.pattern,
+                "patternScale": mat.pattern_scale,
                 "positions": [round(x, 4) for x in verts],
                 "normals": [round(x, 4) for x in norms],
                 "indices": n.indices,
@@ -154,17 +173,39 @@ function mountScene(canvas, labels, togglesEl) {
     return [a[0] / l, a[1] / l, a[2] / l]; }
 
   // --- shader ---------------------------------------------------------------
+  // World-space position and normal go to the fragment stage; the base colour is
+  // modulated there by a triplanar-mapped procedural texture (chosen per dominant
+  // world-normal axis) and lit with a diffuse + sky-fill term plus a
+  // roughness/metallic-driven specular, so a metal roof reads as metal.
   const vs = 'attribute vec3 aPos; attribute vec3 aNorm;'
-    + ' uniform mat4 uMVP; varying vec3 vN;'
-    + ' void main(){ vN=aNorm; gl_Position=uMVP*vec4(aPos,1.0); }';
-  const fs = 'precision mediump float; varying vec3 vN; uniform vec3 uColor;'
+    + ' uniform mat4 uMVP; varying vec3 vN; varying vec3 vWorld;'
+    + ' void main(){ vN=aNorm; vWorld=aPos; gl_Position=uMVP*vec4(aPos,1.0); }';
+  const fs = 'precision mediump float;'
+    + ' varying vec3 vN; varying vec3 vWorld;'
+    + ' uniform vec3 uColor; uniform vec3 uEye;'
+    + ' uniform float uRough; uniform float uMetal;'
+    + ' uniform float uPatScale; uniform float uHasTex; uniform sampler2D uTex;'
     + ' void main(){'
-    + '   vec3 n=normalize(vN);'
+    + '   vec3 n=normalize(vN); vec3 an=abs(n); vec2 uv;'
+    // Project world coords onto the plane facing the dominant axis. Vertical
+    // surfaces (walls, roof faces) keep world-up as V so ribs/courses read upright.
+    + '   if(an.x>=an.y&&an.x>=an.z) uv=vec2(vWorld.z,vWorld.y);'
+    + '   else if(an.z>=an.x&&an.z>=an.y) uv=vec2(vWorld.x,vWorld.y);'
+    + '   else uv=vec2(vWorld.x,vWorld.z);'
+    + '   float detail=1.0;'
+    + '   if(uHasTex>0.5) detail=texture2D(uTex, uv/uPatScale).r;'
+    + '   vec3 albedo=uColor*(0.4+0.6*detail);'
     + '   vec3 L=normalize(vec3(0.4,0.9,0.5));'
-    + '   float d=max(dot(n,L),0.0)*0.75+0.30;'
-    + '   float amb=0.5+0.5*n.y; d+=amb*0.12;'
-    + '   vec3 c=uColor*min(d,1.15);'
-    + '   gl_FragColor=vec4(pow(c, vec3(1.0/2.2)), 1.0);'
+    + '   vec3 V=normalize(uEye-vWorld); vec3 H=normalize(L+V);'
+    + '   float diff=max(dot(n,L),0.0);'
+    + '   float amb=0.28+0.22*(0.5+0.5*n.y);'
+    // Metals carry little diffuse; fade it out as metallic rises.
+    + '   vec3 col=albedo*(amb+diff*0.72)*(1.0-0.65*uMetal);'
+    + '   float sh=mix(10.0,90.0,1.0-uRough);'
+    + '   float spec=pow(max(dot(n,H),0.0),sh);'
+    + '   vec3 specCol=mix(vec3(0.05),uColor,uMetal);'
+    + '   col+=specCol*spec*(0.25+0.75*uMetal);'
+    + '   gl_FragColor=vec4(pow(min(col,vec3(1.4)), vec3(1.0/2.2)), 1.0);'
     + ' }';
   function compileShader(type, src) { const s = gl.createShader(type);
     gl.shaderSource(s, src); gl.compileShader(s);
@@ -178,8 +219,79 @@ function mountScene(canvas, labels, togglesEl) {
   const aNorm = gl.getAttribLocation(prog, 'aNorm');
   const uMVP = gl.getUniformLocation(prog, 'uMVP');
   const uColor = gl.getUniformLocation(prog, 'uColor');
+  const uEye = gl.getUniformLocation(prog, 'uEye');
+  const uRough = gl.getUniformLocation(prog, 'uRough');
+  const uMetal = gl.getUniformLocation(prog, 'uMetal');
+  const uPatScale = gl.getUniformLocation(prog, 'uPatScale');
+  const uHasTex = gl.getUniformLocation(prog, 'uHasTex');
+  const uTex = gl.getUniformLocation(prog, 'uTex');
   gl.getExtension('OES_element_index_uint');
   gl.enable(gl.DEPTH_TEST);
+
+  // --- procedural pattern textures ------------------------------------------
+  // One detail map per pattern, drawn on an offscreen canvas (no network) and
+  // uploaded as a repeating WebGL texture. Each map is a greyscale relief that
+  // darkens grooves/seams; tiled at the material's world scale (feet) by the
+  // shader. 128px is power-of-two, so REPEAT + mipmaps are valid.
+  const texCache = {};
+  function drawPattern(ctx, S, pattern) {
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, S, S);
+    if (pattern === 'rib') {  // corrugated / standing-seam: one vertical rib period
+      const img = ctx.getImageData(0, 0, S, S);
+      for (let x = 0; x < S; x++) {
+        const v = 0.6 + 0.4 * (0.5 - 0.5 * Math.cos(2 * Math.PI * x / S));
+        const g = Math.round(255 * v);
+        for (let y = 0; y < S; y++) { const i = (y * S + x) * 4;
+          img.data[i] = img.data[i + 1] = img.data[i + 2] = g; img.data[i + 3] = 255; }
+      }
+      ctx.putImageData(img, 0, 0);
+    } else if (pattern === 'batten') {  // wide board + a raised vertical batten
+      ctx.fillStyle = '#efefef'; ctx.fillRect(0, 0, S, S);
+      const bw = Math.max(3, Math.round(S * 0.13));
+      ctx.fillStyle = '#c4c4c4'; ctx.fillRect(0, 0, bw, S);
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(2, 0, bw - 4, S);
+      ctx.fillStyle = '#b0b0b0'; ctx.fillRect(bw, 0, 1, S);
+    } else if (pattern === 'shingle') {  // horizontal courses, staggered joints
+      const rows = 2, rh = S / rows;
+      for (let r = 0; r < rows; r++) {
+        const y0 = r * rh, off = (r % 2) * (S * 0.25);
+        ctx.fillStyle = '#9a9a9a';
+        ctx.fillRect(0, y0 + rh - Math.max(2, rh * 0.12), S, Math.max(2, rh * 0.12));
+        ctx.fillStyle = '#bcbcbc';
+        for (let k = 0; k < 4; k++) { const x = (off + k * S / 4) % S;
+          ctx.fillRect(x, y0, 1, rh - 2); }
+      }
+    } else if (pattern === 'plank') {  // long planks: seam top/bottom + grain
+      ctx.fillStyle = '#a8a8a8'; ctx.fillRect(0, 0, S, 1); ctx.fillRect(0, S - 1, S, 1);
+      for (let i = 0; i < 36; i++) { const y = Math.random() * S,
+        g = 205 + Math.round(Math.random() * 40);
+        ctx.fillStyle = 'rgba(' + g + ',' + g + ',' + g + ',0.16)'; ctx.fillRect(0, y, S, 1); }
+      ctx.fillStyle = '#b2b2b2'; ctx.fillRect(Math.round(S * 0.5), 0, 1, S);
+    } else if (pattern === 'tile') {  // one tile with grout on two edges
+      const g = Math.max(2, Math.round(S * 0.06));
+      ctx.fillStyle = '#9a9a9a'; ctx.fillRect(0, 0, S, g); ctx.fillRect(0, 0, g, S);
+    } else if (pattern === 'speckle') {  // concrete / carpet fleck
+      const img = ctx.getImageData(0, 0, S, S);
+      for (let p = 0; p < S * S; p++) { const v = Math.round(255 * (0.84 + 0.16 * Math.random()));
+        const i = p * 4; img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255; }
+      ctx.putImageData(img, 0, 0);
+    }
+  }
+  function patternTexture(pattern) {
+    if (!pattern || pattern === 'none') return null;
+    if (texCache[pattern] !== undefined) return texCache[pattern];
+    const S = 128, cv = document.createElement('canvas'); cv.width = cv.height = S;
+    drawPattern(cv.getContext('2d'), S, pattern);
+    const tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    texCache[pattern] = tex;
+    return tex;
+  }
 
   // --- state (survives setScene so the view/toggles persist on recompile) ---
   let nodes = [];
@@ -204,7 +316,12 @@ function mountScene(canvas, labels, togglesEl) {
       gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.STATIC_DRAW);
       const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(n.indices), gl.STATIC_DRAW);
-      return { layer: n.layer, color: n.color, pb, nb, ib, count: n.indices.length };
+      const pattern = n.pattern || 'none';
+      return { layer: n.layer, color: n.color,
+        rough: n.roughness == null ? 0.8 : n.roughness,
+        metal: n.metallic == null ? 0.0 : n.metallic,
+        patScale: n.patternScale || 1.0, tex: patternTexture(pattern),
+        pb, nb, ib, count: n.indices.length };
     });
     if (nodes.length) {
       center = [(bmin[0] + bmax[0]) / 2, (bmin[1] + bmax[1]) / 2, (bmin[2] + bmax[2]) / 2];
@@ -269,10 +386,18 @@ function mountScene(canvas, labels, togglesEl) {
       radius * 0.05, radius * 40);
     const view = lookAt(eye, target, [0, 1, 0]);
     const vp = mul(proj, view);
+    gl.uniformMatrix4fv(uMVP, false, new Float32Array(vp));
+    gl.uniform3fv(uEye, new Float32Array(eye));
     for (const nd of nodes) {
       if (hidden[nd.layer]) continue;
-      gl.uniformMatrix4fv(uMVP, false, new Float32Array(vp));
       gl.uniform3fv(uColor, nd.color);
+      gl.uniform1f(uRough, nd.rough);
+      gl.uniform1f(uMetal, nd.metal);
+      gl.uniform1f(uPatScale, nd.patScale);
+      if (nd.tex) { gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, nd.tex); gl.uniform1i(uTex, 0);
+        gl.uniform1f(uHasTex, 1.0); }
+      else { gl.uniform1f(uHasTex, 0.0); }
       gl.bindBuffer(gl.ARRAY_BUFFER, nd.pb);
       gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, nd.nb);
