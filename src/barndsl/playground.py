@@ -1159,7 +1159,11 @@ _APP_HTML = r"""<!doctype html>
   .edit-note.err { color:var(--err); }
   .plan-row { flex:1; display:flex; min-height:0; }
   .plan-body { position:relative; flex:1; min-height:0; min-width:0; }
-  #panel-btn.on { border-color:var(--accent); color:var(--accent); }
+  #panel-btn.on, #measure-btn.on { border-color:var(--accent); color:var(--accent); }
+  .edit-layer svg.measuring { cursor:crosshair; }
+  .ov-measure { stroke:var(--accent); stroke-width:1.6; stroke-dasharray:5 3; }
+  .ov-measure-t { fill:var(--accent); font-weight:700;
+    paint-order:stroke; stroke:var(--panel); stroke-width:.22em; }
 
   /* --- design panel: outline + inspector, the no-code face of the DSL --- */
   .design-panel { flex:none; width:252px; overflow-y:auto; overflow-x:hidden;
@@ -1549,6 +1553,8 @@ _APP_HTML = r"""<!doctype html>
           <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
           <button id="undo-btn" disabled title="Nothing to undo">↶ Undo</button>
           <button id="redo-btn" disabled title="Nothing to redo">↷ Redo</button>
+          <button id="measure-btn" disabled
+            title="Measure — drag between two points on the plan (M, edit mode)">⟷ Measure</button>
           <span class="level-switch" id="level-switch" hidden></span>
           <span class="edit-note" id="edit-note"></span>
         </div>
@@ -1984,6 +1990,9 @@ const SHORTCUTS = [
   ['Send to the agent', MOD + '+Enter'], ['Undo / Redo', MOD + '+Z  ·  ' + MOD + '+Shift+Z'],
   ['Zoom in / out / fit', '+  −  0'], ['Compile now', MOD + '+Enter'],
   ['Cancel a drag', 'Esc'], ['Switch floor (edit mode)', '[  ]'],
+  ['Measure on the plan (edit mode)', 'm'],
+  ['Nudge the selected room 1 ft / 3 ft', '←↑↓→  ·  Shift'],
+  ['Rotate the selected fixture', 'r'], ['Delete the selection', 'Del'],
   ['Switch viewport tab', '1  2  3  4'], ['Cycle theme', 't'],
   ['Open this help', '?'],
 ];
@@ -2002,8 +2011,11 @@ const EDIT_TIPS = [
   'The ☰ Design panel edits the plan through forms — outline, properties, add and ' +
     'delete — no code required. Every change is still one DSL text edit, so the ' +
     'code pane follows along and Undo works as usual.',
-  'Drag a room to move it; drag its handles to resize. Edges snap to neighbours.',
+  'Drag a room to move it; drag its handles to resize. Edges snap to neighbours. ' +
+    'Arrow keys nudge the selected room 1 ft (Shift: 3 ft).',
   'Drag a door or window along its wall to re-position it.',
+  'Measure (⟷ or `m`): drag between any two points for a live distance readout — ' +
+    'clearances, walkways, furniture gaps. Esc puts the tape away.',
   'Drag a fixture to move it. An authored fixture rewrites its `at x,y`; a dashed ' +
     'auto-seed (bath/kitchen/laundry) becomes an authored `fixture` line where you drop it.',
   'Add fixtures in the DSL: `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]`.',
@@ -3076,6 +3088,7 @@ const editLayer = document.getElementById('edit-layer');
 const undoBtn = document.getElementById('undo-btn');
 const redoBtn = document.getElementById('redo-btn');
 const editNoteEl = document.getElementById('edit-note');
+const measureBtn = document.getElementById('measure-btn');
 const dimChip = document.getElementById('dim-chip');
 const planBody = document.querySelector('.plan-body');
 const levelSwitch = document.getElementById('level-switch');
@@ -3106,9 +3119,12 @@ function initEdit(){
     editMode = editChk.checked; editLayer.hidden = !editMode;
     planSvg.style.display = editMode ? 'none' : '';
     document.getElementById('plan-zoom').style.display = editMode ? 'none' : '';
+    measureBtn.disabled = !editMode;
+    if (!editMode) setMeasure(false);
     renderLevelSwitcher();
     if (editMode) buildOverlay(); else { selectedRoomId = null; editNote(''); planZoom.refit(); }
   });
+  measureBtn.addEventListener('click', () => setMeasure(!measureMode));
   undoBtn.addEventListener('click', doUndo);
   redoBtn.addEventListener('click', doRedo);
   levelSwitch.addEventListener('click', e => {
@@ -3373,10 +3389,90 @@ function neighborSnap(id, rect, edges){
   return out;
 }
 
+// -- measure tape (edit mode): drag between two points for a distance readout --
+// Ends snap to the 0.5 ft grid; the finished tape stays on screen (with its label)
+// until the next measurement, Esc, or an overlay rebuild. Pure client-side — it
+// never touches the source, so it doesn't join the undo history.
+let measureMode = false, measureEls = [];
+function clearMeasure(){ for (const el of measureEls) if (el.parentNode) el.remove(); measureEls = []; }
+function setMeasure(on){
+  measureMode = !!on && editMode;
+  measureBtn.classList.toggle('on', measureMode);
+  if (svgEl) svgEl.classList.toggle('measuring', measureMode);
+  if (!measureMode) clearMeasure();
+  editNote(measureMode ? 'Measure: drag between two points — Esc when done.' : '');
+}
+function measureLabel(a, b){
+  const dx = Math.abs(b.x - a.x), dy = Math.abs(b.y - a.y);
+  const d = Math.round(Math.hypot(dx, dy) * 100) / 100;
+  return trimNum(d) + '′' + (dx && dy ? '  (' + trimNum(dx) + '′ × ' + trimNum(dy) + '′)' : '');
+}
+function drawMeasure(a, b){
+  clearMeasure();
+  const NS = svgEl.namespaceURI;
+  const ln = document.createElementNS(NS, 'line');
+  ln.setAttribute('class', 'ov-measure');
+  ln.setAttribute('x1', a.x); ln.setAttribute('y1', Y(a.y));
+  ln.setAttribute('x2', b.x); ln.setAttribute('y2', Y(b.y));
+  ln.setAttribute('vector-effect', 'non-scaling-stroke');
+  ln.setAttribute('pointer-events', 'none');
+  const t = document.createElementNS(NS, 'text');
+  t.setAttribute('class', 'ov-measure-t');
+  const fs = Math.max(1.1, Math.min(2.4, Math.min(ov.maxX - ov.minX, ov.maxY - ov.minY) * 0.05));
+  t.setAttribute('font-size', fs * 0.85);
+  t.setAttribute('text-anchor', 'middle');
+  t.setAttribute('x', (a.x + b.x) / 2);
+  t.setAttribute('y', Y((a.y + b.y) / 2) - fs * 0.5);
+  t.setAttribute('pointer-events', 'none');
+  t.textContent = measureLabel(a, b);
+  svgEl.appendChild(ln); svgEl.appendChild(t);
+  measureEls = [ln, t];
+}
+
+// -- keyboard nudge: arrows step the selected room 1 ft (Shift: one 3 ft module) --
+// Key repeats accumulate into ONE pending move (ghost + note preview); a 350 ms
+// pause flushes it as a single move_room edit — one POST, one undo entry per
+// gesture, exactly like releasing a drag.
+let nudge = null;   // { room, x0, y0, w, l, dx, dy, timer }
+function nudgeRoom(r, ddx, ddy){
+  if (nudge && nudge.room !== r.id) flushNudge();
+  if (!nudge) nudge = { room: r.id, x0: r.x, y0: r.y, w: r.w, l: r.l, dx: 0, dy: 0, timer: null };
+  nudge.dx += ddx; nudge.dy += ddy;
+  const nx = nudge.x0 + nudge.dx, ny = nudge.y0 + nudge.dy;
+  if (!ghostEl) addGhost({ kind: 'move', cur: { x: nx, y: ny, w: nudge.w, l: nudge.l } });
+  placeGhostRect(nx, ny, nudge.w, nudge.l);
+  editNote(r.id + ' → ' + trimNum(nx) + ', ' + trimNum(ny));
+  clearTimeout(nudge.timer);
+  nudge.timer = setTimeout(flushNudge, 350);
+}
+function flushNudge(){
+  if (!nudge) return;
+  const n = nudge; nudge = null;
+  clearTimeout(n.timer);
+  removeGhost();
+  if (n.dx || n.dy)
+    applyEdits([{ kind:'move_room', room:n.room, x:n.x0 + n.dx, y:n.y0 + n.dy }], 'nudge room');
+  else editNote('');
+}
+function cancelNudge(){
+  if (!nudge) return;
+  clearTimeout(nudge.timer); nudge = null;
+  removeGhost(); editNote('');
+}
+
 // -- pointer interactions --
 function onDown(e){
-  if (!editMode) return;
+  if (!editMode || !ov) return;
+  flushNudge();                      // commit any pending keyboard move first
   const P = toPlan(e);
+  if (measureMode){
+    const a = { x: snap(P.x), y: snap(P.y) };
+    drag = { kind:'measure', a, b:a, P };
+    drawMeasure(a, a);
+    try { svgEl.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault();
+    return;
+  }
   const handleEl = e.target.closest('[data-handle]');
   const openEl = e.target.closest('[data-okey]');
   const fixEl = e.target.closest('[data-fixkey]');
@@ -3404,6 +3500,12 @@ function onDown(e){
 function onMove(e){
   if (!drag) return;
   const P = toPlan(e);
+  if (drag.kind === 'measure'){
+    drag.b = { x: snap(P.x), y: snap(P.y) };
+    drawMeasure(drag.a, drag.b);
+    showDim(measureLabel(drag.a, drag.b), e);
+    return;
+  }
   clearGuides();
   if (drag.kind === 'move'){
     let nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
@@ -3453,6 +3555,11 @@ function onUp(e){
   if (!drag) return;
   const d = drag; drag = null; removeGhost(); clearGuides(); hideDim();
   try { svgEl.releasePointerCapture(e.pointerId); } catch(_){}
+  if (d.kind === 'measure'){
+    // A click without a drag leaves nothing; a real span stays until the next one.
+    if (d.a.x === d.b.x && d.a.y === d.b.y) clearMeasure();
+    return;
+  }
   if (d.kind === 'move'){
     if (!d.moved){ dpSelect('room', d.id);
       const ln = roomLine(d.id); if (ln) jumpToLine(ln); return; }
@@ -3629,8 +3736,11 @@ function renderInspector(p){
       '</div><div class="dp-btns">' +
       '<button data-btn="adddoor">＋ Door</button><button data-btn="addwindow">＋ Window</button>' +
       '<button data-btn="addentry">＋ Entry</button>' +
+      '<button data-btn="addfix" title="Furnish — place a fixture or furniture piece in this room">＋ Fixture</button>' +
+      '<button data-btn="duproom" title="Add a same-size twin beside this room (bed → bed2)">Duplicate</button>' +
       '<button class="danger" data-btn="delroom" title="Removes the room and everything on it — one undo brings it all back">Delete room</button></div>';
     if (dpForm && dpForm.op) h += addOpeningForm(p, r);
+    if (dpForm === 'fx') h += addFixtureForm();
     return h;
   }
   if (dpSel.t === 'op'){
@@ -3683,6 +3793,22 @@ function addRoomForm(p){
     '</div><div class="dp-btns"><button data-btn="roomsubmit">Add room</button>' +
     '<button data-btn="formcancel">Cancel</button></div>' +
     '<div class="dp-note">Anchored to a neighbour — drag it on the plan afterwards to fine-tune.</div></div>';
+}
+// The furnish palette: every fixture kind the compiler knows (HIGHLIGHT.fixtures,
+// the same list the autocomplete offers), shown with spaces instead of underscores.
+// The piece lands mid-room and is dragged into place like any other fixture.
+function addFixtureForm(){
+  let opts = '';
+  for (const k of (HIGHLIGHT.fixtures || []))
+    opts += '<option value="' + esc(k) + '"' + (k === 'sofa' ? ' selected' : '') + '>' +
+      esc(k.replace(/_/g, ' ')) + '</option>';
+  return '<div class="dp-form"><div class="dp-grid">' +
+    '<label>piece</label><select class="wide" id="nf-kind">' + opts + '</select>' +
+    '<label>wall</label><select class="wide" id="nf-wall" title="Back it to a wall, or leave it free-standing">' +
+    '<option value="" selected>free-standing</option>' + optList(['N', 'S', 'E', 'W'], '') + '</select>' +
+    '</div><div class="dp-btns"><button data-btn="fxsubmit">Add fixture</button>' +
+    '<button data-btn="formcancel">Cancel</button></div>' +
+    '<div class="dp-note">Lands mid-room — drag it into place on the plan.</div></div>';
 }
 function addOpeningForm(p, r){
   const kind = dpForm.op;
@@ -3792,6 +3918,37 @@ function submitRoomForm(){
                 level: ofRoom ? ofRoom.level : 0 }], 'add room')
     .then(ok => { if (ok) dpSelect('room', id); });
 }
+function submitFixtureForm(){
+  const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
+  const r = p.rooms.find(x => x.id === dpSel.k); if (!r) return;
+  const kind = document.getElementById('nf-kind').value;
+  const wall = document.getElementById('nf-wall').value;
+  dpForm = null;
+  // Room-local drop point: roughly centred (the footprint isn't known here — the
+  // compiler sizes the piece), clamped so a tiny room still gets a legal corner.
+  const ed = { kind:'add_fixture', room:r.id, fkind:kind,
+    x: snap(Math.max(0, r.w / 2 - 1.5)), y: snap(Math.max(0, r.l / 2 - 1.5)) };
+  if (wall) ed.wall = wall;
+  applyEdits([ed], 'add fixture');
+}
+// A same-type, same-size twin on the first side with clear floor (checked against
+// this level's rooms and the envelope); when every side is taken it still lands
+// east — the compiler's overlap diagnostic takes over as the teacher.
+function duplicateRoom(r){
+  const p = lastGood; if (!p) return;
+  const id = nextRoomId(p, r.id.replace(/\d+$/, '') || r.id);
+  const env = (p.settings && p.settings.envelope) || null;
+  const clear = (x, y) =>
+    (!env || (x >= 0 && y >= 0 && x + r.w <= env[0] && y + r.l <= env[1])) &&
+    !p.rooms.some(o => o.level === r.level &&
+      x < o.x + o.w && o.x < x + r.w && y < o.y + o.l && o.y < y + r.l);
+  const sides = [['east-of', r.x + r.w, r.y], ['west-of', r.x - r.w, r.y],
+    ['south-of', r.x, r.y - r.l], ['north-of', r.x, r.y + r.l]];
+  const pick = sides.find(s => clear(s[1], s[2]));
+  applyEdits([{ kind:'add_room', id:id, type:r.type, w:r.w, l:r.l,
+                anchor:(pick ? pick[0] : 'east-of'), of:r.id, level:r.level }], 'duplicate room')
+    .then(ok => { if (ok) dpSelect('room', id); });
+}
 function submitOpeningForm(){
   const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
   const r = p.rooms.find(x => x.id === dpSel.k); if (!r) return;
@@ -3822,9 +3979,15 @@ dpEl.addEventListener('click', e => {
   else if (b === 'adddoor' || b === 'addwindow' || b === 'addentry'){
     dpForm = { op: b.slice(3) }; renderPanel();
   }
+  else if (b === 'addfix'){ dpForm = dpForm === 'fx' ? null : 'fx'; renderPanel(); }
   else if (b === 'formcancel'){ dpForm = null; renderPanel(); }
   else if (b === 'roomsubmit') submitRoomForm();
   else if (b === 'opsubmit') submitOpeningForm();
+  else if (b === 'fxsubmit') submitFixtureForm();
+  else if (b === 'duproom'){
+    const p = lastGood, r = p && dpSel && dpSel.t === 'room' && p.rooms.find(x => x.id === dpSel.k);
+    if (r) duplicateRoom(r);
+  }
   else if (b === 'delroom' || b === 'delop' || b === 'delfx') dpDelete();
 });
 dpEl.addEventListener('change', e => {
@@ -3905,7 +4068,7 @@ function isUndoKey(e){ return (e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key 
 function isRedoKey(e){ return (e.metaKey || e.ctrlKey) &&
   ((e.shiftKey && (e.key === 'z' || e.key === 'Z')) || e.key === 'y' || e.key === 'Y'); }
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape'){ cancelDrag(); return; }
+  if (e.key === 'Escape'){ cancelDrag(); cancelNudge(); if (measureMode) setMeasure(false); return; }
   if (isUndoKey(e) || isRedoKey(e)){
     const el = document.activeElement;
     // The editor handles its own (and stopped propagation); the agent brief, find /
@@ -3917,14 +4080,42 @@ document.addEventListener('keydown', e => {
     if (isRedoKey(e)) doRedo(); else doUndo();
     return;
   }
-  // `[` / `]` step the active floor while editing (no modifiers, not while typing).
-  if (editMode && editLevels.length > 1 && !e.metaKey && !e.ctrlKey && !e.altKey &&
-      (e.key === '[' || e.key === ']')){
-    const tag = (document.activeElement || {}).tagName;
-    if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+  // Layout keys below never fire while typing in a field, and take no ⌘/Ctrl/Alt.
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (document.activeElement || {}).tagName;
+  if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+  // `[` / `]` step the active floor while editing.
+  if (editMode && editLevels.length > 1 && (e.key === '[' || e.key === ']')){
     e.preventDefault();
     const i = editLevels.indexOf(editLevel), j = e.key === ']' ? i + 1 : i - 1;
     if (j >= 0 && j < editLevels.length) setEditLevel(editLevels[j]);
+    return;
+  }
+  // `m` toggles the measure tape (edit mode only — that's where the overlay lives).
+  if (editMode && (e.key === 'm' || e.key === 'M')){
+    e.preventDefault(); setMeasure(!measureMode); return;
+  }
+  // Arrows nudge the selected room; Shift steps a whole 3 ft build module.
+  if (editMode && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' ||
+      e.key === 'ArrowUp' || e.key === 'ArrowDown')){
+    const r = roomById(selectedRoomId); if (!r) return;
+    e.preventDefault();
+    const step = e.shiftKey ? 3 : 1;
+    nudgeRoom(r,
+      e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0,
+      e.key === 'ArrowDown' ? -step : e.key === 'ArrowUp' ? step : 0);
+    return;
+  }
+  // `r` spins the inspected fixture a quarter turn (a seed materialises, like a drag).
+  if ((e.key === 'r' || e.key === 'R') && dpSel && dpSel.t === 'fx' && lastGood){
+    const f = (lastGood.fixtures || []).find(x => x.id === dpSel.k); if (!f) return;
+    e.preventDefault();
+    applyEdits([{ kind:'set_fixture', id:f.id, rotate: ((f.rotate || 0) + 90) % 360 }], 'rotate fixture');
+    return;
+  }
+  // Delete removes whatever the inspector holds — one undo brings it all back.
+  if (e.key === 'Delete' && dpSel){
+    e.preventDefault(); dpDelete();
   }
 });
 initEdit();

@@ -943,3 +943,63 @@ def test_wave7_markup_keeps_the_offline_guarantee():
     html = render_app(CLEAN)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 8: architect utility pass (furnish, measure, nudge, duplicate) ------
+
+
+def test_app_furnish_palette_places_new_fixtures():
+    # The ＋Fixture form is the only UI path to a brand-new fixture (drag only
+    # materialises seeds) — it must offer the full catalog and ride add_fixture.
+    html = render_app(CLEAN)
+    for token in ('data-btn="addfix"', "function addFixtureForm(",
+                  "function submitFixtureForm(", "HIGHLIGHT.fixtures",
+                  "'add_fixture'", "id=\"nf-kind\"", "id=\"nf-wall\""):
+        assert token in html, token
+
+
+def test_app_duplicate_room_button():
+    html = render_app(CLEAN)
+    for token in ('data-btn="duproom"', "function duplicateRoom(",
+                  "'duplicate room'"):
+        assert token in html, token
+
+
+def test_app_measure_tool():
+    html = render_app(CLEAN)
+    for token in ('id="measure-btn"', "function setMeasure(", "function drawMeasure(",
+                  "function measureLabel(", "'measure'", ".ov-measure",
+                  "svg.measuring"):
+        assert token in html, token
+
+
+def test_app_keyboard_nudge_and_selection_keys():
+    html = render_app(CLEAN)
+    # arrows accumulate into ONE move_room edit; r rotates; Delete clears selection
+    for token in ("function nudgeRoom(", "function flushNudge(", "function cancelNudge(",
+                  "'nudge room'", "'rotate fixture'", "e.key === 'Delete'"):
+        assert token in html, token
+    # nudge/measure/rotate never fire while typing in a field
+    assert "tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT'" in html
+
+
+def test_wave8_markup_keeps_the_offline_guarantee():
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_plan_svg_always_carries_a_north_arrow():
+    # Every professional floor plan carries a north arrow. Unsited plans get the
+    # plan-north caption; a sited plan keeps its true-azimuth rosette unchanged.
+    from barndsl.compiler import compile_source
+    from barndsl.render import render_svg
+
+    plain = compile_source(CLEAN)
+    assert plain.plan is not None
+    assert "plan north" in render_svg(plain.plan)
+
+    sited = compile_source(CLEAN + "\norientation 30\n")
+    assert sited.plan is not None
+    svg = render_svg(sited.plan)
+    assert "true N · 30°" in svg and "plan north" not in svg

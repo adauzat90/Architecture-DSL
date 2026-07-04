@@ -209,8 +209,7 @@ class _Renderer:
         self.parts.append(f'<rect width="{self.width:.0f}" height="{self.height:.0f}" fill="#ffffff" />')
 
         self._draw_title()
-        if self.plan.orientation is not None:
-            self._draw_compass()
+        self._draw_compass()
         if self.multi:
             for i, lvl in enumerate(self.levels):
                 self._block_top = self._env_top(i)
@@ -279,7 +278,9 @@ class _Renderer:
         points to compass azimuth ``orientation``, so true north is that many
         degrees counter-clockwise of up: a direction ``(-sinθ, -cosθ)`` in screen
         space (x right, y down). At ``orientation 0`` the arrow points straight up.
-        Drawn only when the plan is sited, so unoriented plans render unchanged.
+        An unsited plan (no ``orientation``) still gets the arrow — walls are
+        compass-named, so north-up is the drawing's convention either way — but
+        its caption says ``plan north`` rather than claiming a true azimuth.
         """
         theta = math.radians(self.plan.orientation or 0.0)
         cx, cy, r = self.width - 46.0, 48.0, 22.0
@@ -300,12 +301,14 @@ class _Renderer:
             f'{bx + px * hw:.1f},{by + py * hw:.1f} '
             f'{bx - px * hw:.1f},{by - py * hw:.1f}" fill="{WALL}" />'
         )
-        # "N" just beyond the tip, and the declared azimuth beneath the rosette.
+        # "N" just beyond the tip, and the declared azimuth beneath the rosette
+        # (or the plan-north disclaimer when the plan carries no orientation).
         self._text(cx + dx * (r + 9), cy + dy * (r + 9) + 3, "N", size=11, weight="bold")
-        self._text(
-            cx, cy + r + 14, f"true N · {self.plan.orientation or 0.0:g}°",
-            size=9, fill="#888888",
+        caption = (
+            "plan north" if self.plan.orientation is None
+            else f"true N · {self.plan.orientation:g}°"
         )
+        self._text(cx, cy + r + 14, caption, size=9, fill="#888888")
 
     def _draw_title(self):
         self._text(self.c.margin_left, 34, self.plan.name, size=22, anchor="start", weight="bold")
