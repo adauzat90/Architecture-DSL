@@ -33,7 +33,7 @@ open living - hall width 4
 door hall - bed width 3 offset 0.5
 door hall - bath width 2.67 offset 2
 door hall - laundry width 2.5 offset 9
-door bed - closet width 2.5 offset 0.5
+door bed - closet width 2.5 offset 0.5 into bed
 
 entry living south width 3 offset 14
 entry laundry east width 3 offset 4

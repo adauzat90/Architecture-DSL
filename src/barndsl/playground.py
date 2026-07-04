@@ -680,9 +680,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": '"source" must be a string'}, status=400)
             return
         seed_source = seed or None  # empty editor → a fresh generation, no seed
-        rounds = data.get("iterations", 3)
+        # Default round count comes from $BARNDSL_MAX_ITERATIONS (else 3), clamped
+        # to the playground's 1..8 safety range; an explicit request value wins.
+        from .agent import resolve_max_iterations
+
+        default_rounds = min(8, max(1, resolve_max_iterations()))
+        rounds = data.get("iterations", default_rounds)
         if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 8:
-            rounds = 3
+            rounds = default_rounds
 
         server: _PlaygroundServer = self.server  # type: ignore[assignment]
         if not server.design_lock.acquire(blocking=False):

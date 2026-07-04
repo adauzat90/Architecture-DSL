@@ -438,6 +438,14 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   blows out a burner; curtains hang over the flame). `FIXTURE_EGRESS` — a tall
   piece (fridge/wardrobe/water heater) parked over a bedroom's escape window
   (IRC R310). `FIXTURE_STAIR` — a fixture on a stair's run/landing footprint.
+- `DOOR_SWING_INWARD` — an exterior door swings inward (the residential default)
+  into a room too shallow for its leaf to fully open. Deepen the room, narrow the
+  door, or use an out-swing/sliding door.
+- `DOOR_HITS_FIXTURE` — a door's swing arc eats the wall a wet room or kitchen
+  needs to place a fixture the room otherwise has floor area for (the gap
+  `BATH_CLEARANCE`, which is door-blind, can't see). Move the door along the wall,
+  swing it the other way (`into`/`hinge`), make it pocket/sliding, or enlarge the
+  room.
 - `STAIR_GEOMETRY` / `STAIR_OOB` / `STAIR_LEVELS` (errors), `STAIR_RUN` /
   `STAIR_FLOAT` — a stair with bad geometry, too short a run, or landing in no room.
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
@@ -466,6 +474,11 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   the hall end (extend that room to cap the hall), or trim the hall back.
 - `DOOR_SWING_CLASH` — two door leaves sweep into the same space and foul each
   other; move one along its wall, swing it the other way, or make it pocket/sliding.
+- `DOOR_SWING_UNSET` — a bedroom/bath door with no `into` whose default swing
+  opens *out* of the private room; pin it with `into <room>` so it opens into the
+  space it serves.
+- `DOOR_SWING_PRIVACY` — a bedroom/bath door set to swing out into circulation;
+  swing it `into` the private room so the leaf screens the view and folds to a wall.
 - `ENVELOPE_MODULE` — an exterior (envelope/wing) dimension isn't a multiple of
   the 3 ft build module; rounding to it cuts sheet goods and framing with less waste.
 - `NO_BACK_DOOR` — a home with a single exterior door; add a back/side door (off

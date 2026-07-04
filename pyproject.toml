@@ -14,6 +14,10 @@ keywords = ["dsl", "floor-plan", "barndominium", "architecture", "agent", "llm"]
 
 dependencies = [
     "pydantic>=2.6",
+    # Auto-loads a local .env (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL /
+    # BARNDSL_MODEL) so `barndsl serve` and `barndsl design` work without
+    # manually exporting. Loading is soft — the CLI no-ops if it's absent.
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
