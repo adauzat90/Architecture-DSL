@@ -797,3 +797,82 @@ def test_wave5_markup_keeps_the_offline_guarantee():
     html = render_app(CLEAN)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 6: unified undo/redo history --------------------------------------
+
+
+def test_app_ships_the_unified_history_api():
+    # One linear timeline replaces the old gesture-only undoStack: the state model,
+    # the depth cap, and the single applyEdit funnel are all present, and the old
+    # names are gone.
+    html = render_app(CLEAN)
+    for token in ("let history = [], histIndex", "function histCommit(",
+                  "function applyEdit(", "function histRestore(",
+                  "function doUndo(", "function doRedo(", "function updateUndoRedo("):
+        assert token in html, token
+    # cap ~200 entries, dropping oldest
+    assert "HIST_CAP = 200" in html
+    assert "history.length > HIST_CAP" in html
+    # the retired undo-only stack API is entirely gone
+    assert "undoStack" not in html
+    assert "function pushUndo(" not in html
+
+
+def test_app_typing_coalesces_into_bursts():
+    # A shadow mirror + a coalescing constant fold a run of keystrokes into one undo
+    # unit, and composition must not fracture the burst.
+    html = render_app(CLEAN)
+    assert "COALESCE_MS = 700" in html
+    assert "function recordTyping(" in html
+    assert "histMirror" in html
+    # IME/composition is tracked so it does not split a burst
+    assert "compositionstart" in html and "let lastEditKind" in html
+
+
+def test_app_has_redo_button_paired_with_undo():
+    html = render_app(CLEAN)
+    assert 'id="redo-btn"' in html and 'id="undo-btn"' in html
+    # the redo glyph and both wirings are present
+    assert "↷" in html
+    assert "redoBtn.addEventListener('click', doRedo)" in html
+    # tooltips name the change they would undo/redo
+    assert "'Undo ' + history[histIndex].label" in html
+    assert "'Redo ' + history[histIndex + 1].label" in html
+
+
+def test_app_undo_redo_shortcuts_wired_and_documented():
+    html = render_app(CLEAN)
+    # both directions: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z and Ctrl/Cmd+Y
+    assert "function isUndoKey(" in html and "function isRedoKey(" in html
+    assert "e.key === 'y' || e.key === 'Y'" in html
+    # intercepted in the editor's own keydown so native textarea undo can't fight it
+    assert "e.preventDefault(); e.stopPropagation(); doUndo();" in html
+    assert "e.preventDefault(); e.stopPropagation(); doRedo();" in html
+    # the help panel now documents Undo / Redo with both keys, not the old single entry
+    assert "Undo / Redo" in html
+    assert "Undo a layout edit" not in html
+    # the find/replace and help-search fields keep their native per-field undo
+    assert "el === findInput" in html and "el === helpSearch" in html
+
+
+def test_app_writers_route_through_the_history_funnel():
+    # The known programmatic writers no longer assign editor.value directly for their
+    # edit — they go through applyEdit so the change is undoable and coalesces sanely.
+    html = render_app(CLEAN)
+    # quick-fix, autocomplete-accept, comment-toggle, replace-all and the drag/agent
+    # pipelines each carry a labelled applyEdit call
+    for label in ("'quick-fix'", "'autocomplete'", "'toggle comment'",
+                  "'replace all'", "'layout edit'", "'agent design'", "'load example'"):
+        assert "applyEdit(" in html and label in html, label
+    # applyQuickFix hands its new text to applyEdit rather than setting editor.value
+    assert "applyEdit(lines.join('\\n'), null, null, 'quick-fix')" in html
+    # loading a document is itself undoable (setSource funnels through applyEdit)
+    assert "function setSource(src, label)" in html
+    assert "applyEdit(src, 0, 0, label" in html
+
+
+def test_wave6_markup_keeps_the_offline_guarantee():
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html

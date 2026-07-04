@@ -1491,7 +1491,8 @@ _APP_HTML = r"""<!doctype html>
       <div class="pane active" id="pane-plan">
         <div class="edit-bar">
           <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
-          <button id="undo-btn" disabled title="Undo last edit (Ctrl/Cmd+Z)">↶ Undo</button>
+          <button id="undo-btn" disabled title="Nothing to undo">↶ Undo</button>
+          <button id="redo-btn" disabled title="Nothing to redo">↷ Redo</button>
           <span class="level-switch" id="level-switch" hidden></span>
           <span class="edit-note" id="edit-note"></span>
         </div>
@@ -1563,6 +1564,17 @@ let diagnostics = [];
 let findOpen = false, findMatches = [], findIndex = -1;
 // Autocomplete popup state (Ctrl/Cmd+Space / type-ahead).
 let acOpen = false, acItems = [], acIndex = 0, acWord = null;
+// Unified undo/redo history — one linear timeline of {v,s,e,label} snapshots with an
+// index pointer (classic undo/redo), covering typing, smart edits and layout drags
+// alike. It replaces the old undo-only gesture stack: every programmatic writer routes
+// through applyEdit(); typing coalesces into bursts (COALESCE_MS) so a run of keystrokes
+// undoes as one unit; undo/redo restore value *and* selection. histMirror shadows the
+// current committed text so a burst can preserve its pre-input state. See histCommit /
+// applyEdit / recordTyping / doUndo near the bottom of the script.
+const HIST_CAP = 200;                 // linear history depth (oldest snapshot dropped past this)
+const COALESCE_MS = 700;              // consecutive typing within this gap folds into one undo unit
+let history = [], histIndex = -1, histMirror = '';
+let lastEditKind = 'boot', lastTypeTime = 0, composing = false;
 // Diagnostics triage: the active severity filter (null = show all), persisted
 // across recompiles, and the last payload so a pill click can re-render in place.
 let diagFilter = null, lastDiagPayload = { diagnostics: [], counts: { error:0, warning:0, info:0 } };
@@ -1728,11 +1740,21 @@ function syncScroll(){ gutter.scrollTop = editor.scrollTop;
 editor.addEventListener('scroll', syncScroll);
 editor.addEventListener('scroll', () => { if (acOpen) hideAc(); });   // popup can't track a scroll
 editor.addEventListener('input', () => {
+  recordTyping();                       // fold this keystroke into the unified undo history
   renderGutter(); schedule();
   updateAutocomplete(false);            // refresh / dismiss the popup as the word changes
   if (findOpen) runFind(true);          // keep find matches live while the bar is open
 });
+// IME/composition must not fracture a burst: hold a flag so mid-composition input
+// keeps folding into the current typing unit rather than starting a fresh checkpoint.
+editor.addEventListener('compositionstart', () => { composing = true; });
+editor.addEventListener('compositionend', () => { composing = false; });
 editor.addEventListener('keydown', e => {
+  // Unified undo/redo, intercepted here so the browser's native textarea undo never
+  // fights the history (preventDefault). stopPropagation keeps the global handler from
+  // running it a second time; the find/agent/help fields keep their own native undo.
+  if (isRedoKey(e)){ e.preventDefault(); e.stopPropagation(); doRedo(); return; }
+  if (isUndoKey(e)){ e.preventDefault(); e.stopPropagation(); doUndo(); return; }
   // Ctrl/Cmd+Space forces the completion popup regardless of word length.
   if ((e.ctrlKey || e.metaKey) && (e.key === ' ' || e.code === 'Space')){
     e.preventDefault(); updateAutocomplete(true); return;
@@ -1751,8 +1773,8 @@ editor.addEventListener('keydown', e => {
 });
 function insertText(t){
   const s = editor.selectionStart, e = editor.selectionEnd;
-  editor.value = editor.value.slice(0, s) + t + editor.value.slice(e);
-  editor.selectionStart = editor.selectionEnd = s + t.length;
+  const caret = s + t.length;
+  applyEdit(editor.value.slice(0, s) + t + editor.value.slice(e), caret, caret, 'typing');
   renderGutter(); schedule();
 }
 
@@ -1778,13 +1800,11 @@ function toggleComment(){
   for (const i of idxs)
     lines[i] = allCommented ? lines[i].replace(/^(\s*)#\s?/, '$1')
                             : lines[i].replace(/^(\s*)/, '$1# ');
-  editor.value = lines.join('\n');
   // Reselect the same span of lines (start of first → end of last).
   let noff = 0; const nstarts = [];
   for (const ln of lines){ nstarts.push(noff); noff += ln.length + 1; }
-  editor.selectionStart = nstarts[first];
-  editor.selectionEnd = nstarts[last] + lines[last].length;
   autosaveOff = false;
+  applyEdit(lines.join('\n'), nstarts[first], nstarts[last] + lines[last].length, 'toggle comment');
   renderGutter(); schedule();
 }
 
@@ -1902,7 +1922,7 @@ const SHORTCUTS = [
   ['Save .barn', MOD + '+S'], ['Open a .barn file', MOD + '+O'],
   ['Find in the editor', MOD + '+F'], ['Find & replace', MOD + '+H'],
   ['Autocomplete', MOD + '+Space'], ['Toggle comment', MOD + '+/'],
-  ['Send to the agent', MOD + '+Enter'], ['Undo a layout edit', MOD + '+Z'],
+  ['Send to the agent', MOD + '+Enter'], ['Undo / Redo', MOD + '+Z  ·  ' + MOD + '+Shift+Z'],
   ['Zoom in / out / fit', '+  −  0'], ['Compile now', MOD + '+Enter'],
   ['Cancel a drag', 'Esc'], ['Switch floor (edit mode)', '[  ]'],
   ['Switch viewport tab', '1  2  3  4'], ['Cycle theme', 't'],
@@ -1925,7 +1945,8 @@ const EDIT_TIPS = [
   'Drag a fixture to move it. An authored fixture rewrites its `at x,y`; a dashed ' +
     'auto-seed (bath/kitchen/laundry) becomes an authored `fixture` line where you drop it.',
   'Add fixtures in the DSL: `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]`.',
-  'Every drag is one surgical text edit and joins the Undo stack.',
+  'Every drag is one surgical text edit. Undo and redo (' + MOD + '+Z, ' + MOD +
+    '+Shift+Z) span one timeline across typing, smart edits and drags alike.',
 ];
 function renderShortcuts(){
   let h = '<h5>Keyboard shortcuts</h5>';
@@ -2055,11 +2076,11 @@ function applyQuickFix(snippet, line){
   if (line && line >= 1 && line <= lines.length){ at = line; }
   else { let i = lines.length - 1; while (i >= 0 && lines[i].trim() === '') i--; at = i + 1; }
   lines.splice(at, 0, snippet);
-  editor.value = lines.join('\n');
   autosaveOff = false;
+  applyEdit(lines.join('\n'), null, null, 'quick-fix');
   renderGutter(); compile();
   const ln = at + 1;
-  jumpToLine(ln); flashLine(ln);
+  jumpToLine(ln); flashLine(ln);        // jumpToLine sets the on-screen selection
 }
 
 // Triage: order a *copy* errors → warnings → infos, line ascending within each
@@ -2207,9 +2228,10 @@ function closeFind(){
 function replaceOne(){
   if (findIndex < 0 || !findMatches.length) return;
   const m = findMatches[findIndex], rep = replaceInput.value;
-  editor.value = editor.value.slice(0, m.start) + rep + editor.value.slice(m.end);
-  editor.selectionStart = editor.selectionEnd = m.start + rep.length;
-  autosaveOff = false; renderGutter(); schedule();
+  const caret = m.start + rep.length;
+  autosaveOff = false;
+  applyEdit(editor.value.slice(0, m.start) + rep + editor.value.slice(m.end), caret, caret, 'replace');
+  renderGutter(); schedule();
   runFind(false);
 }
 function replaceAll(){
@@ -2220,7 +2242,9 @@ function replaceAll(){
   for (const m of findMatches){ out += editor.value.slice(last, m.start) + rep; last = m.end; }
   out += editor.value.slice(last);
   const n = findMatches.length;
-  editor.value = out; autosaveOff = false; renderGutter(); schedule();
+  autosaveOff = false;
+  applyEdit(out, null, null, 'replace all');   // null selection leaves the caret put
+  renderGutter(); schedule();
   runFind(false);
   findCount.textContent = 'replaced ' + n;
 }
@@ -2329,9 +2353,8 @@ function moveAc(dir){
 function acceptAc(i){
   if (i == null) i = acIndex;
   const pick = acItems[i]; if (pick == null){ hideAc(); return; }
-  const w = acWord, v = editor.value;
-  editor.value = v.slice(0, w.start) + pick + v.slice(w.end);
-  editor.selectionStart = editor.selectionEnd = w.start + pick.length;
+  const w = acWord, v = editor.value, caret = w.start + pick.length;
+  applyEdit(v.slice(0, w.start) + pick + v.slice(w.end), caret, caret, 'autocomplete');
   hideAc(); editor.focus();
   renderGutter(); schedule();                    // accepted text goes through the normal path
 }
@@ -2706,7 +2729,7 @@ fetch('/api/examples').then(r => r.json()).then(list => {
   }
   sel.addEventListener('change', () => {
     const opt = sel.selectedOptions[0];
-    if (opt && opt.dataset.src != null){ hideNotice(); setSource(opt.dataset.src); }
+    if (opt && opt.dataset.src != null){ hideNotice(); setSource(opt.dataset.src, 'load example'); }
   });
 }).catch(() => {});
 
@@ -2925,8 +2948,15 @@ function onEvent(kind, ev){
     iterRow(ev); applyIteration(ev);
   } else if (kind === 'done'){
     clearStatus();
-    if (ev.source != null && ev.source !== editor.value){ pushUndo(editor.value); }
-    if (ev.source != null){ editor.value = ev.source; renderGutter(); }
+    // Compare against the last COMMITTED state, not the screen: the per-round
+    // previews write editor.value directly (deliberately not undo steps), so by
+    // now the winner usually matches the screen — but it still has to join the
+    // history, or the first undo would skip both it and the pre-run source.
+    if (ev.source != null && ev.source !== histMirror){
+      applyEdit(ev.source, null, null, 'agent design'); renderGutter();
+    } else if (ev.source != null){
+      editor.value = ev.source; renderGutter();     // identical to committed: no entry
+    }
     if (ev.payload) applyResult(ev.payload);
     hasResult = true;
     const win = thread.querySelector('.iter-row[data-round="' + ev.round + '"]');
@@ -2982,6 +3012,7 @@ initAgent();
 const editChk = document.getElementById('edit-mode');
 const editLayer = document.getElementById('edit-layer');
 const undoBtn = document.getElementById('undo-btn');
+const redoBtn = document.getElementById('redo-btn');
 const editNoteEl = document.getElementById('edit-note');
 const dimChip = document.getElementById('dim-chip');
 const planBody = document.querySelector('.plan-body');
@@ -2991,7 +3022,6 @@ let editMode = false, editReady = false;
 let editRooms = [], editOpens = [], editLevels = [0], editFixtures = [];
 let allRooms = [], allOpens = [], allStairs = [], allFixtures = [];   // every level — the dimmed underlay
 let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
-const undoStack = [];
 
 function snap(v){ return Math.round(v * 2) / 2; }          // 0.5 ft grid
 function Y(py){ return ov.MID - py; }                       // plan y (north up) → svg y
@@ -3018,6 +3048,7 @@ function initEdit(){
     if (editMode) buildOverlay(); else { selectedRoomId = null; editNote(''); planZoom.refit(); }
   });
   undoBtn.addEventListener('click', doUndo);
+  redoBtn.addEventListener('click', doRedo);
   levelSwitch.addEventListener('click', e => {
     const b = e.target.closest('[data-level]'); if (!b) return;
     setEditLevel(parseInt(b.getAttribute('data-level'), 10));
@@ -3389,8 +3420,7 @@ function cancelDrag(){ if (!drag) return; drag = null; removeGhost(); clearGuide
 async function applyEdits(edits){
   if (!edits.length){ buildOverlay(); return; }
   autosaveOff = false;   // a layout edit is a deliberate action — resume autosave
-  const before = editor.value;
-  let src = before, p = null;
+  let src = editor.value, p = null;
   try {
     for (const ed of edits){
       const resp = await fetch('/api/edit', { method:'POST',
@@ -3404,8 +3434,8 @@ async function applyEdits(edits){
     buildOverlay();                        // restore positions from the unchanged data
     return;
   }
-  pushUndo(before);                        // snapshot the pre-edit source for undo
-  editor.value = src; renderGutter();
+  applyEdit(src, null, null, 'layout edit');   // checkpoints the pre-drag source, swaps in the rewrite
+  renderGutter();
   applyResult(p);
   if (p.line) flashLine(p.line);
   editNote('');
@@ -3415,16 +3445,84 @@ function flashLine(ln){
   el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
 }
 
-// -- undo stack (programmatic textarea replacement breaks native undo) --
-function pushUndo(v){ undoStack.push(v); if (undoStack.length > 50) undoStack.shift(); updateUndo(); }
-function updateUndo(){ undoBtn.disabled = !undoStack.length; }
-function doUndo(){ if (!undoStack.length) return;
-  editor.value = undoStack.pop(); renderGutter(); updateUndo(); compile(); }
+// -- unified undo/redo history (one timeline for typing, smart edits and drags) --
+// history[histIndex] always mirrors the on-screen text (value+selection); its label
+// names the change that produced it, so undo removes history[histIndex] and redo
+// re-applies history[histIndex+1]. Programmatic replacement breaks the textarea's
+// native undo, so every writer records here instead.
+function histInit(v){
+  history = [{ v: v, s: 0, e: 0, label: 'initial' }];
+  histIndex = 0; histMirror = v; lastEditKind = 'boot';
+  updateUndoRedo();
+}
+function histCommit(v, s, e, label){
+  history.length = histIndex + 1;                 // a new change discards any redo tail
+  history.push({ v: v, s: s, e: e, label: label });
+  histIndex = history.length - 1;
+  if (history.length > HIST_CAP){ history.shift(); histIndex--; }   // cap depth, drop oldest
+  histMirror = v;
+  updateUndoRedo();
+}
+// The single funnel every programmatic mutation uses: snapshot the pre-edit state
+// into history, then swap in the new text + selection. Callers run their own refresh
+// (schedule / compile / applyResult) afterwards, exactly as before.
+function applyEdit(v, s, e, label){
+  histCommit(v, s, e, label);
+  editor.value = v;
+  if (s != null){ editor.selectionStart = s; editor.selectionEnd = (e == null ? s : e); }
+  lastEditKind = 'edit';                           // the next keystroke opens a fresh typing burst
+}
+// Typing path: the editor already holds the new text when `input` fires, so we fold
+// keystrokes into the current burst (updating history[histIndex] in place) unless a
+// new burst is warranted — a >COALESCE_MS gap, or the previous change wasn't typing.
+// Composition never fractures a burst.
+function recordTyping(){
+  const v = editor.value, s = editor.selectionStart, e = editor.selectionEnd, now = Date.now();
+  const cont = lastEditKind === 'type' && (composing || (now - lastTypeTime) <= COALESCE_MS);
+  if (cont){
+    const st = history[histIndex]; st.v = v; st.s = s; st.e = e; histMirror = v;
+  } else {
+    histCommit(v, s, e, 'typing');                 // the pre-input state stays at the prior index
+  }
+  lastEditKind = 'type'; lastTypeTime = now;
+  updateUndoRedo();
+}
+// Restore whatever history[histIndex] now points at, then refresh like an ordinary
+// source change (immediate compile, not the debounced schedule).
+function histRestore(){
+  const st = history[histIndex];
+  editor.value = st.v;
+  editor.selectionStart = st.s != null ? st.s : st.v.length;
+  editor.selectionEnd = st.e != null ? st.e : editor.selectionStart;
+  histMirror = st.v; lastEditKind = 'restore';     // next keystroke = fresh burst
+  if (acOpen) hideAc();
+  renderGutter();
+  if (findOpen) runFind(true); else renderHighlight();
+  compile();
+  updateUndoRedo();
+}
+function doUndo(){ if (histIndex <= 0) return; histIndex--; histRestore(); }
+function doRedo(){ if (histIndex >= history.length - 1) return; histIndex++; histRestore(); }
+function updateUndoRedo(){
+  const canU = histIndex > 0, canR = histIndex < history.length - 1;
+  undoBtn.disabled = !canU; redoBtn.disabled = !canR;
+  undoBtn.title = canU ? ('Undo ' + history[histIndex].label + ' (' + MOD + '+Z)') : 'Nothing to undo';
+  redoBtn.title = canR ? ('Redo ' + history[histIndex + 1].label + ' (' + MOD + '+Shift+Z)')
+                       : 'Nothing to redo';
+}
+function isUndoKey(e){ return (e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z'); }
+function isRedoKey(e){ return (e.metaKey || e.ctrlKey) &&
+  ((e.shiftKey && (e.key === 'z' || e.key === 'Z')) || e.key === 'y' || e.key === 'Y'); }
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape'){ cancelDrag(); return; }
-  if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z') && !e.shiftKey){
-    if (document.activeElement !== editor && document.activeElement !== briefEl){
-      e.preventDefault(); doUndo(); }
+  if (isUndoKey(e) || isRedoKey(e)){
+    const el = document.activeElement;
+    // The editor handles its own (and stopped propagation); the agent brief, find /
+    // replace inputs and help search keep their native per-field undo.
+    if (el === editor || el === briefEl || el === findInput ||
+        el === replaceInput || el === helpSearch) return;
+    e.preventDefault();
+    if (isRedoKey(e)) doRedo(); else doUndo();
     return;
   }
   // `[` / `]` step the active floor while editing (no modifiers, not while typing).
@@ -3485,7 +3583,12 @@ function autosave(){
 function readSaved(){ try { return localStorage.getItem(LS_SOURCE); } catch (e){ return null; } }
 
 // -- one funnel for programmatic source replacement (open / new / example) --
-function setSource(src){ checkpoint = src; editor.value = src; renderGutter(); compile(); }
+// Loading a document is itself undoable — Ctrl+Z after it returns to what you had.
+function setSource(src, label){
+  checkpoint = src;
+  applyEdit(src, 0, 0, label || 'load');
+  renderGutter(); compile();
+}
 
 // -- export menu --
 function updateExportState(ok){
@@ -3551,7 +3654,7 @@ async function doExport(fmt){
 }
 
 // -- open (file picker + drag/drop, read client-side) --
-function openText(text){ autosaveOff = false; hideNotice(); setSource(text); }
+function openText(text){ autosaveOff = false; hideNotice(); setSource(text, 'open file'); }
 function readFileInto(f){
   if (!f) return;
   const rd = new FileReader();
@@ -3575,7 +3678,7 @@ editorWrap.addEventListener('drop', e => {
 });
 
 // -- new plan (scaffold; confirm via the notice if the user has drifted) --
-function newPlan(){ autosaveOff = false; hideNotice(); setSource(SCAFFOLD_SOURCE); }
+function newPlan(){ autosaveOff = false; hideNotice(); setSource(SCAFFOLD_SOURCE, 'new plan'); }
 newBtn.addEventListener('click', () => {
   if (editor.value.trim() && editor.value !== checkpoint){
     showNotice('Start a new plan? The current one is replaced (it stays autosaved in this browser).',
@@ -3615,7 +3718,7 @@ editor.addEventListener('input', () => { if (autosaveOff){ autosaveOff = false; 
     savedSource = INITIAL_SOURCE; checkpoint = INITIAL_SOURCE;
     editor.value = INITIAL_SOURCE; renderGutter(); compile();
     showNotice('Showing the file you opened — a newer autosaved session is also available.',
-      [{ label:'Restore session', fn: () => { autosaveOff = false; setSource(saved); } }]);
+      [{ label:'Restore session', fn: () => { autosaveOff = false; setSource(saved, 'restore session'); } }]);
   } else if (hasNewer){
     // No FILE argument → restore the autosaved session outright.
     savedSource = saved; checkpoint = saved;
@@ -3626,6 +3729,7 @@ editor.addEventListener('input', () => { if (autosaveOff){ autosaveOff = false; 
     savedSource = INITIAL_SOURCE; checkpoint = INITIAL_SOURCE;
     editor.value = INITIAL_SOURCE; renderGutter(); compile();
   }
+  histInit(editor.value);   // seed the undo timeline with the booted source (the floor state)
 })();
 </script>
 </body>
