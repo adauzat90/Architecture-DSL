@@ -269,8 +269,15 @@ def compile_payload(source: str) -> dict:
                         "id": f.id, "kind": f.kind, "room": room.id, "level": room.level,
                         "x": f.x, "y": f.y, "w": f.width, "l": f.length,
                         "wall": f.wall, "seed": f.seed, "line": f.source_line,
+                        "rotate": f.rotation,
                     })
             payload["fixtures"] = fixtures
+            # Plan-level settings the design panel's form edits via `set_plan`.
+            payload["settings"] = {
+                "name": plan.name,
+                "envelope": [plan.envelope_width, plan.envelope_length],
+                "ceiling": plan.ceiling_height,
+            }
             # The Report tab's data — cost, schedules, areas and (if the plan
             # declares one) the climate envelope. Cheap enough to inline: for the
             # gallery plans it adds <1 ms and <8 KB to the compile payload (measured),
@@ -1150,7 +1157,49 @@ _APP_HTML = r"""<!doctype html>
   .edit-bar button:disabled { opacity:.45; cursor:default; }
   .edit-note { font-size:11.5px; color:var(--faint); margin-left:auto; text-align:right; }
   .edit-note.err { color:var(--err); }
-  .plan-body { position:relative; flex:1; min-height:0; }
+  .plan-row { flex:1; display:flex; min-height:0; }
+  .plan-body { position:relative; flex:1; min-height:0; min-width:0; }
+  #panel-btn.on { border-color:var(--accent); color:var(--accent); }
+
+  /* --- design panel: outline + inspector, the no-code face of the DSL --- */
+  .design-panel { flex:none; width:252px; overflow-y:auto; overflow-x:hidden;
+    background:var(--panel); border-right:1px solid var(--line);
+    font-size:12.5px; padding:10px 12px 20px; }
+  .design-panel[hidden] { display:none; }
+  .design-panel h5 { margin:14px 0 6px; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.6px; color:var(--faint); }
+  .design-panel h5:first-child { margin-top:2px; }
+  .dp-grid { display:grid; grid-template-columns:auto 1fr 1fr; gap:6px 8px; align-items:center; }
+  .dp-grid label { color:var(--muted); font-size:11.5px; white-space:nowrap; }
+  .dp-grid .wide { grid-column:2 / 4; }
+  .design-panel input, .design-panel select { font:inherit; font-size:12px; width:100%;
+    padding:3px 7px; border-radius:6px; border:1px solid var(--line);
+    background:var(--editor); color:var(--ink); min-width:0; }
+  .design-panel input:focus, .design-panel select:focus { border-color:var(--accent); outline:none; }
+  .dp-level { margin:8px 0 3px; font-weight:600; font-size:11px; color:var(--muted);
+    display:flex; align-items:center; }
+  .dp-row { display:flex; align-items:center; gap:7px; padding:3px 7px; border-radius:6px;
+    cursor:pointer; user-select:none; }
+  .dp-row:hover { background:var(--bg); }
+  .dp-row.sel { background:var(--accent); color:#fff; }
+  .dp-row.sel .dp-dim, .dp-row.sel .dp-kind { color:rgba(255,255,255,.8); }
+  .dp-row .swatch { width:10px; height:10px; border-radius:3px; flex:none;
+    border:1px solid rgba(0,0,0,.25); }
+  .dp-row .dp-id { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dp-row .dp-dim { margin-left:auto; color:var(--faint); font-size:11px; white-space:nowrap; }
+  .dp-sub { margin-left:18px; }
+  .dp-sub .dp-row { padding:2px 7px; font-size:12px; }
+  .dp-kind { color:var(--faint); font-size:11px; }
+  .dp-seed { opacity:.75; font-style:italic; }
+  .dp-btns { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+  .design-panel button { font:inherit; font-size:11.5px; padding:4px 9px; border-radius:6px;
+    border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer; }
+  .design-panel button:hover { border-color:var(--accent); color:var(--accent); }
+  .design-panel button.danger:hover { border-color:var(--err); color:var(--err); }
+  .dp-form { margin-top:8px; padding:8px; border:1px solid var(--line); border-radius:8px;
+    background:var(--bg); }
+  .dp-note { margin-top:6px; font-size:11px; color:var(--faint); }
+  .dp-note.err { color:var(--err); }
   .edit-layer { position:absolute; inset:0; background:var(--bg); }
   .edit-layer svg { width:100%; height:100%; display:block; touch-action:none;
     -webkit-user-select:none; user-select:none; }
@@ -1359,7 +1408,7 @@ _APP_HTML = r"""<!doctype html>
   /* --- print the current viewport, not the three-pane app chrome --- */
   @media print {
     header, #notice, .agent, .left, .split-h, .tabs, .edit-bar, #three-panel,
-    #snap-btn, .drop-hint, .zoom-ctl, #dim-chip, .score-pop, .help-backdrop,
+    .design-panel, #snap-btn, .drop-hint, .zoom-ctl, #dim-chip, .score-pop, .help-backdrop,
     .help-panel, .lightbox { display:none !important; }
     .plan-body .svgbox { overflow:visible !important; }
     .plan-body .svgbox svg { position:static !important; transform:none !important; }
@@ -1496,12 +1545,15 @@ _APP_HTML = r"""<!doctype html>
     <div class="viewport" id="viewport">
       <div class="pane active" id="pane-plan">
         <div class="edit-bar">
+          <button id="panel-btn" title="Design panel — outline &amp; properties, no code required">☰ Design</button>
           <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
           <button id="undo-btn" disabled title="Nothing to undo">↶ Undo</button>
           <button id="redo-btn" disabled title="Nothing to redo">↷ Redo</button>
           <span class="level-switch" id="level-switch" hidden></span>
           <span class="edit-note" id="edit-note"></span>
         </div>
+        <div class="plan-row">
+        <aside class="design-panel" id="design-panel" hidden aria-label="Design panel"></aside>
         <div class="plan-body">
           <div class="svgbox" id="plan-svg" tabindex="0" style="outline:none"></div>
           <div class="edit-layer" id="edit-layer" hidden></div>
@@ -1512,6 +1564,7 @@ _APP_HTML = r"""<!doctype html>
             <button data-z="in" title="Zoom in (+)" aria-label="Zoom in">+</button>
             <button class="zfit" data-z="fit" title="Fit to pane (0)">Fit</button>
           </div>
+        </div>
         </div>
       </div>
       <div class="pane" id="pane-three">
@@ -1946,6 +1999,9 @@ const THREE_TIPS = [
 
 //: Edit-mode direct-manipulation tips (drag behaviours), shown in the help panel.
 const EDIT_TIPS = [
+  'The ☰ Design panel edits the plan through forms — outline, properties, add and ' +
+    'delete — no code required. Every change is still one DSL text edit, so the ' +
+    'code pane follows along and Undo works as usual.',
   'Drag a room to move it; drag its handles to resize. Edges snap to neighbours.',
   'Drag a door or window along its wall to re-position it.',
   'Drag a fixture to move it. An authored fixture rewrites its `at x,y`; a dashed ' +
@@ -3096,6 +3152,7 @@ function refreshEditData(p){
   }
   renderLevelSwitcher();
   if (editMode) buildOverlay();
+  renderPanel();                 // the design panel mirrors the same payload
 }
 
 // Fit-or-hide guard for overlay labels. Text and rects share the plan-unit space
@@ -3397,7 +3454,8 @@ function onUp(e){
   const d = drag; drag = null; removeGhost(); clearGuides(); hideDim();
   try { svgEl.releasePointerCapture(e.pointerId); } catch(_){}
   if (d.kind === 'move'){
-    if (!d.moved){ const ln = roomLine(d.id); if (ln) jumpToLine(ln); return; }
+    if (!d.moved){ dpSelect('room', d.id);
+      const ln = roomLine(d.id); if (ln) jumpToLine(ln); return; }
     applyEdits([{ kind:'move_room', room:d.id, x:d.calc.x, y:d.calc.y }]);
   } else if (d.kind === 'resize'){
     if (!d.moved) return;
@@ -3408,7 +3466,8 @@ function onUp(e){
       edits.push({ kind:'move_room', room:d.id, x:d.calc.x, y:d.calc.y });
     applyEdits(edits);
   } else if (d.kind === 'fixture'){
-    if (!d.moved){ if (d.f.line) jumpToLine(d.f.line); return; }
+    if (!d.moved){ dpSelect('fx', d.f.id);
+      if (d.f.line) jumpToLine(d.f.line); return; }
     const rm = allRooms.find(r => r.id === d.f.room);
     const lx = d.calc.x - (rm ? rm.x : 0), ly = d.calc.y - (rm ? rm.y : 0);
     if (d.f.seed)   // materialise the seed into an authored `fixture` line
@@ -3423,8 +3482,8 @@ function onUp(e){
 function cancelDrag(){ if (!drag) return; drag = null; removeGhost(); clearGuides(); hideDim(); buildOverlay(); }
 
 // -- apply a sequence of edits atomically (from the client's view) --
-async function applyEdits(edits){
-  if (!edits.length){ buildOverlay(); return; }
+async function applyEdits(edits, label){
+  if (!edits.length){ buildOverlay(); return false; }
   autosaveOff = false;   // a layout edit is a deliberate action — resume autosave
   let src = editor.value, p = null;
   try {
@@ -3437,19 +3496,345 @@ async function applyEdits(edits){
     }
   } catch (err){
     editNote(String(err.message || err), true);
+    dpNote(String(err.message || err), true);
     buildOverlay();                        // restore positions from the unchanged data
-    return;
+    return false;
   }
-  applyEdit(src, null, null, 'layout edit');   // checkpoints the pre-drag source, swaps in the rewrite
+  applyEdit(src, null, null, label || 'layout edit');   // checkpoint, then swap in the rewrite
   renderGutter();
   applyResult(p);
   if (p.line) flashLine(p.line);
   editNote('');
+  dpNote(p.summary || '');
+  return true;
 }
 function flashLine(ln){
   const el = gutter.children[ln - 1]; if (!el) return;
   el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
 }
+
+// --- design panel (outline + inspector + add/delete) --------------------------
+// The no-code face of the DSL: an outline of the plan's structure and a property
+// inspector whose every control emits ONE surgical edit through /api/edit — the
+// code pane updates live, each change joins the unified undo timeline, and the
+// text stays the single source of truth. Renders from `lastGood` (same payload
+// the drag overlay reads) and re-renders on every refreshEditData.
+const dpEl = document.getElementById('design-panel');
+const panelBtn = document.getElementById('panel-btn');
+const LS_PANEL = 'barndsl.playground.panelOpen';
+let dpOpen = false;
+let dpSel = null;            // {t:'room'|'op'|'fx', k:id-or-key} — the inspected object
+let dpForm = null;           // 'room' | {op:'door'|'window'|'entry'} — the open add-form
+let dpNoteMsg = '', dpNoteErr = false;
+
+function dpNote(msg, err){
+  dpNoteMsg = msg || ''; dpNoteErr = !!err;
+  const el = document.getElementById('dp-note');
+  if (el){ el.textContent = dpNoteMsg; el.classList.toggle('err', dpNoteErr); }
+}
+// Selection is shared with the drag overlay: picking a room here rings it there.
+function dpSelect(t, k){
+  dpSel = k == null ? null : { t: t, k: k };
+  dpForm = null;
+  if (t === 'room'){ selectedRoomId = k; if (editMode) buildOverlay(); }
+  renderPanel();
+}
+function togglePanel(open){
+  dpOpen = open == null ? dpEl.hidden : open;
+  dpEl.hidden = !dpOpen;
+  panelBtn.classList.toggle('on', dpOpen);
+  try { localStorage.setItem(LS_PANEL, dpOpen ? '1' : ''); } catch (e){}
+  renderPanel(); planZoom.refit();          // the plan pane just changed width
+}
+panelBtn.addEventListener('click', () => togglePanel());
+
+function optList(items, cur){
+  let h = '';
+  for (const v of items)
+    h += '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(v) + '</option>';
+  return h;
+}
+function fnum(v){ return v == null ? '' : trimNum(v); }
+function opKindWord(o){
+  return o.kind === 'interior' ? (o.door ? 'door' : 'open') : (o.kind === 'window' ? 'window' : 'entry');
+}
+function opLabel(o){
+  if (o.kind === 'interior') return (o.door ? 'door ' : 'open ') + o.a + ' ↔ ' + o.b;
+  return opKindWord(o) + ' ' + o.room + ' ' + o.side;
+}
+
+function renderPanel(){
+  if (!dpOpen) return;
+  const p = lastGood;
+  if (!p || !p.rooms){
+    dpEl.innerHTML = '<div class="dp-note">Compile a plan (fix any errors) to use the design panel.</div>';
+    return;
+  }
+  const s = p.settings || {};
+  let h = '<h5>Plan</h5><div class="dp-grid">' +
+    '<label>name</label><input class="wide" data-act="plan.name" value="' + esc(s.name || '') + '">' +
+    '<label>envelope</label>' +
+    '<input type="number" min="1" step="1" data-act="plan.envw" title="Envelope width (ft, east–west)" value="' + fnum(s.envelope && s.envelope[0]) + '">' +
+    '<input type="number" min="1" step="1" data-act="plan.envl" title="Envelope length (ft, south–north)" value="' + fnum(s.envelope && s.envelope[1]) + '">' +
+    '<label>ceiling</label><input type="number" min="1" step="0.5" data-act="plan.ceil" value="' + fnum(s.ceiling) + '"><span></span>' +
+    '</div>';
+  h += '<h5>Rooms</h5>';
+  const levels = p.levels || [0];
+  for (const lv of levels){
+    if (levels.length > 1) h += '<div class="dp-level">Level ' + lv + '</div>';
+    for (const r of p.rooms.filter(r => r.level === lv)){
+      const sel = dpSel && dpSel.t === 'room' && dpSel.k === r.id;
+      h += '<div class="dp-row' + (sel ? ' sel' : '') + '" data-sel="room:' + esc(r.id) + '">' +
+        '<span class="swatch" style="background:' + esc(r.color) + '"></span>' +
+        '<span class="dp-id">' + esc(r.id) + '</span><span class="dp-kind">' + esc(r.type) + '</span>' +
+        '<span class="dp-dim">' + trimNum(r.w) + '×' + trimNum(r.l) + '</span></div>';
+      for (const f of (p.fixtures || []).filter(f => f.room === r.id)){
+        const fsel = dpSel && dpSel.t === 'fx' && dpSel.k === f.id;
+        h += '<div class="dp-sub"><div class="dp-row' + (fsel ? ' sel' : '') + (f.seed ? ' dp-seed' : '') +
+          '" data-sel="fx:' + esc(f.id) + '"><span class="dp-id">' + esc(f.kind.replace(/_/g, ' ')) +
+          '</span>' + (f.seed ? '<span class="dp-kind">auto</span>' : '') + '</div></div>';
+      }
+    }
+    const ops = (p.openings || []).filter(o => o.level === lv);
+    if (ops.length){
+      h += '<div class="dp-level">Openings' + (levels.length > 1 ? ' — level ' + lv : '') + '</div>';
+      for (const o of ops){
+        const osel = dpSel && dpSel.t === 'op' && dpSel.k === o.key;
+        h += '<div class="dp-row' + (osel ? ' sel' : '') + '" data-sel="op:' + esc(o.key) + '">' +
+          '<span class="dp-id">' + esc(opLabel(o)) + '</span>' +
+          '<span class="dp-dim">' + trimNum(o.width) + '′</span></div>';
+      }
+    }
+  }
+  h += '<div class="dp-btns"><button data-btn="addroom">＋ Room</button></div>';
+  if (dpForm === 'room') h += addRoomForm(p);
+  h += renderInspector(p);
+  h += '<div class="dp-note' + (dpNoteErr ? ' err' : '') + '" id="dp-note">' + esc(dpNoteMsg) + '</div>';
+  dpEl.innerHTML = h;
+}
+
+function renderInspector(p){
+  if (!dpSel)
+    return '<h5>Properties</h5><div class="dp-note">Select a room, opening or fixture above — or click one on the plan in edit mode.</div>';
+  if (dpSel.t === 'room'){
+    const r = p.rooms.find(x => x.id === dpSel.k);
+    if (!r){ dpSel = null; return ''; }
+    let h = '<h5>Room — ' + esc(r.id) + '</h5><div class="dp-grid">' +
+      '<label>name</label><input class="wide" data-act="room.rename" value="' + esc(r.id) + '">' +
+      '<label>type</label><select class="wide" data-act="room.type">' + optList(HIGHLIGHT.types || [], r.type) + '</select>' +
+      '<label>size</label><input type="number" min="1" step="0.5" data-act="room.w" value="' + trimNum(r.w) + '">' +
+      '<input type="number" min="1" step="0.5" data-act="room.l" value="' + trimNum(r.l) + '">' +
+      '<label>corner</label><input type="number" step="0.5" data-act="room.x" title="South-west corner x (ft east of origin)" value="' + trimNum(r.x) + '">' +
+      '<input type="number" step="0.5" data-act="room.y" title="South-west corner y (ft north of origin)" value="' + trimNum(r.y) + '">' +
+      '</div><div class="dp-btns">' +
+      '<button data-btn="adddoor">＋ Door</button><button data-btn="addwindow">＋ Window</button>' +
+      '<button data-btn="addentry">＋ Entry</button>' +
+      '<button class="danger" data-btn="delroom" title="Removes the room and everything on it — one undo brings it all back">Delete room</button></div>';
+    if (dpForm && dpForm.op) h += addOpeningForm(p, r);
+    return h;
+  }
+  if (dpSel.t === 'op'){
+    const o = (p.openings || []).find(x => x.key === dpSel.k);
+    if (!o){ dpSel = null; return ''; }
+    let h = '<h5>' + esc(opLabel(o)) + '</h5><div class="dp-grid">' +
+      '<label>width</label><input type="number" min="0.5" step="0.5" data-act="op.width" value="' + trimNum(o.width) + '"><span></span>' +
+      '<label>offset</label><input type="number" min="0" step="0.5" data-act="op.offset" value="' + fnum(o.offset) + '"><span></span>';
+    if (o.kind === 'interior' && o.door){
+      h += '<label>swings into</label><select data-act="op.into">' +
+        '<option value=""' + (o.into ? '' : ' selected') + '>—</option>' + optList([o.a, o.b], o.into) + '</select>' +
+        '<select data-act="op.hinge"><option value=""' + (o.hinge ? '' : ' selected') + '>hinge…</option>' +
+        optList(['near', 'far'], o.hinge) + '</select>';
+    }
+    if (o.kind === 'window')
+      h += '<label>sill</label><input type="number" min="0" step="0.25" data-act="op.sill" value="' + fnum(o.sill) + '"><span></span>';
+    h += '</div><div class="dp-btns"><button class="danger" data-btn="delop">Delete ' + esc(opKindWord(o)) + '</button></div>';
+    return h;
+  }
+  const f = (p.fixtures || []).find(x => x.id === dpSel.k);
+  if (!f){ dpSel = null; return ''; }
+  return '<h5>Fixture — ' + esc(f.kind.replace(/_/g, ' ')) + (f.seed ? ' (auto)' : '') + '</h5><div class="dp-grid">' +
+    '<label>rotate</label><input type="number" step="90" data-act="fx.rotate" value="' + fnum(f.rotate || 0) + '">' +
+    '<select data-act="fx.wall" title="Snap to a wall"><option value=""' + (f.wall ? '' : ' selected') + '>free</option>' +
+    optList(['N', 'S', 'E', 'W'], f.wall) + '</select>' +
+    '<label>width</label><input type="number" min="0.5" step="0.5" data-act="fx.width" value="' + trimNum(f.w) + '"><span></span>' +
+    '</div><div class="dp-btns">' + (f.seed
+      ? '<span class="dp-note">Auto-placed — the first edit writes a `fixture` line you own.</span>'
+      : '<button class="danger" data-btn="delfx">Delete fixture</button>') + '</div>';
+}
+
+const DP_ANCHORS = ['east-of', 'west-of', 'north-of', 'south-of',
+  'right-of', 'left-of', 'above-of', 'below-of'];
+function nextRoomId(p, base){
+  const ids = new Set(p.rooms.map(r => r.id));
+  let n = 1, id = base;
+  while (ids.has(id)){ n++; id = base + n; }
+  return id;
+}
+function addRoomForm(p){
+  const rooms = p.rooms.map(r => r.id);
+  const of0 = (dpSel && dpSel.t === 'room') ? dpSel.k : rooms[0];
+  return '<div class="dp-form"><div class="dp-grid">' +
+    '<label>name</label><input class="wide" id="nr-id" value="' + esc(nextRoomId(p, 'room')) + '">' +
+    '<label>type</label><select class="wide" id="nr-type">' + optList(HIGHLIGHT.types || [], 'bedroom') + '</select>' +
+    '<label>size</label><input type="number" id="nr-w" min="1" step="0.5" value="12">' +
+    '<input type="number" id="nr-l" min="1" step="0.5" value="12">' +
+    '<label>place</label><select id="nr-anchor">' + optList(DP_ANCHORS, 'east-of') + '</select>' +
+    '<select id="nr-of">' + optList(rooms, of0) + '</select>' +
+    '</div><div class="dp-btns"><button data-btn="roomsubmit">Add room</button>' +
+    '<button data-btn="formcancel">Cancel</button></div>' +
+    '<div class="dp-note">Anchored to a neighbour — drag it on the plan afterwards to fine-tune.</div></div>';
+}
+function addOpeningForm(p, r){
+  const kind = dpForm.op;
+  let inner;
+  if (kind === 'door'){
+    const others = p.rooms.filter(x => x.id !== r.id && x.level === r.level).map(x => x.id);
+    if (!others.length) return '<div class="dp-form"><div class="dp-note">No other room on this level to connect to.</div></div>';
+    inner = '<label>to</label><select class="wide" id="no-b">' + optList(others, others[0]) + '</select>' +
+      '<label>style</label><select class="wide" id="no-doortype">' +
+      '<option value="door">door (swinging)</option><option value="open">open (cased, no door)</option></select>';
+  } else {
+    inner = '<label>wall</label><select class="wide" id="no-side">' +
+      optList(['north', 'south', 'east', 'west'], 'south') + '</select>';
+  }
+  return '<div class="dp-form"><div class="dp-grid">' + inner +
+    '<label>width</label><input type="number" id="no-width" min="1" step="0.5" value="' + (kind === 'window' ? 4 : 3) + '"><span></span>' +
+    '</div><div class="dp-btns"><button data-btn="opsubmit">Add ' + esc(kind) + '</button>' +
+    '<button data-btn="formcancel">Cancel</button></div>' +
+    '<div class="dp-note">The compiler checks placement — watch the diagnostics for a teaching hint.</div></div>';
+}
+
+function dpChange(act, el){
+  const p = lastGood; if (!p) return;
+  const v = el.value, num = parseFloat(v);
+  const s = p.settings || {};
+  if (act === 'plan.name'){
+    if (v.trim() && v.trim() !== s.name) applyEdits([{ kind:'set_plan', name:v.trim() }], 'plan settings');
+    return;
+  }
+  if (act === 'plan.envw' || act === 'plan.envl'){
+    const w = act === 'plan.envw' ? num : (s.envelope || [])[0];
+    const l = act === 'plan.envl' ? num : (s.envelope || [])[1];
+    if (isFinite(w) && isFinite(l) && w > 0 && l > 0)
+      applyEdits([{ kind:'set_plan', envelope:[w, l] }], 'plan settings');
+    return;
+  }
+  if (act === 'plan.ceil'){
+    if (isFinite(num) && num > 0) applyEdits([{ kind:'set_plan', ceiling:num }], 'plan settings');
+    return;
+  }
+  if (dpSel && dpSel.t === 'room'){
+    const r = p.rooms.find(x => x.id === dpSel.k); if (!r) return;
+    if (act === 'room.rename'){
+      const id = v.trim();
+      if (id && id !== r.id){
+        dpSel = { t:'room', k:id }; selectedRoomId = id;   // follow the room across the rename
+        applyEdits([{ kind:'rename_room', room:r.id, to:id }], 'rename room');
+      }
+    }
+    else if (act === 'room.type') applyEdits([{ kind:'set_room_type', room:r.id, type:v }], 'room type');
+    else if (act === 'room.w' || act === 'room.l'){
+      const w = act === 'room.w' ? num : r.w, l = act === 'room.l' ? num : r.l;
+      if (isFinite(w) && isFinite(l) && w > 0 && l > 0)
+        applyEdits([{ kind:'resize_room', room:r.id, w:w, l:l }], 'resize room');
+    }
+    else if (act === 'room.x' || act === 'room.y'){
+      const x = act === 'room.x' ? num : r.x, y = act === 'room.y' ? num : r.y;
+      if (isFinite(x) && isFinite(y)) applyEdits([{ kind:'move_room', room:r.id, x:x, y:y }], 'move room');
+    }
+    return;
+  }
+  if (dpSel && dpSel.t === 'op'){
+    const o = (p.openings || []).find(x => x.key === dpSel.k); if (!o) return;
+    const base = { kind:'set_opening', opening:o.kind, key:o.key };
+    if (act === 'op.width' && isFinite(num) && num > 0) applyEdits([Object.assign(base, { width:num })], 'opening width');
+    else if (act === 'op.offset' && isFinite(num) && num >= 0) applyEdits([Object.assign(base, { offset:num })], 'opening offset');
+    else if (act === 'op.into') applyEdits([Object.assign(base, { into: v || null })], 'door swing');
+    else if (act === 'op.hinge' && v) applyEdits([Object.assign(base, { hinge:v })], 'door swing');
+    else if (act === 'op.sill' && isFinite(num) && num >= 0) applyEdits([Object.assign(base, { sill:num })], 'window sill');
+    return;
+  }
+  if (dpSel && dpSel.t === 'fx'){
+    const f = (p.fixtures || []).find(x => x.id === dpSel.k); if (!f) return;
+    const base = { kind:'set_fixture', id:f.id };
+    if (act === 'fx.rotate' && isFinite(num)) applyEdits([Object.assign(base, { rotate:num })], 'fixture');
+    else if (act === 'fx.wall' && v) applyEdits([Object.assign(base, { wall:v })], 'fixture');
+    else if (act === 'fx.width' && isFinite(num) && num > 0) applyEdits([Object.assign(base, { width:num })], 'fixture');
+  }
+}
+
+function dpDelete(){
+  const p = lastGood; if (!p || !dpSel) return;
+  const sel = dpSel; dpSel = null;
+  if (sel.t === 'room'){
+    selectedRoomId = null;
+    applyEdits([{ kind:'delete_room', room:sel.k }], 'delete room');
+  } else if (sel.t === 'op'){
+    const o = (p.openings || []).find(x => x.key === sel.k);
+    if (o) applyEdits([{ kind:'delete_opening', opening:o.kind, key:o.key }], 'delete opening');
+  } else {
+    applyEdits([{ kind:'delete_fixture', id:sel.k }], 'delete fixture');
+  }
+}
+
+function submitRoomForm(){
+  const p = lastGood; if (!p) return;
+  const id = document.getElementById('nr-id').value.trim();
+  const type = document.getElementById('nr-type').value;
+  const w = parseFloat(document.getElementById('nr-w').value);
+  const l = parseFloat(document.getElementById('nr-l').value);
+  const anchor = document.getElementById('nr-anchor').value;
+  const of = document.getElementById('nr-of').value;
+  if (!id || !(w > 0) || !(l > 0)){ dpNote('a room needs a name and a positive size', true); return; }
+  const ofRoom = p.rooms.find(r => r.id === of);
+  dpForm = null;
+  applyEdits([{ kind:'add_room', id:id, type:type, w:w, l:l, anchor:anchor, of:of,
+                level: ofRoom ? ofRoom.level : 0 }], 'add room')
+    .then(ok => { if (ok) dpSelect('room', id); });
+}
+function submitOpeningForm(){
+  const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
+  const r = p.rooms.find(x => x.id === dpSel.k); if (!r) return;
+  const width = parseFloat(document.getElementById('no-width').value);
+  if (!(width > 0)){ dpNote('width must be positive', true); return; }
+  const kind = dpForm.op; dpForm = null;
+  if (kind === 'door'){
+    const b = document.getElementById('no-b').value;
+    const style = document.getElementById('no-doortype').value;   // door | open
+    applyEdits([{ kind:'add_opening', opening:style, a:r.id, b:b, width:width }], 'add ' + style);
+  } else {
+    const side = document.getElementById('no-side').value;
+    applyEdits([{ kind:'add_opening', opening:kind, room:r.id, side:side, width:width }], 'add ' + kind);
+  }
+}
+
+dpEl.addEventListener('click', e => {
+  const row = e.target.closest('[data-sel]');
+  if (row){
+    const raw = row.getAttribute('data-sel'), i = raw.indexOf(':');
+    dpSelect(raw.slice(0, i), raw.slice(i + 1));
+    return;
+  }
+  const btn = e.target.closest('[data-btn]');
+  if (!btn) return;
+  const b = btn.getAttribute('data-btn');
+  if (b === 'addroom'){ dpForm = dpForm === 'room' ? null : 'room'; renderPanel(); }
+  else if (b === 'adddoor' || b === 'addwindow' || b === 'addentry'){
+    dpForm = { op: b.slice(3) }; renderPanel();
+  }
+  else if (b === 'formcancel'){ dpForm = null; renderPanel(); }
+  else if (b === 'roomsubmit') submitRoomForm();
+  else if (b === 'opsubmit') submitOpeningForm();
+  else if (b === 'delroom' || b === 'delop' || b === 'delfx') dpDelete();
+});
+dpEl.addEventListener('change', e => {
+  const act = e.target.getAttribute && e.target.getAttribute('data-act');
+  if (act) dpChange(act, e.target);
+});
+(function initPanel(){
+  let v = null; try { v = localStorage.getItem(LS_PANEL); } catch (e){}
+  if (v) togglePanel(true);
+})();
 
 // -- unified undo/redo history (one timeline for typing, smart edits and drags) --
 // history[histIndex] always mirrors the on-screen text (value+selection); its label
@@ -3524,9 +3909,10 @@ document.addEventListener('keydown', e => {
   if (isUndoKey(e) || isRedoKey(e)){
     const el = document.activeElement;
     // The editor handles its own (and stopped propagation); the agent brief, find /
-    // replace inputs and help search keep their native per-field undo.
+    // replace inputs, help search and design-panel fields keep native per-field undo.
     if (el === editor || el === briefEl || el === findInput ||
-        el === replaceInput || el === helpSearch) return;
+        el === replaceInput || el === helpSearch ||
+        (el && el.closest && el.closest('.design-panel'))) return;
     e.preventDefault();
     if (isRedoKey(e)) doRedo(); else doUndo();
     return;

@@ -876,3 +876,70 @@ def test_wave6_markup_keeps_the_offline_guarantee():
     html = render_app(CLEAN)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 7: the design panel (outline + inspector, the no-code face) ---------
+
+
+def test_payload_carries_plan_settings_for_the_panel():
+    # The panel's Plan form reads name/envelope/ceiling and writes back via
+    # `set_plan` — the payload must carry exactly what that edit can rewrite.
+    p = compile_payload(CLEAN)
+    s = p["settings"]
+    assert s["name"] == p["title"]
+    assert s["envelope"][0] > 0 and s["envelope"][1] > 0
+    assert s["ceiling"] > 0
+
+
+def test_payload_openings_carry_inspector_facts():
+    # Interior rows name their rooms and swing; window rows their sill — mirroring
+    # what set_opening can rewrite, so the panel reads and writes the same keys.
+    p = compile_payload(CLEAN)
+    interior = [o for o in p["openings"] if o["kind"] == "interior"]
+    assert interior and all("a" in o and "b" in o and "door" in o and "into" in o
+                            for o in interior)
+    windows = [o for o in p["openings"] if o["kind"] == "window"]
+    assert windows and all("room" in o and "side" in o and "sill" in o for o in windows)
+    exterior = [o for o in p["openings"] if o["kind"] == "exterior"]
+    assert exterior and all("room" in o and "side" in o for o in exterior)
+
+
+def test_payload_fixtures_carry_rotation():
+    p = compile_payload(CLEAN)
+    assert p["fixtures"] and all("rotate" in f for f in p["fixtures"])
+
+
+def test_app_contains_the_design_panel():
+    html = render_app(CLEAN)
+    for token in ('id="design-panel"', 'id="panel-btn"', "function renderPanel(",
+                  "function renderInspector(", "function dpSelect(", "function dpChange(",
+                  "function dpDelete(", "function submitRoomForm(", "function submitOpeningForm(",
+                  'class="plan-row"'):
+        assert token in html, token
+
+
+def test_app_panel_edits_ride_the_surgical_edit_pipeline():
+    html = render_app(CLEAN)
+    # every panel control dispatches a wave-A edit kind through applyEdits
+    for kind in ("'set_plan'", "'rename_room'", "'set_room_type'", "'resize_room'",
+                 "'move_room'", "'set_opening'", "'add_room'", "'delete_room'",
+                 "'add_opening'", "'delete_opening'", "'set_fixture'", "'delete_fixture'"):
+        assert "kind:" + kind in html, kind
+    # ...and applyEdits takes the label those calls pass (unified-undo naming)
+    assert "async function applyEdits(edits, label)" in html
+
+
+def test_app_panel_selection_is_shared_with_the_overlay():
+    html = render_app(CLEAN)
+    # clicking a room/fixture on the plan selects it in the panel too
+    assert "dpSelect('room', d.id)" in html
+    assert "dpSelect('fx', d.f.id)" in html
+    # and the design panel is taught in the help tips + hidden from print
+    assert "Design panel" in html or "design panel" in html
+    assert ".design-panel," in html
+
+
+def test_wave7_markup_keeps_the_offline_guarantee():
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html

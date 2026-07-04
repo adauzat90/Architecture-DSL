@@ -367,13 +367,32 @@ def opening_overlays(plan) -> list[dict]:
     (offset is measured from ``(ax,ay)``), the opening ``width``, the resolved
     ``offset``, the draggable ``[min,max]`` offset range, the ``wall`` and the
     ``level``. Openings that can't be placed are dropped.
+
+    The design panel's inspector needs the *authored* facts too, so each row also
+    names its endpoints and editable clauses: interior rows carry ``a``/``b``,
+    ``door`` (False for a cased passage) and the swing (``into``/``hinge``);
+    exterior and window rows carry ``room``/``side``; windows add ``sill``. These
+    mirror what ``set_opening`` can rewrite — the panel reads them and writes back
+    through the same keys.
     """
     out: list[dict] = []
     for kind, key, obj in iter_openings(plan):
         geom = _opening_geom(plan, kind, obj)
         if geom is None:
             continue
-        out.append({"kind": kind, "key": key, "line": getattr(obj, "line", None), **geom})
+        row = {"kind": kind, "key": key, "line": getattr(obj, "line", None), **geom}
+        if kind == "interior":
+            row["a"] = getattr(obj, "room_a", None)
+            row["b"] = getattr(obj, "room_b", None)
+            row["door"] = getattr(obj, "kind", "swing") != "cased"
+            row["into"] = getattr(obj, "swing_into", None)
+            row["hinge"] = getattr(obj, "hinge", None)
+        else:
+            row["room"] = getattr(obj, "room", None)
+            row["side"] = getattr(obj, "wall").value
+            if kind == "window":
+                row["sill"] = getattr(obj, "sill_height", None)
+        out.append(row)
     return out
 
 
