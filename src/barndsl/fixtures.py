@@ -351,7 +351,7 @@ def _place_perimeter(
                 continue
             wall, fx, fy, fw, fl = wname, tx, ty, tw, tl
             break
-        if wall is None:
+        if wall is None or fx is None or fy is None or fw is None or fl is None:
             break  # ran out of perimeter; the fit check reports the shortfall
         placed.append(Fixture(kind, fx, fy, fw, fl, wall))
         cursor += spec.width
