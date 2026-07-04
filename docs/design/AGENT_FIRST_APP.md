@@ -227,7 +227,9 @@ malformed edits are typed errors, never exceptions or 500s. The element→line m
 a minimal `CompileResult.room_lines` addition (openings already carry their source
 line); the overlay is drawn by the frontend from compact `rooms`/`openings` arrays
 in the compile payload, with 0.5 ft grid snap, a 3 ft minimum-dimension guard, an
-undo stack of source snapshots, and level-0 editing on multi-level plans.
+undo stack of source snapshots, and a floor switcher (segmented chips, or `[` /
+`]`) that edits any level of a multi-level plan while the other floors — and any
+stair footprint — render as a dimmed underlay to align against.
 
 ## Non-goals
 

@@ -21,6 +21,9 @@ import pytest
 from barndsl import compile_source, to_glb, to_gltf
 from barndsl.gltf import build_scene, wall_solids
 from barndsl.revit import to_revit_model
+from barndsl.wallheights import roof_plate, wall_top_intervals
+
+TOL = 1e-6
 
 EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples")
 
@@ -201,6 +204,90 @@ def test_room_floors_are_tinted_named_nodes():
     names = {n.name for n in scene.nodes if not n.empty}
     for r in plan.rooms:
         assert f"room:{r.id}" in names
+
+
+# --- multi-level wall heights (the gap-band / wall-to-roof-void fix) ----------
+
+
+def _lower_wall(model, orient, coord):
+    """The level-0 wall run at ``coord`` on the given axis (``"v"``/``"h"``)."""
+    return next(
+        w for w in model.walls
+        if w.level == 0 and w.orientation == orient and abs(w.const_coord - coord) < 1e-6
+    )
+
+
+def _node_max_z(scene, name):
+    node = next(n for n in scene.nodes if n.name == name and not n.empty)
+    return max(p[2] for p in node.positions)
+
+
+def test_two_story_lower_walls_reach_the_level_above_where_covered():
+    # The loft (24x18 at the SW corner) covers the west 24 ft of the south wall
+    # and the south 18 ft of the west wall; those parts must rise to the level-1
+    # base (10 = ceiling 9 + floor 1), closing the inter-floor gap band.
+    model = to_revit_model(_example("gallery/two_story.barn"))
+    assert [l.elevation for l in model.levels] == [0.0, 10.0]
+
+    south = wall_top_intervals(_lower_wall(model, "h", 0.0), model)
+    assert south == [(0.0, 24.0, 10.0), (24.0, 39.0, 19.0)]  # covered→10, uncovered→plate
+
+    west = wall_top_intervals(_lower_wall(model, "v", 0.0), model)
+    assert west == [(0.0, 18.0, 10.0), (18.0, 33.0, 19.0)]
+
+
+def test_two_story_uncovered_exterior_walls_reach_the_top_plate():
+    # The east (x=39) and north (y=33) perimeter walls are nowhere under the loft,
+    # so they rise the full storey to the roof-bearing plate (19), not the old 9.
+    model = to_revit_model(_example("gallery/two_story.barn"))
+    assert roof_plate(model) == 19.0
+    assert wall_top_intervals(_lower_wall(model, "v", 39.0), model) == [(0.0, 33.0, 19.0)]
+    assert wall_top_intervals(_lower_wall(model, "h", 33.0), model) == [(0.0, 39.0, 19.0)]
+
+
+def test_two_story_has_no_horizontal_void_band_on_exterior_walls():
+    # Every exterior level-0 run reaches at least the level-1 base, so there is no
+    # open band around the perimeter between the wall top and the floor above.
+    plan = _example("gallery/two_story.barn")
+    model = to_revit_model(plan)
+    scene = build_scene(plan)
+    next_base = 10.0
+    for w in model.walls:
+        if w.level == 0 and w.exterior:
+            assert _node_max_z(scene, f"wall:{w.id}") >= next_base - TOL, w.id
+
+
+def test_two_story_gable_infill_closes_both_ends():
+    # The roof gable ends are at x=0 (west) and x=39 (east). Both must be closed
+    # from the plate up to the ridge apex — the west via the loft's marked gable
+    # wall, the east via the new lower-uncovered-extension infill.
+    plan = _example("gallery/two_story.barn")
+    model = to_revit_model(plan)
+    scene = build_scene(plan)
+    apex = roof_plate(model) + float(model.roof["rise"])  # 19 + 5.5
+
+    east = _lower_wall(model, "v", 39.0)  # uncovered full-height gable end
+    assert _node_max_z(scene, f"wall:{east.id}") == pytest.approx(apex, abs=1e-6)
+
+    # West end: some wall run on the x=0 gable line reaches the ridge apex
+    # (the loft's marked gable wall on level 1, plus the lower extension below it).
+    west_ids = [w.id for w in model.walls if w.orientation == "v" and abs(w.const_coord) < 1e-6]
+    west_max = max(_node_max_z(scene, f"wall:{wid}") for wid in west_ids)
+    assert west_max == pytest.approx(apex, abs=1e-6)
+
+
+def test_single_level_plan_walls_are_unchanged_plate_high_boxes():
+    # Regression guard: a single-storey plan has only top-level runs, so every
+    # run stays a single plate-high box (top == base + ceiling) — the historical
+    # extrusion, byte-identical to before the multi-level fix.
+    for rel in ("frame_demo.barn", "cedar_ridge.barn"):
+        model = to_revit_model(_example(rel))
+        for w in model.walls:
+            ivs = wall_top_intervals(w, model)
+            assert len(ivs) == 1
+            lo, hi, top = ivs[0]
+            assert (lo, hi) == w.span
+            assert top == pytest.approx(w.height)  # base 0 on a single level
 
 
 # --- coordinate mapping ------------------------------------------------------

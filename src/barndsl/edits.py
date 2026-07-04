@@ -73,6 +73,11 @@ class Edit:
     opening: str | None = None
     key: str | None = None
     offset: float | None = None
+    #: Fixture edits: ``move_fixture`` uses ``key`` (the ``<room>~<kind>~<i>`` id)
+    #: + room-local ``x``/``y``; ``add_fixture`` (a seed materialised by a drag)
+    #: uses ``room``/``fkind``/``wall`` + ``x``/``y``.
+    fkind: str | None = None
+    wall: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +134,13 @@ def edit_from_json(obj: object) -> Edit | EditError:
     if kind == "move_opening":
         return Edit("move_opening", opening=_as_str(obj.get("opening")),
                     key=_as_str(obj.get("key")), offset=_as_num(obj.get("offset")))
+    if kind == "move_fixture":
+        return Edit("move_fixture", key=_as_str(obj.get("key")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+    if kind == "add_fixture":
+        return Edit("add_fixture", room=_as_str(obj.get("room")),
+                    fkind=_as_str(obj.get("fkind")), wall=_as_str(obj.get("wall")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
     return EditError("malformed", f"unknown edit kind {kind!r}")
 
 
@@ -281,6 +293,10 @@ def apply_edit(source: str, edit: Edit) -> EditResult:
         return _move_room(source, result, edit)
     if edit.kind == "resize_room":
         return _resize_room(source, result, edit)
+    if edit.kind == "move_fixture":
+        return _move_fixture(source, result, edit)
+    if edit.kind == "add_fixture":
+        return _add_fixture(source, result, edit)
     return _move_opening(source, result, edit)
 
 
@@ -306,6 +322,18 @@ def _validate_shape(edit: Edit) -> EditError | None:
             return EditError("malformed", "move_opening needs a key")
         if not _finite(edit.offset) or edit.offset < 0:  # type: ignore[operator]
             return EditError("malformed", "move_opening needs a finite, non-negative offset")
+        return None
+    if edit.kind == "move_fixture":
+        if not edit.key:
+            return EditError("malformed", "move_fixture needs a fixture key")
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "move_fixture needs finite x and y")
+        return None
+    if edit.kind == "add_fixture":
+        if not edit.room or not edit.fkind:
+            return EditError("malformed", "add_fixture needs a room and a kind")
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "add_fixture needs finite x and y")
         return None
     return EditError("malformed", f"unknown edit kind {edit.kind!r}")
 
@@ -465,6 +493,88 @@ def _offset_number_token(toks: list):
         if toks[i].text.lower() == "offset":
             return toks[i + 1]
     return None
+
+
+# --- fixtures ----------------------------------------------------------------
+
+
+def _resolved_fixture(plan, key: str):
+    """The resolved :class:`~barndsl.fixtures.Fixture` with id ``key``, or ``None``.
+
+    The id (``<room>~<kind>~<i>``) encodes its room, so we only resolve that one
+    room's fixtures — the same deterministic layout the payload/render/exchange use."""
+    from .fixtures import resolve_room_fixtures
+
+    room_id = key.split("~", 1)[0]
+    room = plan.room(room_id)
+    if room is None:
+        return None
+    for f in resolve_room_fixtures(plan, room):
+        if f.id == key:
+            return f
+    return None
+
+
+def _move_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    """Rewrite an **explicit** fixture's ``at x,y`` (room-local) on its source line.
+
+    A seed fixture has no source line — the frontend materialises it with an
+    ``add_fixture`` edit instead, so a seed key here is ``not_editable``."""
+    assert result.plan is not None
+    f = _resolved_fixture(result.plan, edit.key)  # type: ignore[arg-type]
+    if f is None:
+        return EditResult(source, error=EditError("unknown_opening",
+                          f"no fixture {edit.key!r}"))
+    if f.seed or f.source_line is None:
+        return EditResult(source, error=EditError("not_editable",
+                          f"fixture {edit.key!r} is an auto-seed (materialise it first)"))
+    line_no = f.source_line
+    room = result.plan.room(edit.key.split("~", 1)[0])  # type: ignore[union-attr]
+    assert room is not None
+    tx, ty = float(edit.x), float(edit.y)  # type: ignore[arg-type]
+    # The fixture's current room-local position (its world SW minus the room SW).
+    cur_lx, cur_ly = f.x - room.x, f.y - room.y
+    if _close(tx, cur_lx) and _close(ty, cur_ly):
+        return EditResult(source, changed=False, line=line_no,
+                          summary=f"{edit.key} already at {_fmt(tx)},{_fmt(ty)}")
+
+    lines = _lines(source)
+    raw = lines[line_no - 1]
+    toks = _tokenize_line(raw, line_no)
+    at_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "at"), None)
+    if at_idx is not None and at_idx + 2 < len(toks):
+        xt, yt = toks[at_idx + 1], toks[at_idx + 2]
+        newraw = _splice(raw, [
+            (xt.col - 1, xt.end_col - 1, _fmt(tx)),
+            (yt.col - 1, yt.end_col - 1, _fmt(ty)),
+        ])
+    else:
+        # No `at` yet (an auto-placed explicit fixture): insert one right after the
+        # room id — the 4th token (`fixture <kind> in <room>`).
+        insert_at = toks[3].end_col - 1
+        newraw = raw[:insert_at] + f" at {_fmt(tx)},{_fmt(ty)}" + raw[insert_at:]
+    lines[line_no - 1] = newraw
+    return EditResult("\n".join(lines), changed=True, line=line_no,
+                      summary=f"{edit.key} → at {_fmt(tx)},{_fmt(ty)}")
+
+
+def _add_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    """Materialise a dragged auto-seed: insert a new ``fixture`` line just after the
+    room's ``room`` statement, carrying the dragged room-local position."""
+    assert result.plan is not None
+    line_no, err = _room_line(result, edit.room)  # type: ignore[arg-type]
+    if err is not None:
+        return EditResult(source, error=err)
+    assert line_no is not None
+    wall = f" wall {edit.wall}" if edit.wall else ""
+    stmt = (
+        f"fixture {edit.fkind} in {edit.room} "
+        f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}{wall}"  # type: ignore[arg-type]
+    )
+    lines = _lines(source)
+    lines.insert(line_no, stmt)  # after the room line (1-based line_no → index)
+    return EditResult("\n".join(lines), changed=True, line=line_no + 1,
+                      summary=f"placed {edit.fkind} in {edit.room}")
 
 
 __all__ = [

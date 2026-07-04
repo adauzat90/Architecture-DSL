@@ -38,7 +38,12 @@ Geometry choices (schematic by design, like the elevations and the glTF):
 
 * Walls, slabs, columns, beams, spaces, stair treads and door/window panels are
   ``IfcExtrudedAreaSolid`` of an ``IfcRectangleProfileDef`` (a box) — a vertical
-  extrusion of the plan rectangle.
+  extrusion of the plan rectangle. A wall run's vertical extent comes from
+  :mod:`barndsl.wallheights` (shared with the glTF export): on a multi-level plan
+  a lower run rises to the level above where an upper floor covers it and to the
+  roof plate where it does not, so there is no open band between stacked levels or
+  between a wall and the roof. A run keeps its lengthwise pieces as several solids
+  in one IfcWall.
 * Openings are modelled the *correct* BIM way: the wall keeps its **uncut** box,
   an ``IfcOpeningElement`` (a box spanning the wall) voids it via
   ``IfcRelVoidsElement``, and an ``IfcDoor``/``IfcWindow`` fills it via
@@ -66,6 +71,7 @@ from dataclasses import dataclass
 from .constants import SLAB_THICKNESS
 from .elements import Barndominium
 from .revit import RevitModel, RevitOpening, RevitWall, to_revit_model
+from .wallheights import wall_top_intervals
 
 # --- deterministic IFC GlobalId (22-char compressed GUID) --------------------
 
@@ -335,6 +341,16 @@ _STAIR_TYPE = {
     "overrun": "STRAIGHT_RUN_STAIR",
 }
 
+#: Nominal fixture heights (ft) for the IfcFurnishingElement box massing.
+_FIXTURE_HEIGHT = {
+    "toilet": 2.5, "lavatory": 2.85, "sink": 3.0, "tub": 2.0, "shower": 6.5,
+    "refrigerator": 5.8, "range": 3.05, "washer": 3.0, "dryer": 3.0,
+    "water_heater": 4.6, "kitchen_island": 3.05, "counter": 3.05,
+    "bed_queen": 2.15, "bed_twin": 2.15, "sofa": 2.7, "armchair": 2.7,
+    "dining_table": 2.4, "coffee_table": 1.4, "desk": 2.4, "dresser": 3.0,
+    "wardrobe": 6.0,
+}
+
 
 # --- the builder -------------------------------------------------------------
 
@@ -469,7 +485,7 @@ class _Builder:
         for w in self.model.walls:
             base = elev.get(w.level, 0.0)
             placement = self.storey_placement.get(w.level, self.wcs)
-            solids = [self._wall_box(w, base)]
+            solids = self._wall_solids(w, base)
             wall = s.add(
                 "IFCWALL", self.guid("wall", w.id), owner,
                 "Exterior Wall" if w.exterior else "Interior Wall", None, None,
@@ -480,14 +496,29 @@ class _Builder:
             for o in hosted.get(w.id, []):
                 self._opening(owner, context, w, o, base, wall)
 
-    def _wall_box(self, w: RevitWall, base: float) -> Ref:
+    def _wall_solids(self, w: RevitWall, base: float) -> list[Ref]:
+        """One box per corrected height interval of the run (see wallheights).
+
+        A single IfcWall keeps its lengthwise pieces as several solids in one
+        body representation, so a lower run reaches the level above where it is
+        covered and the roof plate where it is not — closing the inter-floor gap
+        band and the wall-to-roof void — while the wall/opening/door counts the
+        tests pin stay one-per-run. The triangular gable above the plate is
+        closed by the roof prism's end cap (an ``IfcExtrudedAreaSolid`` triangle),
+        so no separate wall infill is needed here. A single-level plan yields one
+        plate-high box per run, byte-identical to before.
+        """
         t = w.thickness
-        lo, hi = w.span
         c = w.const_coord
-        top = base + w.height
-        if w.orientation == "v":
-            return _box_solid(self.spf, c - t / 2.0, lo, base, c + t / 2.0, hi, top)
-        return _box_solid(self.spf, lo, c - t / 2.0, base, hi, c + t / 2.0, top)
+        solids: list[Ref] = []
+        for lo, hi, top in wall_top_intervals(w, self.model):
+            if top - base <= 0:
+                continue
+            if w.orientation == "v":
+                solids.append(_box_solid(self.spf, c - t / 2.0, lo, base, c + t / 2.0, hi, top))
+            else:
+                solids.append(_box_solid(self.spf, lo, c - t / 2.0, base, hi, c + t / 2.0, top))
+        return solids
 
     def _opening(
         self, owner: Ref, context: Ref, w: RevitWall, o: RevitOpening, base: float, wall: Ref
@@ -689,6 +720,30 @@ class _Builder:
                     )
         return solids
 
+    def _fixtures(self, owner: Ref, context: Ref) -> None:
+        """One IfcFurnishingElement per fixture — a simple box on its room's floor.
+
+        The exchange already resolves each fixture's footprint (authored placements
+        plus surviving auto-seeds); here each becomes a plain box solid at a nominal
+        height, with a deterministic GUID from its id, contained on its storey."""
+        s = self.spf
+        elev = {lvl.index: lvl.elevation for lvl in self.model.levels}
+        for fx in self.model.fixtures:
+            z = elev.get(fx.level, 0.0)
+            h = _FIXTURE_HEIGHT.get(fx.kind, 2.5)
+            solid = _box_solid(
+                self.spf, fx.x, fx.y, z, fx.x + fx.width, fx.y + fx.length, z + h
+            )
+            placement = s.add(
+                "IFCLOCALPLACEMENT", self.storey_placement.get(fx.level, self.wcs), self.wcs
+            )
+            product = s.add(
+                "IFCFURNISHINGELEMENT", self.guid("fixture", fx.id), owner,
+                f"{fx.kind} ({fx.room})", None, None,
+                placement, self._shape(context, [solid]), fx.id,
+            )
+            self._place(fx.level, product)
+
     def _spaces(self, owner: Ref, context: Ref) -> None:
         """One IfcSpace per room, aggregated under its storey (schedules/areas)."""
         s = self.spf
@@ -789,6 +844,7 @@ class _Builder:
         self._roof(owner, body_ctx)
         self._frame(owner, body_ctx)
         self._stairs(owner, body_ctx)
+        self._fixtures(owner, body_ctx)
         self._spaces(owner, body_ctx)
         self._properties(owner)
 

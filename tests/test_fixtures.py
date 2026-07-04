@@ -84,6 +84,7 @@ def test_exchange_carries_fixture_seeds():
     fixtures = [f for f in data["fixtures"] if f["room"] == "bath"]
     assert {f["kind"] for f in fixtures} == {"toilet", "lavatory", "tub"}
     for f in fixtures:
-        assert f["id"].startswith("bath_")
+        assert f["id"].startswith("bath~")  # <room>~<kind>~<i>
         assert len(f["point"]) == 2
         assert f["level"] == 0
+        assert f["seed"] is True  # bath fixtures are auto-seeded

@@ -121,6 +121,7 @@ _UNIT_FIELDS = {
     "fixture": {
         "id": "skip", "kind": "skip", "room": "skip", "level": "skip", "x": "len",
         "y": "len", "width": "len", "length": "len", "wall": "skip", "point": "pts",
+        "rotation": "skip", "seed": "skip", "source_line": "skip",
     },
     "site": {"width": "len", "length": "len", "setbacks": "skip"},
     "setbacks": {"front": "len", "side": "len", "rear": "len"},
