@@ -911,6 +911,16 @@ _APP_HTML = r"""<!doctype html>
     :root { --bg:#171b21; --panel:#1e232b; --ink:#e6ebf2; --muted:#9aa4b4;
       --faint:#7a8494; --line:rgba(255,255,255,.10); --editor:#12151a; --gutter:#1a1f26; }
   }
+  /* Explicit theme hooks for the header toggle. Auto (no data-theme) leaves the
+     media query above in charge; light/dark pin the palette outright — and set
+     color-scheme so native controls follow — winning over the media query on
+     attribute specificity. Dark mirrors the media block; light mirrors base :root. */
+  :root[data-theme="dark"] { color-scheme:dark;
+    --bg:#171b21; --panel:#1e232b; --ink:#e6ebf2; --muted:#9aa4b4;
+    --faint:#7a8494; --line:rgba(255,255,255,.10); --editor:#12151a; --gutter:#1a1f26; }
+  :root[data-theme="light"] { color-scheme:light;
+    --bg:#eef1f4; --panel:#ffffff; --ink:#1d2530; --muted:#566072; --faint:#8791a1;
+    --line:rgba(20,30,50,.12); --editor:#fbfbfa; --gutter:#f0f1f2; }
   * { box-sizing: border-box; }
   html, body { margin:0; height:100%; overflow:hidden;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
@@ -1023,6 +1033,17 @@ _APP_HTML = r"""<!doctype html>
   .left { width:36%; min-width:280px; display:flex; flex-direction:column;
     border-right:1px solid var(--line); }
   .right { flex:1; display:flex; flex-direction:column; min-width:0; }
+  /* draggable split handles between the three panes (agent | editor | viewport).
+     A slim 6px hit target with a centred hairline that warms on hover; the row is
+     flex, so a handle just sits between two panes and dragging rewrites the width
+     of the pane on its left. The collapsed agent's handle is hidden (it no-ops). */
+  .split-h { flex:none; width:6px; align-self:stretch; cursor:col-resize;
+    background:transparent; position:relative; z-index:6; touch-action:none; }
+  .split-h::before { content:""; position:absolute; top:0; bottom:0; left:2px; right:2px;
+    border-radius:2px; background:transparent; transition:background .12s; }
+  .split-h:hover::before { background:var(--line); }
+  .split-h.dragging::before { background:var(--accent); }
+  .agent.collapsed + .split-h { display:none; }
 
   .editor-wrap { flex:1; display:flex; min-height:0; background:var(--editor);
     position:relative; overflow:hidden; }
@@ -1100,6 +1121,10 @@ _APP_HTML = r"""<!doctype html>
   #three-toggles label { display:flex; align-items:center; gap:7px; padding:2px 0;
     cursor:pointer; user-select:none; }
   #three-toggles input { accent-color:var(--accent); }
+  /* snapshot pill — bottom-left of the 3D pane, clear of the Walk pill (bottom-right)
+     and the Layers panel (top-left). Hidden until a scene is mounted to capture. */
+  #snap-btn { position:absolute; bottom:12px; left:14px; z-index:6; }
+  #snap-btn[hidden] { display:none; }
   .views-grid { padding:12px; display:grid; grid-template-columns:1fr 1fr; gap:14px; }
   .views-grid figure { margin:0; background:var(--panel); border:1px solid var(--line);
     border-radius:10px; overflow:hidden; }
@@ -1327,9 +1352,9 @@ _APP_HTML = r"""<!doctype html>
 
   /* --- print the current viewport, not the three-pane app chrome --- */
   @media print {
-    header, #notice, .agent, .left, .tabs, .edit-bar, #three-panel,
-    .drop-hint, .zoom-ctl, #dim-chip, .score-pop, .help-backdrop, .help-panel,
-    .lightbox { display:none !important; }
+    header, #notice, .agent, .left, .split-h, .tabs, .edit-bar, #three-panel,
+    #snap-btn, .drop-hint, .zoom-ctl, #dim-chip, .score-pop, .help-backdrop,
+    .help-panel, .lightbox { display:none !important; }
     .plan-body .svgbox { overflow:visible !important; }
     .plan-body .svgbox svg { position:static !important; transform:none !important; }
     html, body { overflow:visible !important; height:auto !important; background:#fff !important; }
@@ -1365,6 +1390,8 @@ _APP_HTML = r"""<!doctype html>
   <label class="examples">example
     <select id="example-select"><option value="">loading…</option></select>
   </label>
+  <button class="tbtn" id="theme-btn" aria-label="Cycle color theme"
+    title="Theme: auto">◐</button>
   <button class="tbtn" id="help-btn" aria-haspopup="dialog"
     title="DSL reference &amp; keyboard shortcuts (?)">?</button>
 </header>
@@ -1408,6 +1435,7 @@ _APP_HTML = r"""<!doctype html>
       <div class="agent-note" id="agent-note"></div>
     </div>
   </section>
+  <div class="split-h" id="split-agent" title="Drag to resize · double-click to reset"></div>
   <section class="left">
     <div class="editor-wrap" id="editor-wrap">
       <div class="gutter" id="gutter"></div>
@@ -1434,6 +1462,7 @@ _APP_HTML = r"""<!doctype html>
     </div>
     <div class="diagnostics" id="diagnostics"></div>
   </section>
+  <div class="split-h" id="split-editor" title="Drag to resize · double-click to reset"></div>
   <section class="right">
     <div class="tabs">
       <button class="tab active" data-tab="plan">2D plan</button>
@@ -1481,6 +1510,8 @@ _APP_HTML = r"""<!doctype html>
       <div class="pane" id="pane-three">
         <canvas id="three-canvas"></canvas>
         <div id="three-panel"><div class="hd">Layers</div><div id="three-toggles"></div></div>
+        <button class="tbtn" id="snap-btn" hidden
+          title="Download this 3D view as a PNG">⤓ PNG</button>
       </div>
       <div class="pane" id="pane-views"></div>
       <div class="pane" id="pane-report"><div class="report-wrap" id="report-wrap"></div></div>
@@ -1510,6 +1541,9 @@ const SCAFFOLD_SOURCE = __SCAFFOLD_SOURCE__;        // "New plan" starter
 const HIGHLIGHT = __HIGHLIGHT__;                    // {keywords, types} for the editor highlighter
 const LS_SOURCE = 'barndsl.playground.source';
 const LS_SAVED_AT = 'barndsl.playground.savedAt';
+const LS_THEME = 'barndsl.playground.theme';        // auto | light | dark
+const LS_AGENT_W = 'barndsl.playground.agentWidth';  // split: agent | editor
+const LS_EDITOR_W = 'barndsl.playground.editorWidth';
 
 const editor = document.getElementById('editor');
 const gutter = document.getElementById('gutter');
@@ -1871,6 +1905,7 @@ const SHORTCUTS = [
   ['Send to the agent', MOD + '+Enter'], ['Undo a layout edit', MOD + '+Z'],
   ['Zoom in / out / fit', '+  −  0'], ['Compile now', MOD + '+Enter'],
   ['Cancel a drag', 'Esc'], ['Switch floor (edit mode)', '[  ]'],
+  ['Switch viewport tab', '1  2  3  4'], ['Cycle theme', 't'],
   ['Open this help', '?'],
 ];
 let helpRefLines = null;   // cached parsed reference lines (fetched once)
@@ -1946,11 +1981,40 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 helpBackdrop.addEventListener('click', closeHelp);
 helpSearch.addEventListener('input', () => renderReference(helpSearch.value));
 
-// Global keys: `?` opens help (when not typing); Esc closes the open overlay.
+// --- theme toggle (header): auto → light → dark -----------------------------
+// Auto defers to the OS via the media query (today's behaviour, unchanged);
+// light/dark stamp `data-theme` on <html>, which the pinned palette blocks read.
+// Persisted, keyboard-accessible (it's a <button>, plus the `t` global key).
+const themeBtn = document.getElementById('theme-btn');
+const THEME_CYCLE = ['auto', 'light', 'dark'];
+const THEME_GLYPH = { auto:'◐', light:'☀', dark:'☾' };
+let themeMode = 'auto';
+function applyTheme(mode){
+  themeMode = THEME_CYCLE.indexOf(mode) >= 0 ? mode : 'auto';
+  if (themeMode === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', themeMode);
+  themeBtn.textContent = THEME_GLYPH[themeMode];
+  themeBtn.title = 'Theme: ' + themeMode + ' (t)';
+  try { localStorage.setItem(LS_THEME, themeMode); } catch (e){}
+  // A 3D redraw picks up palette-driven clear/background changes immediately.
+  if (currentTab === 'three' && ctrl) ctrl.draw();
+}
+function cycleTheme(){ applyTheme(THEME_CYCLE[(THEME_CYCLE.indexOf(themeMode) + 1) % THEME_CYCLE.length]); }
+themeBtn.addEventListener('click', cycleTheme);
+(function initTheme(){ let saved = null; try { saved = localStorage.getItem(LS_THEME); } catch (e){}
+  applyTheme(saved || 'auto'); })();
+
+// Global keys: `?` opens help, `t` cycles the theme, `1`–`4` switch the viewport
+// tab — all only when focus is not in an editable element. Esc closes overlays.
 document.addEventListener('keydown', e => {
   const el = document.activeElement, tag = el && el.tagName;
   const typing = tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT';
   if (e.key === '?' && !typing){ e.preventDefault(); openHelp(); return; }
+  if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey){
+    const TAB_KEY = { '1':'plan', '2':'three', '3':'views', '4':'report' };
+    if (TAB_KEY[e.key]){ e.preventDefault(); selectTab(TAB_KEY[e.key]); return; }
+    if (e.key === 't'){ e.preventDefault(); cycleTheme(); return; }
+  }
   if (e.key === 'Escape'){
     if (lb && !lb.hidden){ closeLightbox(); return; }
     if (!helpPanel.hidden){ closeHelp(); return; }
@@ -2304,6 +2368,7 @@ function selectTab(tab){
   else if (ctrl && ctrl.exitWalk) ctrl.exitWalk();
   // A pane has no measurable size while hidden, so Fit is deferred until it shows.
   if (tab === 'plan'){ planNeedsFit = false; planZoom.refit(); }
+  updateSnapState();               // the snapshot pill only lives on the 3D tab
 }
 let planNeedsFit = false;
 function showThree(){
@@ -2314,7 +2379,32 @@ function showThree(){
     if (!sceneLoaded){ ctrl.setScene(scene3d); sceneLoaded = true; }
     else { ctrl.resize(); ctrl.draw(); }
   }
+  updateSnapState();
 }
+
+// --- 3D snapshot (download the current WebGL view as a PNG) ------------------
+// The canvas has no preserveDrawingBuffer, so its pixels are only valid until the
+// browser composites: draw and read the buffer in the SAME synchronous task, with
+// no await in between. toDataURL is synchronous, so it captures what draw() just
+// rendered (orbit or walk — it's the same canvas). Reuses downloadBlob.
+const snapBtn = document.getElementById('snap-btn');
+function updateSnapState(){ snapBtn.hidden = !(currentTab === 'three' && ctrl && scene3d); }
+function dataUrlToBlob(url){
+  const comma = url.indexOf(','), bin = atob(url.slice(comma + 1));
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type:'image/png' });
+}
+function snapshot3d(){
+  if (!ctrl || !scene3d) return;
+  const canvas = document.getElementById('three-canvas');
+  ctrl.draw();                                   // draw first…
+  let url;
+  try { url = canvas.toDataURL('image/png'); }   // …then read, same task, no yield
+  catch (e){ showNotice('Could not capture the 3D view.'); return; }
+  downloadBlob(dataUrlToBlob(url), planSlug() + '-3d.png');
+}
+snapBtn.addEventListener('click', snapshot3d);
 function renderViews(p){
   if (!p.elevations){ viewsPane.innerHTML = '<div class="diag-empty">No views.</div>'; return; }
   const order = [['south','South'],['north','North'],['east','East'],['west','West']];
@@ -2639,11 +2729,99 @@ let statusEl = null;     // the live status bubble shown while a job streams
 const PHASE_LABEL = { starting:'starting', writing:'writing DSL', compiling:'compiling',
   critiquing:'critiquing', revising:'revising' };
 
+// A collapse clears the pane's explicit width so the `.collapsed` 38px rule wins
+// (inline styles beat the class); expanding restores the dragged width.
+let agentSavedW = '';
 collapseBtn.addEventListener('click', () => {
   const collapsed = agentPane.classList.toggle('collapsed');
   collapseBtn.textContent = collapsed ? '›' : '‹';
   collapseBtn.title = (collapsed ? 'expand' : 'collapse') + ' the agent pane';
+  if (collapsed){ agentSavedW = agentPane.style.width; agentPane.style.width = ''; }
+  else if (agentSavedW){ agentPane.style.width = agentSavedW; }
+  afterSplitResize();
 });
+
+// --- resizable split panes (agent | editor | viewport) ----------------------
+// Two 6px handles drive the flex row by writing an explicit width onto the pane on
+// each handle's left (the agent section, then the editor column); the viewport
+// (flex:1) takes the remainder. Widths are clamped to sensible minimums, persisted
+// per-split in localStorage, and reset by double-clicking a handle. After every
+// tick the self-measuring panes are nudged (the window didn't resize, only the
+// split did): the live 3D canvas re-sizes, the 2D plan re-fits.
+const mainEl = document.querySelector('main');
+const leftCol = document.querySelector('.left');
+const splitAgent = document.getElementById('split-agent');
+const splitEditor = document.getElementById('split-editor');
+const AGENT_MIN = 200, EDITOR_MIN = 320, VIEWPORT_MIN = 360, HANDLES = 12;
+function afterSplitResize(){
+  if (currentTab === 'three' && ctrl){ ctrl.resize(); ctrl.draw(); }
+  else if (currentTab === 'plan') planZoom.refit();
+  else planNeedsFit = true;
+}
+function agentWidthNow(){
+  return agentPane.classList.contains('collapsed') ? 38 : agentPane.getBoundingClientRect().width;
+}
+function clampAgent(px){
+  const room = mainEl.clientWidth - EDITOR_MIN - VIEWPORT_MIN - HANDLES;
+  return Math.max(AGENT_MIN, Math.min(px, Math.max(AGENT_MIN, room)));
+}
+function clampEditor(px){
+  const room = mainEl.clientWidth - agentWidthNow() - VIEWPORT_MIN - HANDLES;
+  return Math.max(EDITOR_MIN, Math.min(px, Math.max(EDITOR_MIN, room)));
+}
+function persistSplits(){
+  try {
+    if (agentPane.style.width) localStorage.setItem(LS_AGENT_W, parseInt(agentPane.style.width, 10));
+    if (leftCol.style.width) localStorage.setItem(LS_EDITOR_W, parseInt(leftCol.style.width, 10));
+  } catch (e){}
+}
+function startSplit(which, ev){
+  if (which === 'agent' && agentPane.classList.contains('collapsed')) return;   // handle no-ops
+  const handle = which === 'agent' ? splitAgent : splitEditor;
+  handle.classList.add('dragging');
+  const prevCursor = document.body.style.cursor, prevSel = document.body.style.userSelect;
+  document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+  try { handle.setPointerCapture(ev.pointerId); } catch (_){}
+  function move(e){
+    const left = mainEl.getBoundingClientRect().left;
+    if (which === 'agent') agentPane.style.width = clampAgent(e.clientX - left) + 'px';
+    else leftCol.style.width = clampEditor(e.clientX - left - agentWidthNow() - 6) + 'px';
+    afterSplitResize();
+  }
+  function up(e){
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', up);
+    handle.classList.remove('dragging');
+    document.body.style.cursor = prevCursor; document.body.style.userSelect = prevSel;
+    try { handle.releasePointerCapture(e.pointerId); } catch (_){}
+    persistSplits(); afterSplitResize();
+  }
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', up);
+  ev.preventDefault();
+}
+splitAgent.addEventListener('pointerdown', e => startSplit('agent', e));
+splitEditor.addEventListener('pointerdown', e => startSplit('editor', e));
+// Double-click a handle → drop the explicit width and the saved key, back to the
+// CSS default (agent 308px, editor 36%).
+splitAgent.addEventListener('dblclick', () => {
+  agentPane.style.width = ''; agentSavedW = '';
+  try { localStorage.removeItem(LS_AGENT_W); } catch (e){}
+  afterSplitResize();
+});
+splitEditor.addEventListener('dblclick', () => {
+  leftCol.style.width = '';
+  try { localStorage.removeItem(LS_EDITOR_W); } catch (e){}
+  afterSplitResize();
+});
+(function restoreSplits(){
+  try {
+    const aw = localStorage.getItem(LS_AGENT_W);
+    if (aw) agentPane.style.width = clampAgent(parseFloat(aw)) + 'px';
+    const ew = localStorage.getItem(LS_EDITOR_W);
+    if (ew) leftCol.style.width = clampEditor(parseFloat(ew)) + 'px';
+  } catch (e){}
+})();
 
 function addMsg(cls, text){
   const el = document.createElement('div');
@@ -2883,6 +3061,17 @@ function refreshEditData(p){
   if (editMode) buildOverlay();
 }
 
+// Fit-or-hide guard for overlay labels. Text and rects share the plan-unit space
+// (font-size is authored in feet, like the rect width), so the overlay scales to
+// the pane without changing their ratio — a label that overruns its rect (the
+// side-by-side washer/dryer, a long fixture kind, a narrow stair) would spill into
+// its neighbour at small sizes. Estimate the advance width (~0.6em/char for this
+// sans-serif) and, when it won't fit, drop the <text> and keep a <title> tooltip so
+// hover still names the element. Deterministic and recomputed on every buildOverlay.
+function labelFits(text, fontSize, boxW){
+  return (String(text).length * fontSize * 0.6) <= (boxW - 0.4);
+}
+
 function buildOverlay(){
   if (!editMode || !svgEl) return;
   if (!editReady){ svgEl.innerHTML = '';
@@ -2902,35 +3091,46 @@ function buildOverlay(){
   const fs = Math.max(1.1, Math.min(2.4, Math.min(W, H) * 0.05));
   const hs = Math.max(0.8, Math.min(2.2, Math.min(W, H) * 0.032));
   let s = '';
-  // Dimmed context: rooms on the other floors, as non-interactive outlines.
+  // Dimmed context: rooms on the other floors, as non-interactive outlines. Their
+  // id is fit-or-hidden (no title — they're inert, pointer-events:none).
   for (const r of allRooms){
     if (r.level === editLevel) continue;
+    const utext = labelFits(r.id, fs * 0.72, r.w)
+      ? '<text class="ov-under-t" x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) + fs * 0.3) +
+        '" text-anchor="middle" font-size="' + (fs * 0.72) + '">' + esc(r.id) + '</text>' : '';
     s += '<rect class="ov-under" x="' + r.x + '" y="' + Y(r.y + r.l) +
-      '" width="' + r.w + '" height="' + r.l + '" vector-effect="non-scaling-stroke"/>' +
-      '<text class="ov-under-t" x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) + fs * 0.3) +
-      '" text-anchor="middle" font-size="' + (fs * 0.72) + '">' + esc(r.id) + '</text>';
+      '" width="' + r.w + '" height="' + r.l + '" vector-effect="non-scaling-stroke"/>' + utext;
   }
   for (const r of editRooms){
     const sel = r.id === selectedRoomId;
+    const dims = trimNum(r.w) + '×' + trimNum(r.l);
+    const idFits = labelFits(r.id, fs, r.w);
+    const idText = idFits ? '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) - fs * 0.1) +
+      '" text-anchor="middle" font-size="' + fs + '" fill="#333" style="pointer-events:none">' +
+      esc(r.id) + '</text>' : '';
+    const dimText = labelFits(dims, fs * 0.72, r.w) ? '<text x="' + (r.x + r.w / 2) + '" y="' +
+      (Y(r.y + r.l / 2) + fs * 1.05) + '" text-anchor="middle" font-size="' + (fs * 0.72) +
+      '" fill="#777" style="pointer-events:none">' + dims + '</text>' : '';
+    // A hidden id leaves a <title> so hover on the (interactive) room still names it.
+    const title = idFits ? '' : '<title>' + esc(r.id) + '</title>';
     s += '<rect class="ov-room" data-room="' + esc(r.id) + '" x="' + r.x + '" y="' + Y(r.y + r.l) +
       '" width="' + r.w + '" height="' + r.l + '" fill="' + r.color + '" stroke="' +
       (sel ? '#2F6FB0' : '#2b2b2b') + '" stroke-width="' + (sel ? 2.4 : 1) +
-      '" vector-effect="non-scaling-stroke"/>' +
-      '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) - fs * 0.1) + '" text-anchor="middle" ' +
-      'font-size="' + fs + '" fill="#333" style="pointer-events:none">' + esc(r.id) + '</text>' +
-      '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) + fs * 1.05) + '" text-anchor="middle" ' +
-      'font-size="' + (fs * 0.72) + '" fill="#777" style="pointer-events:none">' +
-      trimNum(r.w) + '×' + trimNum(r.l) + '</text>';
+      '" vector-effect="non-scaling-stroke">' + title + '</rect>' + idText + dimText;
   }
   // Fixtures on this floor — draggable. A seed is dashed (a drag materialises it
-  // into an authored `fixture` line); an authored fixture is solid.
+  // into an authored `fixture` line); an authored fixture is solid. The kind label
+  // is fit-or-hidden (washer/dryer are the classic overlap) with a <title> fallback.
   for (const f of editFixtures){
+    const fk = f.kind.replace(/_/g, ' ');
+    const fFits = labelFits(fk, fs * 0.6, f.w);
+    const ftext = fFits ? '<text class="ov-fix-t" x="' + (f.x + f.w / 2) + '" y="' +
+      (Y(f.y + f.l / 2) + fs * 0.28) + '" text-anchor="middle" font-size="' + (fs * 0.6) +
+      '" style="pointer-events:none">' + esc(fk) + '</text>' : '';
+    const ftitle = fFits ? '' : '<title>' + esc(fk) + '</title>';
     s += '<rect class="ov-fixture' + (f.seed ? ' seed' : '') + '" data-fixkey="' + esc(f.id) +
       '" x="' + f.x + '" y="' + Y(f.y + f.l) + '" width="' + f.w + '" height="' + f.l +
-      '" vector-effect="non-scaling-stroke"/>' +
-      '<text class="ov-fix-t" x="' + (f.x + f.w / 2) + '" y="' + (Y(f.y + f.l / 2) + fs * 0.28) +
-      '" text-anchor="middle" font-size="' + (fs * 0.6) + '" style="pointer-events:none">' +
-      esc(f.kind.replace(/_/g, ' ')) + '</text>';
+      '" vector-effect="non-scaling-stroke">' + ftitle + '</rect>' + ftext;
   }
   for (const o of editOpens){
     const seg = openSeg(o, o.offset);
@@ -2945,11 +3145,14 @@ function buildOverlay(){
   for (const t of allStairs){
     if (t.from !== editLevel && t.to !== editLevel) continue;
     const up = t.from === editLevel;
+    const slabel = t.id + (up ? ' ↑' + t.to : ' ↓' + t.from);
+    // Fit-or-hide on narrow stairs (the "flight ↑1" overrun). The rect is inert
+    // (pointer-events:none), so a hidden label simply drops — no title to surface.
+    const stext = labelFits(slabel, fs * 0.72, t.w)
+      ? '<text class="ov-stair-t" x="' + (t.x + t.w / 2) + '" y="' + (Y(t.y + t.l / 2) + fs * 0.3) +
+        '" text-anchor="middle" font-size="' + (fs * 0.72) + '">' + esc(slabel) + '</text>' : '';
     s += '<rect class="ov-stair" x="' + t.x + '" y="' + Y(t.y + t.l) +
-      '" width="' + t.w + '" height="' + t.l + '" vector-effect="non-scaling-stroke"/>' +
-      '<text class="ov-stair-t" x="' + (t.x + t.w / 2) + '" y="' + (Y(t.y + t.l / 2) + fs * 0.3) +
-      '" text-anchor="middle" font-size="' + (fs * 0.72) + '">' +
-      esc(t.id) + (up ? ' ↑' + t.to : ' ↓' + t.from) + '</text>';
+      '" width="' + t.w + '" height="' + t.l + '" vector-effect="non-scaling-stroke"/>' + stext;
   }
   const r = roomById(selectedRoomId);
   if (r){

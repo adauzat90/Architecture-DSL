@@ -717,3 +717,83 @@ def test_wave4_markup_keeps_the_offline_guarantee():
     html = render_app(CLEAN)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 5: split panes, theme toggle, 3D snapshot, label declutter, tab keys -
+
+
+def test_app_contains_resizable_split_handles_and_persistence_keys():
+    html = render_app(CLEAN)
+    for token in ('id="split-agent"', 'id="split-editor"', "class=\"split-h",
+                  "function startSplit(", "function afterSplitResize(",
+                  "function clampAgent(", "function clampEditor("):
+        assert token in html, token
+    # the two split widths persist under the namespaced localStorage keys
+    assert "barndsl.playground.agentWidth" in html
+    assert "barndsl.playground.editorWidth" in html
+    # a drag tick re-fits the 2D plan and re-sizes the live 3D canvas
+    assert "ctrl.resize()" in html and "planZoom.refit()" in html
+    # a collapsed agent pane hides its handle in CSS
+    assert ".agent.collapsed + .split-h" in html
+    # handles are hidden in the print stylesheet
+    assert ".split-h" in html
+
+
+def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
+    html = render_app(CLEAN)
+    assert 'id="theme-btn"' in html
+    assert "function applyTheme(" in html and "function cycleTheme(" in html
+    # the previously-inert data-theme hooks now carry the full palette, not just
+    # the #hl token colours — assert --bg reaches the dark/light attribute blocks
+    assert ':root[data-theme="dark"] { color-scheme:dark;' in html
+    assert ':root[data-theme="light"] { color-scheme:light;' in html
+    for block in ('[data-theme="dark"]', '[data-theme="light"]'):
+        i = html.index(block + " { color-scheme")
+        assert "--bg:" in html[i:i + 300], block
+    # persisted, and taught in the shortcuts list
+    assert "barndsl.playground.theme" in html
+    assert "Cycle theme" in html
+
+
+def test_app_theme_auto_is_untouched_default():
+    # Auto mode leaves the OS media query in charge — that block still exists and
+    # boot applies 'auto' when nothing is saved.
+    html = render_app(CLEAN)
+    assert "@media (prefers-color-scheme: dark)" in html
+    assert "applyTheme(saved || 'auto')" in html
+
+
+def test_app_contains_3d_snapshot_with_draw_before_read():
+    html = render_app(CLEAN)
+    assert 'id="snap-btn"' in html
+    assert "function snapshot3d(" in html
+    # PNG named from the plan slug, reusing the existing blob-download idiom
+    assert "'-3d.png'" in html and "downloadBlob(" in html
+    # the WebGL buffer has no preserveDrawingBuffer, so draw() must precede the
+    # synchronous read in the same task — assert that ordering literally
+    draw_at = html.index("ctrl.draw();")
+    read_at = html.index("canvas.toDataURL('image/png')")
+    assert draw_at < read_at
+
+
+def test_app_contains_edit_overlay_label_fit_or_hide():
+    html = render_app(CLEAN)
+    assert "function labelFits(" in html
+    # applied to fixtures and rooms with a <title> fallback for the hidden label
+    assert "labelFits(fk," in html and "labelFits(r.id," in html
+    assert "<title>" in html
+
+
+def test_app_contains_viewport_tab_shortcuts():
+    html = render_app(CLEAN)
+    # keys 1–4 map to the four tabs, guarded by the same typing/modifier predicate
+    assert "'1':'plan'" in html and "'2':'three'" in html
+    assert "'3':'views'" in html and "'4':'report'" in html
+    assert "Switch viewport tab" in html
+
+
+def test_wave5_markup_keeps_the_offline_guarantee():
+    # The split handles, theme toggle, snapshot and declutter add no network refs.
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
