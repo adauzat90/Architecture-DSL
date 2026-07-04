@@ -625,17 +625,18 @@ def _off_module(value: float, module: float = BUILD_MODULE, tol: float = EPSILON
     return abs(value - round(value / module) * module) > tol
 
 
+def _side_of(room: Room, edge) -> float:
+    """+1/-1 for the side of ``edge`` the room's center lies on (its own side)."""
+    cx, cy = room.center
+    return 1.0 if (cx if edge.orientation == "v" else cy) > edge.pos else -1.0
+
+
 def _swing_sgn(door, a: Room, b: Room, edge) -> float | None:
     """Mirror the renderer: +1/-1 for the side the leaf swings into, or None to
     fall back to the keep-inside-the-envelope heuristic."""
     into = door.swing_into
     room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
-    if room is None:
-        return None
-    cx, cy = room.center
-    if edge.orientation == "v":
-        return 1.0 if cx > edge.pos else -1.0
-    return 1.0 if cy > edge.pos else -1.0
+    return None if room is None else _side_of(room, edge)
 
 
 def _swing_region(
@@ -729,6 +730,26 @@ def _convex_overlap(poly_a, poly_b, eps: float = SWING_CLASH_EPS) -> bool:
             if max(a_proj) < min(b_proj) + eps or max(b_proj) < min(a_proj) + eps:
                 return False
     return True
+
+
+def _region_room(region, a: Room, b: Room, edge) -> Room | None:
+    """Which of ``a``/``b`` a swept ``region`` lands in, by the side its centroid
+    falls on — robust for both a declared swing and the geometric default."""
+    axis = 0 if edge.orientation == "v" else 1
+    centroid = sum(p[axis] for p in region) / len(region)
+    a_positive = a.center[axis] > edge.pos
+    return a if (centroid > edge.pos) == a_positive else b
+
+
+def _preferred_swing_room(a: Room, b: Room) -> Room | None:
+    """The room a privacy-sensitive door should open into: a lone wet room over
+    anything, else a lone bedroom — or None when it's ambiguous (two rooms of the
+    same private kind) or neither room is private."""
+    wet = [r for r in (a, b) if r.type in (RoomType.BATHROOM, RoomType.HALF_BATH)]
+    if len(wet) == 1:
+        return wet[0]
+    beds = [r for r in (a, b) if r.type is RoomType.BEDROOM]
+    return beds[0] if len(beds) == 1 else None
 
 
 def _suggest_int(value: float, cap: float = 1e4) -> int | None:
@@ -2897,9 +2918,10 @@ def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
             swings.append((f"'{d.room_a}'-'{d.room_b}'", region, d.line, d.col, d.end_col))
     for xd in plan.exterior_doors:
         r = by_id.get(xd.room)
-        if r is None:
+        if r is None or xd.overhead:  # an overhead door rides up its tracks — no swing
             continue
-        swings.append((f"the entry to '{xd.room}'", _exterior_swing_region(plan, r, xd),
+        swings.append((f"the {xd.wall.value} entry to '{xd.room}'",
+                       _exterior_swing_region(plan, r, xd),
                        xd.line, xd.col, xd.end_col))
     for i in range(len(swings)):
         for j in range(i + 1, len(swings)):
@@ -2920,8 +2942,111 @@ def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
+def _dq_door_swing_direction(plan: Barndominium, graph, by_id, add) -> None:
+    # 8l. Which way a leaf swings, and whether it crowds the room:
+    #       * a bedroom/bath door should open *into* the private room it serves,
+    #         not out into circulation (measured against the rendered swing);
+    #       * an inward exterior leaf can't clear a too-shallow room — the case
+    #         for an out-swing door;
+    #       * a door swing eats the wall a wet room / kitchen needs for a fixture
+    #         the room otherwise has the capacity to hold (DOOR_HITS_FIXTURE).
+    for d in plan.interior_doors:
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None or a.level != b.level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        region = _interior_swing_region(plan, d, a, b, edge)
+        if region is None:  # pocket/sliding/cased — no leaf to place
+            continue
+        target = _region_room(region, a, b, edge)
+        if target is None:
+            continue
+
+        # A bedroom/bath door should open *into* the private room it serves.
+        pref = _preferred_swing_room(a, b)
+        if pref is None or target is pref:
+            continue
+        word = pref.type.value.replace("_", "-")
+        if d.swing_into is None:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "DOOR_SWING_UNSET",
+                    f"The {word} door '{a.id}'-'{b.id}' has no swing direction set and "
+                    f"defaults into '{target.id}'; a {word} door should open into the room.",
+                    room=pref.id,
+                    hint=f"Pin it with `into {pref.id}`.",
+                    **_door_loc(d),
+                )
+            )
+        else:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "DOOR_SWING_PRIVACY",
+                    f"The {word} door '{a.id}'-'{b.id}' swings into '{target.id}'; a "
+                    f"{word} door should open into the room so the leaf screens the "
+                    "view and folds against a wall.",
+                    room=pref.id,
+                    hint=f"Swing it into '{pref.id}' (`into {pref.id}`).",
+                    **_door_loc(d),
+                )
+            )
+
+    for xd in plan.exterior_doors:
+        if xd.overhead:  # rides up its tracks — no swing
+            continue
+        r = by_id.get(xd.room)
+        if r is None:
+            continue
+        leaf = xd.width / 2.0 if xd.kind in DOUBLE_LEAF_KINDS else xd.width
+        depth = r.width if xd.wall in (Direction.WEST, Direction.EAST) else r.length
+        if depth + EPSILON < leaf:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "DOOR_SWING_INWARD",
+                    f"The exterior door on '{r.id}' swings inward, but the room is only "
+                    f"{_f(depth)} ft deep — a {leaf * 12:.0f} in leaf can't fully open.",
+                    room=r.id,
+                    hint="Deepen the room, narrow the door, or use an out-swing or "
+                    "sliding door.",
+                    **_door_loc(xd),
+                )
+            )
+
+    # A door swing that crowds a fixture out of a room the room could otherwise
+    # hold: the door-aware placer drops a fixture the door-blind one keeps. This
+    # is the gap BATH_CLEARANCE (capacity only, door-blind) can't see.
+    from .fixtures import fixtures_for, plan_room_fixtures  # lazy: circular import
+
+    for room in plan.rooms:
+        if not fixtures_for(room.type):
+            continue
+        blind = plan_room_fixtures(plan, room, avoid_doors=False)
+        clear = plan_room_fixtures(plan, room)
+        if len(clear) >= len(blind):
+            continue
+        dropped = [f.kind for f in blind[len(clear):]]
+        names = " and ".join(dropped)
+        add(
+            Issue(
+                Severity.WARNING,
+                "DOOR_HITS_FIXTURE",
+                f"A door swing leaves '{room.id}' no clear wall for its {names} — "
+                "the room has the space, but not once the door's arc is kept clear.",
+                room=room.id,
+                hint="Move the door along the wall, swing it the other way "
+                "(`into <room>` / `hinge near|far`), make it a pocket/sliding door, "
+                "or enlarge the room.",
+            )
+        )
+
+
 def _dq_envelope_module(plan: Barndominium, graph, by_id, add) -> None:
-    # 8l. Material efficiency: exterior dimensions that land on a build module cut
+    # 8m. Material efficiency: exterior dimensions that land on a build module cut
     #     less sheet/board waste. Flag envelope and wing measurements off the module.
     off = []
     for label, value in (
@@ -3243,6 +3368,7 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_stair_wall,
     _dq_door_centered,
     _dq_door_swing_clash,
+    _dq_door_swing_direction,
     _dq_envelope_module,
     _dq_window_partition,
     _dq_room_proportion,

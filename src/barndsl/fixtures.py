@@ -17,7 +17,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .elements import Barndominium, Room, RoomType
+from .elements import DOUBLE_LEAF_KINDS, Barndominium, Direction, Room, RoomType
+from .geometry import opening_endpoints, shared_edge
 from .validation import clear_box
 
 
@@ -94,13 +95,83 @@ def _footprint(wall: str, x0: float, y0: float, cw: float, cl: float, cursor: fl
     return x0 + cw - d, y0 + cursor, d, spec.width  # E
 
 
-def plan_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
+#: How far (ft) to nudge a fixture along its wall when a door swing blocks it.
+_KEEPOUT_STEP = 0.5
+
+
+def _rect_overlaps(fx, fy, fw, fl, box, tol: float = 1e-6) -> bool:
+    """Do fixture footprint ``(fx, fy, fw, fl)`` and axis-aligned ``box`` overlap?"""
+    bx0, by0, bx1, by1 = box
+    return (
+        fx < bx1 - tol and fx + fw > bx0 + tol
+        and fy < by1 - tol and fy + fl > by0 + tol
+    )
+
+
+def _door_keepouts(plan: Barndominium, room: Room) -> list[tuple[float, float, float, float]]:
+    """Rectangles ``(x0, y0, x1, y1)`` a fixture should stay clear of: each door on
+    ``room`` reserves its opening span extended into the room by the door's own
+    width — a conservative bound on the leaf's swept quarter-disc — so the placer
+    never parks a fixture where a door swings (which would read as a false
+    DOOR_HITS_FIXTURE and, in Revit, seed a toilet in a doorway)."""
+    boxes: list[tuple[float, float, float, float]] = []
+
+    def _into_box(wall, ax, ay, bx, by, w):
+        lo_x, hi_x, lo_y, hi_y = min(ax, bx), max(ax, bx), min(ay, by), max(ay, by)
+        if wall is Direction.SOUTH:
+            return (lo_x, hi_y, hi_x, hi_y + w)
+        if wall is Direction.NORTH:
+            return (lo_x, lo_y - w, hi_x, lo_y)
+        if wall is Direction.WEST:
+            return (lo_x, lo_y, lo_x + w, hi_y)
+        return (hi_x - w, lo_y, hi_x, hi_y)  # EAST
+
+    for xd in plan.exterior_doors:
+        if xd.room != room.id or xd.overhead:
+            continue
+        x1, y1, x2, y2 = opening_endpoints(room, xd.wall, xd.offset, xd.width)
+        boxes.append(_into_box(xd.wall, x1, y1, x2, y2, xd.width))
+
+    for d in plan.interior_doors:
+        if room.id not in (d.room_a, d.room_b):
+            continue
+        if d.kind not in ("swing", *DOUBLE_LEAF_KINDS):  # pocket/sliding/cased: no arc
+            continue
+        other = plan.room(d.room_b if d.room_a == room.id else d.room_a)
+        if other is None:
+            continue
+        edge = shared_edge(room, other)
+        if edge is None:
+            continue
+        w = min(d.width, edge.length)
+        if getattr(d, "offset", None) is not None:
+            start = edge.lo + max(0.0, min(d.offset, edge.length - w))
+        else:
+            start = edge.mid - w / 2.0
+        if edge.orientation == "v":  # wall at x = edge.pos, opening spans y
+            if room.x >= edge.pos - 1e-6:  # room lies east of the wall
+                boxes.append((edge.pos, start, edge.pos + w, start + w))
+            else:
+                boxes.append((edge.pos - w, start, edge.pos, start + w))
+        else:  # wall at y = edge.pos, opening spans x
+            if room.y >= edge.pos - 1e-6:  # room lies north of the wall
+                boxes.append((start, edge.pos, start + w, edge.pos + w))
+            else:
+                boxes.append((start, edge.pos - w, start + w, edge.pos))
+    return boxes
+
+
+def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = True) -> list[Fixture]:
     """Place ``room``'s fixtures against its walls (best-effort, deterministic).
 
     Lays each fixture along the clear-box perimeter starting on the longer wall,
     wrapping to the next wall when the current one runs out. Returns the placed
     :class:`Fixture` footprints in world coordinates — seeds for the Revit builder
     to host families on; the designer refines from there.
+
+    ``avoid_doors`` (the default) slides fixtures clear of every door's swing;
+    pass ``False`` for the door-blind placement, which the swing-crowding check
+    diffs against to tell when a door — not just a small room — drops a fixture.
     """
     kinds = fixtures_for(room.type)
     if not kinds:
@@ -110,22 +181,30 @@ def plan_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
         return []
 
     walls = _walls(cw, cl)
+    keepouts = _door_keepouts(plan, room) if avoid_doors else []
     placed: list[Fixture] = []
     wi = 0
     cursor = 0.0
     for kind in kinds:
         spec = FIXTURES[kind]
-        # Advance to a wall with room for this fixture's width (leave the corner).
+        # Advance to a wall with room for this fixture's width (leave the corner),
+        # nudging past any spot a door swings through.
+        wall = fx = fy = fw = fl = None
         while wi < len(walls):
             _, run = walls[wi]
-            if cursor + spec.width <= run + 1e-9:
-                break
-            wi += 1
-            cursor = 0.0
-        if wi >= len(walls):
+            if cursor + spec.width > run + 1e-9:
+                wi += 1
+                cursor = 0.0
+                continue
+            wname = walls[wi][0]
+            tx, ty, tw, tl = _footprint(wname, x0, y0, cw, cl, cursor, spec)
+            if any(_rect_overlaps(tx, ty, tw, tl, b) for b in keepouts):
+                cursor += _KEEPOUT_STEP  # a door swings here; slide along the wall
+                continue
+            wall, fx, fy, fw, fl = wname, tx, ty, tw, tl
+            break
+        if wall is None:
             break  # ran out of perimeter; the fit check reports the shortfall
-        wall = walls[wi][0]
-        fx, fy, fw, fl = _footprint(wall, x0, y0, cw, cl, cursor, spec)
         placed.append(Fixture(kind, fx, fy, fw, fl, wall))
         cursor += spec.width
     return placed
