@@ -84,13 +84,15 @@ def _prompt_text(content) -> str:
 
 
 class FakeClient:
-    """Scripted `.messages.stream(...)` / `.messages.parse(...)`.
+    """Scripted `.messages.stream(...)` — both generation and critique stream now.
 
     `sources` are returned (fenced, like a real reply) one per generation call;
-    `critiques` one per critique call. Prompts are recorded so tests can assert
-    what the model was actually shown — `parse_prompts` holds the critique text
-    (image block or not), `parse_contents`/`parse_systems` the raw content and
-    system prompt for the multimodal assertions.
+    `critiques` one per critique call, serialised to fenced JSON exactly as a real
+    model emits under the `_CRITIQUE_JSON` instruction. Critique calls are told
+    apart from generation by their system prompt (the critic is a "senior
+    architect"). Prompts are recorded so tests can assert what the model was shown
+    — `parse_prompts` holds the critique text (image block or not),
+    `parse_contents`/`parse_systems` the raw content and system prompt.
     """
 
     def __init__(self, sources: list[str], critiques: list[CritiqueSpec] | None = None):
@@ -100,18 +102,19 @@ class FakeClient:
         self.parse_prompts: list[str] = []
         self.parse_contents: list = []
         self.parse_systems: list[str] = []
-        self.messages = self  # so client.messages.stream / .parse resolve here
+        self.messages = self  # so client.messages.stream resolves here
 
     def stream(self, **kwargs):
-        self.stream_prompts.append(kwargs["messages"][0]["content"])
-        return _FakeStream(f"```barn\n{self._sources.pop(0)}```")
-
-    def parse(self, **kwargs):
         content = kwargs["messages"][0]["content"]
-        self.parse_contents.append(content)
-        self.parse_systems.append(kwargs["system"])
-        self.parse_prompts.append(_prompt_text(content))
-        return SimpleNamespace(parsed_output=self._critiques.pop(0))
+        system = kwargs.get("system", "")
+        if "senior architect" in system:  # a critique call (see _CRITIQUE_SYSTEM)
+            self.parse_contents.append(content)
+            self.parse_systems.append(system)
+            self.parse_prompts.append(_prompt_text(content))
+            crit = self._critiques.pop(0)
+            return _FakeStream("```json\n" + crit.model_dump_json() + "\n```")
+        self.stream_prompts.append(content)
+        return _FakeStream(f"```barn\n{self._sources.pop(0)}```")
 
 
 def _agent(client: FakeClient) -> BarndoAgent:
@@ -668,6 +671,79 @@ def test_agent_availability_true_when_anthropic_and_key_present(monkeypatch):
     assert available is True and reason is None
 
 
+# -- streamed, fence-tolerant critique ----------------------------------------
+# The critique is a streamed reply (a non-streaming call is refused by the SDK at
+# high max_tokens on a slow reasoning model). The model is told to emit a JSON
+# object, which we parse fence-tolerantly — so it works the same on native
+# Anthropic and on compat gateways (DeepSeek) that fence their JSON. A reply with
+# no parseable JSON degrades to a neutral verdict rather than crashing the loop.
+
+
+class _FakeStreamClient:
+    """A `.messages.stream(...)` that always returns ``reply`` as the message text,
+    standing in for a gateway that streams a (possibly fenced) critique."""
+
+    def __init__(self, reply: str):
+        self._reply = reply
+        self.messages = self
+
+    def stream(self, **kwargs):
+        return _FakeStream(self._reply)
+
+
+FENCED_CRITIQUE = (
+    '```json\n{"satisfied": false, "assessment": "Tight but workable.", '
+    '"rationale": "WINDOW_EGRESS on bed2.", "suggestions": ["Widen the bed2 window"]}\n```'
+)
+
+
+def test_json_object_from_text_strips_a_fence_and_ignores_prose():
+    from barndsl.agent import _json_object_from_text
+
+    assert _json_object_from_text(FENCED_CRITIQUE).startswith('{"satisfied"')
+    # embedded in prose, no fence
+    wrapped = 'Here is my review:\n{"satisfied": true, "suggestions": []}\nThanks!'
+    assert _json_object_from_text(wrapped) == '{"satisfied": true, "suggestions": []}'
+    # pure prose has no object
+    assert _json_object_from_text("Looking at this plan, it feels like a home.") is None
+
+
+def test_critique_from_text_parses_fenced_json_and_rejects_prose():
+    from barndsl.agent import _critique_from_text
+
+    crit = _critique_from_text(FENCED_CRITIQUE)
+    assert crit is not None and crit.satisfied is False
+    assert crit.suggestions == ["Widen the bed2 window"]
+    assert _critique_from_text("no json here at all") is None
+
+
+def test_critique_parses_fenced_json_from_a_stream():
+    """The DeepSeek path: the streamed reply fences its JSON; the critic reads it."""
+    agent = BarndoAgent(client=_FakeStreamClient(FENCED_CRITIQUE))
+    crit = agent.critique(compile_source(MEDIOCRE))
+    assert crit.satisfied is False
+    assert crit.suggestions == ["Widen the bed2 window"]
+    assert "skipped" not in crit.assessment  # a real critique, not the neutral fallback
+
+
+def test_critique_falls_back_to_neutral_when_there_is_no_json():
+    """Pure prose (no JSON object) degrades to a neutral verdict, not a crash."""
+    result = compile_source(MEDIOCRE)
+    agent = BarndoAgent(client=_FakeStreamClient("Looking at this plan, it reads as a home."))
+    crit = agent.critique(result)
+    assert crit.satisfied is result.ok  # neutral: mirrors compile status
+    assert "skipped" in crit.assessment
+
+
+def test_critique_prompt_instructs_json_output():
+    """The critique prompt must ask for JSON so non-Anthropic gateways emit it."""
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    assert client.parse_prompts, "the critic should have been called"
+    assert '"satisfied"' in client.parse_prompts[0]
+    assert "JSON object" in client.parse_prompts[0]
+
+
 def test_agent_availability_reports_a_missing_key(monkeypatch):
     from barndsl.agent import agent_availability
 
@@ -687,3 +763,78 @@ def test_agent_availability_reports_a_missing_dependency(monkeypatch):
     available, reason = agent_availability()
     assert available is False
     assert reason is not None and "barndsl[agent]" in reason
+
+
+# -- environment-backed configuration knobs -----------------------------------
+# model / max_tokens / target_score / max_iterations each have a built-in default
+# overridable by a BARNDSL_* env var; an explicit argument always wins.
+
+
+def test_resolvers_use_defaults_then_env_then_explicit(monkeypatch):
+    from barndsl import agent as A
+
+    for var in (A.MODEL_ENV_VAR, A.MAX_TOKENS_ENV_VAR,
+                A.TARGET_SCORE_ENV_VAR, A.MAX_ITERATIONS_ENV_VAR):
+        monkeypatch.delenv(var, raising=False)
+    # defaults
+    assert A.resolve_model() == A.DEFAULT_MODEL
+    assert A.resolve_max_tokens() == A.DEFAULT_MAX_TOKENS
+    assert A.resolve_target_score() == A.DEFAULT_TARGET_SCORE
+    assert A.resolve_max_iterations() == A.DEFAULT_MAX_ITERATIONS
+    # env overrides
+    monkeypatch.setenv(A.MODEL_ENV_VAR, "deepseek-v4-pro")
+    monkeypatch.setenv(A.MAX_TOKENS_ENV_VAR, "48000")
+    monkeypatch.setenv(A.TARGET_SCORE_ENV_VAR, "75")
+    monkeypatch.setenv(A.MAX_ITERATIONS_ENV_VAR, "6")
+    assert A.resolve_model() == "deepseek-v4-pro"
+    assert A.resolve_max_tokens() == 48000
+    assert A.resolve_target_score() == 75.0
+    assert A.resolve_max_iterations() == 6
+    # explicit argument beats the env
+    assert A.resolve_model("claude-opus-4-8") == "claude-opus-4-8"
+    assert A.resolve_max_tokens(9000) == 9000
+
+
+def test_resolvers_fall_back_on_malformed_env(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv(A.MAX_TOKENS_ENV_VAR, "lots")
+    monkeypatch.setenv(A.TARGET_SCORE_ENV_VAR, "high")
+    monkeypatch.setenv(A.MAX_ITERATIONS_ENV_VAR, "0")  # non-positive → default
+    assert A.resolve_max_tokens() == A.DEFAULT_MAX_TOKENS
+    assert A.resolve_target_score() == A.DEFAULT_TARGET_SCORE
+    assert A.resolve_max_iterations() == A.DEFAULT_MAX_ITERATIONS
+
+
+def test_agent_reads_model_and_max_tokens_from_env(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv(A.MODEL_ENV_VAR, "deepseek-v4-pro")
+    monkeypatch.setenv(A.MAX_TOKENS_ENV_VAR, "40000")
+    ag = BarndoAgent(client=FakeClient(sources=[CLEAN]))
+    assert ag.model == "deepseek-v4-pro"
+    assert ag.max_tokens == 40000
+
+
+def test_design_default_iterations_come_from_env(monkeypatch):
+    """With no max_iterations arg, the loop runs $BARNDSL_MAX_ITERATIONS rounds."""
+    from barndsl import agent as A
+
+    monkeypatch.setenv(A.MAX_ITERATIONS_ENV_VAR, "2")
+    monkeypatch.setenv(A.TARGET_SCORE_ENV_VAR, "100")  # never satisfied → runs the full cap
+    client = FakeClient(sources=[MEDIOCRE, MEDIOCRE])
+    # no max_iterations / target_score passed → both resolve from the env
+    result = _agent(client).design("a starter home", critique=False)
+    assert result.iterations == 2
+
+
+def test_design_explicit_none_target_score_still_disables_the_gate(monkeypatch):
+    """`target_score=None` must stay 'no gate' even with $BARNDSL_TARGET_SCORE set."""
+    from barndsl import agent as A
+
+    monkeypatch.setenv(A.TARGET_SCORE_ENV_VAR, "100")  # would force more rounds if it applied
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=3, target_score=None)
+    # CLEAN compiles and the critic is satisfied; with the gate disabled the loop
+    # finishes on round 1 instead of grinding to the env's target of 100.
+    assert result.iterations == 1

@@ -27,22 +27,127 @@ Requires ``anthropic`` and ``ANTHROPIC_API_KEY``. Install ``pip install 'barndsl
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
 from .introspect import plan_summary, summary_text
 from .score import ScoreReport, design_score
 from .validation import Issue, Severity
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MODEL = "claude-opus-4-8"
+
+#: Environment variable that overrides the model everywhere (CLI ``design`` and
+#: the playground's ``/api/design``). Set this when the endpoint is not native
+#: Anthropic — e.g. ``ANTHROPIC_BASE_URL`` points at DeepSeek's compat gateway,
+#: where ``claude-opus-4-8`` does not resolve and silently returns empty output.
+MODEL_ENV_VAR = "BARNDSL_MODEL"
+
+
+def resolve_model(model: str | None = None) -> str:
+    """The model to drive the agent with: explicit arg, else ``$BARNDSL_MODEL``, else the default.
+
+    An explicit ``model`` argument always wins. Otherwise the ``BARNDSL_MODEL``
+    environment variable is consulted (so a non-Anthropic endpoint can pick a
+    model the gateway actually serves), falling back to :data:`DEFAULT_MODEL`.
+    Read at call time, not import time, so setting the var before a run takes.
+    """
+    return model or os.environ.get(MODEL_ENV_VAR) or DEFAULT_MODEL
+
+
+#: The per-call output-token cap for generation and critique. It bounds thinking
+#: **plus** the answer, so a reasoning model that thinks heavily needs generous
+#: headroom: ``deepseek-v4-pro`` can burn 8000+ tokens thinking about a single
+#: plan, and at the old 8000 cap the reply hit ``stop_reason=max_tokens`` mid-
+#: thought and returned no DSL at all. 32000 leaves room to think and still emit.
+#: It is a cap, not a target — non-reasoning models (e.g. Opus) stop well under
+#: it and pay only for what they generate.
+DEFAULT_MAX_TOKENS = 32000
+
+#: Environment variable that overrides :data:`DEFAULT_MAX_TOKENS` — raise it for a
+#: model that reasons even more, or lower it to bound cost on a terse one.
+MAX_TOKENS_ENV_VAR = "BARNDSL_MAX_TOKENS"
+
+
+def resolve_max_tokens(max_tokens: int | None = None) -> int:
+    """The per-call token cap: explicit arg, else ``$BARNDSL_MAX_TOKENS``, else the default.
+
+    An explicit argument wins; otherwise the ``BARNDSL_MAX_TOKENS`` environment
+    variable is used when it is a positive integer. Anything missing or malformed
+    (non-numeric, ``<= 0``) falls back to :data:`DEFAULT_MAX_TOKENS`, so a stray
+    value can never silently produce a zero/negative cap that the API would reject.
+    """
+    if max_tokens is not None:
+        return max_tokens
+    raw = os.environ.get(MAX_TOKENS_ENV_VAR)
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError:
+            return DEFAULT_MAX_TOKENS
+        if value > 0:
+            return value
+    return DEFAULT_MAX_TOKENS
 
 #: Below this score the design is not "done" even if the critic is satisfied.
 DEFAULT_TARGET_SCORE = 90.0
+
+#: Environment variable overriding :data:`DEFAULT_TARGET_SCORE` — the score gate
+#: the loop hill-climbs toward. Lower it for a cheaper, "good enough" run.
+TARGET_SCORE_ENV_VAR = "BARNDSL_TARGET_SCORE"
+
+#: Default number of write → compile → critique → revise rounds.
+DEFAULT_MAX_ITERATIONS = 3
+
+#: Environment variable overriding :data:`DEFAULT_MAX_ITERATIONS`. More rounds =
+#: more chances to converge (and more cost); fewer = faster, cheaper.
+MAX_ITERATIONS_ENV_VAR = "BARNDSL_MAX_ITERATIONS"
+
+#: Sentinel for "argument not supplied" where ``None`` is itself a meaningful
+#: value — ``target_score=None`` disables the gate, so it can't double as "unset".
+_UNSET: Any = object()
+
+
+def resolve_target_score() -> float:
+    """The default score gate: ``$BARNDSL_TARGET_SCORE`` else :data:`DEFAULT_TARGET_SCORE`.
+
+    A malformed value (non-numeric) falls back to the default. Note ``0`` is a
+    valid gate that the loop can never fall below, i.e. effectively disabled —
+    the same convention the CLI's ``--target-score 0`` uses.
+    """
+    raw = os.environ.get(TARGET_SCORE_ENV_VAR)
+    if raw is not None:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return DEFAULT_TARGET_SCORE
+
+
+def resolve_max_iterations() -> int:
+    """The default round cap: ``$BARNDSL_MAX_ITERATIONS`` else :data:`DEFAULT_MAX_ITERATIONS`.
+
+    Missing or malformed (non-numeric, ``<= 0``) falls back to the default, so a
+    stray value can never produce a zero/negative cap that would skip the loop.
+    """
+    raw = os.environ.get(MAX_ITERATIONS_ENV_VAR)
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return DEFAULT_MAX_ITERATIONS
+
 
 #: The one-liner both the CLI and the playground surface when the agent can't run.
 AGENT_INSTALL_HINT = "pip install 'barndsl[agent]' and set ANTHROPIC_API_KEY"
@@ -108,6 +213,21 @@ _CRITIQUE_SYSTEM = (
     "constructive but exacting.\n\n" + DSL_REFERENCE
 )
 
+#: Appended to every critique prompt so the model emits JSON we can parse. Native
+#: Anthropic gets the same instruction the SDK's structured output injects, so it
+#: still validates via ``messages.parse``. Non-Anthropic gateways (DeepSeek) ignore
+#: the SDK's injection but honour this in-prompt instruction, so they return JSON
+#: (fenced or bare) that the fence-tolerant recovery path can then parse — instead
+#: of the free-form prose they emit without it.
+_CRITIQUE_JSON = (
+    "\n\nRespond with ONLY a single JSON object — no prose or commentary around "
+    "it — of exactly this shape:\n"
+    '{"satisfied": true|false, "assessment": "<one-paragraph overall judgement>", '
+    '"rationale": "<which diagnostics and score components justify the verdict>", '
+    '"suggestions": ["<specific, actionable change>", ...]}\n'
+    "Set `suggestions` to [] when satisfied is true."
+)
+
 #: Appended to the critique system prompt only when a rendered PNG rides along —
 #: the critic must not be told an image is attached when it isn't.
 _CRITIQUE_VISION = (
@@ -129,6 +249,42 @@ def _extract_source(text: str) -> str:
     if blocks:
         return max(blocks, key=len).strip() + "\n"
     return text.strip() + "\n"
+
+
+def _json_object_from_text(text: str) -> str | None:
+    """Extract a JSON object substring from a model reply, or ``None``.
+
+    Handles the two ways a model returns JSON when it isn't using native
+    structured output: wrapped in a ```json fence, or embedded in prose. Prefers
+    a fenced block that looks like an object, else falls back to the span from
+    the first ``{`` to the last ``}``. Returns ``None`` when there is no object
+    (e.g. the reply is pure prose), so the caller can degrade gracefully.
+    """
+    for block in _FENCE_RE.findall(text):
+        block = block.strip()
+        if block.startswith("{") and block.endswith("}"):
+            return block
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        return text[start : end + 1]
+    return None
+
+
+def _critique_from_text(text: str) -> CritiqueSpec | None:
+    """Parse a :class:`CritiqueSpec` out of raw model text, or ``None``.
+
+    The critique is a streamed reply the model was told to emit as a JSON object;
+    this pulls the object out (fenced or embedded — see :func:`_json_object_from_text`)
+    and validates it. Any failure (no JSON object, malformed, or missing fields)
+    yields ``None`` rather than raising, so the caller degrades gracefully.
+    """
+    candidate = _json_object_from_text(text)
+    if candidate is None:
+        return None
+    try:
+        return CritiqueSpec.model_validate_json(candidate)
+    except ValidationError:
+        return None
 
 
 def render_feedback(
@@ -296,8 +452,13 @@ class DesignResult:
 class BarndoAgent:
     """Drives the write → compile → score → critique → revise loop."""
 
-    def __init__(self, model: str = DEFAULT_MODEL, client=None):
-        self.model = model
+    def __init__(self, model: str | None = None, client=None, max_tokens: int | None = None):
+        # ``None`` resolves via $BARNDSL_MODEL then DEFAULT_MODEL, so the endpoint
+        # (Anthropic vs. a compat gateway) can pick a model it actually serves.
+        self.model = resolve_model(model)
+        # Output-token cap for generation and critique; big enough for a reasoning
+        # model to think and still emit (see resolve_max_tokens / DEFAULT_MAX_TOKENS).
+        self.max_tokens = resolve_max_tokens(max_tokens)
         self._client = client
 
     @property
@@ -350,7 +511,7 @@ class BarndoAgent:
 
         with self.client.messages.stream(
             model=self.model,
-            max_tokens=8000,
+            max_tokens=self.max_tokens,
             system=_GENERATE_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
             thinking={"type": "adaptive"},
@@ -370,6 +531,7 @@ class BarndoAgent:
             "only if it compiles clean AND is a genuinely good layout, and in "
             "`rationale` cite the specific diagnostics and score components that "
             "justify your verdict."
+            + _CRITIQUE_JSON
         )
         # Give the critic eyes: attach the rendered plan when it can be
         # rasterised, and only then claim (in the system prompt) that it was.
@@ -389,17 +551,46 @@ class BarndoAgent:
                 },
                 {"type": "text", "text": prompt},
             ]
-        resp = self.client.messages.parse(
-            model=self.model,
-            max_tokens=8000,
-            system=system,
-            messages=[{"role": "user", "content": content}],
-            output_format=CritiqueSpec,
-        )
-        crit = resp.parsed_output
-        if crit is None:  # pragma: no cover
+        # Stream the critique (like write_source). A non-streaming call
+        # (``messages.parse``) is refused by the SDK once max_tokens is high on a
+        # slow reasoning model — "Streaming is required for operations that may
+        # take longer than 10 minutes" — and a reasoning model (deepseek-v4-pro)
+        # needs that headroom to think. The model is told to emit a JSON object
+        # (via ``_CRITIQUE_JSON``), which we parse fence-tolerantly, so this works
+        # the same on native Anthropic and on compat gateways (DeepSeek) that
+        # ignore Anthropic structured output. Any failure — no parseable JSON, or a
+        # network/API error — degrades to a neutral verdict (with a warning) so the
+        # compile-score-revise loop keeps running on any endpoint.
+        try:
+            with self.client.messages.stream(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": content}],
+            ) as stream:
+                msg = stream.get_final_message()
+        except Exception as exc:
+            logger.warning(
+                "Design critique call failed on model %r (%s: %s) — continuing "
+                "without the critic; the loop still compiles, scores and revises.",
+                self.model, type(exc).__name__, str(exc)[:200],
+            )
             return CritiqueSpec(
-                satisfied=result.ok, assessment="(no critique returned)", rationale=""
+                satisfied=result.ok,
+                assessment="(critique skipped: the critique call failed)",
+                rationale="",
+            )
+        text = "".join(b.text for b in msg.content if b.type == "text")
+        crit = _critique_from_text(text)
+        if crit is None:
+            logger.warning(
+                "Critique returned no parseable JSON on model %r — continuing "
+                "without the critic.", self.model,
+            )
+            return CritiqueSpec(
+                satisfied=result.ok,
+                assessment="(critique skipped: no parseable critique returned)",
+                rationale="",
             )
         return crit
 
@@ -408,10 +599,10 @@ class BarndoAgent:
     def design(
         self,
         brief: str,
-        max_iterations: int = 3,
+        max_iterations: int | None = None,
         critique: bool = True,
         on_step=None,
-        target_score: float | None = DEFAULT_TARGET_SCORE,
+        target_score: float | None = _UNSET,
         seed_with_solver=None,
         *,
         seed_source: str | None = None,
@@ -419,6 +610,13 @@ class BarndoAgent:
         on_phase: Callable[[str, int], None] | None = None,
     ) -> DesignResult:
         """Run the write → compile → score → critique → revise loop.
+
+        ``max_iterations`` and ``target_score`` default to the environment-backed
+        values (:func:`resolve_max_iterations` / :func:`resolve_target_score`, i.e.
+        ``$BARNDSL_MAX_ITERATIONS`` / ``$BARNDSL_TARGET_SCORE`` or the built-in
+        defaults) when left unset. An explicit ``target_score=None`` still
+        *disables* the gate — the ``_UNSET`` sentinel is what selects the default,
+        so ``None`` keeps its distinct "no gate" meaning.
 
         ``seed_with_solver`` opts into seeding the loop from the deterministic
         layout engines (:mod:`barndsl.layout`/:mod:`barndsl.layout2`). ``design``
@@ -448,6 +646,13 @@ class BarndoAgent:
         so a UI can narrate the loop between the coarser ``on_step`` results.
         Both default ``None`` (no behaviour change, no calls).
         """
+        # Resolve the environment-backed defaults (an explicit arg always wins;
+        # target_score=None stays "gate disabled" — only _UNSET means "default").
+        if max_iterations is None:
+            max_iterations = resolve_max_iterations()
+        if target_score is _UNSET:
+            target_score = resolve_target_score()
+
         history: list[DesignStep] = []
         source: str | None = None
         feedback: str | None = None
@@ -688,17 +893,21 @@ def _solver_seed_step(spec) -> DesignStep | None:
 
 def design(
     brief: str,
-    model: str = DEFAULT_MODEL,
-    max_iterations: int = 3,
+    model: str | None = None,
+    max_iterations: int | None = None,
     on_step=None,
-    target_score: float | None = DEFAULT_TARGET_SCORE,
+    target_score: float | None = _UNSET,
     seed_with_solver=None,
     *,
     seed_source: str | None = None,
     cancel: Callable[[], bool] | None = None,
     on_phase: Callable[[str, int], None] | None = None,
 ) -> DesignResult:
-    """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``."""
+    """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``.
+
+    ``max_iterations``/``target_score`` left unset fall to the environment-backed
+    defaults, exactly as :meth:`BarndoAgent.design` documents.
+    """
     return BarndoAgent(model=model).design(
         brief,
         max_iterations=max_iterations,

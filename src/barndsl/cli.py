@@ -108,6 +108,34 @@ def _harden_stdio() -> None:
                 pass
 
 
+def _load_dotenv() -> None:
+    """Load a local ``.env`` into the environment (for the agentic workflow).
+
+    Fills ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` / ``BARNDSL_MODEL`` from
+    a ``.env`` file so ``barndsl serve`` and ``barndsl design`` work without a
+    manual ``export``. Searches from the current directory upward, so running
+    from a subdirectory still finds the repo-root ``.env``.
+
+    Two deliberate properties:
+
+    * **The project ``.env`` is authoritative.** ``override=True`` — values in
+      the file win over the ambient environment. This is on purpose:
+      ``ANTHROPIC_API_KEY`` and ``ANTHROPIC_BASE_URL`` are a matched pair (a key
+      is only valid against its own endpoint). Under ``override=False`` a stray
+      ambient ``ANTHROPIC_BASE_URL`` (e.g. one injected by a host tool) would
+      shadow the file's while the file's key still loaded, sending the key to the
+      wrong endpoint — a 401. Letting the file win keeps the pair consistent.
+    * **Soft dependency.** If ``python-dotenv`` is not installed (a trimmed
+      install), this silently no-ops rather than failing the command; the user
+      just has to export the vars themselves, exactly as before.
+    """
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return
+    load_dotenv(find_dotenv(usecwd=True), override=True)
+
+
 def _repo_example() -> str:
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     return os.path.join(repo_root, "examples", "cedar_ridge.barn")
@@ -407,12 +435,30 @@ def _cmd_layout(args: argparse.Namespace) -> int:
 
 
 def _cmd_design(args: argparse.Namespace) -> int:
-    from .agent import BarndoAgent, agent_availability
+    from .agent import (
+        BarndoAgent,
+        agent_availability,
+        resolve_max_iterations,
+        resolve_model,
+        resolve_target_score,
+    )
 
     available, reason = agent_availability()
     if not available:
         print(f"error: {reason}", file=sys.stderr)
         return 2
+
+    # Each flag defaults to None so an omitted flag falls through to the matching
+    # $BARNDSL_* env var (then the built-in default), keeping the CLI and the
+    # playground on one configuration. An explicit flag always wins.
+    model = resolve_model(args.model)
+    iterations = args.iterations if args.iterations is not None else resolve_max_iterations()
+    if args.target_score is None:
+        target_score: float | None = resolve_target_score()
+    elif args.target_score <= 0:
+        target_score = None  # `--target-score 0` disables the gate
+    else:
+        target_score = args.target_score
 
     def on_step(step) -> None:
         crit = ""
@@ -421,15 +467,15 @@ def _cmd_design(args: argparse.Namespace) -> int:
         score = f"  score {step.score.total:g}/100" if step.score is not None else ""
         print(f"  iteration {step.iteration}: {step.result.summary()}{score}{crit}")
 
-    print(f"Designing with {args.model} (up to {args.iterations} iteration(s))...\n")
-    agent = BarndoAgent(model=args.model)
+    print(f"Designing with {model} (up to {iterations} iteration(s))...\n")
+    agent = BarndoAgent(model=model)
     try:
         result = agent.design(
             args.brief,
-            max_iterations=args.iterations,
+            max_iterations=iterations,
             critique=not args.no_critique,
             on_step=on_step,
-            target_score=args.target_score if args.target_score > 0 else None,
+            target_score=target_score,
         )
     except Exception as exc:  # pragma: no cover - network/runtime errors
         print(f"error: {exc}", file=sys.stderr)
@@ -968,6 +1014,7 @@ window living west width 8 offset 10
 
 def main(argv: list[str] | None = None) -> int:
     _harden_stdio()
+    _load_dotenv()
     parser = argparse.ArgumentParser(
         prog="barndsl",
         description="DSL compiler and agentic workflow for barndominium floor plans.",
@@ -1087,14 +1134,21 @@ def main(argv: list[str] | None = None) -> int:
     p_design = sub.add_parser("design", help="generate a plan from a brief with Claude")
     p_design.add_argument("brief", help="natural-language design brief")
     p_design.add_argument("--out", default="barndo.svg", help="output SVG path")
-    p_design.add_argument("--iterations", type=int, default=3, help="max refine iterations")
-    p_design.add_argument("--model", default="claude-opus-4-8", help="Claude model id")
+    p_design.add_argument(
+        "--iterations", type=int, default=None,
+        help="max refine iterations (default: $BARNDSL_MAX_ITERATIONS, else 3)",
+    )
+    p_design.add_argument(
+        "--model", default=None,
+        help="model id (default: $BARNDSL_MODEL, else claude-opus-4-8)",
+    )
     p_design.add_argument("--no-critique", action="store_true", help="skip the design critic")
     p_design.add_argument(
         "--target-score",
         type=float,
-        default=90.0,
-        help="keep iterating while the design score is below this (0 disables the gate)",
+        default=None,
+        help="keep iterating while the design score is below this; 0 disables the "
+        "gate (default: $BARNDSL_TARGET_SCORE, else 90)",
     )
     p_design.set_defaults(func=_cmd_design)
 
