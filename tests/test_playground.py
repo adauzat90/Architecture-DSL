@@ -643,3 +643,77 @@ def test_plan_svg_rooms_are_clickable_for_source_linking():
     # the payload carries the matching source line for each room
     p = compile_payload(CLEAN)
     assert all(r.get("line") for r in p["rooms"])
+
+
+# --- wave 4: quick-fix, find/replace, autocomplete, comment, triage ----------
+
+
+def test_highlight_tokens_carry_statements_and_fixtures():
+    # The editor's autocomplete and the diagnostics quick-fix need statement heads
+    # and fixture kinds split out of the merged highlight vocab — derived from the
+    # same sources the parser uses, so the two can't drift.
+    from barndsl.fixtures import FIXTURES
+    from barndsl.playground import _STATEMENT_KEYWORDS, _highlight_tokens
+
+    toks = _highlight_tokens()
+    assert toks["statements"] == sorted(_STATEMENT_KEYWORDS)
+    assert toks["fixtures"] == sorted(FIXTURES)
+    # every statement head is also in the merged keyword set (colouring is unchanged)
+    assert set(toks["statements"]) <= set(toks["keywords"])
+
+
+def test_app_ships_the_statement_and_fixture_lists_to_the_page():
+    html = render_app(CLEAN)
+    # the split lists reach the SPA as JS sets it can branch on
+    assert "const HL_STMT" in html and "const HL_FIX" in html
+    assert "HIGHLIGHT.statements" in html and "HIGHLIGHT.fixtures" in html
+    # a fixture kind and a statement head both round-trip into the page JSON
+    assert '"toilet"' in html and '"fixture"' in html
+
+
+def test_app_contains_diagnostic_quickfix_apply():
+    html = render_app(CLEAN)
+    for token in ("function quickFixSnippet(", "function applyQuickFix(",
+                  "QUICKFIX_PLACEHOLDER", 'class="qfix"', 'data-qfix="'):
+        assert token in html, token
+    # the placeholder guard rejects the fill-in-the-blank hints (…/</>)
+    assert "\\.\\.\\.|" in html or "QUICKFIX_PLACEHOLDER = /" in html
+
+
+def test_app_contains_find_and_replace_bar():
+    html = render_app(CLEAN)
+    for token in ('id="find-bar"', 'id="find-input"', 'id="replace-input"',
+                  'id="find-count"', "function openFind(", "function replaceAll(",
+                  "function cycleFind(", "mark.find"):
+        assert token in html, token
+    # find + replace are taught in the keyboard-shortcuts list
+    assert "Find in the editor" in html and "Find & replace" in html
+
+
+def test_app_contains_autocomplete_popup_and_context():
+    html = render_app(CLEAN)
+    for token in ('id="ac-pop"', "function completionContext(", "function acceptAc(",
+                  "function roomIds(", "function updateAutocomplete("):
+        assert token in html, token
+    # the Ctrl+Space completion shortcut is documented
+    assert "Autocomplete" in html
+
+
+def test_app_contains_comment_toggle():
+    html = render_app(CLEAN)
+    assert "function toggleComment(" in html
+    assert "Toggle comment" in html
+
+
+def test_app_contains_diagnostics_triage():
+    html = render_app(CLEAN)
+    for token in ("function sortedDiagnostics(", "data-filter=", "let diagFilter",
+                  ".count.active"):
+        assert token in html, token
+
+
+def test_wave4_markup_keeps_the_offline_guarantee():
+    # None of the new UI reaches for the network — the offline promise holds.
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html

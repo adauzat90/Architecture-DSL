@@ -87,7 +87,7 @@ from .cost import estimate_cost
 from .dxf import to_dxf
 from .edits import EditError, apply_edit, edit_from_json, opening_overlays
 from .energy import describe_targets, envelope_targets
-from .fixtures import resolve_room_fixtures
+from .fixtures import FIXTURES, resolve_room_fixtures
 from .gltf import build_scene, to_glb
 from .ifc import to_ifc
 from .packet import build_packet
@@ -111,7 +111,7 @@ _STATEMENT_KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "accessible", "electrical",
     "street", "overhang", "climate", "orientation", "finish", "site", "setback",
     "roof", "note", "program", "require", "room", "wall", "suite", "zone", "door",
-    "open", "entry", "window", "porch", "stair", "frame",
+    "open", "entry", "window", "porch", "stair", "frame", "fixture",
 )
 
 #: Secondary keywords — placement anchors, opening modifiers and option words that
@@ -137,10 +137,18 @@ def _highlight_tokens() -> dict:
     source of room-type names) and ``keywords`` from the compiler's statement
     dispatch plus the grammar's modifier words — derived, not re-invented, so the
     highlighting tracks the language rather than drifting from it.
+
+    ``statements`` is the statement-head subset alone (``keywords`` folds heads and
+    modifiers together for one colour, but the editor's autocomplete and the
+    diagnostics quick-fix need to tell a line-leading keyword from a mid-statement
+    modifier). ``fixtures`` is the fixture catalog, so ``fixture <kind>`` can
+    autocomplete against the same set the parser validates.
     """
     return {
         "keywords": sorted(set(_STATEMENT_KEYWORDS) | set(_MODIFIER_KEYWORDS)),
         "types": [t.value for t in RoomType],
+        "statements": sorted(_STATEMENT_KEYWORDS),
+        "fixtures": sorted(FIXTURES),
     }
 
 
@@ -1040,6 +1048,16 @@ _APP_HTML = r"""<!doctype html>
     border:1px solid var(--line); }
   .count.error { color:var(--err); } .count.warning { color:var(--warn); }
   .count.info { color:var(--info); } .count.zero { color:var(--faint); opacity:.65; }
+  /* count pills double as severity filters — a live one is a button, an active
+     one wears the accent, a zero one stays inert */
+  .count[data-filter]:not(.zero) { cursor:pointer; }
+  .count.active { border-color:var(--accent); background:rgba(209,135,63,.14); color:var(--accent); }
+  .count.zero { cursor:default; }
+  /* quick-fix Apply button on a diagnostic row (subtle, right-aligned) */
+  .diag-row .qfix { align-self:center; justify-self:end; font:inherit; font-size:11px;
+    font-weight:600; padding:3px 9px; border-radius:6px; border:1px solid var(--line);
+    background:var(--panel); color:var(--muted); cursor:pointer; white-space:nowrap; }
+  .diag-row .qfix:hover { border-color:var(--accent); color:var(--accent); }
   .diag-head .ok { color:var(--okc); font-weight:600; margin-left:auto; }
   .diag-empty { padding:14px 12px; color:var(--faint); }
   .diag-row { display:grid; grid-template-columns:64px auto 1fr; gap:8px;
@@ -1185,6 +1203,36 @@ _APP_HTML = r"""<!doctype html>
   :root[data-theme="light"] #hl .k { color:#2f6fb0; }
   :root[data-theme="light"] #hl .t { color:#8a5cc0; }
   :root[data-theme="light"] #hl .id { color:#1d2530; }
+  /* find/replace match highlights, drawn in the mirror behind the caret */
+  #hl mark.find { background:rgba(209,135,63,.30); color:inherit; border-radius:2px; }
+  #hl mark.find.cur { background:rgba(209,135,63,.62); }
+
+  /* --- editor find/replace bar (pinned top-right of the editor) --- */
+  .find-bar { position:absolute; top:6px; right:12px; z-index:16; display:flex;
+    flex-direction:column; gap:5px; padding:6px 7px; background:var(--panel);
+    border:1px solid var(--line); border-radius:9px; box-shadow:0 4px 16px rgba(20,30,50,.18); }
+  .find-bar[hidden] { display:none; }
+  .find-row { display:flex; align-items:center; gap:5px; }
+  .find-row[hidden] { display:none; }
+  .find-bar input { font:inherit; font-size:12.5px; padding:4px 8px; border-radius:6px; width:168px;
+    border:1px solid var(--line); background:var(--editor); color:var(--ink); outline:none; }
+  .find-bar input:focus { border-color:var(--accent); }
+  .find-count { font:11px ui-monospace,Menlo,Consolas,monospace; color:var(--faint);
+    min-width:52px; text-align:center; white-space:nowrap; }
+  .find-bar button { font:inherit; font-size:12px; font-weight:600; padding:4px 9px; border-radius:6px;
+    border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer; }
+  .find-bar button:hover { border-color:var(--accent); color:var(--accent); }
+  .find-bar .find-nav { padding:3px 7px; font-size:11px; }
+  .find-bar .find-x { border:0; font-size:16px; line-height:1; padding:0 5px; color:var(--muted); }
+
+  /* --- editor autocomplete popup (fixed, positioned at the caret) --- */
+  .ac-pop { position:fixed; z-index:60; min-width:132px; max-height:196px; overflow:auto;
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    box-shadow:0 6px 22px rgba(20,30,50,.22); padding:4px; font-size:12.5px; }
+  .ac-pop[hidden] { display:none; }
+  .ac-item { padding:4px 9px; border-radius:5px; cursor:pointer; white-space:nowrap;
+    font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--ink); }
+  .ac-item.sel { background:var(--accent); color:#fff; }
 
   /* --- viewport zoom controls (2D plan + elevation lightbox) --- */
   .zoom-ctl { position:absolute; z-index:8; bottom:12px; right:14px; display:flex;
@@ -1368,6 +1416,20 @@ _APP_HTML = r"""<!doctype html>
         <textarea id="editor" spellcheck="false" autocapitalize="off"
           autocomplete="off" wrap="off"></textarea>
       </div>
+      <div class="find-bar" id="find-bar" hidden>
+        <div class="find-row">
+          <input id="find-input" type="text" placeholder="Find" autocomplete="off" spellcheck="false">
+          <span class="find-count" id="find-count"></span>
+          <button class="find-nav" id="find-prev" title="Previous match (Shift+Enter)" aria-label="Previous match">▲</button>
+          <button class="find-nav" id="find-next" title="Next match (Enter)" aria-label="Next match">▼</button>
+          <button class="find-x" id="find-close" title="Close (Esc)" aria-label="Close find">×</button>
+        </div>
+        <div class="find-row" id="find-replace-row" hidden>
+          <input id="replace-input" type="text" placeholder="Replace" autocomplete="off" spellcheck="false">
+          <button class="find-btn" id="replace-one" title="Replace this match">Replace</button>
+          <button class="find-btn" id="replace-all" title="Replace all matches">All</button>
+        </div>
+      </div>
       <div class="drop-hint">Drop a .barn file to open</div>
     </div>
     <div class="diagnostics" id="diagnostics"></div>
@@ -1438,6 +1500,7 @@ _APP_HTML = r"""<!doctype html>
   </div>
   <div class="lb-body"><div class="svgbox" id="lb-svg" tabindex="0" style="outline:none"></div></div>
 </div>
+<div class="ac-pop" id="ac-pop" hidden></div>
 <script>__RENDERER_JS__</script>
 <script>
 const LAYER_LABELS = __LAYER_LABELS__;
@@ -1461,6 +1524,14 @@ const metricsEl = document.getElementById('metrics');
 const viewport = document.getElementById('viewport');
 
 let diagnostics = [];
+// Editor find/replace state (Feature: Ctrl/Cmd+F). Declared up here because
+// renderHighlight reads it on the very first boot render, before the find bar wires.
+let findOpen = false, findMatches = [], findIndex = -1;
+// Autocomplete popup state (Ctrl/Cmd+Space / type-ahead).
+let acOpen = false, acItems = [], acIndex = 0, acWord = null;
+// Diagnostics triage: the active severity filter (null = show all), persisted
+// across recompiles, and the last payload so a pill click can re-render in place.
+let diagFilter = null, lastDiagPayload = { diagnostics: [], counts: { error:0, warning:0, info:0 } };
 let lastGood = null;     // last payload that carried a full render
 let scene3d = null;      // last good 3D scene json
 let ctrl = null;         // 3D renderer controller
@@ -1495,6 +1566,11 @@ function renderGutter(){
 // desync. Purely visual: the textarea keeps all input behaviour (tab, IME, paste).
 const HL_KW = new Set(HIGHLIGHT.keywords || []);
 const HL_TYPE = new Set(HIGHLIGHT.types || []);
+// Statement heads (line-leading keywords) and fixture kinds, split out from the
+// merged highlight vocab: the autocomplete and the diagnostics quick-fix must tell
+// a statement head from a mid-line modifier, which HL_KW alone can't.
+const HL_STMT = new Set(HIGHLIGHT.statements || []);
+const HL_FIX = HIGHLIGHT.fixtures || [];
 function hlWord(w){
   if (w.length > 1 && w.endsWith(':'))
     return '<span class="id">' + esc(w.slice(0, -1)) + '</span>:';
@@ -1523,24 +1599,158 @@ function hlLine(line){
   }
   return out;
 }
+// Find highlighting rides on the same mirror. A match can straddle token
+// boundaries, so instead of injecting into hlLine's finished HTML we retokenise
+// the line into {cls,text} pieces, split those pieces at the match edges, and wrap
+// the covered runs in <mark> — well-formed even across a keyword/number seam.
+function classifyWord(w){
+  if (w.length > 1 && w.endsWith(':')) return [{ cls:'id', s:w.slice(0, -1) }, { cls:'', s:':' }];
+  const lw = w.toLowerCase();
+  if (HL_KW.has(lw)) return [{ cls:'k', s:w }];
+  if (HL_TYPE.has(lw)) return [{ cls:'t', s:w }];
+  if (/\d/.test(w)){                         // colour digit runs, leave the rest plain
+    const parts = [], re = /(\d+(?:\.\d+)?)|([^\d]+)/g; let m;
+    while ((m = re.exec(w))) parts.push({ cls: m[1] != null ? 'n' : '', s: m[0] });
+    return parts;
+  }
+  return [{ cls:'', s:w }];
+}
+function hlPieces(line){
+  const out = []; let i = 0; const n = line.length;
+  while (i < n){
+    const ch = line[i];
+    if (ch === '#'){ out.push({ cls:'c', s:line.slice(i) }); break; }
+    if (ch === '"'){
+      let j = i + 1;
+      while (j < n && line[j] !== '"'){ if (line[j] === '\\') j++; j++; }
+      if (j < n) j++;
+      out.push({ cls:'s', s:line.slice(i, j) }); i = j; continue;
+    }
+    if (ch === ' ' || ch === '\t'){ out.push({ cls:'', s:ch }); i++; continue; }
+    let j = i;
+    while (j < n && line[j] !== ' ' && line[j] !== '\t' && line[j] !== '#' && line[j] !== '"') j++;
+    for (const p of classifyWord(line.slice(i, j))) out.push(p);
+    i = j;
+  }
+  return out;
+}
+// Split pieces so each falls wholly inside or outside a match (marks sorted,
+// non-overlapping, offsets relative to the line start).
+function splitByMarks(pieces, marks){
+  const out = []; let pos = 0;
+  for (const p of pieces){
+    const base = pos, end = pos + p.s.length; let cur = base;
+    while (cur < end){
+      let mk = null, next = end;
+      for (const m of marks){
+        if (m.s <= cur && cur < m.e){ mk = m; next = Math.min(end, m.e); break; }
+        if (cur < m.s) next = Math.min(next, m.s);
+      }
+      out.push({ cls:p.cls, s:p.s.slice(cur - base, next - base), mk });
+      cur = next;
+    }
+    pos = end;
+  }
+  return out;
+}
+function emitMarked(tagged){
+  let html = '', open = undefined;
+  for (const t of tagged){
+    const id = t.mk ? (t.mk.i + (t.mk.cur ? ':cur' : '')) : null;
+    if (id !== open){
+      if (open) html += '</mark>';
+      if (id !== null) html += '<mark class="find' + (t.mk.cur ? ' cur' : '') + '">';
+      open = id;
+    }
+    html += t.cls ? '<span class="' + t.cls + '">' + esc(t.s) + '</span>' : esc(t.s);
+  }
+  if (open) html += '</mark>';
+  return html;
+}
 function renderHighlight(){
+  const active = findOpen && findMatches.length;
+  let off = 0;
+  const out = editor.value.split('\n').map(line => {
+    let lm = null;
+    if (active){
+      lm = []; const lineEnd = off + line.length;
+      for (let k = 0; k < findMatches.length; k++){
+        const m = findMatches[k];
+        if (m.end > off && m.start < lineEnd)
+          lm.push({ s:Math.max(0, m.start - off), e:Math.min(line.length, m.end - off),
+            i:k, cur:k === findIndex });
+      }
+    }
+    off += line.length + 1;
+    return (lm && lm.length) ? emitMarked(splitByMarks(hlPieces(line), lm)) : hlLine(line);
+  });
   // A trailing newline keeps the <pre> the same height as the textarea's content.
-  hl.innerHTML = editor.value.split('\n').map(hlLine).join('\n') + '\n';
+  hl.innerHTML = out.join('\n') + '\n';
   hl.scrollTop = editor.scrollTop; hl.scrollLeft = editor.scrollLeft;
 }
 function syncScroll(){ gutter.scrollTop = editor.scrollTop;
   hl.scrollTop = editor.scrollTop; hl.scrollLeft = editor.scrollLeft; }
 
 editor.addEventListener('scroll', syncScroll);
-editor.addEventListener('input', () => { renderGutter(); schedule(); });
+editor.addEventListener('scroll', () => { if (acOpen) hideAc(); });   // popup can't track a scroll
+editor.addEventListener('input', () => {
+  renderGutter(); schedule();
+  updateAutocomplete(false);            // refresh / dismiss the popup as the word changes
+  if (findOpen) runFind(true);          // keep find matches live while the bar is open
+});
 editor.addEventListener('keydown', e => {
-  if (e.key === 'Tab'){ e.preventDefault(); insertText('  '); }
-  else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)){ e.preventDefault(); compile(); }
+  // Ctrl/Cmd+Space forces the completion popup regardless of word length.
+  if ((e.ctrlKey || e.metaKey) && (e.key === ' ' || e.code === 'Space')){
+    e.preventDefault(); updateAutocomplete(true); return;
+  }
+  // While the popup owns the keys, it captures navigation/accept/dismiss so the
+  // textarea's own Tab-inserts-spaces stays untouched when nothing is open.
+  if (acOpen){
+    if (e.key === 'ArrowDown'){ e.preventDefault(); moveAc(1); return; }
+    if (e.key === 'ArrowUp'){ e.preventDefault(); moveAc(-1); return; }
+    if (e.key === 'Enter' || e.key === 'Tab'){ e.preventDefault(); acceptAc(); return; }
+    if (e.key === 'Escape'){ e.preventDefault(); hideAc(); return; }
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === '/'){ e.preventDefault(); toggleComment(); return; }
+  if (e.key === 'Tab'){ e.preventDefault(); insertText('  '); return; }
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)){ e.preventDefault(); compile(); return; }
 });
 function insertText(t){
   const s = editor.selectionStart, e = editor.selectionEnd;
   editor.value = editor.value.slice(0, s) + t + editor.value.slice(e);
   editor.selectionStart = editor.selectionEnd = s + t.length;
+  renderGutter(); schedule();
+}
+
+// --- comment toggle (Ctrl/Cmd+/) --------------------------------------------
+// Toggles a leading `# ` on every non-blank line the selection (or caret) covers.
+// If all of them are already commented it uncomments (dropping the `#` and one
+// following space); otherwise it comments them. The selection is grown to cover
+// the same lines afterwards so a repeat keypress flips them straight back.
+function toggleComment(){
+  const val = editor.value, selS = editor.selectionStart, selE = editor.selectionEnd;
+  const lines = val.split('\n'), starts = [];
+  let off = 0;
+  for (const ln of lines){ starts.push(off); off += ln.length + 1; }
+  const lineOf = pos => { let li = 0;
+    for (let i = 0; i < lines.length; i++){ if (starts[i] <= pos) li = i; else break; } return li; };
+  let first = lineOf(selS), last = lineOf(selE);
+  // A selection ending exactly at a line's start shouldn't drag in that next line.
+  if (selE > selS && selE === starts[last] && last > first) last--;
+  const idxs = [];
+  for (let i = first; i <= last; i++) if (lines[i].trim() !== '') idxs.push(i);
+  if (!idxs.length) return;                       // nothing but blank lines
+  const allCommented = idxs.every(i => /^\s*#/.test(lines[i]));
+  for (const i of idxs)
+    lines[i] = allCommented ? lines[i].replace(/^(\s*)#\s?/, '$1')
+                            : lines[i].replace(/^(\s*)/, '$1# ');
+  editor.value = lines.join('\n');
+  // Reselect the same span of lines (start of first → end of last).
+  let noff = 0; const nstarts = [];
+  for (const ln of lines){ nstarts.push(noff); noff += ln.length + 1; }
+  editor.selectionStart = nstarts[first];
+  editor.selectionEnd = nstarts[last] + lines[last].length;
+  autosaveOff = false;
   renderGutter(); schedule();
 }
 
@@ -1656,6 +1866,8 @@ const helpShortcuts = document.getElementById('help-shortcuts');
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 const SHORTCUTS = [
   ['Save .barn', MOD + '+S'], ['Open a .barn file', MOD + '+O'],
+  ['Find in the editor', MOD + '+F'], ['Find & replace', MOD + '+H'],
+  ['Autocomplete', MOD + '+Space'], ['Toggle comment', MOD + '+/'],
   ['Send to the agent', MOD + '+Enter'], ['Undo a layout edit', MOD + '+Z'],
   ['Zoom in / out / fit', '+  −  0'], ['Compile now', MOD + '+Enter'],
   ['Cancel a drag', 'Esc'], ['Switch floor (edit mode)', '[  ]'],
@@ -1747,18 +1959,82 @@ document.addEventListener('keydown', e => {
 });
 
 // --- diagnostics list -------------------------------------------------------
+function escAttr(s){ return esc(s).replace(/"/g, '&quot;'); }
+
+// A hint often embeds a paste-able DSL line in backticks, e.g.
+// "…e.g. `entry a south width 3 offset 4`." We surface an Apply button only when
+// that snippet is a *complete, literal* statement the author can drop in as-is:
+// its first word is a statement head (not a modifier) and it carries no
+// placeholder (…/</>) they would still have to fill in. `site <W> x <L>` and
+// `size 12 x 10` both correctly get no button.
+const QUICKFIX_PLACEHOLDER = /\.\.\.|…|[<>]/;
+function quickFixSnippet(hint){
+  if (!hint) return null;
+  const re = /`([^`]+)`/g; let m;
+  while ((m = re.exec(hint))){
+    const snip = m[1].trim();
+    const head = (snip.split(/\s+/)[0] || '').toLowerCase();
+    if (HL_STMT.has(head) && !QUICKFIX_PLACEHOLDER.test(snip)) return snip;
+  }
+  return null;
+}
+function qfixTitle(snip){
+  const t = snip.length > 30 ? snip.slice(0, 26).replace(/\s+\S*$/, '') + ' …' : snip;
+  return 'Insert this line: ' + t;
+}
+// Insert a quick-fix snippet as a fresh line — after the diagnostic's line if it
+// has one, else past the last non-blank line — then rerun the compile flow and
+// jump/flash the inserted line.
+function applyQuickFix(snippet, line){
+  const lines = editor.value.split('\n');
+  let at;
+  if (line && line >= 1 && line <= lines.length){ at = line; }
+  else { let i = lines.length - 1; while (i >= 0 && lines[i].trim() === '') i--; at = i + 1; }
+  lines.splice(at, 0, snippet);
+  editor.value = lines.join('\n');
+  autosaveOff = false;
+  renderGutter(); compile();
+  const ln = at + 1;
+  jumpToLine(ln); flashLine(ln);
+}
+
+// Triage: order a *copy* errors → warnings → infos, line ascending within each
+// (no-line rows last). The payload the viewport reads stays in emit order.
+const SEV_RANK = { error:0, warning:1, info:2 };
+function sortedDiagnostics(ds){
+  return ds.slice().sort((a, b) => {
+    const s = (SEV_RANK[a.severity] ?? 3) - (SEV_RANK[b.severity] ?? 3);
+    return s || (a.line || Infinity) - (b.line || Infinity);
+  });
+}
 function countChip(kind, n){
-  return '<span class="count ' + kind + (n ? '' : ' zero') + '">' + n + ' ' + kind +
+  const active = diagFilter === kind, zero = !n;
+  const title = zero ? '' : (active ? 'Showing only ' + kind + 's — click to clear'
+                                    : 'Show only ' + kind + 's');
+  return '<span class="count ' + kind + (zero ? ' zero' : '') + (active ? ' active' : '') +
+    '" data-filter="' + kind + '" title="' + title + '">' + n + ' ' + kind +
     (n === 1 ? '' : 's') + '</span>';
 }
 function renderDiagnostics(p){
+  lastDiagPayload = p;
   const ds = p.diagnostics || [], c = p.counts || { error:0, warning:0, info:0 };
+  // A filter whose bucket emptied on recompile self-clears — a filter matching
+  // nothing would just hide the work that remains, so we reveal it instead.
+  if (diagFilter && !c[diagFilter]) diagFilter = null;
   let head = '<div class="diag-head">' + countChip('error', c.error) +
     countChip('warning', c.warning) + countChip('info', c.info) +
     (p.ok ? '<span class="ok">✓ compiles clean</span>' : '') + '</div>';
   if (!ds.length){ diagEl.innerHTML = head + '<div class="diag-empty">No diagnostics.</div>'; return; }
+  let shown = sortedDiagnostics(ds);
+  if (diagFilter) shown = shown.filter(d => d.severity === diagFilter);
+  if (!shown.length){ diagEl.innerHTML = head +
+    '<div class="diag-empty">No ' + esc(diagFilter) + 's — clear the filter to see the rest.</div>';
+    return; }
   let rows = '';
-  for (const d of ds){
+  for (const d of shown){
+    const snip = quickFixSnippet(d.hint);
+    const apply = snip ? '<button class="qfix" data-qfix="' + escAttr(snip) + '" data-qline="' +
+      (d.line || '') + '" title="' + escAttr(qfixTitle(snip)) + '">Apply</button>' : '';
     rows += '<div class="diag-row sev-' + d.severity + '" data-line="' + (d.line || '') + '">' +
       '<span class="sev">' + d.severity + '</span>' +
       '<span class="code">' + esc(d.code) + '</span>' +
@@ -1766,11 +2042,26 @@ function renderDiagnostics(p){
         (d.line ? '<span class="loc">L' + d.line + (d.col ? ':' + d.col : '') + '</span> ' : '') +
         esc(d.message) + (d.room ? ' <em>(' + esc(d.room) + ')</em>' : '') +
         (d.hint ? '<span class="hint">' + esc(d.hint) + '</span>' : '') +
-      '</span></div>';
+      '</span>' + apply + '</div>';
   }
   diagEl.innerHTML = head + rows;
 }
 diagEl.addEventListener('click', e => {
+  // A count pill toggles a severity filter (zero-count pills stay inert).
+  const pill = e.target.closest('.count[data-filter]');
+  if (pill){
+    if (!pill.classList.contains('zero')){
+      const kind = pill.getAttribute('data-filter');
+      diagFilter = diagFilter === kind ? null : kind;
+      renderDiagnostics(lastDiagPayload);
+    }
+    return;
+  }
+  // Apply a quick-fix without also triggering the row's jump-to-line.
+  const qbtn = e.target.closest('.qfix');
+  if (qbtn){ e.stopPropagation();
+    applyQuickFix(qbtn.getAttribute('data-qfix'),
+      parseInt(qbtn.getAttribute('data-qline') || '0', 10)); return; }
   const row = e.target.closest('.diag-row'); if (!row) return;
   const ln = parseInt(row.getAttribute('data-line') || '0', 10);
   if (ln) jumpToLine(ln);
@@ -1786,6 +2077,216 @@ function jumpToLine(ln){
   editor.scrollTop = Math.max(0, (ln - 3) * lh);
   gutter.scrollTop = editor.scrollTop;
 }
+
+// --- find & replace ---------------------------------------------------------
+// A compact bar over the editor. Search is case-insensitive plain text; matches
+// are highlighted in the mirror (renderHighlight), cycled with Enter/Shift+Enter
+// or the ▲▼ buttons (wrapping), and replaced one-at-a-time or all at once. The bar
+// closes on Esc, dropping every mark and returning focus to the editor.
+const findBar = document.getElementById('find-bar');
+const findInput = document.getElementById('find-input');
+const findCount = document.getElementById('find-count');
+const findReplaceRow = document.getElementById('find-replace-row');
+const replaceInput = document.getElementById('replace-input');
+function computeFindMatches(){
+  findMatches = [];
+  const q = findInput.value; if (!q) return;
+  const hay = editor.value.toLowerCase(), needle = q.toLowerCase();
+  let i = 0, idx;
+  while ((idx = hay.indexOf(needle, i)) >= 0){
+    findMatches.push({ start: idx, end: idx + needle.length });
+    i = idx + needle.length;                 // non-overlapping
+  }
+}
+function updateFindCount(){
+  findCount.textContent = findMatches.length ? (findIndex + 1) + ' / ' + findMatches.length
+    : (findInput.value ? '0 results' : '');
+}
+function scrollToMatch(m){
+  const ln = editor.value.slice(0, m.start).split('\n').length;   // 1-based
+  const lh = parseFloat(getComputedStyle(editor).lineHeight) || 20;
+  editor.scrollTop = Math.max(0, (ln - 3) * lh);
+  syncScroll();
+}
+function selectMatch(m){ editor.selectionStart = m.start; editor.selectionEnd = m.end; scrollToMatch(m); }
+function runFind(keep){
+  const prev = findMatches[findIndex];
+  computeFindMatches();
+  if (!findMatches.length){ findIndex = -1; }
+  else if (keep && prev){
+    let ni = findMatches.findIndex(m => m.start >= prev.start);
+    findIndex = ni < 0 ? 0 : ni;
+  } else {
+    const caret = editor.selectionStart || 0;
+    let ni = findMatches.findIndex(m => m.start >= caret);
+    findIndex = ni < 0 ? 0 : ni;
+  }
+  updateFindCount(); renderHighlight();
+  if (findIndex >= 0) scrollToMatch(findMatches[findIndex]);
+}
+function cycleFind(dir){
+  if (!findMatches.length) return;
+  findIndex = (findIndex + dir + findMatches.length) % findMatches.length;
+  updateFindCount(); renderHighlight(); selectMatch(findMatches[findIndex]);
+}
+function openFind(withReplace){
+  findOpen = true; findBar.hidden = false; findReplaceRow.hidden = !withReplace;
+  const sel = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+  if (sel && sel.indexOf('\n') < 0) findInput.value = sel;   // prefill from a single-line selection
+  runFind(false);
+  findInput.focus(); findInput.select();
+}
+function closeFind(){
+  findOpen = false; findBar.hidden = true; findMatches = []; findIndex = -1;
+  renderHighlight(); editor.focus();
+}
+function replaceOne(){
+  if (findIndex < 0 || !findMatches.length) return;
+  const m = findMatches[findIndex], rep = replaceInput.value;
+  editor.value = editor.value.slice(0, m.start) + rep + editor.value.slice(m.end);
+  editor.selectionStart = editor.selectionEnd = m.start + rep.length;
+  autosaveOff = false; renderGutter(); schedule();
+  runFind(false);
+}
+function replaceAll(){
+  computeFindMatches();
+  if (!findInput.value || !findMatches.length) return;
+  const rep = replaceInput.value;
+  let out = '', last = 0;
+  for (const m of findMatches){ out += editor.value.slice(last, m.start) + rep; last = m.end; }
+  out += editor.value.slice(last);
+  const n = findMatches.length;
+  editor.value = out; autosaveOff = false; renderGutter(); schedule();
+  runFind(false);
+  findCount.textContent = 'replaced ' + n;
+}
+findInput.addEventListener('input', () => runFind(false));
+findInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter'){ e.preventDefault(); cycleFind(e.shiftKey ? -1 : 1); }
+});
+replaceInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter'){ e.preventDefault(); replaceOne(); }
+});
+// Esc closes the bar from anywhere inside it — the ▲▼/Replace buttons hold focus
+// after a click, so an input-only handler would strand the bar open.
+findBar.addEventListener('keydown', e => {
+  if (e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); closeFind(); }
+});
+document.getElementById('find-next').addEventListener('click', () => cycleFind(1));
+document.getElementById('find-prev').addEventListener('click', () => cycleFind(-1));
+document.getElementById('find-close').addEventListener('click', closeFind);
+document.getElementById('replace-one').addEventListener('click', replaceOne);
+document.getElementById('replace-all').addEventListener('click', replaceAll);
+
+// --- editor autocomplete ----------------------------------------------------
+// A context popup: statement heads at line start, room types after `room <id>:`,
+// fixture kinds after `fixture`, and live room ids after door/open/window/entry
+// heads, placement anchors and `in`. Never inside a comment. Accepting replaces
+// the current word through the normal input path (renderGutter/renderHighlight).
+const acPop = document.getElementById('ac-pop');
+const AC_ANCHORS = new Set(['east-of','west-of','north-of','south-of',
+  'right-of','left-of','above-of','below-of']);
+const AC_ROOM_HEADS = new Set(['door','open','window','entry']);
+let _acCharW = 0;
+function acCharWidth(){
+  if (_acCharW) return _acCharW;
+  const cs = getComputedStyle(editor), span = document.createElement('span');
+  span.style.cssText = 'position:absolute;visibility:hidden;white-space:pre';
+  span.style.fontFamily = cs.fontFamily; span.style.fontSize = cs.fontSize;
+  span.textContent = 'MMMMMMMMMM'; document.body.appendChild(span);
+  _acCharW = span.getBoundingClientRect().width / 10; span.remove();
+  return _acCharW || 8;
+}
+function roomIds(){
+  const ids = [], re = /^\s*room\s+([A-Za-z_][\w-]*)\s*:/gm; let m;
+  while ((m = re.exec(editor.value))) ids.push(m[1]);
+  return ids;
+}
+function currentWord(){
+  const pos = editor.selectionStart, v = editor.value;
+  let s = pos, e = pos;
+  while (s > 0 && /[\w-]/.test(v[s - 1])) s--;
+  while (e < v.length && /[\w-]/.test(v[e])) e++;
+  return { start: s, end: e, text: v.slice(s, pos) };   // prefix = text typed up to the caret
+}
+function completionContext(){
+  const pos = editor.selectionStart, v = editor.value;
+  const lineStart = v.lastIndexOf('\n', pos - 1) + 1;
+  if (v.slice(lineStart, pos).indexOf('#') >= 0) return null;   // never inside a comment
+  const w = currentWord();
+  const before = v.slice(lineStart, w.start);
+  const toks = before.split(/\s+/).filter(Boolean);
+  const head = (toks[0] || '').toLowerCase();
+  const last = toks.length ? toks[toks.length - 1].toLowerCase() : '';
+  let items = null;
+  if (toks.length === 0){ items = HIGHLIGHT.statements || []; }        // first word of the line
+  else if (AC_ROOM_HEADS.has(last) || AC_ANCHORS.has(last) || last === 'in' || last === '-'){
+    items = roomIds();                                                // a room-id slot
+  } else if (head === 'room' && /^room\s+[A-Za-z_][\w-]*:\s*$/.test(before)){
+    items = HIGHLIGHT.types || [];                                    // room type after `room <id>:`
+  } else if (head === 'fixture' && toks.length === 1){
+    items = HL_FIX;                                                   // `fixture <kind>`
+  } else { return null; }
+  if (!items || !items.length) return null;
+  return { word: w, items };
+}
+function paintAc(){
+  let h = '';
+  for (let i = 0; i < acItems.length; i++)
+    h += '<div class="ac-item' + (i === acIndex ? ' sel' : '') + '" data-i="' + i + '">' +
+      esc(acItems[i]) + '</div>';
+  acPop.innerHTML = h;
+}
+function positionAc(){
+  const pos = editor.selectionStart, v = editor.value;
+  const nl = v.lastIndexOf('\n', pos - 1), col = pos - (nl + 1);
+  const line = v.slice(0, pos).split('\n').length - 1;
+  const cs = getComputedStyle(editor), lh = parseFloat(cs.lineHeight) || 20;
+  const padL = parseFloat(cs.paddingLeft) || 0, padT = parseFloat(cs.paddingTop) || 0;
+  const r = editor.getBoundingClientRect();
+  const x = r.left + padL + col * acCharWidth() - editor.scrollLeft;
+  const y = r.top + padT + (line + 1) * lh - editor.scrollTop;      // just below the caret's line
+  acPop.style.left = x + 'px'; acPop.style.top = y + 'px';
+  const box = acPop.getBoundingClientRect();
+  if (box.right > window.innerWidth - 6) acPop.style.left = (window.innerWidth - box.width - 6) + 'px';
+  if (box.bottom > window.innerHeight - 6) acPop.style.top = (y - box.height - lh - 4) + 'px';
+}
+function showAc(items, word){
+  acItems = items; acWord = word; acIndex = 0; acOpen = true;
+  paintAc(); acPop.hidden = false; positionAc();
+}
+function hideAc(){ acOpen = false; acPop.hidden = true; acItems = []; }
+function moveAc(dir){
+  if (!acItems.length) return;
+  acIndex = (acIndex + dir + acItems.length) % acItems.length;
+  paintAc();
+  const sel = acPop.querySelector('.ac-item.sel'); if (sel) sel.scrollIntoView({ block:'nearest' });
+}
+function acceptAc(i){
+  if (i == null) i = acIndex;
+  const pick = acItems[i]; if (pick == null){ hideAc(); return; }
+  const w = acWord, v = editor.value;
+  editor.value = v.slice(0, w.start) + pick + v.slice(w.end);
+  editor.selectionStart = editor.selectionEnd = w.start + pick.length;
+  hideAc(); editor.focus();
+  renderGutter(); schedule();                    // accepted text goes through the normal path
+}
+function updateAutocomplete(force){
+  const ctx = completionContext();
+  if (!ctx){ hideAc(); return; }
+  const prefix = ctx.word.text.toLowerCase();
+  if (!force && prefix.length < 2){ hideAc(); return; }
+  const matches = ctx.items.filter(it => it.toLowerCase().startsWith(prefix));
+  // Nothing to choose (no match, or the single match is already fully typed).
+  if (!matches.length || (matches.length === 1 && matches[0].toLowerCase() === prefix)){ hideAc(); return; }
+  showAc(matches, ctx.word);
+}
+acPop.addEventListener('mousedown', e => e.preventDefault());   // keep the caret in the editor
+acPop.addEventListener('click', e => {
+  const it = e.target.closest('.ac-item'); if (!it) return;
+  acceptAc(parseInt(it.getAttribute('data-i'), 10));
+});
+editor.addEventListener('blur', () => { if (acOpen) hideAc(); });
 
 // --- tabs / viewport --------------------------------------------------------
 document.querySelectorAll('.tab').forEach(btn => {
@@ -2882,12 +3383,14 @@ newBtn.addEventListener('click', () => {
 // -- save (download .barn) --
 saveBtn.addEventListener('click', downloadSource);
 
-// -- keyboard: Ctrl/Cmd+S = Save, Ctrl/Cmd+O = Open --
+// -- keyboard: Ctrl/Cmd+S = Save, +O = Open, +F = Find, +H = Find & replace --
 document.addEventListener('keydown', e => {
   if (!(e.metaKey || e.ctrlKey)) return;
   const k = e.key.toLowerCase();
   if (k === 's'){ e.preventDefault(); downloadSource(); }
   else if (k === 'o'){ e.preventDefault(); fileInput.click(); }
+  else if (k === 'f'){ e.preventDefault(); openFind(false); }
+  else if (k === 'h'){ e.preventDefault(); openFind(true); }
 });
 
 // -- warn on leave only when the editor differs from the persisted copy --
