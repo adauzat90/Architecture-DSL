@@ -168,6 +168,10 @@ class Room:
     #: A vaulted / cathedral room open to the roof — no flat ceiling plane. Its
     #: usable height rises to the ridge, so a flat ceiling isn't built for it.
     vaulted: bool = False
+    #: Optional free-text floor-finish hint (e.g. "tile", "polished concrete",
+    #: "wood plank"), fuzzy-matched to the 3D material palette (see
+    #: :mod:`barndsl.materials`). ``None`` inherits a default finish by room type.
+    floor: str | None = None
     #: How the room was placed, for diagnostics — e.g. "east_of kitchen" for a
     #: relative anchor, or None for an absolute position. Not serialised.
     placement: str | None = None
@@ -356,6 +360,35 @@ class Window:
         fw, fh = WINDOW_CLEAR_FACTORS.get(self.kind, (1.0, 1.0))
         glass_h = max(0.0, self.head_height - self.sill_height)
         return self.width * fw, glass_h * fh
+
+
+@dataclass
+class PlacedFixture:
+    """An author-placed fixture or furnishing (the ``fixture`` statement).
+
+    ``kind`` is a catalog kind (see :data:`barndsl.fixtures.FIXTURE_KINDS`), placed
+    in room ``room``. Position is either explicit — ``x``/``y`` are **room-local**
+    feet measured from the room's south-west corner — or omitted, in which case it
+    auto-places against ``wall`` (S/N/E/W) or, failing that, the first free spot.
+    ``rotation`` turns it in plan (degrees, snapped to a quarter-turn by the
+    massing); ``width`` overrides the nominal run of a resizable piece (a counter).
+
+    Authored fixtures **add** to a room's auto-seeds, except that one of a seeded
+    kind **replaces** that kind's seed — see
+    :func:`barndsl.fixtures.resolve_room_fixtures`.
+    """
+
+    kind: str
+    room: str
+    x: float | None = None  # room-local (offset from the room's SW corner), ft
+    y: float | None = None
+    wall: Direction | None = None
+    rotation: float = 0.0
+    width: float | None = None  # override the nominal run (resizable fixtures)
+    #: Source location of the `fixture` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
 
 @dataclass
@@ -743,6 +776,10 @@ class Barndominium:
     windows: list[Window] = field(default_factory=list)
     porches: list[Porch] = field(default_factory=list)
     stairs: list[Stair] = field(default_factory=list)
+    #: Author-placed fixtures & furnishings (the ``fixture`` statement). They add
+    #: to a room's auto-seeds (an explicit fixture of a seeded kind replaces that
+    #: seed). See :class:`PlacedFixture` and :func:`barndsl.fixtures.resolve_room_fixtures`.
+    fixtures: list[PlacedFixture] = field(default_factory=list)
     notes: str = ""
     #: Extra footprint blocks beyond the primary ``envelope`` rectangle. Empty for
     #: a plain rectangular building; one entry per ``wing`` for an L/T/U footprint.
@@ -1197,6 +1234,7 @@ class Barndominium:
         level: int | float = 0,
         ceiling_height: float | None = None,
         vaulted: bool = False,
+        floor: str | None = None,
         east_of: str | None = None,
         west_of: str | None = None,
         north_of: str | None = None,
@@ -1254,7 +1292,9 @@ class Barndominium:
         self.rooms.append(
             Room(
                 room_id, type, x, y, width, length, label, level,
-                ceiling_height=ch, vaulted=bool(vaulted), placement=placement,
+                ceiling_height=ch, vaulted=bool(vaulted),
+                floor=(str(floor) if floor is not None else None),
+                placement=placement,
             )
         )
         return self
@@ -1391,6 +1431,48 @@ class Barndominium:
                 f"(got {lo})."
             )
         self.stairs.append(Stair(stair_id, x, y, width, length, lo, hi, label))
+        return self
+
+    def add_fixture(
+        self,
+        kind: str,
+        room: str,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        wall: Direction | str | None = None,
+        rotation: float = 0.0,
+        width: float | None = None,
+    ) -> "Barndominium":
+        """Place a fixture/furnishing (the ``fixture`` statement).
+
+        ``kind`` must be a catalog kind (see :data:`barndsl.fixtures.FIXTURE_KINDS`).
+        ``x``/``y`` are **room-local** feet from the room's SW corner; omit them to
+        auto-place against ``wall`` (or the first free spot). ``rotation`` turns it
+        in plan (degrees). Authored fixtures add to a room's auto-seeds; one of a
+        seeded kind replaces that seed. See :class:`PlacedFixture`.
+        """
+        from .fixtures import FIXTURES
+
+        kind = str(kind)
+        if kind not in FIXTURES:
+            raise ValueError(
+                f"Unknown fixture kind '{kind}'. Known: {', '.join(FIXTURES)}."
+            )
+        wd = Direction(wall) if isinstance(wall, str) else wall
+        if x is not None:
+            x = _finite(room, "fixture x", x)
+        if y is not None:
+            y = _finite(room, "fixture y", y)
+        if (x is None) != (y is None):
+            raise ValueError("A fixture `at` needs both an x and a y offset.")
+        rot = _finite(room, "fixture rotation", rotation)
+        w = None if width is None else _finite(room, "fixture width", width)
+        if w is not None and w <= 0:
+            raise ValueError("A fixture width must be positive.")
+        self.fixtures.append(
+            PlacedFixture(kind, str(room), x, y, wd, rot, w)
+        )
         return self
 
     def connect(

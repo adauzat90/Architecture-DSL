@@ -8,7 +8,7 @@ placer change that keeps auto-placed fixtures out of a door's arc.
 from __future__ import annotations
 
 from barndsl import compile_source
-from barndsl.fixtures import _door_keepouts, _rect_overlaps, plan_room_fixtures
+from barndsl.fixtures import _door_swing_rects, _rects_overlap, plan_room_fixtures
 
 
 def _codes(src: str) -> set[str]:
@@ -134,9 +134,9 @@ door hall - bath into bath offset 2
 """
     plan = compile_source(src).plan
     bath = plan.room("bath")
-    keepouts = _door_keepouts(plan, bath)
+    keepouts = _door_swing_rects(plan, bath)
     assert keepouts, "the swinging door should reserve an arc"
     for f in plan_room_fixtures(plan, bath):
         assert not any(
-            _rect_overlaps(f.x, f.y, f.width, f.length, b) for b in keepouts
+            _rects_overlap((f.x, f.y, f.width, f.length), b) for b in keepouts
         ), f"{f.kind} sits in the door swing"

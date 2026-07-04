@@ -43,6 +43,17 @@ view3d`. Tests pin glTF structural validity (accessor/bufferView bookkeeping,
 POSITION min/max, index ranges, .glb chunk padding), the geometry contract (every
 wall run → a mesh, opening cuts reduce wall volume), and a gallery export sweep.
 
+Bugfix — multi-level wall heights (`src/barndsl/wallheights.py`, shared by
+`gltf.py` and `ifc.py`): the exchange carries each run at its storey's clear
+ceiling (the centreline fact the pyRevit consumer needs), so extruded naively a
+multi-level plan showed an open **gap band** the floor-assembly depth between
+stacked levels and a wall-to-roof **void** wherever a lower level wasn't under an
+upper floor (e.g. `two_story`'s single-storey east end). The exporters now correct
+each run's vertical extent per segment — covered runs rise to the base of the level
+above, uncovered exterior runs rise to the roof plate — and close any gable end a
+run newly reaches. The Revit exchange is unchanged; single-level plans are
+byte-identical.
+
 Possible follow-ups: billboarded room labels in the viewer; true swept gable-wall
 pentagons instead of the box + infill approximation.
 
@@ -81,8 +92,11 @@ walks the spatial tree and tessellates the geometry.
 Possible follow-ups: room-type colours as `IfcStyledItem`/`IfcSurfaceStyle` on the
 spaces/floor tiles; aggregate the roof as per-plane `IfcSlab(ROOF)` under the
 `IfcRoof` instead of direct geometry (stricter model-checker conformance); IFC2x3
-output for older Revit-import paths that still prefer it; a download/export menu in
-the playground offering `.barn`/`.svg`/`.glb`/`.ifc` of the current plan.
+output for older Revit-import paths that still prefer it. ~~A download/export menu
+in the playground offering `.barn`/`.svg`/`.glb`/`.ifc` of the current plan.~~ —
+DONE: the viewport's **Export** menu offers `.barn`, `SVG`, `DXF`, `GLB`, `IFC` and
+the self-contained 3D viewer `.html` via `POST /api/export`, reusing these
+exporters unchanged (see the Web playground entry).
 
 ## Web playground — DONE
 Shipped (Tier 2 of `docs/design/AGENT_FIRST_APP.md`): `src/barndsl/playground.py`
@@ -178,7 +192,7 @@ with `{error:{kind,message}}`. The element→line map is a minimal
 is drawn client-side from compact `rooms`/`openings` payload arrays (room-palette
 colours, id labels) with 0.5 ft grid snap, a 3 ft minimum-dimension guard, an undo
 stack of source snapshots (button / Ctrl-Cmd-Z), a click-to-jump-to-line select,
-and level-0 editing on multi-level plans. Tests: `tests/test_edits.py` (the
+and a floor switcher for editing any level of a multi-level plan. Tests: `tests/test_edits.py` (the
 preservation/idempotence/typed-error guarantees + a gallery sweep) and the
 `/api/edit` + SPA-markup cases in `tests/test_playground.py`.
 
@@ -189,10 +203,83 @@ against its former anchor, emit an updated *relative* placement (`east-of foo al
 bearing / rated, add/remove a `wall` statement); **multi-select** + group move /
 align / distribute (one batched edit set, one undo entry); dragging to **create**
 (rubber-band a new `room`, drop a new window/door onto a wall) and **delete**;
-editing **porches / stairs / wings** (not just rooms and openings) and the upper
-levels of a multi-level plan (a level switcher); a **live coordinate/size readout**
-and dimension witnesses while dragging; snapping to **sibling edges** (align to an
-adjacent room's wall, not just the 0.5 ft grid).
+editing **porches / stairs / wings** (not just rooms and openings); ~~editing the
+upper **levels** of a multi-level plan (a level switcher)~~ — DONE (wave 4): a
+floor switcher (segmented chips, or `[` / `]`) picks the active level; its
+rooms/openings stay fully interactive while the other floors — and any stair
+footprint — render as a dimmed, non-interactive underlay to align against, and
+neighbour snap guides compare same-level rooms only; ~~a **live coordinate/size
+readout** and dimension witnesses while dragging; snapping to **sibling edges**
+(align to an adjacent room's wall, not just the 0.5 ft grid)~~ — DONE (wave 3): a
+readout chip near the ghost shows position/size (and the resize delta) live with
+the snap, and neighbour snap guides draw + prefer an aligned edge.
+
+## Report tab + print packet — DONE
+Shipped (wave 2 of the architect-lens playground review): the half of the engine
+that had no UI — cost, schedules, energy and the drawing packet — now has a
+surface. A fourth viewport **Report** tab renders from a `report` block the server
+inlines on every clean `compile_payload` (measured cheap: <1 ms and <8 KB for the
+gallery plans, so no second endpoint): the assembly **cost estimate**
+(`cost.estimate_cost` verbatim — total range, per-category breakdown, subtotals,
+$/sq ft and the planning-only disclaimer), the **door/window/room schedules**
+(`schedule._schedules` row builders), a per-room **areas** table whose total
+reconciles with `metrics.assigned_sqft`, and — gated on a declared `climate` zone,
+skipped entirely otherwise — the IECC **envelope guidance** (`energy.envelope_targets`
+/ `describe_targets`). No pricing or geometry is recomputed; a source module that
+raised would degrade to one line, never a 500 (`report_data` swallows to
+`{"error": …}`, and a non-plan source carries no block at all). The **Print** button
+opens a self-contained, print-optimised window — title block, plan sheet,
+elevations + section, the Report tables, `@media print` page breaks and an auto
+`window.print()` — composed client-side from the payload the SPA already holds (so
+it carries the elevations the server packet omits and never touches the editor or
+autosave); a `@media print` block on the app page itself makes a stray Ctrl+P print
+the active viewport tab full-width rather than the three-pane chrome. Separately,
+`packet.build_packet` is now an **Export** format (`POST /api/export` `format=packet`)
+— the dependency-free, print-ready permit HTML as a download. Tests:
+`tests/test_playground.py` pins the report shape (cost/schedule/area fields,
+count-consistent rows, area total == metrics, climate-only energy, no block on a
+bad source, `report_data` never raises), the `packet` export (content-type,
+self-contained bar the inlined-SVG namespace, plan title + SVG, typed error on a
+bad source) and the Report/Print SPA markup + no-external-references invariant.
+
+Possible follow-ups: a **regional cost multiplier / unit-cost overrides** control
+in the Report tab (the engine already takes them); wiring the server `packet`
+format into the Print button as an alternative "full permit packet" print; a
+**CSV/Markdown schedule** download straight from the Report tab (`schedules_csv` /
+`schedules_markdown` already exist).
+
+## Viewport ergonomics + editor affordances — DONE
+Shipped (wave 3 of the architect-lens playground review), all client-side and
+still stdlib-only / no-CDN / offline: **2D-plan zoom controls** (`−` / percentage /
+`+` / **Fit**) over a reusable `makeZoom` controller — wheel-zoom, drag-to-pan,
+`+`/`−`/`0` keys when the viewport has focus, double-click to fit — where **Fit**
+fills the pane computed from the SVG's intrinsic `width`/`height` (fixing the old
+render-small-with-dead-space default) and is applied on load and every tab-switch;
+each **elevation card opens a zoomable lightbox** on the same controller (chosen
+over a shared grid-wide zoom, which reads awkwardly on a 2×2 grid); **click a room
+on the plan** (outside edit mode) jumps the editor to its source line and flashes
+it (`render_svg` tags each room rect with an inert `data-room`; the payload's
+`rooms[].line` supplies the line). **Live drag readouts** + **neighbour snap
+guides** in edit mode (above). A header **?** opens a slide-over that finally wires
+the dead `GET /api/reference`: the `DSL_REFERENCE` fetched once and rendered with a
+light touch (heading vs monospace grammar lines), a filter input, the app's
+keyboard-shortcut list, Esc / click-outside to close. **DSL syntax highlighting**
+via the overlay technique — a coloured `aria-hidden` `<pre>` behind a
+transparent-text textarea, same font metrics / padding / tab-size, re-rendered and
+scroll-synced on every `renderGutter` (so it can't desync; cost is one line-wise
+tokenize pass, imperceptible on gallery sources) — with a muted palette for light
+and dark; the token vocabulary (statement heads + modifier words + `RoomType`
+values) is **derived from the compiler** (`_highlight_tokens`), not hardcoded. The
+**score chip** now opens a per-category breakdown popover (colour-coded bars +
+detail lines, click/touch, `title` kept as fallback). Tests in
+`tests/test_playground.py` pin the zoom/help/highlight/score/dimension markup, the
+`data-room` + per-room-line linking, that `/api/reference` is now consumed, and the
+no-external-references invariant.
+
+Possible follow-ups: **minimap / scroll-into-view** for very large plans;
+persisting the last zoom/pan per plan; extending highlighting to flag **unknown
+statement heads** or mismatched ids inline (the compiler already knows them);
+a **theme toggle** in the header (the CSS already honours `data-theme`).
 
 ## Revit plug-in — foundation DONE
 Shipped: `src/barndsl/revit.py` (`to_revit_model` / `to_revit_json`, the

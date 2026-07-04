@@ -25,6 +25,18 @@ same rule and stay consistent — we build all geometry in plan space and transf
 points and normals identically at serialisation time. **1 glTF unit = 1 foot**
 (recorded in ``asset.extras``).
 
+Wall heights on multi-level plans
+---------------------------------
+The exchange carries each wall at its storey's clear ceiling (its plate). Extruded
+naively that leaves a gap band between stacked levels and a void where a lower
+level is not covered by an upper floor. :mod:`barndsl.wallheights` corrects the
+vertical extent of every run (shared with :mod:`barndsl.ifc`): a lower run rises
+to the **base of the level above** where an upper floor covers it, and an exterior
+lower run rises to the **top plate** where it does not, so walls meet the floor
+above or the roof with no open band. A gable end that reaches the plate this way
+is closed to the ridge by :func:`_gable_infill_segment`. Single-level plans have
+only top-level runs and are byte-identical to before.
+
 Roof approximations mirror what :mod:`barndsl.views` documents: **gable** exact
 (two sloped planes eave→ridge at the plan's pitch, projected past the walls by the
 eave overhang), **shed** one sloped plane, **monitor** built from its per-section
@@ -56,19 +68,35 @@ from dataclasses import dataclass, field
 
 from .constants import SLAB_THICKNESS
 from .elements import Barndominium, RoomType
-from .render import BEAM_COLOR, ROOM_COLORS
+from .geometry import TOL
+from .materials import (
+    FIXTURE_FABRIC,
+    FIXTURE_PORCELAIN,
+    FIXTURE_STAINLESS,
+    FIXTURE_WOOD,
+    FRAME_MATERIAL,
+    OPENING_MATERIAL,
+    PALETTE,
+    PORCH_MATERIAL,
+    SLAB_MATERIAL,
+    STAIR_MATERIAL,
+    Material,
+    floor_material,
+    roof_material,
+    wall_material,
+)
+from .render import ROOM_COLORS
 from .revit import RevitModel, RevitOpening, RevitWall, to_revit_model
+from .wallheights import gable_line, is_gable_end, roof_plate, wall_top_intervals
 
-# --- materials (hex colours; converted to linear baseColorFactor on emit) -----
-
-WALL_COLOR = "#DAD5C8"      # warm off-white plaster/siding shell
-ROOF_COLOR = "#8A5A3B"      # weathered metal/shingle brown
-LINTEL_COLOR = "#B4A88F"    # header/sill boxes over & under openings
-FRAME_COLOR = BEAM_COLOR    # post-and-beam frame, reusing the plan palette
-PORCH_COLOR = "#C9D2B4"     # porch deck (a muted PORCH tint)
-POST_COLOR = "#7A5A2E"      # porch posts
-STAIR_COLOR = "#C9B892"     # stair treads
-SLAB_COLOR = "#CFCBC2"      # structural floor slab (neutral)
+# --- materials ---------------------------------------------------------------
+#
+# Every surface carries a real :class:`~barndsl.materials.Material` (base colour +
+# roughness/metallic + procedural pattern) rather than a bare hex string. Room
+# floors additionally carry a *tint* — the per-room-type colour from
+# :data:`barndsl.render.ROOM_COLORS` — which modulates the floor material's base
+# colour so the drawing set still reads as one system (a tiled bath floor is a
+# little cooler than a tiled kitchen). See :func:`_effective_linear`.
 
 #: A thin visible thickness (ft) for floor tiles that only need to read as a
 #: coloured surface, not a structural slab.
@@ -107,12 +135,16 @@ class MeshNode:
 
     Geometry is built with :meth:`add_box`/:meth:`add_quad`; the :class:`Scene`
     transforms every vertex and normal into glTF space when it serialises.
+    ``tint`` is an optional ``#rrggbb`` that modulates the material's base colour
+    (room floors carry their per-room-type tint here); ``None`` uses the material
+    colour verbatim.
     """
 
-    def __init__(self, name: str, layer: str, material: str):
+    def __init__(self, name: str, layer: str, material: Material, tint: str | None = None):
         self.name = name
         self.layer = layer
-        self.material = material  # a hex colour string
+        self.material = material
+        self.tint = tint
         self.positions: list[tuple[float, float, float]] = []
         self.normals: list[tuple[float, float, float]] = []
         self.indices: list[int] = []
@@ -171,10 +203,12 @@ class Scene:
     nodes: list[MeshNode] = field(default_factory=list)
 
     #: Layer order (parents in the glTF scene, and the viewer's toggle order).
-    LAYERS = ("floors", "walls", "openings", "roof", "frame", "porches", "stairs")
+    LAYERS = ("floors", "walls", "openings", "roof", "frame", "porches", "stairs", "fixtures")
 
-    def node(self, name: str, layer: str, material: str) -> MeshNode:
-        n = MeshNode(name, layer, material)
+    def node(
+        self, name: str, layer: str, material: Material, tint: str | None = None
+    ) -> MeshNode:
+        n = MeshNode(name, layer, material, tint)
         self.nodes.append(n)
         return n
 
@@ -182,7 +216,12 @@ class Scene:
 # --- wall solids (the door/window box decomposition) -------------------------
 
 
-def wall_solids(wall: RevitWall, openings: list[RevitOpening], base: float) -> list[Box]:
+def wall_solids(
+    wall: RevitWall,
+    openings: list[RevitOpening],
+    base: float,
+    intervals: list[tuple[float, float, float]] | None = None,
+) -> list[Box]:
     """The solid boxes of one wall run, with its hosted ``openings`` cut out.
 
     Pure and deterministic: the run is split lengthwise into full-height segments
@@ -190,10 +229,28 @@ def wall_solids(wall: RevitWall, openings: list[RevitOpening], base: float) -> l
     re-added (sill / lintel), so the void is exactly the opening rectangle. With no
     openings this is a single box — the uncut wall — so opening cuts strictly
     reduce the summed volume (the invariant the tests pin).
+
+    ``intervals`` is the run's corrected vertical extent as ``(lo, hi, top)``
+    running pieces (see :mod:`barndsl.wallheights`): each piece extrudes from
+    ``base`` to its own ``top``, so a lower level's run reaches the level above
+    where it is covered and the roof plate where it is not. It defaults to a
+    single plate-high box over the whole span, which is the historical behaviour
+    (and keeps single-level plans byte-identical).
     """
+    if intervals is None:
+        lo, hi = wall.span
+        intervals = [(lo, hi, base + wall.height)]
+    boxes: list[Box] = []
+    for lo, hi, top in intervals:
+        boxes.extend(_segment_solids(wall, openings, base, lo, hi, top))
+    return boxes
+
+
+def _segment_solids(
+    wall: RevitWall, openings: list[RevitOpening], base: float, lo: float, hi: float, top: float
+) -> list[Box]:
+    """One vertical segment ``[lo, hi]`` of a run, base→``top``, with openings cut."""
     t = wall.thickness
-    lo, hi = wall.span
-    top = base + wall.height
     vertical = wall.orientation == "v"
     c = wall.const_coord
 
@@ -202,7 +259,7 @@ def wall_solids(wall: RevitWall, openings: list[RevitOpening], base: float) -> l
             return Box(c - t / 2.0, a, z0, c + t / 2.0, b, z1)
         return Box(a, c - t / 2.0, z0, b, c + t / 2.0, z1)
 
-    # Opening spans along the running axis, clamped to the wall and sorted.
+    # Opening spans along the running axis, clamped to this segment and sorted.
     spans: list[tuple[float, float, float, float]] = []  # (a, b, sill, head)
     for o in openings:
         along = o.location[1] if vertical else o.location[0]
@@ -294,6 +351,46 @@ def _gable_infill(node: MeshNode, wall: RevitWall, base: float) -> None:
     )
 
 
+def _gable_infill_segment(
+    node: MeshNode, wall: RevitWall, lo: float, hi: float, plate: float, gl: dict
+) -> None:
+    """Close the gable above ``[lo, hi]`` for a run that reaches the plate.
+
+    Generalises :func:`_gable_infill` (which fills a whole marked top-level gable
+    wall) to an arbitrary run interval, following the roof underside from
+    :func:`barndsl.wallheights.gable_line`. Used for a *lower* exterior run that
+    the uncovered-extension rule lifts to the plate at a gable end — e.g. the
+    single-storey end of a plan with a partial upper floor, which the exchange's
+    top-level-only gable marking never reaches.
+    """
+    t = wall.thickness
+    vertical = wall.orientation == "v"
+    c = wall.const_coord
+    mid, half, rise = gl["mid"], gl["half"], gl["rise"]
+
+    def zf(s: float) -> float:
+        return plate + rise * max(0.0, 1.0 - abs(s - mid) / half)
+
+    def pt(along: float, face: float, z: float):
+        if vertical:
+            return (c + face, along, z)
+        return (along, c + face, z)
+
+    # Split at the ridge so each piece has a straight (monotonic) roofline.
+    breaks = [lo, mid, hi] if lo < mid < hi else [lo, hi]
+    for p, q in zip(breaks, breaks[1:]):
+        zp, zq = zf(p), zf(q)
+        for face in (t / 2.0, -t / 2.0):  # the trapezoid plate→roofline on each face
+            node.add_quad(
+                pt(p, face, plate), pt(q, face, plate), pt(q, face, zq), pt(p, face, zp),
+            )
+        # The roof-underside strip closing the top across the wall thickness.
+        node.add_quad_up(
+            pt(p, -t / 2.0, zp), pt(p, t / 2.0, zp),
+            pt(q, t / 2.0, zq), pt(q, -t / 2.0, zq),
+        )
+
+
 # --- roof --------------------------------------------------------------------
 
 
@@ -374,7 +471,7 @@ def _add_roof(scene: Scene) -> None:
     top = roof["top_level"]
     plate = plan.level_elevation(top) + plan.ceiling_height
     oh = float(getattr(plan, "overhang", 0.0) or 0.0)
-    node = scene.node("roof", "roof", ROOF_COLOR)
+    node = scene.node("roof", "roof", roof_material(plan))
     sections = roof.get("sections")
     if sections:
         for sec in sections:
@@ -386,23 +483,29 @@ def _add_roof(scene: Scene) -> None:
 # --- assembly of every layer -------------------------------------------------
 
 
-def _floor_material(rtype: str) -> str:
-    try:
-        return ROOM_COLORS[RoomType(rtype)]
-    except (ValueError, KeyError):
-        return ROOM_COLORS[RoomType.OTHER]
+def _room_tint(rtype) -> str:
+    """The per-room-type tint (a `#rrggbb`) that modulates the floor material."""
+    return ROOM_COLORS.get(rtype, ROOM_COLORS[RoomType.OTHER])
 
 
 def _add_floors(scene: Scene) -> None:
     model = scene.model
+    rooms_by_id = {r.id: r for r in scene.plan.rooms}
     elev = {lvl.index: lvl.elevation for lvl in model.levels}
     for i, s in enumerate(model.slabs):
         z = elev.get(s.level, 0.0)
-        node = scene.node(f"slab:{s.level}.{i}", "floors", SLAB_COLOR)
+        node = scene.node(f"slab:{s.level}.{i}", "floors", SLAB_MATERIAL)
         node.add_box(Box(s.x, s.y, z - SLAB_THICKNESS, s.x + s.width, s.y + s.length, z))
     for r in model.rooms:
         z = elev.get(r.level, 0.0)
-        node = scene.node(f"room:{r.id}", "floors", _floor_material(r.type))
+        # Resolve the floor finish from the authored room (its `floor` hint / type),
+        # then wash it with the room-type tint so the floors read as one palette.
+        room = rooms_by_id.get(r.id)
+        if room is not None:
+            mat, tint = floor_material(room), _room_tint(room.type)
+        else:  # defensive: a slab with no authored room keeps the wood default
+            mat, tint = PALETTE["wood_plank"], None
+        node = scene.node(f"room:{r.id}", "floors", mat, tint)
         node.add_box(Box(r.x, r.y, z, r.x + r.width, r.y + r.length, z + FLOOR_TILE_THICKNESS))
 
 
@@ -413,17 +516,29 @@ def _add_walls(scene: Scene) -> None:
     for o in model.openings:
         if o.host_wall is not None:
             hosted.setdefault(o.host_wall, []).append(o)
+    plate = roof_plate(model)
+    gl = gable_line(model)
+    wall_mat = wall_material(scene.plan)
     for w in model.walls:
         base = elev.get(w.level, 0.0)
         ops = hosted.get(w.id, [])
-        node = scene.node(f"wall:{w.id}", "walls", WALL_COLOR)
-        for box in wall_solids(w, ops, base):
+        node = scene.node(f"wall:{w.id}", "walls", wall_mat)
+        intervals = wall_top_intervals(w, model)
+        for box in wall_solids(w, ops, base, intervals):
             node.add_box(box)
+        # Top-level gable ends carry the exchange's own marking; a lower exterior
+        # run lifted to the plate at a gable end (uncovered extension) is closed
+        # here from the corrected intervals so its end meets the ridge too.
         _gable_infill(node, w, base)
+        if gl is not None and plate is not None and w.profile != "gable" and w.exterior \
+                and is_gable_end(w, gl):
+            for lo, hi, top in intervals:
+                if abs(top - plate) <= TOL:
+                    _gable_infill_segment(node, w, lo, hi, plate, gl)
         # Lintel / sill boxes ride the openings layer so they can be toggled apart.
         lintels = _opening_boxes(w, ops, base)
         if lintels:
-            onode = scene.node(f"opening:{w.id}", "openings", LINTEL_COLOR)
+            onode = scene.node(f"opening:{w.id}", "openings", OPENING_MATERIAL)
             for box in lintels:
                 onode.add_box(box)
 
@@ -432,13 +547,13 @@ def _add_frame(scene: Scene) -> None:
     model = scene.model
     for i, c in enumerate(model.columns):
         s = c.size or 0.5
-        node = scene.node(f"post:{i}", "frame", FRAME_COLOR)
+        node = scene.node(f"post:{i}", "frame", FRAME_MATERIAL)
         node.add_box(Box(c.point[0] - s / 2, c.point[1] - s / 2, c.base,
                          c.point[0] + s / 2, c.point[1] + s / 2, c.top))
     for i, b in enumerate(model.framing):
         s = b.size or 0.5
         (x0, y0), (x1, y1) = b.start, b.end
-        node = scene.node(f"beam:{i}", "frame", FRAME_COLOR)
+        node = scene.node(f"beam:{i}", "frame", FRAME_MATERIAL)
         if abs(x1 - x0) >= abs(y1 - y0):  # runs east-west
             node.add_box(Box(min(x0, x1), (y0 + y1) / 2 - s / 2, b.z - s / 2,
                              max(x0, x1), (y0 + y1) / 2 + s / 2, b.z + s / 2))
@@ -453,7 +568,7 @@ def _add_porches(scene: Scene) -> None:
     for a in scene.model.areas:
         if a.kind != "porch":
             continue
-        node = scene.node(f"porch:{a.id}", "porches", PORCH_COLOR)
+        node = scene.node(f"porch:{a.id}", "porches", PORCH_MATERIAL)
         node.add_box(Box(a.x, a.y, -SLAB_THICKNESS, a.x + a.width, a.y + a.length, 0.0))
         if a.meta.get("covered"):
             s = 0.5
@@ -461,7 +576,7 @@ def _add_porches(scene: Scene) -> None:
                 (a.x, a.y), (a.x + a.width, a.y),
                 (a.x, a.y + a.length), (a.x + a.width, a.y + a.length),
             ]
-            posts = scene.node(f"porch:{a.id}:posts", "porches", POST_COLOR)
+            posts = scene.node(f"porch:{a.id}:posts", "porches", FRAME_MATERIAL)
             for cx, cy in corners:
                 px = min(max(cx - s / 2, a.x), a.x + a.width - s)
                 py = min(max(cy - s / 2, a.y), a.y + a.length - s)
@@ -479,7 +594,7 @@ def _add_stairs(scene: Scene) -> None:
         base = elev.get(a.meta.get("from_level", a.level), 0.0)
         rh = float(sp.get("riser_height", 0.0))
         tread = float(sp.get("tread", 0.0))
-        node = scene.node(f"stair:{a.id}", "stairs", STAIR_COLOR)
+        node = scene.node(f"stair:{a.id}", "stairs", STAIR_MATERIAL)
         for run in sp.get("runs", []):
             (sx, sy), (ex, ey) = run["start"], run["end"]
             width = float(run["width"])
@@ -506,6 +621,155 @@ def _add_stairs(scene: Scene) -> None:
                              land["x"] + land["width"], land["y"] + land["length"], top))
 
 
+# --- fixture / furniture massing ---------------------------------------------
+#
+# Each fixture becomes a small stack of axis-aligned boxes on its room's floor —
+# recognisable, not detailed. A wall-backed fixture reads front-to-back from the
+# wall it backs to (its "front" faces into the room); a free-standing piece is
+# symmetric. Materials come from the palette: porcelain plumbing, stainless
+# appliances, fabric upholstery, wood casework.
+
+#: base body material per fixture kind.
+_FIXTURE_MATERIAL: dict[str, Material] = {
+    "toilet": FIXTURE_PORCELAIN, "lavatory": FIXTURE_PORCELAIN, "tub": FIXTURE_PORCELAIN,
+    "shower": FIXTURE_PORCELAIN, "sink": FIXTURE_PORCELAIN,
+    "refrigerator": FIXTURE_STAINLESS, "range": FIXTURE_STAINLESS,
+    "washer": FIXTURE_STAINLESS, "dryer": FIXTURE_STAINLESS, "water_heater": FIXTURE_STAINLESS,
+    "sofa": FIXTURE_FABRIC, "armchair": FIXTURE_FABRIC,
+    "bed_queen": FIXTURE_WOOD, "bed_twin": FIXTURE_WOOD,
+    "dining_table": FIXTURE_WOOD, "coffee_table": FIXTURE_WOOD, "desk": FIXTURE_WOOD,
+    "dresser": FIXTURE_WOOD, "kitchen_island": FIXTURE_WOOD, "counter": FIXTURE_WOOD,
+    "wardrobe": FIXTURE_WOOD,
+}
+
+#: a light countertop / lid material (island & counter tops) and a dark cooktop.
+_FIXTURE_TOP = PALETTE["drywall"]
+_FIXTURE_COOKTOP = PALETTE["standing_seam"]
+
+
+def _add_fixtures(scene: Scene) -> None:
+    model = scene.model
+    elev = {lvl.index: lvl.elevation for lvl in model.levels}
+    for fx in model.fixtures:
+        z = elev.get(fx.level, 0.0)
+        _fixture_massing(scene, fx, z)
+
+
+def _fixture_massing(scene: Scene, fx, z: float) -> None:
+    x0, y0 = fx.x, fx.y
+    x1, y1 = fx.x + fx.width, fx.y + fx.length
+    mat = _FIXTURE_MATERIAL.get(fx.kind, FIXTURE_WOOD)
+    body = scene.node(f"fixture:{fx.id or fx.kind}", "fixtures", mat)
+    add = body.add_box
+    wall = fx.wall
+
+    def frac(a: float, b: float, lo: float, hi: float) -> tuple[float, float]:
+        """A sub-interval of ``[a, b]`` at fractions ``[lo, hi]``."""
+        return a + (b - a) * lo, a + (b - a) * hi
+
+    # `back`/`front` split along the depth axis, measured from the backing wall.
+    def depth_split(lo: float, hi: float) -> tuple[float, float, float, float]:
+        """The footprint sub-box spanning ``[lo, hi]`` fraction from the wall."""
+        if wall == "S":
+            ya, yb = frac(y0, y1, lo, hi)
+            return x0, ya, x1, yb
+        if wall == "N":
+            ya, yb = frac(y1, y0, lo, hi)
+            return x0, yb, x1, ya
+        if wall == "W":
+            xa, xb = frac(x0, x1, lo, hi)
+            return xa, y0, xb, y1
+        if wall == "E":
+            xa, xb = frac(x1, x0, lo, hi)
+            return xb, y0, xa, y1
+        # free-standing: split along the longer footprint axis, from the low end.
+        if (x1 - x0) >= (y1 - y0):
+            xa, xb = frac(x0, x1, lo, hi)
+            return xa, y0, xb, y1
+        ya, yb = frac(y0, y1, lo, hi)
+        return x0, ya, x1, yb
+
+    k = fx.kind
+    if k == "toilet":
+        bx0, by0, bx1, by1 = depth_split(0.0, 0.42)  # tank against the wall
+        add(Box(bx0, by0, z, bx1, by1, z + 2.5))
+        bx0, by0, bx1, by1 = depth_split(0.42, 1.0)  # bowl
+        add(_inset(bx0, by0, bx1, by1, 0.15, z, z + 1.3))
+    elif k == "lavatory" or k == "sink":
+        add(Box(x0, y0, z, x1, y1, z + 2.8))
+        basin = scene.node(f"fixture:{fx.id}:basin", "fixtures", FIXTURE_PORCELAIN)
+        basin.add_box(_inset(x0, y0, x1, y1, 0.25, z + 2.6, z + 2.85))
+    elif k == "tub":
+        add(Box(x0, y0, z, x1, y1, z + 0.5))  # apron
+        add(Box(x0, y0, z + 0.5, x1, y1, z + 2.0))  # a solid tub body (rim height)
+        inner = scene.node(f"fixture:{fx.id}:basin", "fixtures", FIXTURE_PORCELAIN)
+        inner.add_box(_inset(x0, y0, x1, y1, 0.35, z + 0.9, z + 1.95))
+    elif k == "shower":
+        add(Box(x0, y0, z, x1, y1, z + 0.4))  # pan / curb
+        # a back panel up the backing wall (or the low-x side when free-standing).
+        bx0, by0, bx1, by1 = depth_split(0.0, 0.12)
+        add(Box(bx0, by0, z + 0.4, bx1, by1, z + 6.5))
+    elif k == "refrigerator":
+        add(Box(x0, y0, z, x1, y1, z + 5.8))
+        door = scene.node(f"fixture:{fx.id}:door", "fixtures", FIXTURE_STAINLESS)
+        dx0, dy0, dx1, dy1 = depth_split(0.9, 1.0)  # a shallow front face proud
+        door.add_box(Box(dx0, dy0, z + 0.6, dx1, dy1, z + 5.6))
+    elif k == "range":
+        add(Box(x0, y0, z, x1, y1, z + 2.95))
+        top = scene.node(f"fixture:{fx.id}:cooktop", "fixtures", _FIXTURE_COOKTOP)
+        top.add_box(Box(x0, y0, z + 2.95, x1, y1, z + 3.05))  # a darker cooktop lid
+    elif k in ("washer", "dryer"):
+        add(Box(x0, y0, z, x1, y1, z + 3.0))
+        door = scene.node(f"fixture:{fx.id}:door", "fixtures", _FIXTURE_COOKTOP)
+        dx0, dy0, dx1, dy1 = depth_split(0.9, 1.0)
+        door.add_box(_inset(dx0, dy0, dx1, dy1, 0.25, z + 1.2, z + 2.6))
+    elif k == "water_heater":
+        add(Box(x0, y0, z, x1, y1, z + 4.6))
+    elif k in ("kitchen_island", "counter"):
+        add(Box(x0, y0, z, x1, y1, z + 2.9))  # cabinet body
+        top = scene.node(f"fixture:{fx.id}:top", "fixtures", _FIXTURE_TOP)
+        top.add_box(_inset(x0, y0, x1, y1, -0.08, z + 2.9, z + 3.05))  # a proud lighter top
+    elif k == "dresser":
+        add(Box(x0, y0, z, x1, y1, z + 3.0))
+    elif k == "wardrobe":
+        add(Box(x0, y0, z, x1, y1, z + 6.0))
+    elif k in ("bed_queen", "bed_twin"):
+        add(Box(x0, y0, z, x1, y1, z + 1.0))  # platform
+        mat_box = scene.node(f"fixture:{fx.id}:mattress", "fixtures", FIXTURE_FABRIC)
+        mat_box.add_box(_inset(x0, y0, x1, y1, 0.08, z + 1.0, z + 1.8))
+        px0, py0, px1, py1 = depth_split(0.0, 0.2)  # pillows at the head (wall side)
+        mat_box.add_box(_inset(px0, py0, px1, py1, 0.15, z + 1.8, z + 2.15))
+    elif k in ("sofa", "armchair"):
+        add(Box(x0, y0, z, x1, y1, z + 1.4))  # seat
+        bx0, by0, bx1, by1 = depth_split(0.0, 0.2)  # back against the wall
+        add(Box(bx0, by0, z + 1.4, bx1, by1, z + 2.7))
+        # arms down the two sides perpendicular to the wall.
+        if wall in ("S", "N", ""):
+            add(Box(x0, y0, z + 1.4, x0 + 0.5, y1, z + 2.2))
+            add(Box(x1 - 0.5, y0, z + 1.4, x1, y1, z + 2.2))
+        else:
+            add(Box(x0, y0, z + 1.4, x1, y0 + 0.5, z + 2.2))
+            add(Box(x0, y1 - 0.5, z + 1.4, x1, y1, z + 2.2))
+    elif k in ("dining_table", "coffee_table", "desk"):
+        top_z = 2.4 if k != "coffee_table" else 1.4
+        add(Box(x0, y0, z + top_z - 0.2, x1, y1, z + top_z))  # top slab
+        _legs(add, x0, y0, x1, y1, z, top_z - 0.2)
+    else:  # any unmapped kind: a plain block, so it still reads as *something*.
+        add(Box(x0, y0, z, x1, y1, z + 2.5))
+
+
+def _inset(x0, y0, x1, y1, d, z0, z1) -> Box:
+    """A box inset (or, negative ``d``, expanded) by ``d`` ft on all four sides."""
+    return Box(x0 + d, y0 + d, z0, x1 - d, y1 - d, z1)
+
+
+def _legs(add, x0, y0, x1, y1, z, top: float, s: float = 0.2) -> None:
+    """Four corner legs from the floor to ``z + top`` under a table/desk slab."""
+    for cx in (x0, x1 - s):
+        for cy in (y0, y1 - s):
+            add(Box(cx, cy, z, cx + s, cy + s, z + top))
+
+
 def build_scene(plan: Barndominium) -> Scene:
     """Lower ``plan`` into the intermediate box/quad :class:`Scene` (pure)."""
     model = to_revit_model(plan)
@@ -516,6 +780,7 @@ def build_scene(plan: Barndominium) -> Scene:
     _add_frame(scene)
     _add_porches(scene)
     _add_stairs(scene)
+    _add_fixtures(scene)
     return scene
 
 
@@ -531,6 +796,21 @@ def hex_to_linear(hex_color: str) -> list[float]:
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
     return [_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b), 1.0]
+
+
+def effective_linear(material: Material, tint: str | None = None) -> list[float]:
+    """The material's linear ``[r, g, b, 1]`` base colour, modulated by ``tint``.
+
+    With no tint this is just the material colour; a tint (a room-type ``#rrggbb``)
+    multiplies it channel-wise in linear space — the room palette washes over the
+    floor finish rather than replacing it, so a tiled bath and a tiled kitchen
+    share a material yet still read as different rooms.
+    """
+    base = hex_to_linear(material.color)
+    if not tint:
+        return base
+    t = hex_to_linear(tint)
+    return [base[0] * t[0], base[1] * t[1], base[2] * t[2], 1.0]
 
 
 # --- glTF space transform ----------------------------------------------------
@@ -554,19 +834,27 @@ def _build_gltf(plan: Barndominium) -> tuple[dict, bytes]:
     scene = build_scene(plan)
     live = [n for n in scene.nodes if not n.empty]
 
-    # Deduplicate materials by colour, in first-seen order.
-    mat_index: dict[str, int] = {}
+    # Deduplicate materials by (palette id, tint), in first-seen order. The tint
+    # only distinguishes room floors sharing a finish; every other surface has no
+    # tint, so untinted materials collapse to one entry each as before.
+    def mat_key(n: MeshNode) -> tuple[str, str]:
+        return (n.material.name, n.tint or "")
+
+    mat_index: dict[tuple[str, str], int] = {}
     materials: list[dict] = []
     for n in live:
-        if n.material not in mat_index:
-            mat_index[n.material] = len(materials)
+        key = mat_key(n)
+        if key not in mat_index:
+            mat_index[key] = len(materials)
+            mat = n.material
+            name = mat.name if not n.tint else f"{mat.name} ({n.tint})"
             materials.append(
                 {
-                    "name": n.material,
+                    "name": name,
                     "pbrMetallicRoughness": {
-                        "baseColorFactor": hex_to_linear(n.material),
-                        "metallicFactor": 0.0,
-                        "roughnessFactor": 0.85,
+                        "baseColorFactor": effective_linear(mat, n.tint),
+                        "metallicFactor": mat.metallic,
+                        "roughnessFactor": mat.roughness,
                     },
                     "doubleSided": True,
                 }
@@ -634,7 +922,7 @@ def _build_gltf(plan: Barndominium) -> tuple[dict, bytes]:
                     {
                         "attributes": {"POSITION": pos_acc, "NORMAL": nrm_acc},
                         "indices": idx_acc,
-                        "material": mat_index[n.material],
+                        "material": mat_index[mat_key(n)],
                     }
                 ],
             }

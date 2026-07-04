@@ -56,7 +56,7 @@ from .elements import (
     Room,
     feet,
 )
-from .fixtures import plan_room_fixtures
+from .fixtures import resolve_room_fixtures
 from .geometry import (
     TOL,
     footprint_area,
@@ -291,11 +291,15 @@ class RevitArea:
 
 @dataclass
 class RevitFixture:
-    """A fixture/appliance seed: a footprint rectangle + the room and wall it
-    serves, for the consumer to host a loadable family at its centre."""
+    """A fixture/appliance/furnishing: a footprint rectangle + the room and wall it
+    serves, for the consumer to host a loadable family at its centre.
+
+    ``rotation`` is the plan quarter-turn baked into the footprint. ``seed`` marks
+    an auto-placed fixture (vs. one the author placed); ``source_line`` is the
+    ``fixture`` statement's line (``None`` for a seed)."""
 
     id: str
-    kind: str  # toilet | lavatory | tub | shower | sink | range | refrigerator
+    kind: str  # a barndsl.fixtures catalog kind (toilet, bed_queen, sofa, ...)
     room: str
     level: int
     x: float
@@ -304,6 +308,9 @@ class RevitFixture:
     length: float
     wall: str
     point: tuple[float, float]
+    rotation: float = 0.0
+    seed: bool = True
+    source_line: int | None = None
 
 
 @dataclass
@@ -496,6 +503,9 @@ class RevitModel:
                     "length": fx.length,
                     "wall": fx.wall,
                     "point": list(fx.point),
+                    "rotation": fx.rotation,
+                    "seed": fx.seed,
+                    "source_line": fx.source_line,
                 }
                 for fx in self.fixtures
             ],
@@ -1424,10 +1434,10 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
 
     fixtures: list[RevitFixture] = []
     for r in plan.rooms:
-        for fx in plan_room_fixtures(plan, r):
+        for fx in resolve_room_fixtures(plan, r):
             fixtures.append(
                 RevitFixture(
-                    id=f"{r.id}_{fx.kind}",
+                    id=fx.id or f"{r.id}~{fx.kind}",
                     kind=fx.kind,
                     room=r.id,
                     level=getattr(r, "level", 0),
@@ -1437,6 +1447,9 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
                     length=float(fx.length),
                     wall=fx.wall,
                     point=(float(fx.center[0]), float(fx.center[1])),
+                    rotation=float(fx.rotation),
+                    seed=bool(fx.seed),
+                    source_line=fx.source_line,
                 )
             )
 
@@ -1670,6 +1683,7 @@ _UNIT_FIELDS = {
     "fixture": {
         "id": "skip", "kind": "skip", "room": "skip", "level": "skip", "x": "len",
         "y": "len", "width": "len", "length": "len", "wall": "skip", "point": "pts",
+        "rotation": "skip", "seed": "skip", "source_line": "skip",
     },
     "site": {"width": "len", "length": "len", "setbacks": "skip"},
     "setbacks": {"front": "len", "side": "len", "rear": "len"},

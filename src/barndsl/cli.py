@@ -697,7 +697,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             print(f"error: cannot read {args.file}: {exc.strerror or exc}", file=sys.stderr)
             return 2
     return run(
-        initial_source=source, port=args.port, open_browser=getattr(args, "open", False)
+        initial_source=source, port=args.port, open_browser=getattr(args, "open", False),
+        from_file=source is not None,
     )
 
 
