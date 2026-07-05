@@ -271,6 +271,54 @@ def _edit(srv, source, edit):
     return status, json.loads(data)
 
 
+def _compare(srv, a, b):
+    status, data = _request(
+        srv, "POST", "/api/compare", json.dumps({"source_a": a, "source_b": b})
+    )
+    return status, json.loads(data)
+
+
+def test_compare_endpoint_round_trip(server):
+    # A real two-source comparison: score, metrics takeoff, and the diagnostic
+    # multiset diff all ride through, plus each side's compile summary.
+    status, p = _compare(server, CLEAN, WITH_ERROR)
+    assert status == 200
+    assert {"a", "b", "deltas", "resolved", "introduced", "compile"} <= set(p)
+    assert isinstance(p["a"]["score"], (int, float))
+    assert isinstance(p["b"]["score"], (int, float))
+    # takeoff metrics present on both sides, with B − A deltas
+    assert p["a"]["metrics"] and p["b"]["metrics"]
+    assert "score" in p["deltas"] and "footprint_sqft" in p["deltas"]
+    # per-side compile summary: CLEAN is clean; WITH_ERROR renders but has an error
+    assert p["compile"]["a"]["ok"] is True
+    assert p["compile"]["b"]["ok"] is False
+    assert p["compile"]["b"]["counts"]["error"] >= 1
+    # the diagnostic multiset diff is a real diff in both directions here
+    assert p["introduced"] and p["resolved"]
+    assert "NO_ACCESS" in p["introduced"]
+
+
+def test_compare_endpoint_refuses_uncompilable_side(server):
+    # A side that can't build a plan is a typed error, not a 500 (edit's contract).
+    status, p = _compare(server, CLEAN, "total garbage that is not dsl")
+    assert status == 200
+    assert p["error"]["kind"] == "compile_error"
+    assert p["error"]["side"] == "b"
+    assert "a" not in p  # no comparison payload when a side can't build
+
+
+def test_compare_endpoint_malformed_is_400(server):
+    status, _ = _request(server, "POST", "/api/compare", json.dumps({"source_a": CLEAN}))
+    assert status == 400
+
+
+def test_compare_endpoint_unknown_path_still_404(server):
+    # /api/compare is the only new route — nothing else changed.
+    status, data = _request(server, "POST", "/api/comparez", json.dumps({}))
+    assert status == 404
+    assert json.loads(data)["error"]
+
+
 def test_edit_happy_path_changes_exactly_one_line_and_recompiles(server):
     p = compile_payload(CLEAN)
     room = p["rooms"][0]
@@ -525,6 +573,38 @@ def test_app_contains_workspace_controls_and_localstorage_keys():
     # the autosave/restore localStorage keys are referenced by the SPA
     assert "barndsl.playground.source" in html
     assert "barndsl.playground.savedAt" in html
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_contains_compare_ui_markup_and_stays_offline():
+    html = render_app(CLEAN)
+    for token in ("id=\"compare-btn\"", "id=\"compare-modal\"", "id=\"compare-backdrop\"",
+                  "id=\"compare-body\"", "id=\"compare-set-a\"", "id=\"compare-swap\"",
+                  "id=\"compare-load-a\"", "function runCompare(", "function renderCompare(",
+                  "function setBaselineA(", "fetch('/api/compare'"):
+        assert token in html, token
+    # the baseline (scheme A) persists under the playground key family
+    assert "barndsl.playground.compareA" in html
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_contains_multi_select_and_align_functions_and_stays_offline():
+    html = render_app(CLEAN)
+    for token in ("function toggleMultiSel(", "function clearMultiSel(",
+                  "function alignRooms(", "function distributeRooms(",
+                  "function selectedRooms(", "function nudgeMembers(",
+                  "kind:'movegroup'", "id=\"align-tools\"", "id=\"multi-count\"",
+                  "data-btn=\"align-left\"", "data-btn=\"align-right\"",
+                  "data-btn=\"align-top\"", "data-btn=\"align-bottom\"",
+                  "data-btn=\"dist-h\"", "data-btn=\"dist-v\""):
+        assert token in html, token
+    # the batched-undo labels — one undo step per group action
+    for label in ("'align rooms'", "'distribute rooms'", "'move rooms'", "'nudge rooms'"):
+        assert label in html, label
     # still no external network references (the offline guarantee holds)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
@@ -1031,7 +1111,7 @@ def test_app_measure_tool():
 def test_app_keyboard_nudge_and_selection_keys():
     html = render_app(CLEAN)
     # arrows accumulate into ONE move_room edit; r rotates; Delete clears selection
-    for token in ("function nudgeRoom(", "function flushNudge(", "function cancelNudge(",
+    for token in ("function nudgeMembers(", "function flushNudge(", "function cancelNudge(",
                   "'nudge room'", "'rotate fixture'", "e.key === 'Delete'"):
         assert token in html, token
     # nudge/measure/rotate never fire while typing in a field

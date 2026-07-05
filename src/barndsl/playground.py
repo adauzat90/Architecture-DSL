@@ -87,6 +87,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
+from .compare import compare_plans
 from .compiler import DSL_REFERENCE, compile_source
 from .elements import RoomType
 from .cost import estimate_cost
@@ -207,6 +208,21 @@ def default_source() -> str:
 
 
 # --- the compile endpoint payload --------------------------------------------
+
+
+def _compile_summary(result: Any) -> dict:
+    """A compact compile summary (ok / recovered / severity counts) for one side
+    of a comparison — enough for the UI to flag a side that rendered but has
+    errors, without shipping the whole diagnostics list."""
+    return {
+        "ok": result.ok,
+        "recovered": result.recovered,
+        "counts": {
+            "error": len(result.errors),
+            "warning": len(result.warnings),
+            "info": len(result.infos),
+        },
+    }
 
 
 def compile_payload(source: str) -> dict:
@@ -590,7 +606,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         if path not in (
-            "/api/compile", "/api/edit", "/api/export", "/api/design", "/api/design/cancel"
+            "/api/compile", "/api/edit", "/api/compare",
+            "/api/export", "/api/design", "/api/design/cancel",
         ):
             self._json({"error": "not found"}, status=404)
             return
@@ -601,6 +618,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_compile(data)
         elif path == "/api/edit":
             self._handle_edit(data)
+        elif path == "/api/compare":
+            self._handle_compare(data)
         elif path == "/api/export":
             self._handle_export(data)
         elif path == "/api/design":
@@ -649,6 +668,57 @@ class _Handler(BaseHTTPRequestHandler):
         payload["line"] = result.line
         payload["changed"] = result.changed
         payload["summary"] = result.summary
+        self._json(payload)
+
+    def _handle_compare(self, data: object) -> None:
+        """Compile two sources and return their side-by-side comparison.
+
+        The body is ``{"source_a", "source_b"}``. On success the response is
+        :func:`barndsl.compare.compare_plans`' dict (``a``/``b`` sides, ``deltas``,
+        ``resolved``/``introduced`` diagnostic multisets) with a ``compile`` block
+        summarising each side's compile (ok/recovered/counts). A source that can't
+        build a plan (a parse failure or a parse-recovered partial) is refused with
+        a normal 200 and a typed ``error`` naming the side — comparing against a
+        half-parsed plan is meaningless (the same contract the CLI's ``compare``
+        keeps). Only a malformed envelope is 400.
+        """
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("source_a"), str)
+            or not isinstance(data.get("source_b"), str)
+        ):
+            self._json(
+                {"error": 'expected {"source_a": "<dsl>", "source_b": "<dsl>"}'}, status=400
+            )
+            return
+        try:
+            result_a = compile_source(data["source_a"])
+            result_b = compile_source(data["source_b"])
+        except Exception as exc:  # a real bug — bad DSL never reaches here
+            self._json({"error": f"internal error: {exc}"}, status=500)
+            return
+        bad = [
+            side
+            for side, r in (("a", result_a), ("b", result_b))
+            if r.plan is None or r.recovered
+        ]
+        if bad:
+            which = " and ".join("scheme " + s.upper() for s in bad)
+            self._json({"error": {
+                "kind": "compile_error",
+                "side": bad[0] if len(bad) == 1 else "both",
+                "message": f"{which} does not build a plan — fix its errors to compare",
+            }})
+            return
+        try:
+            payload = compare_plans(result_a, result_b, names=("A", "B"))
+        except Exception as exc:  # a plan that scores/measures oddly must not 500 the API
+            self._json({"error": f"internal error: {exc}"}, status=500)
+            return
+        payload["compile"] = {
+            "a": _compile_summary(result_a),
+            "b": _compile_summary(result_b),
+        }
         self._json(payload)
 
     def _handle_export(self, data: object) -> None:
@@ -1180,6 +1250,13 @@ _APP_HTML = r"""<!doctype html>
   .edit-bar button:disabled { opacity:.45; cursor:default; }
   .edit-note { font-size:11.5px; color:var(--faint); margin-left:auto; text-align:right; }
   .edit-note.err { color:var(--err); }
+  /* multi-select: count indicator + align/distribute toolbar (2+ rooms) */
+  .multi-count { font-size:11.5px; font-weight:600; color:var(--accent2); white-space:nowrap; }
+  .multi-count:empty { display:none; }
+  .align-tools { display:flex; align-items:center; gap:5px; }
+  .align-tools[hidden] { display:none; }
+  .align-tools button { padding:3px 8px; font-size:11.5px; }
+  .ov-multi { fill:none; stroke:#8a5cc0; stroke-width:2.4; stroke-dasharray:4 2.4; pointer-events:none; }
   .plan-row { flex:1; display:flex; min-height:0; }
   .plan-body { position:relative; flex:1; min-height:0; min-width:0; }
   #panel-btn.on, #measure-btn.on { border-color:var(--accent); color:var(--accent); }
@@ -1423,6 +1500,46 @@ _APP_HTML = r"""<!doctype html>
   .help-ref .rline.hit mark { background:rgba(209,135,63,.35); color:inherit; border-radius:2px; }
   .help-ref .rempty { color:var(--faint); padding:12px 0; }
 
+  /* --- compare modal: scheme A vs B side-by-side --- */
+  .cmp-backdrop { position:fixed; inset:0; z-index:52; background:rgba(15,20,30,.42); }
+  .cmp-backdrop[hidden] { display:none; }
+  .cmp-modal { position:fixed; z-index:53; top:50%; left:50%; transform:translate(-50%,-50%);
+    width:min(760px,94vw); max-height:88vh; display:flex; flex-direction:column;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    box-shadow:0 18px 60px rgba(20,30,50,.34); }
+  .cmp-modal[hidden] { display:none; }
+  .cmp-head { display:flex; align-items:center; gap:10px; padding:12px 14px;
+    border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .cmp-title { font-weight:700; font-size:14px; }
+  .cmp-title span { color:var(--faint); font-weight:600; }
+  .cmp-actions { display:flex; gap:6px; margin-left:6px; flex-wrap:wrap; }
+  .cmp-close { margin-left:auto; font-size:19px; line-height:1; border:0; padding:0 6px;
+    background:transparent; color:var(--muted); cursor:pointer; }
+  .cmp-body { flex:1; overflow:auto; padding:14px 16px; font-size:12.5px; }
+  .cmp-empty { color:var(--muted); line-height:1.6; padding:14px 4px; }
+  .cmp-empty strong { color:var(--ink); }
+  .cmp-err { color:var(--err); padding:12px 4px; line-height:1.5; }
+  .cmp-cols { display:grid; grid-template-columns:1fr auto auto auto; gap:2px 12px;
+    align-items:baseline; }
+  .cmp-sec { margin:16px 0 6px; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.6px; color:var(--faint); }
+  .cmp-sec:first-child { margin-top:2px; }
+  .cmp-h { font-weight:700; font-size:12px; padding-bottom:4px; border-bottom:1px solid var(--line); }
+  .cmp-h.a, .cmp-h.b { text-align:right; }
+  .cmp-h .cap { display:block; font-weight:500; font-size:10.5px; color:var(--faint); }
+  .cmp-row { display:contents; }
+  .cmp-row > span { padding:3px 0; }
+  .cmp-lbl { color:var(--muted); }
+  .cmp-va, .cmp-vb, .cmp-vd { text-align:right; font-variant-numeric:tabular-nums; }
+  .cmp-vd { color:var(--faint); }
+  .cmp-win { color:var(--okc); font-weight:700; }
+  .cmp-scorebig { font-size:16px; font-weight:800; }
+  .cmp-tag { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11.5px;
+    margin:3px 6px 3px 0; }
+  .cmp-tag.res { background:rgba(46,139,87,.16); color:var(--okc); }
+  .cmp-tag.intro { background:rgba(200,69,47,.16); color:var(--err); }
+  .cmp-diag-none { color:var(--faint); padding:4px 0; }
+
   /* --- elevation lightbox (a zoomable single-view overlay) --- */
   .views-grid figure { cursor:zoom-in; }
   .lightbox { position:fixed; inset:0; z-index:55; background:rgba(15,20,30,.62);
@@ -1473,7 +1590,9 @@ _APP_HTML = r"""<!doctype html>
     <button class="tbtn" id="new-btn" title="Start a new plan from the scaffold">New</button>
     <button class="tbtn" id="open-btn" title="Open a .barn file (Ctrl/Cmd+O)">Open</button>
     <button class="tbtn" id="save-btn" title="Download the source as .barn (Ctrl/Cmd+S)">Save</button>
+    <button class="tbtn" id="compare-btn" title="Compare the current plan against a saved baseline (A vs B)">Compare…</button>
     <input type="file" id="file-input" accept=".barn,.txt" hidden>
+    <input type="file" id="compare-file-input" accept=".barn,.txt" hidden>
   </div>
   <label class="examples">example
     <select id="example-select"><option value="">loading…</option></select>
@@ -1500,6 +1619,19 @@ _APP_HTML = r"""<!doctype html>
       <div id="help-ref-body" class="rempty">loading…</div></div>
   </div>
 </aside>
+<div id="compare-backdrop" class="cmp-backdrop" hidden></div>
+<div id="compare-modal" class="cmp-modal" hidden role="dialog" aria-label="Compare schemes">
+  <div class="cmp-head">
+    <span class="cmp-title">Compare <span>A vs B</span></span>
+    <div class="cmp-actions">
+      <button class="tbtn" id="compare-set-a" title="Snapshot the current plan as baseline A">Set baseline A</button>
+      <button class="tbtn" id="compare-load-a" title="Load a .barn file as baseline A">Load A…</button>
+      <button class="tbtn" id="compare-swap" title="Swap which side is A and which is B" disabled>⇄ Swap</button>
+    </div>
+    <button class="cmp-close" id="compare-close" title="Close (Esc)" aria-label="Close">×</button>
+  </div>
+  <div class="cmp-body" id="compare-body"></div>
+</div>
 <div id="notice" hidden>
   <span class="notice-msg" id="notice-msg"></span>
   <span id="notice-actions"></span>
@@ -1585,6 +1717,15 @@ _APP_HTML = r"""<!doctype html>
           <button id="measure-btn" disabled
             title="Measure — drag between two points on the plan (M, edit mode)">⟷ Measure</button>
           <span class="level-switch" id="level-switch" hidden></span>
+          <span class="multi-count" id="multi-count"></span>
+          <span class="align-tools" id="align-tools" hidden>
+            <button data-btn="align-left" title="Align left edges (min x)">⇤ Left</button>
+            <button data-btn="align-right" title="Align right edges (max x)">Right ⇥</button>
+            <button data-btn="align-top" title="Align top edges (max y)">⤒ Top</button>
+            <button data-btn="align-bottom" title="Align bottom edges (min y)">⤓ Bottom</button>
+            <button data-btn="dist-h" title="Distribute horizontally — equalize gaps">⇹ Dist H</button>
+            <button data-btn="dist-v" title="Distribute vertically — equalize gaps">⤨ Dist V</button>
+          </span>
           <span class="edit-note" id="edit-note"></span>
         </div>
         <div class="plan-row">
@@ -1639,6 +1780,7 @@ const LS_SAVED_AT = 'barndsl.playground.savedAt';
 const LS_THEME = 'barndsl.playground.theme';        // auto | light | dark
 const LS_AGENT_W = 'barndsl.playground.agentWidth';  // split: agent | editor
 const LS_EDITOR_W = 'barndsl.playground.editorWidth';
+const LS_COMPARE_A = 'barndsl.playground.compareA';  // the snapshotted baseline (scheme A)
 
 const editor = document.getElementById('editor');
 const gutter = document.getElementById('gutter');
@@ -2134,6 +2276,158 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 helpBackdrop.addEventListener('click', closeHelp);
 helpSearch.addEventListener('input', () => renderReference(helpSearch.value));
 
+// --- compare: scheme A (a saved baseline) vs B (the current editor) ----------
+// The workflow the empty state teaches: snapshot the current plan as baseline A,
+// keep editing, then reopen Compare to see A vs B. A survives reload via
+// localStorage; B is always whatever is in the editor now. Swap flips which side
+// is A and which is B (a pure display toggle — it never mutates the editor).
+const compareBtn = document.getElementById('compare-btn');
+const compareModal = document.getElementById('compare-modal');
+const compareBackdrop = document.getElementById('compare-backdrop');
+const compareBody = document.getElementById('compare-body');
+const compareFileInput = document.getElementById('compare-file-input');
+let compareBaselineA = null;   // the snapshotted baseline source (scheme A), or null
+let compareSwapped = false;    // show B-as-A / A-as-B without touching the editor
+try { compareBaselineA = localStorage.getItem(LS_COMPARE_A); } catch (e){}
+
+function setBaselineA(src){
+  compareBaselineA = src;
+  try { localStorage.setItem(LS_COMPARE_A, src); } catch (e){}
+  document.getElementById('compare-swap').disabled = false;
+  if (!compareModal.hidden) runCompare();
+}
+function openCompare(){
+  compareBackdrop.hidden = false; compareModal.hidden = false;
+  document.getElementById('compare-swap').disabled = compareBaselineA == null;
+  runCompare();
+}
+function closeCompare(){ compareModal.hidden = true; compareBackdrop.hidden = true; }
+
+// Which metrics read as "higher is better" vs "lower is better" — used only to
+// tint the winning side (ties stay neutral). Lengths render with fmtFtIn; areas
+// and counts render as plain sq ft / integers.
+const CMP_LOWER_BETTER = { footprint_sqft:1, unassigned_sqft:1, exterior_wall_area_sqft:1,
+  roof_area_sqft:1, beam_linear_ft:1, post_count:1 };
+const CMP_LEN = { beam_linear_ft:1 };
+const CMP_METRIC_LABEL = { footprint_sqft:'footprint', interior_sqft:'interior',
+  habitable_sqft:'habitable', unassigned_sqft:'unassigned', bedroom_count:'bedrooms',
+  bathroom_count:'bathrooms', exterior_wall_area_sqft:'exterior wall', roof_area_sqft:'roof area',
+  beam_linear_ft:'beam length', post_count:'posts' };
+function cmpVal(k, v){
+  if (v == null) return '—';
+  if (CMP_LEN[k]) return fmtFtIn(v);
+  if (/_sqft$/.test(k)) return trimNum(v) + ' sq ft';
+  if (/_count$/.test(k)) return String(Math.round(v));
+  return trimNum(v);
+}
+// class for the two value cells, tinting whichever side wins the row.
+function cmpWin(av, bv, lowerBetter){
+  if (av == null || bv == null || av === bv) return ['cmp-va', 'cmp-vb'];
+  const aWins = lowerBetter ? av < bv : av > bv;
+  return aWins ? ['cmp-va cmp-win', 'cmp-vb'] : ['cmp-va', 'cmp-vb cmp-win'];
+}
+
+function renderCompare(p, aCap, bCap){
+  if (p.error){
+    compareBody.innerHTML = '<div class="cmp-err">' +
+      esc((p.error && (p.error.message || p.error)) || 'comparison failed') + '</div>';
+    return;
+  }
+  const A = p.a, B = p.b, cm = p.compile || { a:{}, b:{} };
+  const badge = c => !c ? '' : (c.ok ? '' :
+    ' <span class="cmp-tag intro">' + ((c.counts && c.counts.error) || 0) + ' err</span>');
+  let h = '<div class="cmp-cols">';
+  h += '<span class="cmp-h"></span>' +
+    '<span class="cmp-h a">A' + badge(cm.a) + '<span class="cap">' + esc(aCap) + '</span></span>' +
+    '<span class="cmp-h b">B' + badge(cm.b) + '<span class="cap">' + esc(bCap) + '</span></span>' +
+    '<span class="cmp-h b">Δ</span>';
+  // score
+  const sw = cmpWin(A.score, B.score, false);
+  h += '<span class="cmp-lbl">Design score</span>' +
+    '<span class="' + sw[0] + ' cmp-scorebig">' + fmt(A.score) + '</span>' +
+    '<span class="' + sw[1] + ' cmp-scorebig">' + fmt(B.score) + '</span>' +
+    '<span class="cmp-vd">' + (p.deltas.score >= 0 ? '+' : '') + fmt(p.deltas.score) + '</span>';
+  h += '</div>';
+  // per-component deductions (only components either side deducts on)
+  const comps = Object.keys(Object.assign({}, A.components, B.components)).sort();
+  let crows = '';
+  for (const k of comps){
+    const av = A.components[k] || 0, bv = B.components[k] || 0;
+    if (!av && !bv) continue;
+    const w = cmpWin(av, bv, true);   // fewer deductions wins
+    crows += '<span class="cmp-lbl">' + esc(k) + '</span>' +
+      '<span class="' + w[0] + '">-' + fmt(av) + '</span>' +
+      '<span class="' + w[1] + '">-' + fmt(bv) + '</span>' +
+      '<span class="cmp-vd">' + ((bv - av) >= 0 ? '+' : '') + fmt(bv - av) + '</span>';
+  }
+  if (crows) h += '<div class="cmp-sec">Score deductions (lower is better)</div>' +
+    '<div class="cmp-cols">' + crows + '</div>';
+  // takeoff metrics
+  let mrows = '';
+  for (const k in A.metrics){
+    if (!(k in B.metrics)) continue;
+    const av = A.metrics[k], bv = B.metrics[k];
+    const w = cmpWin(av, bv, !!CMP_LOWER_BETTER[k]);
+    const d = p.deltas[k];
+    mrows += '<span class="cmp-lbl">' + esc(CMP_METRIC_LABEL[k] || k) + '</span>' +
+      '<span class="' + w[0] + '">' + cmpVal(k, av) + '</span>' +
+      '<span class="' + w[1] + '">' + cmpVal(k, bv) + '</span>' +
+      '<span class="cmp-vd">' + (d ? (d > 0 ? '+' : '') + trimNum(d) : '·') + '</span>';
+  }
+  if (mrows) h += '<div class="cmp-sec">Takeoff</div><div class="cmp-cols">' + mrows + '</div>';
+  // diagnostics multiset diff
+  const res = p.resolved || {}, intro = p.introduced || {};
+  const resK = Object.keys(res), introK = Object.keys(intro);
+  h += '<div class="cmp-sec">Diagnostics (B relative to A)</div><div>';
+  if (!resK.length && !introK.length)
+    h += '<div class="cmp-diag-none">Identical diagnostic code sets.</div>';
+  for (const c of resK)
+    h += '<span class="cmp-tag res">B resolves ' + esc(c) + (res[c] > 1 ? ' ×' + res[c] : '') + '</span>';
+  for (const c of introK)
+    h += '<span class="cmp-tag intro">B introduces ' + esc(c) + (intro[c] > 1 ? ' ×' + intro[c] : '') + '</span>';
+  h += '</div>';
+  compareBody.innerHTML = h;
+}
+
+async function runCompare(){
+  if (compareBaselineA == null){
+    document.getElementById('compare-swap').disabled = true;
+    compareBody.innerHTML = '<div class="cmp-empty"><strong>Snapshot this plan as baseline A</strong>, ' +
+      'keep editing, then reopen Compare to see your changes (scheme B) measured against it — ' +
+      'score, takeoff and diagnostics side by side.</div>';
+    return;
+  }
+  // Not swapped: A = the baseline snapshot, B = the current editor. Swapped flips them.
+  const editorSrc = editor.value;
+  const source_a = compareSwapped ? editorSrc : compareBaselineA;
+  const source_b = compareSwapped ? compareBaselineA : editorSrc;
+  const aCap = compareSwapped ? 'current editor' : 'baseline';
+  const bCap = compareSwapped ? 'baseline' : 'current editor';
+  compareBody.innerHTML = '<div class="cmp-empty">Comparing…</div>';
+  try {
+    const resp = await fetch('/api/compare', { method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ source_a, source_b }) });
+    const p = await resp.json();
+    renderCompare(p, aCap, bCap);
+  } catch (err){
+    compareBody.innerHTML = '<div class="cmp-err">Compare failed: ' + esc(String(err)) + '</div>';
+  }
+}
+compareBtn.addEventListener('click', openCompare);
+document.getElementById('compare-close').addEventListener('click', closeCompare);
+compareBackdrop.addEventListener('click', closeCompare);
+document.getElementById('compare-set-a').addEventListener('click', () => { compareSwapped = false; setBaselineA(editor.value); });
+document.getElementById('compare-swap').addEventListener('click', () => { compareSwapped = !compareSwapped; runCompare(); });
+document.getElementById('compare-load-a').addEventListener('click', () => compareFileInput.click());
+compareFileInput.addEventListener('change', () => {
+  const f = compareFileInput.files && compareFileInput.files[0];
+  if (f){ const rd = new FileReader();
+    rd.onload = () => { compareSwapped = false; setBaselineA(String(rd.result || '')); };
+    rd.readAsText(f); }
+  compareFileInput.value = '';
+});
+
 // --- theme toggle (header): auto → light → dark -----------------------------
 // Auto defers to the OS via the media query (today's behaviour, unchanged);
 // light/dark stamp `data-theme` on <html>, which the pinned palette blocks read.
@@ -2170,6 +2464,7 @@ document.addEventListener('keydown', e => {
   }
   if (e.key === 'Escape'){
     if (lb && !lb.hidden){ closeLightbox(); return; }
+    if (!compareModal.hidden){ closeCompare(); return; }
     if (!helpPanel.hidden){ closeHelp(); return; }
     if (!scorePop.hidden){ toggleScorePop(false); return; }
   }
@@ -3165,11 +3460,16 @@ const measureBtn = document.getElementById('measure-btn');
 const dimChip = document.getElementById('dim-chip');
 const planBody = document.querySelector('.plan-body');
 const levelSwitch = document.getElementById('level-switch');
+const multiCountEl = document.getElementById('multi-count');
+const alignTools = document.getElementById('align-tools');
 let editLevel = 0;                   // the floor the overlay currently edits
 let editMode = false, editReady = false;
 let editRooms = [], editOpens = [], editLevels = [0], editFixtures = [], editNotes = [];
 let allRooms = [], allOpens = [], allStairs = [], allFixtures = [], allNotes = [];   // every level — the dimmed underlay
 let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
+// Overlay-level multi-selection (rooms only) — distinct from dpSel/selectedRoomId
+// (the inspector's single notion). Shift-click toggles; a plain click clears it.
+const multiSel = new Set();
 
 function snap(v){ return Math.round(v * 2) / 2; }          // 0.5 ft grid
 function Y(py){ return ov.MID - py; }                       // plan y (north up) → svg y
@@ -3178,6 +3478,74 @@ function openByKey(k){ return editOpens.find(o => o.key === k); }
 function roomLine(id){ const r = roomById(id); return r ? r.line : null; }
 function editNote(msg, isErr){ editNoteEl.textContent = msg || '';
   editNoteEl.className = 'edit-note' + (isErr ? ' err' : ''); }
+
+// -- overlay multi-selection (rooms) + align / distribute --
+// The edit-bar shows a live count and, at 2+ rooms, the align/distribute toolbar.
+function renderMultiCount(){
+  const n = multiSel.size;
+  multiCountEl.textContent = n >= 1 ? n + ' selected' : '';
+  alignTools.hidden = n < 2;
+}
+function toggleMultiSel(id){
+  if (!roomById(id)) return;
+  if (multiSel.has(id)) multiSel.delete(id); else multiSel.add(id);
+  renderMultiCount();
+  if (editMode) buildOverlay();
+}
+function clearMultiSel(rebuild){
+  if (!multiSel.size){ renderMultiCount(); return; }
+  multiSel.clear(); renderMultiCount();
+  if (rebuild && editMode) buildOverlay();
+}
+function pruneMultiSel(){   // drop ids that vanished (a delete, or a floor switch)
+  let changed = false;
+  for (const id of Array.from(multiSel)) if (!roomById(id)){ multiSel.delete(id); changed = true; }
+  if (changed) renderMultiCount();
+}
+function selectedRooms(){ return Array.from(multiSel).map(roomById).filter(Boolean); }
+function roomsBBox(rooms){
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of rooms){ minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.l); }
+  return { x: minX, y: minY, w: maxX - minX, l: maxY - minY };
+}
+// Align the selected rooms' edges to the extreme edge (all in plan feet, snap 0.5).
+// Overlap / out-of-envelope stays the compiler's job — we never pre-block a move.
+function alignRooms(edge){
+  const rooms = selectedRooms(); if (rooms.length < 2) return;
+  const edits = [];
+  if (edge === 'left'){ const t = snap(Math.min.apply(null, rooms.map(r => r.x)));
+    for (const r of rooms) if (t !== r.x) edits.push({ kind:'move_room', room:r.id, x:t, y:r.y }); }
+  else if (edge === 'right'){ const t = Math.max.apply(null, rooms.map(r => r.x + r.w));
+    for (const r of rooms){ const nx = snap(t - r.w); if (nx !== r.x) edits.push({ kind:'move_room', room:r.id, x:nx, y:r.y }); } }
+  else if (edge === 'top'){ const t = Math.max.apply(null, rooms.map(r => r.y + r.l));
+    for (const r of rooms){ const ny = snap(t - r.l); if (ny !== r.y) edits.push({ kind:'move_room', room:r.id, x:r.x, y:ny }); } }
+  else if (edge === 'bottom'){ const t = snap(Math.min.apply(null, rooms.map(r => r.y)));
+    for (const r of rooms) if (t !== r.y) edits.push({ kind:'move_room', room:r.id, x:r.x, y:t }); }
+  applyEdits(edits, 'align rooms');
+}
+// Distribute: keep the first and last (by position), equalise the gaps between the
+// sorted members. Needs 3+ to have a middle to move; 2 is a clean no-op.
+function distributeRooms(axis){
+  const rooms = selectedRooms();
+  if (rooms.length < 3){ if (rooms.length) editNote('Select 3+ rooms to distribute.'); return; }
+  const horiz = axis === 'h';
+  const sorted = rooms.slice().sort((a, b) => horiz ? (a.x - b.x) : (a.y - b.y));
+  const first = sorted[0], last = sorted[sorted.length - 1];
+  const startEdge = horiz ? (first.x + first.w) : (first.y + first.l);
+  const endEdge = horiz ? last.x : last.y;
+  const middle = sorted.slice(1, -1);
+  const totalW = middle.reduce((s, m) => s + (horiz ? m.w : m.l), 0);
+  const gap = (endEdge - startEdge - totalW) / (sorted.length - 1);
+  let cursor = startEdge;
+  const edits = [];
+  for (const m of middle){
+    const np = snap(cursor + gap);
+    if (horiz){ if (np !== m.x) edits.push({ kind:'move_room', room:m.id, x:np, y:m.y }); cursor = np + m.w; }
+    else { if (np !== m.y) edits.push({ kind:'move_room', room:m.id, x:m.x, y:np }); cursor = np + m.l; }
+  }
+  applyEdits(edits, 'distribute rooms');
+}
 
 function initEdit(){
   // Parse an inline <svg> so the SVG namespace comes from the DOM (no namespace
@@ -3195,7 +3563,8 @@ function initEdit(){
     measureBtn.disabled = !editMode;
     if (!editMode) setMeasure(false);
     renderLevelSwitcher();
-    if (editMode) buildOverlay(); else { selectedRoomId = null; editNote(''); planZoom.refit(); }
+    if (editMode) buildOverlay();
+    else { selectedRoomId = null; clearMultiSel(false); editNote(''); planZoom.refit(); }
   });
   measureBtn.addEventListener('click', () => setMeasure(!measureMode));
   undoBtn.addEventListener('click', doUndo);
@@ -3203,6 +3572,14 @@ function initEdit(){
   levelSwitch.addEventListener('click', e => {
     const b = e.target.closest('[data-level]'); if (!b) return;
     setEditLevel(parseInt(b.getAttribute('data-level'), 10));
+  });
+  alignTools.addEventListener('click', e => {
+    const b = e.target.closest('[data-btn]'); if (!b) return;
+    const a = b.getAttribute('data-btn');
+    if (a === 'align-left' || a === 'align-right' || a === 'align-top' || a === 'align-bottom')
+      alignRooms(a.slice(6));
+    else if (a === 'dist-h') distributeRooms('h');
+    else if (a === 'dist-v') distributeRooms('v');
   });
 }
 
@@ -3229,6 +3606,7 @@ function noteByIndex(i){ return editNotes.find(n => n.index === i); }
 function setEditLevel(lvl){
   if (editLevels.indexOf(lvl) < 0 || lvl === editLevel) return;
   editLevel = lvl; selectedRoomId = null;
+  clearMultiSel(false);            // selection is per-floor
   applyLevelFilter(); renderLevelSwitcher();
   if (editMode) buildOverlay();
 }
@@ -3241,6 +3619,7 @@ function refreshEditData(p){
     editLevels = p.levels || [0];
     if (editLevels.indexOf(editLevel) < 0) editLevel = editLevels[0] || 0;  // clamp
     applyLevelFilter(); editReady = true;
+    pruneMultiSel();               // a recompile may have removed selected rooms
   }
   renderLevelSwitcher();
   if (editMode) buildOverlay();
@@ -3303,6 +3682,10 @@ function buildOverlay(){
       '" width="' + r.w + '" height="' + r.l + '" fill="' + r.color + '" stroke="' +
       (sel ? '#2F6FB0' : '#2b2b2b') + '" stroke-width="' + (sel ? 2.4 : 1) +
       '" vector-effect="non-scaling-stroke">' + title + '</rect>' + idText + dimText;
+    // Multi-selection ring — a distinct dashed violet outline over the room rect.
+    if (multiSel.has(r.id))
+      s += '<rect class="ov-multi" x="' + r.x + '" y="' + Y(r.y + r.l) +
+        '" width="' + r.w + '" height="' + r.l + '"/>';
   }
   // Fixtures on this floor — draggable. A seed is dashed (a drag materialises it
   // into an authored `fixture` line); an authored fixture is solid. The kind label
@@ -3531,19 +3914,32 @@ function drawMeasure(a, b){
   measureEls = [ln, t];
 }
 
-// -- keyboard nudge: arrows step the selected room 1 ft (Shift: one 3 ft module) --
-// Key repeats accumulate into ONE pending move (ghost + note preview); a 350 ms
-// pause flushes it as a single move_room edit — one POST, one undo entry per
-// gesture, exactly like releasing a drag.
-let nudge = null;   // { room, x0, y0, w, l, dx, dy, timer }
-function nudgeRoom(r, ddx, ddy){
-  if (nudge && nudge.room !== r.id) flushNudge();
-  if (!nudge) nudge = { room: r.id, x0: r.x, y0: r.y, w: r.w, l: r.l, dx: 0, dy: 0, timer: null };
+// -- keyboard nudge: arrows step the selected room(s) 1 ft (Shift: one 3 ft module) --
+// Key repeats accumulate into ONE pending move (bounding ghost + note preview); a
+// 350 ms pause flushes it as a single batched edit — one undo entry per gesture,
+// exactly like releasing a drag. The pending set is a list of rooms, so a single
+// room and a whole multi-selection share the same accumulate-then-flush path.
+let nudge = null;   // { ids, rooms:[{id,x0,y0,w,l}], dx, dy, timer, label }
+function nudgeBBox(n){
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of n.rooms){ const x = r.x0 + n.dx, y = r.y0 + n.dy;
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + r.w); maxY = Math.max(maxY, y + r.l); }
+  return { x: minX, y: minY, w: maxX - minX, l: maxY - minY };
+}
+function nudgeMembers(rooms, ddx, ddy, label){
+  const ids = rooms.map(r => r.id).join('|');
+  if (nudge && nudge.ids !== ids) flushNudge();
+  if (!nudge) nudge = { ids, label, dx: 0, dy: 0, timer: null,
+    rooms: rooms.map(r => ({ id: r.id, x0: r.x, y0: r.y, w: r.w, l: r.l })) };
   nudge.dx += ddx; nudge.dy += ddy;
-  const nx = nudge.x0 + nudge.dx, ny = nudge.y0 + nudge.dy;
-  if (!ghostEl) addGhost({ kind: 'move', cur: { x: nx, y: ny, w: nudge.w, l: nudge.l } });
-  placeGhostRect(nx, ny, nudge.w, nudge.l);
-  editNote(r.id + ' → ' + fmtFtIn(nx) + ', ' + fmtFtIn(ny));
+  const b = nudgeBBox(nudge);
+  if (!ghostEl) addGhost({ kind: 'move', cur: b });
+  placeGhostRect(b.x, b.y, b.w, b.l);
+  editNote(nudge.rooms.length > 1
+    ? nudge.rooms.length + ' rooms → Δ ' + fmtFtIn(nudge.dx) + ', ' + fmtFtIn(nudge.dy)
+    : nudge.rooms[0].id + ' → ' + fmtFtIn(nudge.rooms[0].x0 + nudge.dx) + ', ' +
+      fmtFtIn(nudge.rooms[0].y0 + nudge.dy));
   clearTimeout(nudge.timer);
   nudge.timer = setTimeout(flushNudge, 350);
 }
@@ -3553,7 +3949,7 @@ function flushNudge(){
   clearTimeout(n.timer);
   removeGhost();
   if (n.dx || n.dy)
-    applyEdits([{ kind:'move_room', room:n.room, x:n.x0 + n.dx, y:n.y0 + n.dy }], 'nudge room');
+    applyEdits(n.rooms.map(r => ({ kind:'move_room', room:r.id, x:r.x0 + n.dx, y:r.y0 + n.dy })), n.label);
   else editNote('');
 }
 function cancelNudge(){
@@ -3580,6 +3976,13 @@ function onDown(e){
   const fixEl = e.target.closest('[data-fixkey]');
   const noteEl = e.target.closest('[data-notekey]');
   const roomEl = e.target.closest('[data-room]');
+  const roomId = roomEl && roomEl.getAttribute('data-room');
+  // Shift-click a room rect toggles it into the multi-selection (no drag starts).
+  if (e.shiftKey && roomEl && !handleEl){ toggleMultiSel(roomId); e.preventDefault(); return; }
+  // Dragging a member of a 2+ room selection moves the whole set as one.
+  const groupDrag = roomEl && !handleEl && roomId && multiSel.has(roomId) && multiSel.size >= 2;
+  // A plain click that isn't a group drag clears the multi-selection first.
+  if (!groupDrag && multiSel.size) clearMultiSel(true);
   if (noteEl){
     const n = noteByIndex(parseInt(noteEl.getAttribute('data-notekey'), 10)); if (!n) return;
     drag = { kind:'note', n, P, cur:{ x:n.x, y:n.y }, calc:{ x:n.x, y:n.y }, moved:false };
@@ -3593,8 +3996,14 @@ function onDown(e){
   } else if (openEl){
     const o = openByKey(openEl.getAttribute('data-okey')); if (!o) return;
     drag = { kind:'open', o, P, offset:o.offset, moved:false };
+  } else if (groupDrag){
+    const members = selectedRooms();
+    drag = { kind:'movegroup', pressed:roomId, P, ddx:0, ddy:0, moved:false,
+      members: members.map(m => ({ id:m.id, x0:m.x, y0:m.y, w:m.w, l:m.l })),
+      bbox: roomsBBox(members) };
+    drag.cur = drag.bbox;                 // addGhost draws the bounding rect
   } else if (roomEl){
-    const id = roomEl.getAttribute('data-room'), r = roomById(id); if (!r) return;
+    const id = roomId, r = roomById(id); if (!r) return;
     if (id !== selectedRoomId){ selectedRoomId = id; buildOverlay(); }
     drag = { kind:'move', id, P, cur:{ x:r.x, y:r.y, w:r.w, l:r.l },
       calc:{ x:r.x, y:r.y, w:r.w, l:r.l }, moved:false };
@@ -3613,6 +4022,14 @@ function onMove(e){
     return;
   }
   clearGuides();
+  if (drag.kind === 'movegroup'){
+    const ddx = snap(P.x - drag.P.x), ddy = snap(P.y - drag.P.y);
+    drag.ddx = ddx; drag.ddy = ddy;
+    if (ddx || ddy) drag.moved = true;
+    placeGhostRect(drag.bbox.x + ddx, drag.bbox.y + ddy, drag.bbox.w, drag.bbox.l);
+    showDim(drag.members.length + ' rooms — Δ ' + fmtFtIn(ddx) + ', ' + fmtFtIn(ddy), e);
+    return;
+  }
   if (drag.kind === 'move'){
     let nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
     const sn = neighborSnap(drag.id, { x:nx, y:ny, w:drag.cur.w, l:drag.cur.l },
@@ -3670,6 +4087,13 @@ function onUp(e){
   if (d.kind === 'measure'){
     // A click without a drag leaves nothing; a real span stays until the next one.
     if (d.a.x === d.b.x && d.a.y === d.b.y) clearMeasure();
+    return;
+  }
+  if (d.kind === 'movegroup'){
+    if (!d.moved){    // a plain click on a member collapses to single-selecting it
+      clearMultiSel(false); dpSelect('room', d.pressed); return; }
+    applyEdits(d.members.map(m => ({ kind:'move_room', room:m.id,
+      x: snap(m.x0 + d.ddx), y: snap(m.y0 + d.ddy) })), 'move rooms');
     return;
   }
   if (d.kind === 'move'){
@@ -4244,7 +4668,8 @@ function isUndoKey(e){ return (e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key 
 function isRedoKey(e){ return (e.metaKey || e.ctrlKey) &&
   ((e.shiftKey && (e.key === 'z' || e.key === 'Z')) || e.key === 'y' || e.key === 'Y'); }
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape'){ cancelDrag(); cancelNudge(); if (measureMode) setMeasure(false); return; }
+  if (e.key === 'Escape'){ cancelDrag(); cancelNudge(); clearMultiSel(true);
+    if (measureMode) setMeasure(false); return; }
   if (isUndoKey(e) || isRedoKey(e)){
     const el = document.activeElement;
     // The editor handles its own (and stopped propagation); the agent brief, find /
@@ -4271,15 +4696,20 @@ document.addEventListener('keydown', e => {
   if (editMode && (e.key === 'm' || e.key === 'M')){
     e.preventDefault(); setMeasure(!measureMode); return;
   }
-  // Arrows nudge the selected room; Shift steps a whole 3 ft build module.
+  // Arrows nudge the selection; Shift steps a whole 3 ft build module. With a
+  // 2+ room multi-selection the whole set moves as one batched edit; otherwise
+  // the single selected room, unchanged.
   if (editMode && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' ||
       e.key === 'ArrowUp' || e.key === 'ArrowDown')){
-    const r = roomById(selectedRoomId); if (!r) return;
+    const members = multiSel.size >= 2 ? selectedRooms()
+      : (roomById(selectedRoomId) ? [roomById(selectedRoomId)] : []);
+    if (!members.length) return;
     e.preventDefault();
     const step = e.shiftKey ? 3 : 1;
-    nudgeRoom(r,
+    nudgeMembers(members,
       e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0,
-      e.key === 'ArrowDown' ? -step : e.key === 'ArrowUp' ? step : 0);
+      e.key === 'ArrowDown' ? -step : e.key === 'ArrowUp' ? step : 0,
+      members.length > 1 ? 'nudge rooms' : 'nudge room');
     return;
   }
   // `r` spins the inspected fixture a quarter turn (a seed materialises, like a drag).
