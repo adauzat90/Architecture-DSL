@@ -25,8 +25,8 @@ from xml.sax.saxutils import escape
 from .elements import Barndominium, Direction, RoomType
 from .revit import roof_plan
 
-# Reuse the plan renderer's palette so the two views read as one drawing set.
-from .render import ROOM_COLORS, TEXT_COLOR, WALL
+# Reuse the plan renderer's palette + shared ft-in formatter so the drawing set reads as one.
+from .render import ROOM_COLORS, TEXT_COLOR, WALL, fmt_ft_in
 
 SKY = "#F5F8FB"       # roof fill
 WALLFILL = "#EFECE6"  # wall mass fill
@@ -47,10 +47,6 @@ _FACE_AXIS = {
     Direction.EAST: ("y", False),
     Direction.WEST: ("y", True),
 }
-
-
-def _n(v: float) -> str:
-    return f"{v:g}"
 
 
 def _roof_geom(plan: Barndominium) -> dict:
@@ -206,11 +202,11 @@ def elevation_svg(plan: Barndominium, side: Direction | str) -> str:
         fill = "#DfE6EC" if d.overhead else OPENING
         c.rect_wz(a, base, a + d.width, base + h, fill, sw=1.0)
 
-    c.dim(geom["eave"], f"eave {_n(geom['eave'])} ft")
-    c.dim(geom["ridge"], f"ridge {_n(geom['ridge'])} ft")
+    c.dim(geom["eave"], f"eave {fmt_ft_in(geom['eave'])}")
+    c.dim(geom["ridge"], f"ridge {fmt_ft_in(geom['ridge'])}")
     for lvl in plan.levels():
         if lvl > 0:
-            c.dim(plan.level_elevation(lvl), f"L{lvl} floor {_n(plan.level_elevation(lvl))} ft")
+            c.dim(plan.level_elevation(lvl), f"L{lvl} floor {fmt_ft_in(plan.level_elevation(lvl))}")
     if plan.wings:
         c.text(MARGIN_L, c.height - 14, "schematic — L/T/U footprint shown to its bounding box",
                size=10, anchor="start", fill="#9AA6B2")
@@ -256,14 +252,14 @@ def section_svg(plan: Barndominium) -> str:
         top = geom["eave"] if room.vaulted else floor + ceil_h
         c.rect_wz(rp0, floor, rp1, top, fill, sw=0.8)
         mid = (rp0 + rp1) / 2.0
-        tag = f"{room.id}" + (" · vaulted" if room.vaulted else f" · {_n(ceil_h)} ft")
+        tag = f"{room.id}" + (" · vaulted" if room.vaulted else f" · {fmt_ft_in(ceil_h)}")
         c.text(c.sx(mid), c.sy(floor) - 6, tag, size=9, fill="#555555")
 
-    c.dim(geom["eave"], f"eave {_n(geom['eave'])} ft")
-    c.dim(geom["ridge"], f"ridge {_n(geom['ridge'])} ft")
+    c.dim(geom["eave"], f"eave {fmt_ft_in(geom['eave'])}")
+    c.dim(geom["ridge"], f"ridge {fmt_ft_in(geom['ridge'])}")
     for lvl in plan.levels():
         if lvl > 0:
-            c.dim(plan.level_elevation(lvl), f"L{lvl} {_n(plan.level_elevation(lvl))} ft")
+            c.dim(plan.level_elevation(lvl), f"L{lvl} {fmt_ft_in(plan.level_elevation(lvl))}")
     c.text(c.sx((w0 + w1) / 2), c.height - 14,
            f"cut looking along the ridge ({ga}-axis)", size=10, fill="#9AA6B2")
     if plan.wings:

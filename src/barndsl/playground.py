@@ -1653,6 +1653,35 @@ let currentTab = 'plan';
 function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function fmt(n){ return (Math.round(n*10)/10).toString(); }
 function trimNum(n){ return (Math.round(n*10)/10).toString().replace(/\.0$/,''); }
+// Feet-and-inches display, mirroring Python's fmt_ft_in: round to the nearest
+// inch; whole feet drop the inch part (18′, not 18′-0″); fractional reads 18′-6″;
+// sub-foot reads as inches alone (9″); 0 → 0′; negatives keep a leading '-'.
+function fmtFtIn(v){
+  v = Number(v); if (!isFinite(v)) return '';
+  const neg = v < 0, t = Math.round(Math.abs(v) * 12);
+  const ft = Math.floor(t / 12), inch = t % 12;
+  let s;
+  if (inch === 0) s = ft + '′';
+  else if (ft === 0) s = inch + '″';
+  else s = ft + '′-' + inch + '″';
+  return neg ? '-' + s : s;
+}
+// Parse a length the user typed into a dimension field. Accepts 12'6", 12' 6",
+// 12-6, 12.5 and plain 12 (and the ′/″ glyphs); returns feet as a number, or
+// null when the text isn't a recognisable length (caller keeps prior value).
+function parseFtIn(str){
+  if (str == null) return null;
+  let s = String(str).trim().replace(/[′’]/g, "'").replace(/[″”]/g, '"');
+  if (s === '') return null;
+  if (/^-?\d*\.?\d+$/.test(s)){ const f = parseFloat(s); return isFinite(f) ? f : null; }
+  let m = s.match(/^(-?\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)$/);   // 12-6
+  if (m){ const ft = parseFloat(m[1]), sgn = ft < 0 ? -1 : 1; return ft + sgn * parseFloat(m[2]) / 12; }
+  m = s.match(/^(-?\d+(?:\.\d+)?)\s*'\s*(?:(\d+(?:\.\d+)?)\s*"?)?$/);   // 12'6"  12'  12' 6
+  if (m){ const ft = parseFloat(m[1]), sgn = ft < 0 ? -1 : 1; return ft + sgn * (m[2] ? parseFloat(m[2]) : 0) / 12; }
+  m = s.match(/^(-?\d+(?:\.\d+)?)\s*"$/);   // 6"
+  if (m) return parseFloat(m[1]) / 12;
+  return null;
+}
 
 // --- editor: line numbers + severity gutter ---------------------------------
 function renderGutter(){
@@ -2620,7 +2649,7 @@ function areaSection(rep){
   const rows = a.rooms.length
     ? a.rooms.map(r => '<tr><td>' + esc(r.name) + '</td><td>' + esc(r.type) + '</td>' +
         '<td class="num">' + r.level + '</td>' +
-        '<td class="num">' + trimNum(r.width) + '′ × ' + trimNum(r.length) + '′</td>' +
+        '<td class="num">' + fmtFtIn(r.width) + ' × ' + fmtFtIn(r.length) + '</td>' +
         '<td class="num">' + sqft(r.area) + '</td></tr>').join('')
     : '<tr><td colspan="5">No rooms.</td></tr>';
   return '<div class="rsec"><h3>Areas</h3>' +
@@ -3213,7 +3242,7 @@ function buildOverlay(){
   }
   for (const r of editRooms){
     const sel = r.id === selectedRoomId;
-    const dims = trimNum(r.w) + '×' + trimNum(r.l);
+    const dims = fmtFtIn(r.w) + '×' + fmtFtIn(r.l);
     const idFits = labelFits(r.id, fs, r.w);
     const idText = idFits ? '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) - fs * 0.1) +
       '" text-anchor="middle" font-size="' + fs + '" fill="#333" style="pointer-events:none">' +
@@ -3405,7 +3434,7 @@ function setMeasure(on){
 function measureLabel(a, b){
   const dx = Math.abs(b.x - a.x), dy = Math.abs(b.y - a.y);
   const d = Math.round(Math.hypot(dx, dy) * 100) / 100;
-  return trimNum(d) + '′' + (dx && dy ? '  (' + trimNum(dx) + '′ × ' + trimNum(dy) + '′)' : '');
+  return fmtFtIn(d) + (dx && dy ? '  (' + fmtFtIn(dx) + ' × ' + fmtFtIn(dy) + ')' : '');
 }
 function drawMeasure(a, b){
   clearMeasure();
@@ -3441,7 +3470,7 @@ function nudgeRoom(r, ddx, ddy){
   const nx = nudge.x0 + nudge.dx, ny = nudge.y0 + nudge.dy;
   if (!ghostEl) addGhost({ kind: 'move', cur: { x: nx, y: ny, w: nudge.w, l: nudge.l } });
   placeGhostRect(nx, ny, nudge.w, nudge.l);
-  editNote(r.id + ' → ' + trimNum(nx) + ', ' + trimNum(ny));
+  editNote(r.id + ' → ' + fmtFtIn(nx) + ', ' + fmtFtIn(ny));
   clearTimeout(nudge.timer);
   nudge.timer = setTimeout(flushNudge, 350);
 }
@@ -3517,8 +3546,8 @@ function onMove(e){
     drag.calc = { x:nx, y:ny, w:drag.cur.w, l:drag.cur.l };
     if (nx !== drag.cur.x || ny !== drag.cur.y) drag.moved = true;
     placeGhostRect(nx, ny, drag.cur.w, drag.cur.l);
-    showDim(esc(drag.id) + ' — ' + trimNum(drag.cur.w) + ' × ' + trimNum(drag.cur.l) +
-      ' at ' + trimNum(nx) + ', ' + trimNum(ny), e);
+    showDim(esc(drag.id) + ' — ' + fmtFtIn(drag.cur.w) + ' × ' + fmtFtIn(drag.cur.l) +
+      ' at ' + fmtFtIn(nx) + ', ' + fmtFtIn(ny), e);
   } else if (drag.kind === 'resize'){
     let c = resizeCalc(drag, P);
     const h = drag.h;
@@ -3531,9 +3560,9 @@ function onMove(e){
     if (c.x !== drag.cur.x || c.y !== drag.cur.y || c.w !== drag.cur.w || c.l !== drag.cur.l) drag.moved = true;
     placeGhostRect(c.x, c.y, c.w, c.l);
     const dw = c.w - drag.cur.w, dl = c.l - drag.cur.l;
-    const delta = (dw ? (dw > 0 ? '+' : '') + trimNum(dw) + "' w" : '') +
-      (dw && dl ? '  ' : '') + (dl ? (dl > 0 ? '+' : '') + trimNum(dl) + "' l" : '');
-    showDim(trimNum(c.w) + ' × ' + trimNum(c.l) +
+    const delta = (dw ? (dw > 0 ? '+' : '') + fmtFtIn(dw) + ' w' : '') +
+      (dw && dl ? '  ' : '') + (dl ? (dl > 0 ? '+' : '') + fmtFtIn(dl) + ' l' : '');
+    showDim(fmtFtIn(c.w) + ' × ' + fmtFtIn(c.l) +
       (delta ? '<span class="delta">' + delta + '</span>' : ''), e);
   } else if (drag.kind === 'fixture'){
     const nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
@@ -3542,13 +3571,13 @@ function onMove(e){
     placeGhostRect(nx, ny, drag.cur.w, drag.cur.l);
     const rm = allRooms.find(r => r.id === drag.f.room);
     const lx = nx - (rm ? rm.x : 0), ly = ny - (rm ? rm.y : 0);
-    showDim(esc(drag.f.kind.replace(/_/g, ' ')) + ' — at ' + trimNum(lx) + ', ' + trimNum(ly), e);
+    showDim(esc(drag.f.kind.replace(/_/g, ' ')) + ' — at ' + fmtFtIn(lx) + ', ' + fmtFtIn(ly), e);
   } else {
     const o = drag.o;
     const off = Math.max(o.min, Math.min(o.max, snap(projOffset(o, P) - o.width / 2)));
     drag.offset = off; if (Math.abs(off - o.offset) > 1e-9) drag.moved = true;
     placeGhostLine(o, off);
-    showDim('offset ' + trimNum(off), e);
+    showDim('offset ' + fmtFtIn(off), e);
   }
 }
 function onUp(e){
@@ -3694,7 +3723,7 @@ function renderPanel(){
       h += '<div class="dp-row' + (sel ? ' sel' : '') + '" data-sel="room:' + esc(r.id) + '">' +
         '<span class="swatch" style="background:' + esc(r.color) + '"></span>' +
         '<span class="dp-id">' + esc(r.id) + '</span><span class="dp-kind">' + esc(r.type) + '</span>' +
-        '<span class="dp-dim">' + trimNum(r.w) + '×' + trimNum(r.l) + '</span></div>';
+        '<span class="dp-dim">' + fmtFtIn(r.w) + '×' + fmtFtIn(r.l) + '</span></div>';
       for (const f of (p.fixtures || []).filter(f => f.room === r.id)){
         const fsel = dpSel && dpSel.t === 'fx' && dpSel.k === f.id;
         h += '<div class="dp-sub"><div class="dp-row' + (fsel ? ' sel' : '') + (f.seed ? ' dp-seed' : '') +
@@ -3709,7 +3738,7 @@ function renderPanel(){
         const osel = dpSel && dpSel.t === 'op' && dpSel.k === o.key;
         h += '<div class="dp-row' + (osel ? ' sel' : '') + '" data-sel="op:' + esc(o.key) + '">' +
           '<span class="dp-id">' + esc(opLabel(o)) + '</span>' +
-          '<span class="dp-dim">' + trimNum(o.width) + '′</span></div>';
+          '<span class="dp-dim">' + fmtFtIn(o.width) + '</span></div>';
       }
     }
   }
@@ -3729,10 +3758,10 @@ function renderInspector(p){
     let h = '<h5>Room — ' + esc(r.id) + '</h5><div class="dp-grid">' +
       '<label>name</label><input class="wide" data-act="room.rename" value="' + esc(r.id) + '">' +
       '<label>type</label><select class="wide" data-act="room.type">' + optList(HIGHLIGHT.types || [], r.type) + '</select>' +
-      '<label>size</label><input type="number" min="1" step="0.5" data-act="room.w" value="' + trimNum(r.w) + '">' +
-      '<input type="number" min="1" step="0.5" data-act="room.l" value="' + trimNum(r.l) + '">' +
-      '<label>corner</label><input type="number" step="0.5" data-act="room.x" title="South-west corner x (ft east of origin)" value="' + trimNum(r.x) + '">' +
-      '<input type="number" step="0.5" data-act="room.y" title="South-west corner y (ft north of origin)" value="' + trimNum(r.y) + '">' +
+      '<label>size</label><input type="text" inputmode="text" data-act="room.w" title="Width (ft — accepts 12′6″, 12-6, 12.5)" value="' + trimNum(r.w) + '">' +
+      '<input type="text" inputmode="text" data-act="room.l" title="Length (ft — accepts 12′6″, 12-6, 12.5)" value="' + trimNum(r.l) + '">' +
+      '<label>corner</label><input type="text" inputmode="text" data-act="room.x" title="South-west corner x (ft east of origin — accepts 12′6″)" value="' + trimNum(r.x) + '">' +
+      '<input type="text" inputmode="text" data-act="room.y" title="South-west corner y (ft north of origin — accepts 12′6″)" value="' + trimNum(r.y) + '">' +
       '</div><div class="dp-btns">' +
       '<button data-btn="adddoor">＋ Door</button><button data-btn="addwindow">＋ Window</button>' +
       '<button data-btn="addentry">＋ Entry</button>' +
@@ -3747,8 +3776,8 @@ function renderInspector(p){
     const o = (p.openings || []).find(x => x.key === dpSel.k);
     if (!o){ dpSel = null; return ''; }
     let h = '<h5>' + esc(opLabel(o)) + '</h5><div class="dp-grid">' +
-      '<label>width</label><input type="number" min="0.5" step="0.5" data-act="op.width" value="' + trimNum(o.width) + '"><span></span>' +
-      '<label>offset</label><input type="number" min="0" step="0.5" data-act="op.offset" value="' + fnum(o.offset) + '"><span></span>';
+      '<label>width</label><input type="text" inputmode="text" data-act="op.width" title="Width (ft — accepts 2′8″, 2-8, 2.67)" value="' + trimNum(o.width) + '"><span></span>' +
+      '<label>offset</label><input type="text" inputmode="text" data-act="op.offset" title="Offset (ft — accepts 2′8″, 2-8, 2.67)" value="' + fnum(o.offset) + '"><span></span>';
     if (o.kind === 'interior' && o.door){
       h += '<label>swings into</label><select data-act="op.into">' +
         '<option value=""' + (o.into ? '' : ' selected') + '>—</option>' + optList([o.a, o.b], o.into) + '</select>' +
@@ -3832,7 +3861,10 @@ function addOpeningForm(p, r){
 
 function dpChange(act, el){
   const p = lastGood; if (!p) return;
-  const v = el.value, num = parseFloat(v);
+  // Dimension fields accept feet-and-inches (12'6", 12-6) as well as decimals;
+  // parseFtIn returns null on junk, which we map to NaN so the isFinite() guards
+  // below reject it and the field keeps its prior value.
+  const v = el.value; let num = parseFtIn(v); if (num == null) num = NaN;
   const s = p.settings || {};
   if (act === 'plan.name'){
     if (v.trim() && v.trim() !== s.name) applyEdits([{ kind:'set_plan', name:v.trim() }], 'plan settings');

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .elements import Barndominium
+from .render import fmt_ft_in
 from .validation import clear_dimensions, exterior_walls
 
 
@@ -30,7 +31,7 @@ class Column:
 
 
 def _fmt_ft(v: float) -> str:
-    return f"{v:g}′"
+    return fmt_ft_in(v)
 
 
 # -- row builders ---------------------------------------------------------
@@ -116,7 +117,7 @@ _ROOM_COLS = [
     Column("Name", lambda r: r["name"]),
     Column("Type", lambda r: r["type"]),
     Column("Level", lambda r: str(r["level"])),
-    Column("Size", lambda r: f"{r['width']:g}′ × {r['length']:g}′"),
+    Column("Size", lambda r: f"{fmt_ft_in(r['width'])} × {fmt_ft_in(r['length'])}"),
     Column("Area", lambda r: f"{r['area']:.0f} sq ft"),
     # Clear (finish-face) area — what Revit's room schedule reports and what IRC
     # habitability minimums are measured to; smaller than nominal by the walls.

@@ -86,6 +86,66 @@ def test_chain_breaks_skip_full_and_inset_rooms():
     assert pts2 == [0.0, 12.0, 20.0]
 
 
+def test_rectangular_plan_has_one_run_per_side_at_the_bounds():
+    # The wing-aware run finder must degrade to the bounds edge on a plain
+    # rectangle — one run per side — so rectangular plans are unchanged.
+    plan = compile_source(_TWO_ROOM).plan  # 20 x 9, no wing
+    r = _Renderer(plan, RenderConfig())
+    assert r._exterior_runs("S") == [(0.0, 0.0, 20.0)]
+    assert r._exterior_runs("N") == [(9.0, 0.0, 20.0)]
+    assert r._exterior_runs("W") == [(0.0, 0.0, 9.0)]
+    assert r._exterior_runs("E") == [(20.0, 0.0, 9.0)]
+
+
+def _lshape_plan():
+    with open("examples/gallery/lshape.barn", encoding="utf-8") as fh:
+        return compile_source(fh.read()).plan
+
+
+def test_wing_footprint_splits_notched_sides_into_per_offset_runs():
+    # Maple Bend: a 36×30 main block with an 18×18 east wing at (36,0). The
+    # north and east faces are each notched into two colinear runs at *different*
+    # wall offsets; the south and west faces stay single continuous runs.
+    plan = _lshape_plan()
+    r = _Renderer(plan, RenderConfig())
+    assert r._exterior_runs("S") == [(0.0, 0.0, 54.0)]
+    assert r._exterior_runs("W") == [(0.0, 0.0, 30.0)]
+    # North: the wing top (y=18, x 36→54) and the main-block top (y=30, x 0→36).
+    assert r._exterior_runs("N") == [(18.0, 36.0, 54.0), (30.0, 0.0, 36.0)]
+    # East: the wing east wall (x=54, y 0→18) and the main east wall above the
+    # wing (x=36, y 18→30).
+    assert r._exterior_runs("E") == [(36.0, 18.0, 30.0), (54.0, 0.0, 18.0)]
+
+
+def test_wing_run_breaks_only_collect_rooms_backing_that_run():
+    plan = _lshape_plan()
+    r = _Renderer(plan, RenderConfig())
+    rooms = plan.rooms
+    # Main-block north run: bed1|closet1|bath|laundry partition x into 16+4+8+8.
+    assert r._run_breaks("N", rooms, 30.0, 0.0, 36.0) == [0.0, 16.0, 20.0, 28.0, 36.0]
+    # Wing north run: master (12) + mcloset (6) — the hall's y2=18 wall does NOT
+    # contribute because its x-extent [0,36] doesn't overlap the wing run [36,54].
+    assert r._run_breaks("N", rooms, 18.0, 36.0, 54.0) == [36.0, 48.0, 54.0]
+    # Wing east run: mbath (9) + mcloset (9) stacked up the x=54 wall.
+    assert r._run_breaks("E", rooms, 54.0, 0.0, 18.0) == [0.0, 9.0, 18.0]
+
+
+def test_wing_plan_draws_a_chain_per_broken_run_at_its_own_offset():
+    plan = _lshape_plan()
+    svg = render_svg(plan, RenderConfig(show_room_dims=False))
+    # The wing-suite ensuite/closet split (6 ft segments) only appears when the
+    # east chain follows the x=54 wall — the old bounds-only chain would miss it.
+    assert "6′" in svg
+    # Two distinct north chain lines sit at the two wall offsets (y=18 and y=30
+    # in world space) — proving each run is drawn at its own wall, not the bounds.
+    r = _Renderer(plan, RenderConfig(show_room_dims=False))
+    off = r._CHAIN_OFFSET
+    y18 = r.sy(18.0) - off  # wing north run chain line (north side → wall minus offset)
+    y30 = r.sy(30.0) - off  # main-block north run chain line
+    assert f'y1="{y18:.1f}"' in svg and f'y1="{y30:.1f}"' in svg
+    assert abs(y18 - y30) > 1.0  # genuinely two different rows
+
+
 def test_multistory_chain_uses_each_levels_own_rooms():
     # The two-story gallery plan: level 0 fills the footprint (breaks on all four
     # sides); the level-1 loft only reaches the S/W walls, so its N/E sides get no

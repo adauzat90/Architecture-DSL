@@ -325,6 +325,24 @@ def test_app_contains_edit_mode_markup_and_no_external_refs():
     assert "//cdn" not in html and "<script src" not in html
 
 
+def test_app_ships_the_feet_inches_formatter_and_parser():
+    # The client mirrors Python's ft-in display + input parsing; both must be
+    # present and the offline guarantee must still hold (no external references).
+    html = render_app(CLEAN)
+    for token in ("function fmtFtIn(", "function parseFtIn(",
+                  "data-act=\"room.w\"", "data-act=\"op.width\""):
+        assert token in html, token
+    # the dimension fields became text inputs so ft-in strings can be typed
+    assert "data-act=\"room.w\" title=" in html
+    # display sites route through fmtFtIn (measure tape, drag chip, inspector)
+    assert "fmtFtIn(d)" in html and "fmtFtIn(c.w)" in html
+    # the prime/double-prime glyphs the formatter emits
+    assert "′" in html and "″" in html
+    # offline guarantee: no external network references
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
 def test_app_contains_level_switcher_markup_and_shortcut():
     html = render_app(CLEAN)
     for token in ('id="level-switch"', "function renderLevelSwitcher(",

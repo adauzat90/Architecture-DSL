@@ -15,6 +15,30 @@ from xml.sax.saxutils import escape
 from .elements import Barndominium, Direction, RoomType
 from .geometry import opening_endpoints, shared_edge
 
+# US architectural feet-and-inches glyphs: prime (feet) and double-prime (inches).
+_FT = "′"  # ′
+_IN = "″"  # ″
+
+
+def fmt_ft_in(feet: float) -> str:
+    """Format a decimal-feet length as US feet-and-inches (rounded to the inch).
+
+    Whole feet drop the inch part (``18′``, never ``18′-0″``); a fractional value
+    reads ``18′-6″``; a sub-foot value reads as inches alone (``9″``); zero is
+    ``0′``. Negatives shouldn't occur in a plan, but are formatted from their
+    magnitude with a leading ``-`` rather than crashing.
+    """
+    neg = feet < 0
+    total_inches = round(abs(feet) * 12.0)
+    ft, inch = divmod(int(total_inches), 12)
+    if inch == 0:
+        s = f"{ft}{_FT}"
+    elif ft == 0:
+        s = f"{inch}{_IN}"
+    else:
+        s = f"{ft}{_FT}-{inch}{_IN}"
+    return f"-{s}" if neg else s
+
 # Fill colours per room type (soft, print-friendly).
 ROOM_COLORS: dict[RoomType, str] = {
     RoomType.LIVING: "#FDE9D9",
@@ -170,6 +194,33 @@ class _Renderer:
             )
         else:
             self.height = self.top + self.content_h + config.margin_bottom
+
+        # The PROJECT SUMMARY panel (summary rows + legend) can be taller than the
+        # plan drawing — a plan with many room types overruns the canvas otherwise.
+        # Grow the SVG to enclose the panel's real content height so nothing clips;
+        # plans whose panel already fits keep their height unchanged (max()).
+        self._panel_ph = self._panel_content_height()
+        panel_py = self.top + (self.label_gap if self.multi else 0.0)
+        self.height = max(self.height, panel_py + self._panel_ph + 16.0)
+
+    def _panel_content_height(self) -> float:
+        """Pixel height the summary panel needs, from its top to below the last
+        legend row — mirrors the y-cursor walk in :meth:`_draw_panel`."""
+        n_rows = 3  # footprint, interior, habitable
+        if self.multi:
+            n_rows += len(self.plan.area_by_level())
+        n_rows += 7  # bedrooms, bathrooms, ceiling, perimeter, wall, roof, foundation
+        if self.plan.frame_spec is not None or self.plan.posts:
+            n_rows += 3  # frames, posts, beam length
+            if self.plan.frame_spec is not None:
+                n_rows += 1  # bay spacing
+        present: list[RoomType] = []
+        for r in self.plan.rooms:
+            if r.type not in present:
+                present.append(r.type)
+        # title (26) + gap (10) + 20/summary-row + legend header (30)
+        # + 18/legend-row + a bottom pad clearing the last row off the border.
+        return 26 + 10 + 20 * n_rows + 30 + 18 * len(present) + 14
 
     def _env_top(self, i: int) -> float:
         return self.top + self.label_gap + i * self.block_stride
@@ -341,7 +392,7 @@ class _Renderer:
 
     def _extent_label(self) -> str:
         fx0, fy0, fx1, fy1 = self.plan.bounds()
-        label = f"{fx1 - fx0:.0f}′ × {fy1 - fy0:.0f}′"
+        label = f"{fmt_ft_in(fx1 - fx0)} × {fmt_ft_in(fy1 - fy0)}"
         return label + " (L/T/U)" if self.plan.wings else label
 
     def _draw_envelope(self):
@@ -396,7 +447,9 @@ class _Renderer:
             if dims:
                 self._text(cx, cy - 11, r.display_name, size=12, weight="bold")
                 self._text(
-                    cx, cy + 3, f"{r.width:g}′ × {r.length:g}′", size=9, fill="#777777"
+                    cx, cy + 3,
+                    f"{fmt_ft_in(r.width)} × {fmt_ft_in(r.length)}",
+                    size=9, fill="#777777",
                 )
                 self._text(cx, cy + 16, f"{r.area:.0f} sq ft", size=10, fill="#555555")
             else:
@@ -786,12 +839,12 @@ class _Renderer:
         # Overall width dimension below the plan.
         y = self.top + self.content_h + 28
         self._dim_line(
-            self.sx(fx0), y, self.sx(fx1), y, f"{fx1 - fx0:.0f}′", horizontal=True
+            self.sx(fx0), y, self.sx(fx1), y, fmt_ft_in(fx1 - fx0), horizontal=True
         )
         # Overall length dimension left of the plan.
         x = self.c.margin_left - 34
         self._dim_line(
-            x, self.sy(fy0), x, self.sy(fy1), f"{fy1 - fy0:.0f}′", horizontal=False
+            x, self.sy(fy0), x, self.sy(fy1), fmt_ft_in(fy1 - fy0), horizontal=False
         )
 
     def _dim_line(self, x1, y1, x2, y2, label, horizontal):
@@ -857,10 +910,114 @@ class _Renderer:
         return pts, lo, hi
 
     def _level_has_north_chain(self, level: int) -> bool:
-        fx0, fy0, fx1, fy1 = self.plan.bounds()
         rooms = [r for r in self.plan.rooms if r.level == level]
-        pts, _, _ = self._chain_breaks("N", rooms, fx0, fy0, fx1, fy1)
-        return len(pts) > 2
+        fx0, fy0, fx1, fy1 = self.plan.bounds()
+        if not self.plan.wings:
+            pts, _, _ = self._chain_breaks("N", rooms, fx0, fy0, fx1, fy1)
+            return len(pts) > 2
+        # Wing plans: only a chain on the top-most north run (offset == max_y)
+        # rides in the title band — an inset wing run sits in the notch, clear.
+        for offset, lo, hi in self._exterior_runs("N"):
+            if abs(offset - fy1) <= 1e-6 and len(self._run_breaks(
+                "N", rooms, offset, lo, hi
+            )) > 2:
+                return True
+        return False
+
+    def _exterior_runs(self, side: str) -> list[tuple[float, float, float]]:
+        """Distinct colinear exterior wall runs facing ``side`` (S/N/W/E).
+
+        Each run is ``(offset, lo, hi)``: its wall coordinate (y for S/N, x for
+        W/E) and the span it covers on the perpendicular axis. A plain rectangle
+        yields exactly one run per side (the bounds edge), so wing-free plans keep
+        the old single-chain-per-side behaviour; an L/T/U footprint yields one run
+        per notched face, each at its own wall offset.
+        """
+        from .geometry import footprint_boundary, point_in_footprint
+
+        sections = self.plan.footprint_sections()
+        eps = 1e-3
+        intervals: dict[float, list[tuple[float, float]]] = {}
+        for (x1, y1), (x2, y2) in footprint_boundary(sections):
+            if side in ("S", "N"):
+                if abs(y1 - y2) > 1e-9:
+                    continue  # want a horizontal edge
+                offset = y1
+                mid = (x1 + x2) / 2.0
+                inside_hi = point_in_footprint(sections, mid, offset + eps)
+                inside_lo = point_in_footprint(sections, mid, offset - eps)
+                faces = (
+                    "S" if inside_hi and not inside_lo
+                    else "N" if inside_lo and not inside_hi else None
+                )
+                a, b = sorted((x1, x2))
+            else:
+                if abs(x1 - x2) > 1e-9:
+                    continue  # want a vertical edge
+                offset = x1
+                mid = (y1 + y2) / 2.0
+                inside_hi = point_in_footprint(sections, offset + eps, mid)
+                inside_lo = point_in_footprint(sections, offset - eps, mid)
+                faces = (
+                    "W" if inside_hi and not inside_lo
+                    else "E" if inside_lo and not inside_hi else None
+                )
+                a, b = sorted((y1, y2))
+            if faces != side:
+                continue
+            intervals.setdefault(offset, []).append((a, b))
+        runs: list[tuple[float, float, float]] = []
+        for offset, ivs in intervals.items():
+            ivs.sort()
+            cur_lo, cur_hi = ivs[0]
+            for lo, hi in ivs[1:]:
+                if lo <= cur_hi + 1e-9:
+                    cur_hi = max(cur_hi, hi)
+                else:
+                    runs.append((offset, cur_lo, cur_hi))
+                    cur_lo, cur_hi = lo, hi
+            runs.append((offset, cur_lo, cur_hi))
+        runs.sort()
+        return runs
+
+    def _run_breaks(
+        self,
+        side: str,
+        rooms: list,
+        offset: float,
+        lo: float,
+        hi: float,
+        tol: float = 1e-6,
+    ) -> list[float]:
+        """Break points partitioning one exterior run (``offset``, span ``[lo,hi]``).
+
+        Like :meth:`_chain_breaks` but keyed to a specific wall run: a room
+        contributes only when its wall lies on this run's ``offset`` *and* its
+        extent overlaps ``[lo, hi]`` — so a wing's north run collects only the
+        rooms backing that wing, not rooms on the deeper main-block wall.
+        """
+        if side in ("S", "N"):
+            edge = (lambda r: r.y) if side == "S" else (lambda r: r.y2)
+            touch = [
+                r for r in rooms
+                if abs(edge(r) - offset) <= tol
+                and min(r.x2, hi) - max(r.x, lo) > tol
+            ]
+            raw = [c for r in touch for c in (r.x, r.x2)]
+        else:
+            edge = (lambda r: r.x) if side == "W" else (lambda r: r.x2)
+            touch = [
+                r for r in rooms
+                if abs(edge(r) - offset) <= tol
+                and min(r.y2, hi) - max(r.y, lo) > tol
+            ]
+            raw = [c for r in touch for c in (r.y, r.y2)]
+        pts: list[float] = []
+        for c in sorted([lo, hi, *raw]):
+            c = min(max(c, lo), hi)
+            if not pts or c - pts[-1] > tol:
+                pts.append(c)
+        return pts
 
     @staticmethod
     def _label_min_px(label: str) -> float:
@@ -874,38 +1031,47 @@ class _Renderer:
         overall dimension (no duplicated single-segment string)."""
         fx0, fy0, fx1, fy1 = self.plan.bounds()
         rooms = [r for r in self.plan.rooms if level is None or r.level == level]
+        if self.plan.wings:
+            # L/T/U footprint: chain along each notched exterior run at its own
+            # wall offset, not the rectangular bounds.
+            for side in ("S", "N", "W", "E"):
+                for offset, lo, hi in self._exterior_runs(side):
+                    pts = self._run_breaks(side, rooms, offset, lo, hi)
+                    if len(pts) <= 2:
+                        continue
+                    self._chain_string(side, pts, offset)
+            return
         for side in ("S", "N", "W", "E"):
             pts, _, _ = self._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
             if len(pts) <= 2:
                 continue  # no interior break — the overall dim already covers it
-            self._chain_string(side, pts, fx0, fy0, fx1, fy1)
+            wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
+            self._chain_string(side, pts, wall)
 
-    def _chain_string(
-        self, side: str, pts: list[float], fx0: float, fy0: float, fx1: float, fy1: float
-    ) -> None:
+    def _chain_string(self, side: str, pts: list[float], wall_coord: float) -> None:
         off, tick = self._CHAIN_OFFSET, self._CHAIN_TICK
         if side in ("S", "N"):
-            wy = self.sy(fy0 if side == "S" else fy1)
+            wy = self.sy(wall_coord)
             ly = wy + off if side == "S" else wy - off
             xs = [self.sx(p) for p in pts]
             self._line(xs[0], ly, xs[-1], ly, DIM_COLOR, 1.0)
             for x in xs:
                 self._line(x, ly - tick, x, ly + tick, DIM_COLOR, 1.0)
             for a, b, xa, xb in zip(pts, pts[1:], xs, xs[1:]):
-                label = f"{b - a:g}′"
+                label = fmt_ft_in(b - a)
                 if (xb - xa) < self._label_min_px(label):
                     continue
                 ty = ly - 3 if side == "S" else ly + 10
                 self._text((xa + xb) / 2, ty, label, size=9, fill=DIM_COLOR)
         else:
-            wx = self.sx(fx0 if side == "W" else fx1)
+            wx = self.sx(wall_coord)
             lx = wx - off if side == "W" else wx + off
             ys = [self.sy(p) for p in pts]
             self._line(lx, ys[0], lx, ys[-1], DIM_COLOR, 1.0)
             for y in ys:
                 self._line(lx - tick, y, lx + tick, y, DIM_COLOR, 1.0)
             for a, b, ya, yb in zip(pts, pts[1:], ys, ys[1:]):
-                label = f"{b - a:g}′"
+                label = fmt_ft_in(b - a)
                 if abs(yb - ya) < self._label_min_px(label):
                     continue
                 cy = (ya + yb) / 2
@@ -924,6 +1090,8 @@ class _Renderer:
         else:
             py = self.top
             ph = self.content_h
+        # Grow the panel rect to enclose its content when the legend runs long.
+        ph = max(ph, self._panel_ph)
         pw = self.c.panel_width
         m = self.plan.metrics()
 
@@ -944,7 +1112,7 @@ class _Renderer:
         rows += [
             ("Bedrooms", f"{int(m['bedroom_count'])}"),
             ("Bathrooms", f"{m['bathroom_count']:.1f}"),
-            ("Ceiling", f'{self.plan.ceiling_height:.1f}′'),
+            ("Ceiling", fmt_ft_in(self.plan.ceiling_height)),
             ("Ext. perimeter", f"{m['exterior_perimeter_ft']:.0f} ft"),
             ("Ext. wall area", f"{m['exterior_wall_area_sqft']:.0f} sq ft"),
             ("Roof area (≈)", f"{m['roof_area_sqft']:.0f} sq ft"),
