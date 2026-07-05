@@ -352,11 +352,10 @@ def test_oakline_example_compiles_clean():
     out = solve_layout2(parse_brief2(open(path).read()))
     result = compile_source(emit_dsl(out.plan), name=out.plan.name)
     assert not result.errors, result.report()
-    # WINDOW_TEMPERED is a safety-glazing advisory (IRC R308.4) the auto-layout
-    # can't yet suppress (no `tempered` override this pass); nothing structural
-    # should warn.
-    structural = [w for w in result.warnings if w.code != "WINDOW_TEMPERED"]
-    assert not structural, result.report()
+    # The auto-layout now DECLARES `tempered` on the windows it places in R308.4
+    # hazard locations (via the shared predicate), so no WINDOW_TEMPERED warning
+    # survives — the plan is strictly clean of warnings.
+    assert not result.warnings, result.report()
     assert out.unsatisfied == []
 
 

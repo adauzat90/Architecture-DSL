@@ -338,6 +338,11 @@ class Window:
     head_height: float = feet(6.67)
     #: One of :data:`WINDOW_KINDS`. Defaults to ``casement`` (see there for why).
     kind: str = "casement"
+    #: Author-declared safety (tempered) glazing — the R308.4 escape hatch. When
+    #: ``True`` the window is already specified as safety glass, so the
+    #: WINDOW_TEMPERED hazard-location warning is silenced for it and the window
+    #: schedule reads "tempered (declared)" rather than "tempered (required)".
+    tempered: bool = False
     #: Source location of the `window` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
@@ -346,6 +351,13 @@ class Window:
     @property
     def glazed_area(self) -> float:
         return self.width * max(0.0, self.head_height - self.sill_height)
+
+    @property
+    def openable(self) -> bool:
+        """Can this window open for ventilation? A ``fixed`` window is sealed
+        glass — it daylights but provides no openable area (IRC R303.1's 4%
+        ventilation floor, VENT_AREA). Every other kind opens."""
+        return self.kind != "fixed"
 
     @property
     def escape_capable(self) -> bool:
@@ -591,6 +603,11 @@ class Stair:
     from_level: int = 0
     to_level: int = 1
     label: str | None = None
+    #: Source location of the `stair` statement (textual front-end only), so its
+    #: diagnostics carry a column-accurate caret and can be `accept`-ed by line.
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
     @property
     def x2(self) -> float:
@@ -1858,10 +1875,12 @@ class Barndominium:
         sill_height: float = feet(3),
         head_height: float = feet(6.67),
         kind: str = "casement",
+        tempered: bool = False,
     ) -> "Barndominium":
         """Add a window. ``kind`` is one of :data:`WINDOW_KINDS` (default
         ``casement`` — full glazed size = clear opening; a ``fixed`` window
-        never counts as an escape opening)."""
+        never counts as an escape opening). ``tempered`` declares safety
+        glazing, the R308.4 escape hatch (silences WINDOW_TEMPERED)."""
         kind = str(kind).lower()
         if kind not in WINDOW_KINDS:
             raise ValueError(
@@ -1876,6 +1895,7 @@ class Barndominium:
                 float(sill_height),
                 float(head_height),
                 kind=kind,
+                tempered=bool(tempered),
             )
         )
         return self

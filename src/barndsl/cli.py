@@ -575,21 +575,28 @@ def _cmd_revit_import(args: argparse.Namespace) -> int:
 
 
 def _cmd_fmt(args: argparse.Namespace) -> int:
-    """Canonically reformat .barn files via the compile → emit_dsl round-trip."""
-    from .emit import emit_dsl
+    """Canonically reformat .barn files with the comment-preserving normalizer.
+
+    Unlike an emit round-trip, `fmt` keeps every comment (teaching notes and
+    suppression pragmas) — it re-renders each statement line from its own tokens
+    and normalizes only spacing/number formatting/keyword case. It refuses to
+    touch a file that doesn't compile without parse errors, so it can't mask
+    breakage."""
+    from .fmt import format_source
 
     rc = 0
     changed_any = False
     for path in args.files:
         with open(path, encoding="utf-8") as fh:
             original = fh.read()
+        # Refuse to format a file with parse errors — fmt must never mask breakage.
         result = compile_source(original)
-        if result.plan is None:
-            print(f"{path}: cannot format — fix compile errors first", file=sys.stderr)
+        if result.plan is None or result.recovered:
+            print(f"{path}: cannot format — fix parse errors first", file=sys.stderr)
             print(result.report(os.path.basename(path)), file=sys.stderr)
             rc = 2
             continue
-        formatted = emit_dsl(result.plan)
+        formatted = format_source(original)
         changed = formatted != original
         if args.check:
             if changed:
@@ -1174,7 +1181,7 @@ def main(argv: list[str] | None = None) -> int:
     p_revit_import.set_defaults(func=_cmd_revit_import)
 
     p_fmt = sub.add_parser(
-        "fmt", help="canonically reformat .barn files (compile → emit)"
+        "fmt", help="canonically reformat .barn files (comments/pragmas preserved)"
     )
     p_fmt.add_argument("files", nargs="+", help="one or more .barn files")
     p_fmt.add_argument(

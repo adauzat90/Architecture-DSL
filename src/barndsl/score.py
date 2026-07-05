@@ -49,6 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .elements import HABITABLE_TYPES, Barndominium, RoomType
+from .validation import Severity
 
 # --- weights (the contract; change these and the score changes meaning) ------
 
@@ -211,10 +212,14 @@ def design_score(result) -> ScoreReport:
     components are still reported when a plan exists, so an agent fixing errors
     can already see what else needs work.
     """
+    # An *accepted* diagnostic (downgraded by an `# barndsl: accept CODE` pragma)
+    # is a documented, deliberate deviation — it survives as an audited INFO but
+    # must not deduct at any severity, so the score excludes it from every count.
+    active = [d for d in result.diagnostics if not getattr(d, "accepted", False)]
     counts = {
-        "error": len(result.errors),
-        "warning": len(result.warnings),
-        "info": len(result.infos),
+        "error": sum(1 for d in active if d.severity is Severity.ERROR),
+        "warning": sum(1 for d in active if d.severity is Severity.WARNING),
+        "info": sum(1 for d in active if d.severity is Severity.INFO),
     }
     components: dict[str, float] = {
         "errors": 100.0 if (result.plan is None or result.errors) else 0.0,

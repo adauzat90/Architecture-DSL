@@ -189,6 +189,8 @@ def emit_dsl(plan: Barndominium) -> str:
                 line += f" sill {_n(w.sill_height)}"
             if abs(w.head_height - 6.67) > 1e-6:
                 line += f" head {_n(w.head_height)}"
+            if getattr(w, "tempered", False):
+                line += " tempered"  # declared safety glazing (R308.4 escape hatch)
             out.append(line)
 
     if plan.fixtures:

@@ -49,6 +49,10 @@ door master - mcloset width 2.5 offset 10.5 into master
 
 entry living south width 3 offset 20
 entry dining east width 3 offset 6
+
+# Covered landings at both exterior doors — a floor to step onto (IRC R311.3).
+porch front at 18,-6 size 7 x 6 covered
+porch back at 69,4 size 6 x 7 covered
 window living south width 10 offset 2
 window kitchen south width 8 offset 6
 window dining south width 8 offset 6

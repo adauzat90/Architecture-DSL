@@ -645,7 +645,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         if path not in (
-            "/api/compile", "/api/edit", "/api/compare",
+            "/api/compile", "/api/edit", "/api/compare", "/api/fmt",
             "/api/export", "/api/design", "/api/design/cancel",
         ):
             self._json({"error": "not found"}, status=404)
@@ -655,6 +655,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/compile":
             self._handle_compile(data)
+        elif path == "/api/fmt":
+            self._handle_fmt(data)
         elif path == "/api/edit":
             self._handle_edit(data)
         elif path == "/api/compare":
@@ -676,6 +678,32 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": f"internal error: {exc}"}, status=500)
             return
         self._json(payload)
+
+    def _handle_fmt(self, data: object) -> None:
+        """Canonically reformat ``source`` with the comment-preserving normalizer.
+
+        Returns ``{"source": <formatted>, "changed": bool}``. Refuses (a typed
+        ``error``, a normal 200) a source that doesn't compile without parse
+        errors, mirroring the CLI — fmt must never mask breakage."""
+        if not isinstance(data, dict) or not isinstance(data.get("source"), str):
+            self._json({"error": 'expected {"source": "<dsl>"}'}, status=400)
+            return
+        source = data["source"]
+        try:
+            result = compile_source(source)
+            if result.plan is None or result.recovered:
+                self._json({"error": {
+                    "kind": "parse_error",
+                    "message": "fix the parse errors before formatting",
+                }})
+                return
+            from .fmt import format_source
+
+            formatted = format_source(source)
+        except Exception as exc:  # a real bug — bad DSL never reaches here
+            self._json({"error": f"internal error: {exc}"}, status=500)
+            return
+        self._json({"source": formatted, "changed": formatted != source})
 
     def _handle_edit(self, data: object) -> None:
         """Apply one surgical DSL edit and return the recompiled payload.
@@ -1238,6 +1266,10 @@ _APP_HTML = r"""<!doctype html>
   .diag-row .loc { font:11px ui-monospace,Menlo,Consolas,monospace; color:var(--faint); }
   .diag-row .msg { color:var(--ink); }
   .diag-row .msg em { color:var(--faint); font-style:normal; }
+  .diag-row .acc { display:inline-block; font-size:10px; font-weight:700;
+    text-transform:uppercase; letter-spacing:.04em; color:var(--info);
+    border:1px solid var(--info); border-radius:3px; padding:0 4px; }
+  .diag-row.accepted .code { text-decoration:line-through; }
   .diag-row .hint { display:block; color:var(--faint); font-size:11.5px; margin-top:2px; }
 
   .tabs { display:flex; gap:2px; padding:6px 10px 0; background:var(--panel);
@@ -1629,6 +1661,7 @@ _APP_HTML = r"""<!doctype html>
     <button class="tbtn" id="new-btn" title="Start a new plan from the scaffold">New</button>
     <button class="tbtn" id="open-btn" title="Open a .barn file (Ctrl/Cmd+O)">Open</button>
     <button class="tbtn" id="save-btn" title="Download the source as .barn (Ctrl/Cmd+S)">Save</button>
+    <button class="tbtn" id="fmt-btn" title="Canonically reformat the source — comments &amp; pragmas preserved (Shift+Alt+F)">Format</button>
     <button class="tbtn" id="compare-btn" title="Compare the current plan against a saved baseline (A vs B)">Compare…</button>
     <input type="file" id="file-input" accept=".barn,.txt" hidden>
     <input type="file" id="compare-file-input" accept=".barn,.txt" hidden>
@@ -2228,6 +2261,7 @@ const helpShortcuts = document.getElementById('help-shortcuts');
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 const SHORTCUTS = [
   ['Save .barn', MOD + '+S'], ['Open a .barn file', MOD + '+O'],
+  ['Format (comments & pragmas kept)', 'Shift+Alt+F'],
   ['Find in the editor', MOD + '+F'], ['Find & replace', MOD + '+H'],
   ['Autocomplete', MOD + '+Space'], ['Toggle comment', MOD + '+/'],
   ['Send to the agent', MOD + '+Enter'], ['Undo / Redo', MOD + '+Z  ·  ' + MOD + '+Shift+Z'],
@@ -2590,10 +2624,15 @@ function renderDiagnostics(p){
     const snip = quickFixSnippet(d.hint);
     const apply = snip ? '<button class="qfix" data-qfix="' + escAttr(snip) + '" data-qline="' +
       (d.line || '') + '" title="' + escAttr(qfixTitle(snip)) + '">Apply</button>' : '';
-    rows += '<div class="diag-row sev-' + d.severity + '" data-line="' + (d.line || '') + '">' +
+    // An accepted diagnostic (downgraded by a `# barndsl: accept CODE` pragma) is
+    // shown as an INFO with the reason visible and a distinct "accepted" badge —
+    // the audit trail an author (and a reviewer) reads.
+    const accBadge = d.accepted ? '<span class="acc" title="downgraded by an accept pragma">accepted</span> ' : '';
+    rows += '<div class="diag-row sev-' + d.severity + (d.accepted ? ' accepted' : '') +
+      '" data-line="' + (d.line || '') + '">' +
       '<span class="sev">' + d.severity + '</span>' +
       '<span class="code">' + esc(d.code) + '</span>' +
-      '<span class="msg">' +
+      '<span class="msg">' + accBadge +
         (d.line ? '<span class="loc">L' + d.line + (d.col ? ':' + d.col : '') + '</span> ' : '') +
         esc(d.message) + (d.room ? ' <em>(' + esc(d.room) + ')</em>' : '') +
         (d.hint ? '<span class="hint">' + esc(d.hint) + '</span>' : '') +
@@ -4976,6 +5015,34 @@ newBtn.addEventListener('click', () => {
 
 // -- save (download .barn) --
 saveBtn.addEventListener('click', downloadSource);
+
+// -- format (canonical reformat; comments & pragmas preserved) --
+// POSTs to /api/fmt (the same normalizer the CLI's `barndsl fmt` uses) and lands
+// the result through applyEdit, so it's ONE undo step (Ctrl+Z restores the
+// pre-format text) — the same checkpoint funnel a quick-fix uses.
+const fmtBtn = document.getElementById('fmt-btn');
+async function formatSource(){
+  const src = editor.value;
+  try {
+    const resp = await fetch('/api/fmt', { method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ source: src }) });
+    const j = await resp.json();
+    if (j.error){
+      showNotice('Format: ' + ((j.error && (j.error.message || j.error)) || 'could not format'));
+      return;
+    }
+    if (!j.changed){ showNotice('Already formatted — nothing to change.'); return; }
+    applyEdit(j.source, null, null, 'format');   // one undo step
+    renderGutter(); compile();
+  } catch (err){ showNotice('Format failed: ' + String(err)); }
+}
+fmtBtn.addEventListener('click', formatSource);
+document.addEventListener('keydown', e => {   // Shift+Alt+F = Format (VS Code parity)
+  if (e.shiftKey && e.altKey && (e.key === 'f' || e.key === 'F')){
+    e.preventDefault(); formatSource();
+  }
+});
 
 // -- keyboard: Ctrl/Cmd+S = Save, +O = Open, +F = Find, +H = Find & replace --
 document.addEventListener('keydown', e => {

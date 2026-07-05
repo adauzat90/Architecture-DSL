@@ -108,7 +108,7 @@ door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]  
 door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # overhead/sectional garage door
 open <id_a> - <id_b> [width <w>] [offset <o>]     # shorthand for `door <a> - <b> cased ...`
 entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]   # shorthand for `door <id> <wall> exterior ...`
-window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
+window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>] [fixed] [tempered]   # sill/head: ft above the floor
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
 fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>]   # furnishing
@@ -474,6 +474,13 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 **Warnings (should address):**
 - 8% natural-light glazing for habitable rooms (`living, kitchen, dining,
   bedroom, office, loft`) — windows must be on **exterior** walls to count.
+- `VENT_AREA` — 4% **openable** window area (half the 8% light floor) for
+  natural ventilation (IRC R303.1). A `fixed` window daylights but opens nothing,
+  so it doesn't count here — make one operable or confirm mechanical ventilation.
+- `DOOR_NO_LANDING` — an exterior `entry` with no landing on the outside (IRC
+  R311.3). A `porch` covering the door's face (its full width, ≥ 3 ft deep) is the
+  landing. With porches drawn anywhere, every uncovered entry warns; on a plan
+  with *no* porches it's a single INFO nudge on the primary entry.
 - A `window` on an interior wall (gives no daylight/egress).
 - Hallway ≥ 3 ft; interior door ≥ 30 in; at least one egress door ≥ 32 in; a
   bathroom exists.
@@ -509,6 +516,9 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   room.
 - `STAIR_GEOMETRY` / `STAIR_OOB` / `STAIR_LEVELS` (errors), `STAIR_RUN` /
   `STAIR_FLOAT` — a stair with bad geometry, too short a run, or landing in no room.
+- `WINDOW_TEMPERED` — a window in an IRC R308.4 hazard location (beside a door,
+  near a tub/shower, near a stair) needs safety glazing. Declare `tempered` to
+  silence it (the schedule then reads "tempered (declared)").
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
   `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
   — it's a contract check, not a code error — so it's a warning.
@@ -518,6 +528,11 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   id is a `REQUIRE_REF` **error**, like any dangling reference.
 
 **Info (design quality — heed when you can):**
+- `STAIR_HANDRAIL` — a stair flight of 4+ risers needs a handrail (IRC R311.7.8);
+  the DSL can't draw one, so it's a one-per-plan checklist reminder on the first
+  qualifying stair (carry it onto the construction documents).
+- `WATER_HEATER_PLACEMENT` — a `water_heater` fixture in a garage/shop (ignition
+  elevation, M1307.3) or on level 1+ over habitable space (drain pan, P2801.6).
 - `KITCHEN_FLOW` — open the kitchen to dining/living.
 - `BED_PRIVACY` — don't open a bedroom straight onto a public room; buffer with a
   hallway.
@@ -750,6 +765,50 @@ maple.barn:10:6: error[BEDROOM_AREA] (bed2): Bedroom is 64 sq ft; IRC minimum is
 `file:line:col`, severity + `[CODE]` + the room, the message, the **source line
 with a caret** under the offending token, and a `hint` you can usually apply
 verbatim. Apply the hint, recompile, repeat until `COMPILE OK`.
+
+## Accepting a diagnostic (`# barndsl: accept`)
+
+Real projects have justified deviations. A **suppression pragma** waives a
+*specific* diagnostic without hiding it — a comment of the form:
+
+```barn
+window bath north width 3 offset 2   # barndsl: accept WINDOW_TEMPERED "glass block, inherently safety-rated"
+# barndsl: accept HALL_DEADEND "gallery wall by design"
+room hall: hallway at 18,0 size 4 x 24
+```
+
+- **Trailing** a statement (the primary form) accepts that `CODE` for the
+  diagnostics anchored to that line. **On its own line** it accepts the code for
+  the next statement line.
+- "Accept" means *downgrade, not delete*: the diagnostic becomes an **INFO** with
+  a `(accepted: "<reason>")` suffix, it stops deducting from the design score, and
+  the audit trail survives (the permit packet lists it under **Accepted
+  deviations**).
+- **Errors can't be accepted** — an error must be fixed (`ACCEPT_DENIED`). An
+  unknown code is `ACCEPT_UNKNOWN` (with did-you-mean); a pragma that matches
+  nothing on its line is `ACCEPT_UNUSED` (a stale pragma to remove).
+
+## Window flags: `fixed` and `tempered`
+
+- `fixed` — sealed glass. It daylights (counts for `NAT_LIGHT`) but opens nothing,
+  so it never counts as bedroom egress and doesn't help the 4% ventilation floor
+  (`VENT_AREA`). `fixed` is both a *kind* (right after the wall) and a trailing
+  flag; both mean the same non-opening glass.
+- `tempered` — declares safety (tempered) glazing, the IRC R308.4 escape hatch. A
+  window in a hazard location (beside a door, near a tub/shower, near a stair)
+  normally warns `WINDOW_TEMPERED`; declaring it `tempered` silences that and the
+  window schedule reads **"tempered (declared)"** instead of "tempered (required)".
+
+## Formatting: `barndsl fmt`
+
+`barndsl fmt FILE` prints canonical source; `-w` rewrites in place; `--check`
+exits non-zero when a file isn't already formatted (CI mode). Unlike an
+`emit_dsl` round-trip, `fmt` **preserves every comment and pragma** — it
+re-renders each statement line from its own tokens (single spaces, `:g` numbers,
+feet-and-inches → decimal feet, lower-case leading keyword) and leaves comments,
+blank lines and statement order untouched. It refuses to touch a file with parse
+errors, so it can't mask breakage. In the playground, **Format** (Shift+Alt+F)
+does the same, as one undo step. `fmt(fmt(x)) == fmt(x)`.
 
 ## Two front-ends, one core
 

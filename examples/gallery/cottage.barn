@@ -23,6 +23,10 @@ door bed - closet width 2.5 offset 0.5 into bed
 
 entry living south width 3 offset 13
 entry kitchen west width 3 offset 3
+
+# Covered landings at both exterior doors — a floor to step onto (IRC R311.3).
+porch front at 11,-6 size 7 x 6 covered
+porch side at -5,15 size 5 x 7 covered
 window living south width 8 offset 2
 window kitchen north width 6 offset 6
 window bed  south width 4 offset 3

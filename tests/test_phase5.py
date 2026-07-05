@@ -171,7 +171,7 @@ def test_window_tempered_near_door_sidelite():
                        'entry a south width 3 offset 12\n'
                        'window a south width 4 offset 8\n')
     assert "WINDOW_TEMPERED" in _codes(r)
-    assert _glazing(r, "a") == "tempered"
+    assert _glazing(r, "a") == "tempered (required)"
 
 
 def test_window_not_tempered_far_from_door():
@@ -190,7 +190,7 @@ def test_window_tempered_in_wet_room_near_tub():
                        'entry a south width 3 offset 8\n'
                        'window bath east width 2 offset 3\n')
     assert "WINDOW_TEMPERED" in _codes(r)
-    assert _glazing(r, "bath") == "tempered"
+    assert _glazing(r, "bath") == "tempered (required)"
 
 
 def test_high_sill_bath_window_is_exempt():

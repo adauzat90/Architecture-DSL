@@ -139,6 +139,14 @@ only reads as a length when there is no space around it, so `12 - 6`, `door a - 
 and a plain `-6` are unaffected; `-12-6` (negative feet + inches) is rejected, and
 ASCII 12'6" (with the inch ") is not accepted because " starts a string.
 
+A comment may carry a suppression pragma for a justified deviation:
+  # barndsl: accept <CODE> ["reason"]
+Trailing a statement it downgrades that CODE on that line to an accepted INFO;
+on its own line it applies to the next statement line. Errors cannot be accepted
+(ACCEPT_DENIED); an unknown code is ACCEPT_UNKNOWN; a pragma matching no
+diagnostic on its line is ACCEPT_UNUSED. Accepted diagnostics stop deducting from
+the design score but survive as an audited INFO (packet: "Accepted deviations").
+
 Statements:
   plan "Name"
   envelope <W> x <L>              # primary footprint block (at the origin)
@@ -202,11 +210,14 @@ Statements:
   entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]
         # shorthand for `door <id> <wall> exterior ...`; double/french = a pair of
         # half-width leaves (egress clear width counts ONE leaf, IRC R311.2)
-  window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
+  window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>] [fixed] [tempered]
         # window; sill/head are ft above the floor. The kind (default casement)
         # sets the escape-opening math: a casement opens ~its full glazed size, a
         # slider opens ~half its width, a double-hung ~half its height, and FIXED
-        # glass never counts for bedroom egress (it still daylights).
+        # glass never counts for bedroom egress (it still daylights). `fixed` may
+        # also trail as a flag; a fixed window counts for daylight but not the
+        # openable-area ventilation floor (VENT_AREA). `tempered` declares safety
+        # glazing — the IRC R308.4 escape hatch that silences WINDOW_TEMPERED here.
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
@@ -1325,6 +1336,7 @@ def _parse_statement(
             kind = c.take("a window kind").text.lower()
         width, offset = 4.0, 2.0
         sill, head = 3.0, 6.67  # ft above the floor; matches Window's defaults
+        tempered = False
         while c.peek() is not None:
             opt = c.take("an option").text.lower()
             if opt == "width":
@@ -1335,6 +1347,15 @@ def _parse_statement(
                 sill = c.number("sill height")
             elif opt == "head":
                 head = c.number("head height")
+            elif opt == "tempered":
+                # Declared safety glazing — the R308.4 escape hatch (silences the
+                # WINDOW_TEMPERED hazard-location warning for this window).
+                tempered = True
+            elif opt == "fixed":
+                # `fixed` as a trailing flag is the same non-opening glass as the
+                # `fixed` kind (it just reads naturally after the size). It opens
+                # nothing, so it counts for daylight but not ventilation.
+                kind = "fixed"
             else:
                 raise _ParseError(
                     "BAD_OPTION",
@@ -1342,12 +1363,12 @@ def _parse_statement(
                     c.toks[c.i - 1].col,
                     hint="Options: a kind (casement/slider/fixed/double-hung, "
                     "right after the wall), width <n>, offset <n>, sill <n>, "
-                    "head <n>.",
+                    "head <n>, fixed, tempered.",
                     end_col=c.toks[c.i - 1].end_col,
                 )
         plan.add_window(
             rid, wall, width=width, offset=offset, sill_height=sill,
-            head_height=head, kind=kind,
+            head_height=head, kind=kind, tempered=tempered,
         )
         win = plan.windows[-1]
         win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
@@ -1397,6 +1418,8 @@ def _parse_statement(
                 sid_tok.text, x=x, y=y, width=w, length=length,
                 from_level=lo, to_level=hi,
             )
+            st = plan.stairs[-1]
+            st.line, st.col, st.end_col = lineno, sid_tok.col, sid_tok.end_col
         except ValueError as exc:
             raise _ParseError(
                 "BAD_LEVEL", str(exc), sid_tok.col, end_col=sid_tok.end_col,
@@ -1700,6 +1723,8 @@ class CompileResult:
                     "room": d.room,
                     "message": d.message,
                     "hint": d.hint,
+                    "accepted": getattr(d, "accepted", False),
+                    "accept_reason": getattr(d, "accept_reason", None),
                 }
                 for d in sorted(
                     self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)
@@ -1743,9 +1768,12 @@ def compile_source(
     (:data:`~barndsl.profiles.DEFAULT`), which is byte-identical to the
     pre-profile behaviour.
     """
+    from .pragma import apply_pragmas, parse_pragmas
+
     diagnostics: list[Issue] = []
     plan = Barndominium(name=name or "Untitled")
     smap = _SourceMap()
+    pragmas = parse_pragmas(source)
     # True once any statement was skipped by parse-error recovery. Tracked at
     # the skip sites themselves (not inferred from ERROR diagnostics later):
     # semantic build errors also record ERRORs but skip nothing, and they must
@@ -1818,6 +1846,7 @@ def compile_source(
     # empty/garbage input scores a flat zero with no misleading semantic cascade;
     # see score.py's plan-None handling).
     if skipped and not plan.rooms:
+        apply_pragmas(diagnostics, pragmas)
         return CompileResult(None, diagnostics, source, room_lines=dict(smap.room_line))
 
     # Derive the structural frame (if requested) before checks, so the validator
@@ -1864,6 +1893,11 @@ def compile_source(
                 if iss.col is None and iss.room in smap.room_col:
                     iss.col, iss.end_col = smap.room_col[iss.room]
         diagnostics.extend(report.issues)
+    # Suppression pragmas run last, once every diagnostic carries its resolved
+    # line (semantic issues were just anchored to their room's statement line):
+    # a pragma downgrades the matched warnings/infos to accepted INFOs and flags
+    # any that can't be honoured.
+    apply_pragmas(diagnostics, pragmas)
     return CompileResult(
         plan, diagnostics, source, recovered=skipped, room_lines=dict(smap.room_line)
     )

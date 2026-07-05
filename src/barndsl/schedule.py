@@ -104,7 +104,16 @@ def window_rows(plan: Barndominium) -> list[dict]:
 
     rows: list[dict] = []
     for i, w in enumerate(plan.windows, start=1):
-        tempered = window_tempered_reason(plan, w) is not None
+        # Two distinguishable ways a window ends up tempered: the author DECLARED
+        # it (`tempered`), or the geometry REQUIRES it (an R308.4 hazard location).
+        # A declared window that also sits in a hazard reads "tempered (declared)"
+        # — the declaration is what matters for the schedule.
+        if getattr(w, "tempered", False):
+            glazing = "tempered (declared)"
+        elif window_tempered_reason(plan, w) is not None:
+            glazing = "tempered (required)"
+        else:
+            glazing = "—"
         rows.append(
             {
                 "mark": f"W{i}",
@@ -115,7 +124,7 @@ def window_rows(plan: Barndominium) -> list[dict]:
                 "height": max(0.0, w.head_height - w.sill_height),
                 "sill": w.sill_height,
                 "area": w.glazed_area,
-                "glazing": "tempered" if tempered else "—",
+                "glazing": glazing,
             }
         )
     return rows

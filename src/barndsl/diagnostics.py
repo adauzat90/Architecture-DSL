@@ -38,7 +38,7 @@ class CodeInfo:
 
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
-_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING"})
+_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING"})
 
 
 def _c(code: str, severity: Severity, title: str, explanation: str) -> tuple[str, CodeInfo]:
@@ -50,6 +50,23 @@ E, W, I = Severity.ERROR, Severity.WARNING, Severity.INFO
 #: code -> CodeInfo. Grouped by emitting phase for readability.
 REGISTRY: dict[str, CodeInfo] = dict(
     [
+        # --- suppression pragmas (the `# barndsl: accept CODE` escape hatch) --
+        _c("ACCEPT_DENIED", W, "Error can't be accepted",
+           "An `# barndsl: accept <CODE>` pragma named a code that fired as an "
+           "ERROR on its target line. Errors are unbuildable-plan problems, not "
+           "judgement calls — they must be fixed, never waived. `accept` only "
+           "downgrades warnings and infos. Resolve the underlying error."),
+        _c("ACCEPT_UNKNOWN", W, "Accept pragma names an unknown code",
+           "An `# barndsl: accept <CODE>` pragma named a code the registry doesn't "
+           "know (a typo, or an old name). The pragma suppresses nothing. Use a "
+           "real diagnostic code — the message lists did-you-mean candidates, and "
+           "`barndsl explain` / the registry has the exact spellings."),
+        _c("ACCEPT_UNUSED", I, "Accept pragma matched nothing",
+           "An `# barndsl: accept <CODE>` pragma fired on nothing — the code never "
+           "appeared on the line it targets (a trailing pragma's own line, or the "
+           "statement following a standalone one), or the standalone pragma had no "
+           "following statement. A stale pragma outlives the diagnostic it once "
+           "waived; remove it so the audit trail stays honest."),
         # --- lexer / parser (always errors) ---------------------------------
         _c("UNTERMINATED_STRING", E, "Unterminated string literal",
            "A quoted value has no closing '\"' before the end of the line."),
@@ -276,6 +293,15 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "room has none), so the exhaust duct runs long and bendy — lint collects "
            "and airflow drops, a fire risk and an efficiency loss. Put the laundry "
            "on an exterior wall, or keep the dryer near one."),
+        _c("WATER_HEATER_PLACEMENT", I, "Water heater placement needs protection",
+           "A `water_heater` fixture sits somewhere its installation needs extra "
+           "protection the DSL can't draw. In a garage or shop, a fuel-fired or "
+           "electric water heater's ignition source must be elevated 18 in above "
+           "the floor (or be a listed flammable-vapour-ignition-resistant unit), "
+           "IRC M1307.3. On an upper floor (level 1+) over habitable space, it "
+           "needs a drain pan piped to an approved drain so a leak doesn't soak the "
+           "ceiling below, IRC P2801.6. A one-per-heater INFO naming which case "
+           "applies — carry the detail onto the plumbing/mechanical documents."),
         _c("FIXTURE_STAIR", W, "Fixture on a stair footprint",
            "A fixture's footprint overlaps a stair's run or landing on the same "
            "level, so it fouls the flight. Keep the stair and its landing clear — "
@@ -364,6 +390,17 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "schedule's Glazing column. Specify tempered glass on the schedule."),
         _c("ENTRY_INTERIOR", E, "Entry on an interior wall",
            "An exterior door is on a wall that doesn't face outside."),
+        _c("DOOR_NO_LANDING", W, "Exterior door has no landing",
+           "An exterior people-door (`entry`) opens onto no landing — IRC R311.3 "
+           "requires a floor/landing on each side of an exterior door, at least as "
+           "wide as the door and 36 in deep, so you don't step out into space. A "
+           "covered-or-open `porch` whose footprint spans the door's exterior face "
+           "for the door's full width satisfies it. Only entries are checked (an "
+           "overhead garage door needs no landing). Severity varies: with porches "
+           "modelled anywhere it's a WARNING on each uncovered entry; on a plan with "
+           "NO porches at all it's a single INFO nudge on the primary entry (the "
+           "plan simply hasn't drawn porches yet — don't spam every door). Add a "
+           "`porch` at the door, or note the landing on the construction documents."),
         # --- stairs ---------------------------------------------------------
         _c("STAIR_GEOMETRY", E, "Non-finite stair geometry",
            "A stair has nan/inf coordinates or size."),
@@ -379,6 +416,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A stair's footprint is too short to physically hold the run the "
            "ceiling height requires (R311.7: ~7.75 in max riser, 10 in min "
            "tread). Lengthen its footprint or model a switchback."),
+        _c("STAIR_HANDRAIL", I, "Stair flight needs a handrail",
+           "A stair flight of four or more risers requires at least one handrail, "
+           "34–38 in above the tread nosings and graspable the full length (IRC "
+           "R311.7.8). The DSL doesn't model railings, so this is a one-per-plan "
+           "checklist reminder on the first qualifying stair — carry the handrail "
+           "onto the construction documents. Fewer than four risers is exempt."),
         _c("STAIR_HEADROOM", W, "Stair headroom can't develop",
            "A stair's footprint is too short for a floor opening (stairwell) that "
            "keeps 6 ft 8 in of headroom under the upper floor (IRC R311.7.2). "
@@ -468,6 +511,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("NAT_LIGHT", W, "Insufficient natural light",
            "A habitable room's glazing on exterior walls is below 8% of floor "
            "area (R303.1)."),
+        _c("VENT_AREA", W, "Insufficient natural ventilation",
+           "A habitable room's OPENABLE window area on exterior walls is below 4% "
+           "of its floor area (IRC R303.1's natural-ventilation floor, half the 8% "
+           "glazing floor). A `fixed` window daylights but opens nothing, so it "
+           "counts for NAT_LIGHT but not here. Make a window operable "
+           "(casement/slider/double-hung), widen one, or confirm mechanical "
+           "ventilation on the construction documents."),
         # --- solar orientation (advisory; needs a declared `orientation`) ---
         _c("SOLAR_WEST_GAIN", I, "Overheating west glazing",
            "A habitable room has a lot of west-facing glass. The low afternoon sun "

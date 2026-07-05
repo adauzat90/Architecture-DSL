@@ -300,11 +300,16 @@ def _cost_section(est: dict[str, Any]) -> str:
 
 def _diagnostics(result: Any) -> str:
     diags = sorted(result.diagnostics, key=lambda i: (i.line or 0, i.col or 0))
-    if not diags:
+    # Accepted deviations (downgraded by a `# barndsl: accept CODE` pragma) get
+    # their own audit subsection — the documented, deliberate deviations an AHJ
+    # reviewer reads — separate from the diagnostics still needing attention.
+    accepted = [d for d in diags if getattr(d, "accepted", False)]
+    active = [d for d in diags if not getattr(d, "accepted", False)]
+    if not active:
         body = "<p>No diagnostics — the plan compiles clean.</p>"
     else:
         items = []
-        for d in diags:
+        for d in active:
             sev = d.severity.value
             where = f" ({_tag(d.room)})" if d.room else ""
             loc = f"line {d.line}: " if d.line else ""
@@ -314,13 +319,37 @@ def _diagnostics(result: Any) -> str:
                 f"{where} — {_tag(d.message)}{hint}</div>"
             )
         body = "\n".join(items)
+    accepted_html = ""
+    if accepted:
+        rows = []
+        for d in accepted:
+            where = f" ({_tag(d.room)})" if d.room else ""
+            loc = f"line {d.line}: " if d.line else ""
+            reason = getattr(d, "accept_reason", None)
+            reason_html = (
+                f"<div class='hint'>reason: {_tag(reason)}</div>"
+                if reason
+                else "<div class='hint'>reason: (none given)</div>"
+            )
+            rows.append(
+                f"<div class='diag info accepted'>{loc}"
+                f"<span class='code'>{_tag(d.code)}</span>{where} — "
+                f"accepted deviation{reason_html}</div>"
+            )
+        accepted_html = f"""
+  <h3>Accepted deviations</h3>
+  <p class="sub">{len(accepted)} deviation(s) waived by an `accept` pragma — a
+     documented, deliberate departure recorded for review, not a defect.</p>
+  {"".join(rows)}
+"""
     c = result.to_dict()["counts"]
     return f"""
 <section class="page">
   <h2>Diagnostics Appendix</h2>
   <p class="sub">{c['error']} error(s), {c['warning']} warning(s),
-     {c['info']} info(s)</p>
+     {c['info']} info(s){f' — including {len(accepted)} accepted' if accepted else ''}</p>
   {body}
+  {accepted_html}
 </section>
 """
 

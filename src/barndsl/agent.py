@@ -245,6 +245,9 @@ door bed2 - c2 width 2.5 offset 0.5 into bed2 hinge near
 entry living south width 3 offset 8
 entry living west width 3 offset 24
 
+porch front at 6,-6 size 7 x 6 covered
+porch side at -6,22 size 6 x 7 covered
+
 window living west width 14 offset 8
 window kitchen south width 8 offset 6
 window bath east width 4 offset 5 sill 5

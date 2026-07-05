@@ -156,6 +156,12 @@ WINDOW_WALL_CLEAR = 0.5
 BUILD_MODULE = 3.0
 #: Two door swings overlapping by less than this (ft) are treated as just grazing.
 SWING_CLASH_EPS = 0.02
+#: Natural-ventilation floor (IRC R303.1): openable window area >= 4% of a
+#: habitable room's floor — half the 8% daylight floor (NATURAL_LIGHT_RATIO).
+NATURAL_VENT_RATIO = 0.04
+#: A landing (R311.3) must reach at least this far (ft) out from an exterior
+#: door's face — a porch shallower than this doesn't count as a landing.
+LANDING_MIN_DEPTH = 3.0
 
 # The emergency-escape opening minimums (IRC R310) are imported from constants;
 # the modelled clear opening is width × (head − sill), generous for a single-hung
@@ -181,6 +187,13 @@ class Issue:
     col: int | None = None
     end_col: int | None = None  # 1-based, exclusive — for column-accurate carets
     hint: str | None = None
+    #: Set by an ``# barndsl: accept <CODE>`` pragma (see :mod:`barndsl.pragma`).
+    #: An accepted diagnostic has been DOWNGRADED to an INFO — its ``severity`` is
+    #: already ``INFO`` — but the flag records that it was a deliberate,
+    #: documented deviation so the score stops deducting for it and the audit
+    #: trail survives. ``accept_reason`` carries the quoted justification (if any).
+    accepted: bool = False
+    accept_reason: str | None = None
 
     def __str__(self) -> str:
         loc = f"line {self.line}: " if self.line else ""
@@ -946,6 +959,8 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_openings(plan, add)
     _validate_safety_glazing(plan, add)
     _validate_stairs(plan, add, profile)
+    _validate_landings(plan, add)
+    _validate_water_heater(plan, add)
     _validate_guards(plan, add)
     _validate_life_safety(plan, add)
     _validate_load_path(plan, add)
@@ -2352,10 +2367,13 @@ def window_tempered_reason(plan: Barndominium, window) -> str | None:
 def _validate_safety_glazing(plan: Barndominium, add) -> None:
     """Flag each window in an IRC R308.4 hazard location as needing tempered glass.
 
-    One WINDOW_TEMPERED warning per offending window, naming the trigger. A future
-    ``tempered`` window attribute would be the override/escape hatch — for now the
-    rule derives it from geometry, so a genuinely tempered window still warns."""
+    One WINDOW_TEMPERED warning per offending window, naming the trigger. A window
+    that already declares ``tempered`` (the R308.4 escape hatch) is skipped — it is
+    specified as safety glass, so there is nothing to warn about (the schedule
+    still records it as "tempered (declared)")."""
     for w in plan.windows:
+        if getattr(w, "tempered", False):
+            continue
         reason = window_tempered_reason(plan, w)
         if reason is None:
             continue
@@ -2384,12 +2402,38 @@ def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
 
 
 def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
+    handrail_noted = False  # STAIR_HANDRAIL is one per plan (first qualifying flight)
     for s in plan.stairs:
         if not all(math.isfinite(v) for v in (s.x, s.y, s.width, s.length)):
             add(Issue(Severity.ERROR, "STAIR_GEOMETRY",
                       f"Stair '{s.id}' has non-finite coordinates or size.", room=s.id,
                       hint="Use finite measurements in feet (no nan/inf)."))
             continue
+        # Handrail (R311.7.8): four or more risers on a flight need a handrail.
+        # The DSL can't place a rail, so this is a one-per-plan checklist INFO on
+        # the first qualifying stair — computed from the same rise/riser math the
+        # geometry-fit checks below use.
+        if (
+            not handrail_noted
+            and plan.ceiling_height > 0
+            and s.from_level != s.to_level
+            and s.from_level >= 0
+            and s.to_level >= 0
+        ):
+            rise0 = plan.ceiling_height * abs(s.to_level - s.from_level)
+            risers0 = max(1, math.ceil(rise0 / profile.max_riser_height))
+            if risers0 >= 4:
+                handrail_noted = True
+                add(Issue(
+                    Severity.INFO, "STAIR_HANDRAIL",
+                    f"Stair '{s.id}' climbs {_f(rise0)} ft in ~{risers0} risers, so "
+                    "it needs at least one handrail (34–38 in above the nosings, "
+                    "graspable the full length, IRC R311.7.8).",
+                    room=s.id,
+                    hint="The DSL can't draw a rail — carry the handrail (both sides "
+                    "if the flight is wider than 44 in) onto the construction "
+                    "documents.",
+                    line=s.line, col=s.col, end_col=s.end_col))
         if s.width <= 0 or s.length <= 0:
             add(Issue(Severity.ERROR, "STAIR_SIZE",
                       f"Stair '{s.id}' has non-positive size.", room=s.id,
@@ -4899,6 +4943,148 @@ def _validate_energy(plan: Barndominium, add) -> None:
         )
 
 
+def _porch_lands_door(plan: Barndominium, room: Room, wall: Direction,
+                      seg_lo: float, seg_hi: float, tol: float = 0.05) -> bool:
+    """True if a porch platforms an exterior door: its footprint abuts ``wall``
+    from outside, spans the door opening (``[seg_lo, seg_hi]`` along the wall),
+    and reaches at least :data:`LANDING_MIN_DEPTH` outward from the wall."""
+    for p in plan.porches:
+        px2, py2 = p.x + p.width, p.y + p.length
+        if wall is Direction.SOUTH:
+            abut, depth = py2 >= room.y - 0.75, room.y - p.y
+            span = p.x <= seg_lo + tol and px2 >= seg_hi - tol
+        elif wall is Direction.NORTH:
+            abut, depth = p.y <= room.y2 + 0.75, py2 - room.y2
+            span = p.x <= seg_lo + tol and px2 >= seg_hi - tol
+        elif wall is Direction.WEST:
+            abut, depth = px2 >= room.x - 0.75, room.x - p.x
+            span = p.y <= seg_lo + tol and py2 >= seg_hi - tol
+        else:  # EAST
+            abut, depth = p.x <= room.x2 + 0.75, px2 - room.x2
+            span = p.y <= seg_lo + tol and py2 >= seg_hi - tol
+        if abut and span and depth + tol >= LANDING_MIN_DEPTH:
+            return True
+    return False
+
+
+def _primary_entry(plan: Barndominium):
+    """The plan's primary people-entrance: prefer an egress door on an exterior
+    wall, front (street side if declared, else south) first, else the first
+    entry. Returns ``None`` if the plan has no people-door."""
+    entries = [d for d in plan.exterior_doors if not d.overhead]
+    if not entries:
+        return None
+    by_id = {r.id: r for r in plan.rooms}
+
+    def on_exterior(d) -> bool:
+        r = by_id.get(d.room)
+        return r is not None and d.wall in exterior_walls(plan, r)
+
+    front = plan.street if plan.street is not None else Direction.SOUTH
+    ext = [d for d in entries if on_exterior(d)]
+    pool = ext or entries
+
+    def rank(d) -> tuple:
+        return (0 if d.egress else 1, 0 if d.wall is front else 1)
+
+    return min(pool, key=rank)
+
+
+def _validate_landings(plan: Barndominium, add) -> None:
+    """Flag an exterior people-door with no landing (IRC R311.3).
+
+    A porch whose footprint covers the door's exterior face (its full width, at
+    least a door-depth out) is the landing. Only entries are checked — an overhead
+    garage door needs none. Severity is context-aware: with porches modelled
+    anywhere, every uncovered entry warns; on a plan with NO porches at all it's a
+    single INFO nudge on the primary entry (the plan just hasn't drawn porches
+    yet — don't spam every door)."""
+    entries = [d for d in plan.exterior_doors if not d.overhead]
+    if not entries:
+        return
+    if not plan.porches:
+        primary = _primary_entry(plan)
+        if primary is not None:
+            add(Issue(
+                Severity.INFO, "DOOR_NO_LANDING",
+                f"Exterior door in '{primary.room}' needs a landing on the outside "
+                "(IRC R311.3) — the plan draws no porch yet.",
+                room=primary.room,
+                hint="Add a `porch` at the door (covering its width, >= "
+                f"{LANDING_MIN_DEPTH:g} ft deep), or note the landing on the "
+                "construction documents. Nudged once, on the primary entry.",
+                **_door_loc(primary)))
+        return
+    by_id = {r.id: r for r in plan.rooms}
+    for d in entries:
+        room = by_id.get(d.room)
+        if room is None:
+            continue  # DOOR_REF handles a bad ref
+        if d.wall not in exterior_walls(plan, room):
+            continue  # an entry on an interior wall is ENTRY_INTERIOR's problem
+        x1, y1, x2, y2 = opening_endpoints(room, d.wall, d.offset, d.width)
+        if d.wall in (Direction.SOUTH, Direction.NORTH):
+            seg_lo, seg_hi = min(x1, x2), max(x1, x2)
+        else:
+            seg_lo, seg_hi = min(y1, y2), max(y1, y2)
+        if _porch_lands_door(plan, room, d.wall, seg_lo, seg_hi):
+            continue
+        add(Issue(
+            Severity.WARNING, "DOOR_NO_LANDING",
+            f"Exterior door in '{d.room}' (on the {d.wall.value} wall) opens onto "
+            "no landing — IRC R311.3 wants a porch/landing spanning the door, at "
+            f"least {LANDING_MIN_DEPTH:g} ft deep.",
+            room=d.room,
+            hint=f"Add a `porch` at the door covering its {_f(d.width)} ft width "
+            f"(>= {LANDING_MIN_DEPTH:g} ft deep), swing the door where a porch "
+            "already reaches, or note the landing on the construction documents.",
+            **_door_loc(d)))
+
+
+def _validate_water_heater(plan: Barndominium, add) -> None:
+    """Flag a water_heater fixture whose placement needs extra protection.
+
+    Two cases (either, or both): in a garage/shop its ignition source must be
+    elevated 18 in / be a listed FVIR unit (IRC M1307.3); on an upper floor over
+    habitable space it needs a drain pan piped to a drain (IRC P2801.6). One INFO
+    per heater, naming which case(s) apply."""
+    by_id = {r.id: r for r in plan.rooms}
+    for f in plan.fixtures:
+        if f.kind != "water_heater":
+            continue
+        room = by_id.get(f.room)
+        if room is None:
+            continue  # FIXTURE_ROOM handles a bad ref
+        cases: list[str] = []
+        if room.type in GARAGE_TYPES:
+            cases.append(
+                "in a garage/shop, so its ignition source must be elevated 18 in "
+                "above the floor or be a listed flammable-vapour-ignition-resistant "
+                "unit (IRC M1307.3)"
+            )
+        if room.level >= 1:
+            below = [
+                r for r in plan.rooms
+                if r.level == room.level - 1
+                and r.type in HABITABLE_TYPES
+                and min(room.x2, r.x2) - max(room.x, r.x) > EPSILON
+                and min(room.y2, r.y2) - max(room.y, r.y) > EPSILON
+            ]
+            if below:
+                cases.append(
+                    f"on level {room.level} over habitable space, so it needs a "
+                    "drain pan piped to an approved drain (IRC P2801.6)"
+                )
+        if not cases:
+            continue
+        add(Issue(
+            Severity.INFO, "WATER_HEATER_PLACEMENT",
+            f"The water heater in '{f.room}' is " + " and ".join(cases) + ".",
+            room=f.room,
+            hint="The DSL can't draw the pan/elevation — carry the detail onto the "
+            "plumbing/mechanical documents."))
+
+
 def _door_clear_width(door) -> float:
     """An exterior door's egress **clear** width: a double/french pair provides
     its required clear opening through ONE leaf (IRC R311.2), so it counts half
@@ -5110,5 +5296,52 @@ def _validate_egress_and_light(plan: Barndominium, add, profile: Profile = DEFAU
                         + ".",
                         room=room.id,
                         hint=hint,
+                    )
+                )
+
+            # Natural ventilation (IRC R303.1): a habitable room needs OPENABLE
+            # window area >= 4% of its floor. Fixed glass daylights (counted above)
+            # but opens nothing, so it's excluded here — the gap NAT_LIGHT can't
+            # see. Existing plans (default casement windows) keep passing: any room
+            # that clears the 8% daylight floor with openable glass clears this 4%
+            # floor too.
+            openable = sum(
+                w.glazed_area
+                for w in plan.windows_for(room.id)
+                if w.wall in walls and getattr(w, "openable", w.kind != "fixed")
+            )
+            vent_required = room.area * NATURAL_VENT_RATIO
+            if openable + EPSILON < vent_required:
+                fixed_here = any(
+                    w.wall in walls and not getattr(w, "openable", w.kind != "fixed")
+                    for w in plan.windows_for(room.id)
+                )
+                if not walls:
+                    vhint = (
+                        f"'{room.id}' has no exterior wall — open it to an adjacent "
+                        "room or move it to the perimeter so it can be ventilated."
+                    )
+                elif fixed_here:
+                    vhint = (
+                        "A `fixed` window opens nothing — make one operable "
+                        f"(casement/slider/double-hung), e.g. `window {room.id} "
+                        f"{walls[0].value} width 4 offset 2`, or confirm mechanical "
+                        "ventilation."
+                    )
+                else:
+                    vhint = (
+                        f"Add openable window area on an exterior wall, e.g. "
+                        f"`window {room.id} {walls[0].value} width 4 offset 2`, or "
+                        "confirm mechanical ventilation."
+                    )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "VENT_AREA",
+                        f"Openable window area {_f(openable)} sq ft is below the "
+                        f"natural-ventilation minimum of {_f(vent_required)} sq ft "
+                        f"({NATURAL_VENT_RATIO * 100:.0f}% of floor area, IRC R303.1).",
+                        room=room.id,
+                        hint=vhint,
                     )
                 )

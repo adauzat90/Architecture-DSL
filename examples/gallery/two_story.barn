@@ -26,7 +26,7 @@ room loft: loft at 0,0 size 24 x 18 level 1
 fixture bed_queen in bed wall N
 
 # --- vertical circulation: along the west wall, clear of the kitchen doorway ---
-stair flight at 0,3 size 4 x 12 from 0 to 1
+stair flight at 0,3 size 4 x 12 from 0 to 1   # barndsl: accept STAIR_HANDRAIL "handrail on the west wall, on the construction documents"
 
 open living - kitchen width 10
 open living - hall width 4
@@ -37,6 +37,10 @@ door bed - closet width 2.5 offset 0.5 into bed
 
 entry living south width 3 offset 14
 entry laundry east width 3 offset 4
+
+# Covered landings at both exterior doors — a floor to step onto (IRC R311.3).
+porch front at 12,-6 size 7 x 6 covered
+porch back at 39,24 size 6 x 7 covered
 window living south width 10 offset 2
 window kitchen south width 7 offset 6
 window bed north width 4 offset 5
