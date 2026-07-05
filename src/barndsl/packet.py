@@ -25,7 +25,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from .cost import estimate_cost
-from .render import RenderConfig, render_svg, sheet_scale
+from .render import RenderConfig, render_site_svg, render_svg, sheet_scale
 from .schedule import _schedules
 from .score import design_score
 
@@ -162,6 +162,78 @@ def _floor_plan(plan: Any, sheet: str = "Letter") -> str:
 """
 
 
+def _has_electrical(plan: Any) -> bool:
+    return bool(plan.outlets or plan.switches or plan.lights)
+
+
+def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
+    """The Electrical Plan sheet: the floor plan with the electrical layer on, a
+    small legend, and an outlet/switch/light count table. Only included when the
+    plan declares electrical items."""
+    ipf, label, css_w = sheet_scale(plan, sheet=sheet)
+    statement = f"SCALE: {label} = 1{_FT_GLYPH}-0{_IN_GLYPH} ({sheet})"
+    cfg = RenderConfig(scale_bar=True, scale_note=statement, show_electrical=True)
+    svg = render_svg(plan, cfg)
+    n_out = len(plan.outlets)
+    n_gfci = sum(1 for o in plan.outlets if o.gfci)
+    n_sw = len(plan.switches)
+    n_light = len(plan.lights)
+    count_rows = "\n".join(
+        f"<tr><td>{_tag(name)}</td><td class='num'>{n}</td></tr>"
+        for name, n in (
+            ("Receptacles (outlets)", n_out),
+            ("— of which GFCI", n_gfci),
+            ("Wall switches", n_sw),
+            ("Ceiling lights", n_light),
+        )
+    )
+    legend = (
+        "<span class='badge'>⊙ receptacle · ⊙ GFCI = ground-fault · "
+        "S = switch · ⊗ = ceiling light</span>"
+    )
+    return f"""
+<section class="page">
+  <h2>Electrical Plan</h2>
+  <p class="sub">{_tag(statement)} · devices shown in violet. {legend}</p>
+  <div class="svgwrap scaled" style="width:{css_w:.2f}in; max-width:100%;">{svg}</div>
+  <h3>Device count</h3>
+  <table class="metrics">{count_rows}</table>
+  <p class="note">Schematic device layout — verify circuiting, GFCI/AFCI
+     protection and switched-lighting coverage against IRC E39xx on the final
+     electrical plan.</p>
+</section>
+"""
+
+
+def _site_plan(plan: Any) -> str:
+    """The Site Plan sheet: the lot, setback lines, and building footprint placed
+    on the lot, with dimensions. Only included when the plan declares a ``site``."""
+    ss = plan.site_spec
+    svg = render_site_svg(plan)
+    rows = [("Lot", f"{ss.width:g}′ × {ss.length:g}′")]
+    for label, val in (("Front setback", ss.front), ("Rear setback", ss.rear),
+                       ("Side setback", ss.side)):
+        if val is not None:
+            rows.append((label, f"{val:g}′"))
+    if ss.has_building:
+        rows.append(("Building at", f"{ss.building_x:g}′, {ss.building_y:g}′ (SW corner)"))
+    dim_rows = "\n".join(
+        f"<tr><td>{_tag(k)}</td><td>{_tag(v)}</td></tr>" for k, v in rows
+    )
+    return f"""
+<section class="page">
+  <h2>Site Plan</h2>
+  <p class="sub">Lot boundary, required setbacks (dashed), and building footprint.</p>
+  <div class="svgwrap">{svg}</div>
+  <h3>Lot &amp; setbacks</h3>
+  <table class="metrics">{dim_rows}</table>
+  <p class="note">Schematic, fit-to-page — not drawn to a fixed engineering scale
+     (a limitation; the floor-plan sheet carries the true architectural scale).
+     Not a substitute for a surveyed site plan.</p>
+</section>
+"""
+
+
 def _schedule_tables(plan: Any) -> str:
     blocks = []
     for title, columns, rows in _schedules(plan, True, True, True):
@@ -269,6 +341,12 @@ def build_packet(
     sections = (
         _cover(result, plan, est)
         + _floor_plan(plan, sheet=sheet)
+        + (_electrical_plan(plan, sheet=sheet) if _has_electrical(plan) else "")
+        + (
+            _site_plan(plan)
+            if plan.site_spec is not None and plan.site_spec.has_dims
+            else ""
+        )
         + _schedule_tables(plan)
         + _cost_section(est)
         + _diagnostics(result)

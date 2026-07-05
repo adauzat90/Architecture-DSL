@@ -44,7 +44,7 @@ import re
 from dataclasses import dataclass
 
 from .compiler import _PLACEMENT, CompileResult, _tokenize_line, compile_source
-from .elements import RoomType
+from .elements import LIGHT_KINDS, RoomType
 from .geometry import shared_edge, wall_segment
 
 #: A valid room identifier for :class:`Edit` kinds that mint a new id
@@ -133,6 +133,12 @@ class Edit:
     #: ``delete_note`` uses ``index``.
     text: str | None = None
     index: int | None = None
+    #: Electrical edits (the `outlet`/`switch`/`light` statements). ``add_outlet``
+    #: uses ``room``/``wall``/``offset``/``gfci``; ``add_switch`` ``room``/``wall``/
+    #: ``offset``; ``add_light`` ``room``/``x``/``y``/``fkind`` (the light kind).
+    #: ``delete_outlet``/``delete_switch``/``delete_light`` use ``index`` (the
+    #: 0-based ordinal within that device list, as the payload lists them).
+    gfci: bool = False
 
 
 @dataclass(frozen=True)
@@ -254,6 +260,19 @@ def edit_from_json(obj: object) -> Edit | EditError:
                     x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
     if kind == "delete_note":
         return Edit("delete_note", index=_as_int(obj.get("index")))
+    if kind == "add_outlet":
+        return Edit("add_outlet", room=_as_str(obj.get("room")),
+                    wall=_as_str(obj.get("wall")), offset=_as_num(obj.get("offset")),
+                    gfci=bool(obj.get("gfci")))
+    if kind == "add_switch":
+        return Edit("add_switch", room=_as_str(obj.get("room")),
+                    wall=_as_str(obj.get("wall")), offset=_as_num(obj.get("offset")))
+    if kind == "add_light":
+        return Edit("add_light", room=_as_str(obj.get("room")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
+                    fkind=_as_str(obj.get("lkind")))
+    if kind in ("delete_outlet", "delete_switch", "delete_light"):
+        return Edit(kind, index=_as_int(obj.get("index")))
     return EditError("malformed", f"unknown edit kind {kind!r}")
 
 
@@ -475,6 +494,14 @@ def apply_edit(source: str, edit: Edit) -> EditResult:
         return _set_note(source, result, edit)
     if edit.kind == "delete_note":
         return _delete_note(source, result, edit)
+    if edit.kind == "add_outlet":
+        return _add_outlet(source, result, edit)
+    if edit.kind == "add_switch":
+        return _add_switch(source, result, edit)
+    if edit.kind == "add_light":
+        return _add_light(source, result, edit)
+    if edit.kind in ("delete_outlet", "delete_switch", "delete_light"):
+        return _delete_electrical(source, result, edit)
     return _move_opening(source, result, edit)
 
 
@@ -670,6 +697,27 @@ def _validate_shape(edit: Edit) -> EditError | None:
     if edit.kind == "delete_note":
         if edit.index is None or edit.index < 0:
             return EditError("malformed", "delete_note needs a note index >= 0")
+        return None
+    if edit.kind in ("add_outlet", "add_switch"):
+        if not edit.room:
+            return EditError("malformed", f"{edit.kind} needs a room")
+        if not edit.wall or _fixture_wall(edit.wall) is None:
+            return EditError("bad_value", f"{edit.kind} wall must be N|S|E|W")
+        if edit.offset is not None and (not _finite(edit.offset) or edit.offset < 0):
+            return EditError("bad_value", f"{edit.kind} offset must be finite and >= 0")
+        return None
+    if edit.kind == "add_light":
+        if not edit.room:
+            return EditError("malformed", "add_light needs a room")
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "add_light needs finite x and y")
+        if edit.fkind is not None and edit.fkind.lower() not in LIGHT_KINDS:
+            return EditError("bad_value",
+                             f"add_light kind must be one of {', '.join(LIGHT_KINDS)}")
+        return None
+    if edit.kind in ("delete_outlet", "delete_switch", "delete_light"):
+        if edit.index is None or edit.index < 0:
+            return EditError("malformed", f"{edit.kind} needs an index >= 0")
         return None
     return EditError("malformed", f"unknown edit kind {edit.kind!r}")
 
@@ -1529,6 +1577,75 @@ def _delete_note(source: str, result: CompileResult, edit: Edit) -> EditResult:
     new_source = _rebuild_without(_lines(source), {line_no})
     return EditResult(new_source, changed=True, line=line_no,
                       summary=f"deleted note #{edit.index}")
+
+
+# --- electrical devices (outlet / switch / light) --------------------------
+# Each `add_*` inserts a one-line statement right after the target room's `room`
+# line (like `add_fixture`); each `delete_*` drops the device's own source line,
+# resolved by its 0-based ordinal in that device list.
+
+
+def _insert_after_room(source: str, result: CompileResult, room: str, stmt: str,
+                       summary: str) -> EditResult:
+    line_no, err = _room_line(result, room)
+    if err is not None:
+        return EditResult(source, error=err)
+    assert line_no is not None
+    lines = _lines(source)
+    lines.insert(line_no, stmt)
+    return EditResult("\n".join(lines), changed=True, line=line_no + 1, summary=summary)
+
+
+def _add_outlet(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    wall = _fixture_wall(edit.wall)  # type: ignore[arg-type]
+    off = _fmt(float(edit.offset)) if edit.offset is not None else "1"
+    stmt = f"outlet in {edit.room} wall {wall} offset {off}"
+    if edit.gfci:
+        stmt += " gfci"
+    return _insert_after_room(source, result, edit.room, stmt,  # type: ignore[arg-type]
+                              f"added outlet in {edit.room}")
+
+
+def _add_switch(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    wall = _fixture_wall(edit.wall)  # type: ignore[arg-type]
+    off = _fmt(float(edit.offset)) if edit.offset is not None else "1"
+    stmt = f"switch in {edit.room} wall {wall} offset {off}"
+    return _insert_after_room(source, result, edit.room, stmt,  # type: ignore[arg-type]
+                              f"added switch in {edit.room}")
+
+
+def _add_light(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    stmt = (f"light in {edit.room} "
+            f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}")  # type: ignore[arg-type]
+    kind = (edit.fkind or "ceiling").lower()
+    if kind != "ceiling":
+        stmt += f" kind {kind}"
+    return _insert_after_room(source, result, edit.room, stmt,  # type: ignore[arg-type]
+                              f"placed light in {edit.room}")
+
+
+def _delete_electrical(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    which = {
+        "delete_outlet": ("outlets", "outlet"),
+        "delete_switch": ("switches", "switch"),
+        "delete_light": ("lights", "light"),
+    }[edit.kind]
+    devices = getattr(result.plan, which[0])
+    idx = edit.index
+    if idx is None or idx < 0 or idx >= len(devices):
+        return EditResult(source, error=EditError(
+            "unknown_opening", f"no {which[1]} at index {idx}"))
+    dev = devices[idx]
+    if dev.line is None:
+        return EditResult(source, error=EditError(
+            "not_editable", f"{which[1]} #{idx} has no source line"))
+    new_source = _rebuild_without(_lines(source), {dev.line})
+    return EditResult(new_source, changed=True, line=dev.line,
+                      summary=f"deleted {which[1]} #{idx}")
 
 
 __all__ = [

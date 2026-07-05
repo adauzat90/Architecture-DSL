@@ -63,7 +63,7 @@ from .gltf import build_scene, to_glb, to_gltf, write_gltf
 from .ifc import to_ifc, write_ifc
 from .viewer import viewer_html, write_viewer
 from .playground import compile_payload, make_server, run as serve
-from .render import RenderConfig, render_svg, save_render, save_svg
+from .render import RenderConfig, render_site_svg, render_svg, save_render, save_svg
 from .views import (
     elevation_svg,
     save_elevation,
@@ -179,6 +179,7 @@ __all__ = [
     "plan_room_fixtures",
     # rendering
     "render_svg",
+    "render_site_svg",
     "save_svg",
     "save_render",
     "RenderConfig",

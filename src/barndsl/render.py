@@ -136,6 +136,9 @@ NOTE_COLOR = "#7A6A55"
 # stays readable (no fill, or a whisper of one).
 FIXTURE_COLOR = "#5a5a5a"
 FIXTURE_FILL = "#00000008"
+# Electrical overlay (outlets / switches / lights) — a muted violet, distinct
+# from the fixture grey and the structural rust so the layer reads as its own.
+ELEC_COLOR = "#8A5FB0"
 # Structural overlay (post-and-beam frame).
 BEAM_COLOR = "#B5651D"  # frame/bent beams — a steel/timber rust tone
 RIDGE_COLOR = "#8A4B12"  # ridge member, slightly darker
@@ -161,6 +164,10 @@ class RenderConfig:
     #: Optional scale statement drawn beside the bar (e.g. ``SCALE: 1/4" = 1'-0"
     #: (Letter)``). ``None`` draws the bar alone. Only used when ``scale_bar``.
     scale_note: str | None = None
+    #: Draw the electrical layer (outlets, switches, ceiling lights) over the
+    #: plan. Off by default so the screen/permit floor plan stays uncluttered;
+    #: the playground's ⚡ toggle and the packet's Electrical Plan sheet turn it on.
+    show_electrical: bool = False
 
 
 def render_svg(plan: Barndominium, config: RenderConfig | None = None) -> str:
@@ -366,6 +373,8 @@ class _Renderer:
             self._draw_envelope()
             self._draw_rooms()
             self._draw_fixtures()
+            if self.c.show_electrical:
+                self._draw_electrical()
             self._draw_structure()
             self._draw_windows()
             self._draw_doors()
@@ -395,6 +404,8 @@ class _Renderer:
         self._draw_envelope()
         self._draw_rooms(level=lvl)
         self._draw_fixtures(level=lvl)
+        if self.c.show_electrical:
+            self._draw_electrical(level=lvl)
         self._draw_structure(level=lvl)
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
@@ -649,6 +660,98 @@ class _Renderer:
             # tables / desk / dresser / wardrobe / counter / island / other:
             # a plain rounded rectangle reads as casework.
             self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9, rx=rr)
+
+    # -- electrical layer --------------------------------------------------
+
+    def _wall_point(self, r, wall: Direction, offset: float) -> tuple[float, float, tuple[float, float]]:
+        """World point of a device at ``offset`` along ``wall`` of room ``r``, plus
+        the screen-space unit vector pointing *into* the room (for the ticks)."""
+        off = min(max(offset, 0.0), r.width if wall in (Direction.SOUTH, Direction.NORTH) else r.length)
+        if wall is Direction.SOUTH:
+            return r.x + off, r.y, (0.0, -1.0)  # into room = screen up
+        if wall is Direction.NORTH:
+            return r.x + off, r.y + r.length, (0.0, 1.0)
+        if wall is Direction.WEST:
+            return r.x, r.y + off, (1.0, 0.0)
+        return r.x + r.width, r.y + off, (-1.0, 0.0)  # east
+
+    def _draw_electrical(self, level: int | None = None) -> None:
+        """Draw the electrical layer — receptacles (duplex symbol, "GFCI" tag when
+        ground-fault), wall switches ("S"), and ceiling lights (circled-X, with a
+        kind variant) — over the plan in a muted ``data-layer="electrical"`` group.
+        Devices carry no level of their own; they inherit their room's."""
+        if not (self.plan.outlets or self.plan.switches or self.plan.lights):
+            return
+        by_id = {r.id: r for r in self.plan.rooms}
+        self.parts.append('<g data-layer="electrical">')
+        for o in self.plan.outlets:
+            r = by_id.get(o.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            wx, wy, into = self._wall_point(r, o.wall, o.offset)
+            self._outlet_symbol(self.sx(wx), self.sy(wy), into, o.gfci)
+        for s in self.plan.switches:
+            r = by_id.get(s.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            wx, wy, into = self._wall_point(r, s.wall, s.offset)
+            self._switch_symbol(self.sx(wx), self.sy(wy), into)
+        for lt in self.plan.lights:
+            r = by_id.get(lt.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            self._light_symbol(self.sx(r.x + lt.x), self.sy(r.y + lt.y), lt.kind)
+        self.parts.append("</g>")
+
+    def _elec_circle(self, cx, cy, rad, fill="#ffffff", sw=1.0):
+        self.parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rad:.1f}" fill="{fill}" '
+            f'stroke="{ELEC_COLOR}" stroke-width="{sw}" />'
+        )
+
+    def _outlet_symbol(self, px, py, into, gfci: bool) -> None:
+        """A duplex receptacle: a small circle set just inside the wall with two
+        ticks perpendicular to it (the classic NEC symbol). GFCI adds a tiny tag."""
+        ix, iy = into  # inward unit (screen)
+        rad = 3.4
+        cx, cy = px + ix * (rad + 1.0), py + iy * (rad + 1.0)
+        self._line(px, py, cx, cy, ELEC_COLOR, sw=0.9)  # stem to the wall
+        self._elec_circle(cx, cy, rad)
+        # Two ticks across the circle, perpendicular to the inward stem (the two
+        # receptacle slots): the along-wall direction is (-iy, ix).
+        ax, ay = -iy, ix
+        for s in (-1.0, 1.0):
+            ox, oy = ax * 1.5 * s, ay * 1.5 * s
+            self._line(cx + ox - ix * 2.2, cy + oy - iy * 2.2,
+                       cx + ox + ix * 2.2, cy + oy + iy * 2.2, ELEC_COLOR, sw=0.9)
+        if gfci:
+            self._text(cx + ix * 6.5, cy + iy * 6.5 + 3, "GFCI", size=6,
+                       fill=ELEC_COLOR, weight="bold")
+
+    def _switch_symbol(self, px, py, into) -> None:
+        """A wall switch: an "S" set just inside the wall, with a short stem."""
+        ix, iy = into
+        cx, cy = px + ix * 6.0, py + iy * 6.0
+        self._line(px, py, px + ix * 2.5, py + iy * 2.5, ELEC_COLOR, sw=0.9)
+        self._text(cx, cy + 3.0, "S", size=9, fill=ELEC_COLOR, weight="bold")
+
+    def _light_symbol(self, cx, cy, kind: str) -> None:
+        """A ceiling luminaire: a circled-X. Kind variants keep it simple — a
+        pendant gets a centre dot, a recessed can a second ring, a fan two blades."""
+        rad = 4.2
+        self._elec_circle(cx, cy, rad)
+        d = rad * 0.7
+        self._line(cx - d, cy - d, cx + d, cy + d, ELEC_COLOR, sw=0.9)
+        self._line(cx + d, cy - d, cx - d, cy + d, ELEC_COLOR, sw=0.9)
+        if kind == "recessed":
+            self._elec_circle(cx, cy, rad + 1.8, fill="none", sw=0.7)
+        elif kind == "pendant":
+            self.parts.append(
+                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="1.3" fill="{ELEC_COLOR}" />'
+            )
+        elif kind == "fan":
+            self._line(cx - rad * 1.6, cy, cx + rad * 1.6, cy, ELEC_COLOR, sw=0.7)
+            self._line(cx, cy - rad * 1.6, cx, cy + rad * 1.6, ELEC_COLOR, sw=0.7)
 
     def _draw_structure(self, level: int = 0):
         """Overlay the post-and-beam frame: beam centrelines + solid posts.
@@ -1278,3 +1381,189 @@ class _Renderer:
             y += 18
             self._rect(cx, y - 9, 12, 12, fill=ROOM_COLORS.get(t, "#f0f0f0"), stroke=WALL, sw=0.8)
             self._text(cx + 18, y, t.value.replace("_", " ").title(), size=10, anchor="start", fill="#444444")
+
+
+def render_site_svg(plan: Barndominium) -> str:
+    """Render a site plan: the lot boundary, the required setback lines, and the
+    building footprint placed on the lot, with a north arrow, the street side, and
+    lot/setback dimensions in feet-and-inches.
+
+    Requires a declared ``site`` (lot dimensions); returns a small placeholder
+    otherwise. The building is drawn at its declared ``building at <x>,<y>``
+    position, or centred on the lot when none is given (the setback check makes
+    the same choice explicit). This is a lightweight standalone drawing — it does
+    not use the floor-plan renderer's panel/scale machinery."""
+    ss = plan.site_spec
+    if ss is None or not ss.has_dims:
+        return (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60" '
+            'viewBox="0 0 240 60"><rect width="240" height="60" fill="#ffffff" />'
+            f'<text x="120" y="34" font-family="{RenderConfig().font}" font-size="12" '
+            'fill="#888888" text-anchor="middle">No site declared — add `site '
+            '&lt;W&gt; x &lt;L&gt;`.</text></svg>'
+        )
+    assert ss.width is not None and ss.length is not None  # has_dims guaranteed both
+    lot_w = float(ss.width)
+    lot_l = float(ss.length)
+
+    # Footprint bounding box in plan coordinates (building + wings + porches).
+    minx, miny, maxx, maxy = plan.bounds()
+    for p in plan.porches:
+        minx = min(minx, p.x)
+        miny = min(miny, p.y)
+        maxx = max(maxx, p.x + p.width)
+        maxy = max(maxy, p.y + p.length)
+    fp_w = maxx - minx
+    fp_l = maxy - miny
+    if ss.has_building:
+        bx = float(ss.building_x or 0.0)
+        by = float(ss.building_y or 0.0)
+    else:  # centre the footprint's bbox on the lot
+        bx = (lot_w - fp_w) / 2.0 - minx
+        by = (lot_l - fp_l) / 2.0 - miny
+
+    font = RenderConfig().font
+    margin = 84.0
+    top = 66.0
+    avail = 520.0
+    scale = avail / max(lot_w, lot_l) if max(lot_w, lot_l) > 0 else 1.0
+    draw_w = lot_w * scale
+    draw_h = lot_l * scale
+    width = margin * 2 + draw_w
+    height = top + draw_h + 66.0
+    parts: list[str] = []
+
+    def sx(x: float) -> float:
+        return margin + x * scale
+
+    def sy(y: float) -> float:
+        return top + (lot_l - y) * scale
+
+    def line(x1, y1, x2, y2, stroke, sw=1.0, dash=None):
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        parts.append(
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="{stroke}" stroke-width="{sw}"{d} />'
+        )
+
+    def text(x, y, s, size=11, anchor="middle", fill=TEXT_COLOR, weight="normal"):
+        parts.append(
+            f'<text x="{x:.1f}" y="{y:.1f}" font-family="{font}" font-size="{size}" '
+            f'fill="{fill}" text-anchor="{anchor}" font-weight="{weight}">{escape(s)}</text>'
+        )
+
+    parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0f}" '
+        f'height="{height:.0f}" viewBox="0 0 {width:.0f} {height:.0f}">'
+    )
+    parts.append(f'<rect width="{width:.0f}" height="{height:.0f}" fill="#ffffff" />')
+    text(margin, 32, f"Site Plan — {plan.name}", size=20, anchor="start", weight="bold")
+    text(margin, 52, f"Lot {fmt_ft_in(lot_w)} × {fmt_ft_in(lot_l)}", size=12,
+         anchor="start", fill="#666666")
+
+    # Lot boundary (heavy line).
+    parts.append(
+        f'<rect x="{sx(0):.1f}" y="{sy(lot_l):.1f}" width="{draw_w:.1f}" '
+        f'height="{draw_h:.1f}" fill="#fafaf6" stroke="{WALL}" stroke-width="2.6" />'
+    )
+
+    # Setback lines (dashed, labelled), only for declared edges. front = south.
+    def setback_edge(value, label, orient, at):
+        if value is None:
+            return
+        if orient == "h":  # horizontal line at lot-y = at
+            y = sy(at)
+            line(sx(0), y, sx(lot_w), y, "#B23A48", sw=1.2, dash="6 4")
+            ty = y - 4 if label.startswith("rear") else y + 13
+            text(sx(lot_w) - 6, ty, f"{fmt_ft_in(value)} {label} setback", size=9,
+                 anchor="end", fill="#B23A48")
+        else:  # vertical line at lot-x = at
+            x = sx(at)
+            line(x, sy(lot_l), x, sy(0), "#B23A48", sw=1.2, dash="6 4")
+            text(x + 3, sy(lot_l) + 26, f"{fmt_ft_in(value)} {label}", size=9,
+                 anchor="start", fill="#B23A48")
+
+    setback_edge(ss.front, "front", "h", ss.front or 0.0)
+    setback_edge(ss.rear, "rear", "h", lot_l - (ss.rear or 0.0))
+    setback_edge(ss.side, "W side", "v", ss.side or 0.0)
+    setback_edge(ss.side, "E side", "v", lot_w - (ss.side or 0.0))
+
+    # Building footprint on the lot (filled outline at the correct position).
+    hatch = "site-hatch"
+    parts.append(
+        f'<defs><pattern id="{hatch}" width="7" height="7" patternUnits="userSpaceOnUse" '
+        f'patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" '
+        f'stroke="#9a8a63" stroke-width="0.8" /></pattern></defs>'
+    )
+    for (sxf, syf, sw_, sl_) in plan.footprint_sections():
+        lx = bx + sxf
+        ly = by + syf
+        parts.append(
+            f'<rect x="{sx(lx):.1f}" y="{sy(ly + sl_):.1f}" width="{sw_ * scale:.1f}" '
+            f'height="{sl_ * scale:.1f}" fill="url(#{hatch})" stroke="{WALL}" '
+            f'stroke-width="1.6" />'
+        )
+    # Porches (open outline, no hatch) so the projecting footprint reads.
+    for p in plan.porches:
+        parts.append(
+            f'<rect x="{sx(bx + p.x):.1f}" y="{sy(by + p.y + p.length):.1f}" '
+            f'width="{p.width * scale:.1f}" height="{p.length * scale:.1f}" '
+            f'fill="none" stroke="{WALL}" stroke-width="1.0" stroke-dasharray="3 3" />'
+        )
+    # Building label at the footprint centre.
+    text(sx(bx + (minx + maxx) / 2.0), sy(by + (miny + maxy) / 2.0) + 4, "BUILDING",
+         size=11, weight="bold", fill="#5A3210")
+
+    # Street side marker (reuse the `street` directive; front = south edge).
+    st = plan.street
+    if st is not None:
+        col = "#8A8F98"
+        if st in (Direction.SOUTH, Direction.NORTH):
+            y = sy(0) if st is Direction.SOUTH else sy(lot_l)
+            line(sx(0), y, sx(lot_w), y, col, sw=4.0)
+            text(sx(lot_w / 2.0), y + (16 if st is Direction.SOUTH else -7), "STREET",
+                 size=10, fill=col)
+        else:
+            x = sx(0) if st is Direction.WEST else sx(lot_w)
+            line(x, sy(0), x, sy(lot_l), col, sw=4.0)
+            text(x, sy(lot_l) - 6, "STREET", size=10, fill=col,
+                 anchor="start" if st is Direction.WEST else "end")
+
+    # North arrow (top-right of the drawing).
+    theta = math.radians(plan.orientation or 0.0)
+    cx, cy, r = width - 46.0, top + 4.0, 20.0
+    dx, dy = -math.sin(theta), -math.cos(theta)
+    px, py = -dy, dx
+    parts.append(
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="#ffffff" '
+        f'stroke="#bbbbbb" stroke-width="1" />'
+    )
+    tipx, tipy = cx + dx * r, cy + dy * r
+    line(cx - dx * r * 0.7, cy - dy * r * 0.7, tipx, tipy, WALL, sw=1.6)
+    hbx, hby = tipx - dx * 7.0, tipy - dy * 7.0
+    parts.append(
+        f'<polygon points="{tipx:.1f},{tipy:.1f} {hbx + px * 4:.1f},{hby + py * 4:.1f} '
+        f'{hbx - px * 4:.1f},{hby - py * 4:.1f}" fill="{WALL}" />'
+    )
+    text(cx + dx * (r + 9), cy + dy * (r + 9) + 3, "N", size=11, weight="bold")
+
+    # Overall lot dimensions (bottom = width, left = length).
+    dimcol = DIM_COLOR
+    by_dim = sy(0) + 40
+    line(sx(0), by_dim, sx(lot_w), by_dim, dimcol, sw=0.8)
+    line(sx(0), by_dim - 4, sx(0), by_dim + 4, dimcol, sw=0.8)
+    line(sx(lot_w), by_dim - 4, sx(lot_w), by_dim + 4, dimcol, sw=0.8)
+    text(sx(lot_w / 2.0), by_dim - 5, fmt_ft_in(lot_w), size=10, fill=dimcol)
+    lx_dim = sx(0) - 46
+    line(lx_dim, sy(0), lx_dim, sy(lot_l), dimcol, sw=0.8)
+    line(lx_dim - 4, sy(0), lx_dim + 4, sy(0), dimcol, sw=0.8)
+    line(lx_dim - 4, sy(lot_l), lx_dim + 4, sy(lot_l), dimcol, sw=0.8)
+    parts.append(
+        f'<text x="{lx_dim - 6:.1f}" y="{(sy(0) + sy(lot_l)) / 2:.1f}" '
+        f'font-family="{font}" font-size="10" fill="{dimcol}" text-anchor="middle" '
+        f'transform="rotate(-90 {lx_dim - 6:.1f} {(sy(0) + sy(lot_l)) / 2:.1f})">'
+        f'{escape(fmt_ft_in(lot_l))}</text>'
+    )
+
+    parts.append("</svg>")
+    return "\n".join(parts)

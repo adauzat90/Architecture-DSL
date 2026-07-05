@@ -91,6 +91,7 @@ require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeata
 require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
 site <W> x <L>                     # optional; the lot's east-west × north-south dimensions (ft)
 setback [front <n>] [side <n>] [rear <n>]     # optional; required yard clearances (needs a `site`)
+building at <x>,<y>                # optional; place the building's SW corner on the lot (default centred)
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall (rooms must abut)
@@ -104,6 +105,10 @@ entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]   # short
 window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]   # sill/head: ft above the floor
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
+fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>]   # furnishing
+outlet in <room> wall N|S|E|W offset <ft> [gfci]   # optional; a receptacle on a room wall
+switch in <room> wall N|S|E|W offset <ft>          # optional; a wall switch
+light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]   # optional; a ceiling luminaire (room-local x,y)
 frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 ```
 
@@ -195,6 +200,27 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
   isn't modelled. A `site` on its own imposes no check; a `setback` with no
   `site` to measure against is a `SETBACK_NO_SITE` error. This is a sanity guard,
   not a substitute for a surveyed site plan.
+- `building at <x>,<y>` pins the building's plan origin (its south-west envelope
+  corner, world `0,0`) at that point in **lot feet** from the lot's south-west
+  corner. Declare it and the `SETBACK` check becomes position-aware: it measures
+  the real clear yard on each edge and, on a violation, **names the side and the
+  encroachment in ft-in** (rather than the dimensions-only test above). Omit it
+  and the site plan centres the footprint on the lot. It also drives the **Site
+  Plan** sheet in the permit packet and the site drawing on the playground's
+  Elevations tab.
+- The **electrical layer** is opt-in and drawn per statement:
+  `outlet in <room> wall N|S|E|W offset <ft> [gfci]` places a receptacle on a
+  wall (offset from its south/west start corner; `gfci` = ground-fault),
+  `switch in <room> wall N|S|E|W offset <ft>` a wall switch, and
+  `light in <room> at <x>,<y> [kind ...]` a ceiling luminaire at **room-local**
+  x,y. Once a habitable room declares any `outlet`, the compiler checks receptacle
+  spacing (no wall point more than 6 ft from one — `OUTLET_SPACING`, IRC E3901.2);
+  a wet-room (kitchen/bath/laundry/utility) outlet without `gfci` warns
+  (`OUTLET_GFCI`, E3902); and a habitable room with power but no `light` gets a
+  `ROOM_NO_LIGHT` info (E3903). Rooms that draw nothing are never nagged — and a
+  plan with the `electrical` directive but no drawn devices keeps the old
+  one-shot `ELECTRICAL_PLAN` checklist. Toggle the layer with **⚡** in the
+  playground's plan toolbar; the permit packet gains an **Electrical Plan** sheet.
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
 
@@ -409,8 +435,15 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   (`BEDROOM_EGRESS`) — fixed glass doesn't open.
 - `SETBACK` — with a `site` + `setback` declared, the building footprint
   (envelope + wings + porches) must fit the **buildable rectangle** (the lot minus
-  its setbacks). Checked by dimensions only; a `setback` with no `site` is a
+  its setbacks). Checked by dimensions only, unless a `building at <x>,<y>` pins
+  the building on the lot — then the check measures each edge's real yard and
+  names the encroached side + overrun in ft-in. A `setback` with no `site` is a
   `SETBACK_NO_SITE` error.
+- Electrical (opt-in, per room that draws devices): `OUTLET_SPACING` — a
+  habitable room with outlets has a wall point more than 6 ft from a receptacle
+  (IRC E3901.2). `OUTLET_GFCI` — a wet-room outlet isn't marked `gfci` (E3902).
+  `ROOM_NO_LIGHT` — a habitable room has power (outlets/switches) but no `light`
+  (E3903, info).
 - Numbers are finite; ids/names are non-empty.
 
 **Warnings (should address):**

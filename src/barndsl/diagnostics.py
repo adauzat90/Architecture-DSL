@@ -392,7 +392,29 @@ REGISTRY: dict[str, CodeInfo] = dict(
            ">6 ft from an outlet, IRC E3901.2) with GFCI/AFCI protection (E3902), "
            "switched lighting outlets at habitable rooms/halls/entries (R303.7 / "
            "E3903), stair lighting, and a level landing at each exterior door "
-           "(R311.3). Carry these onto the construction documents."),
+           "(R311.3). Carry these onto the construction documents. Once a room "
+           "actually draws outlets, the sharper per-room checks (OUTLET_SPACING / "
+           "OUTLET_GFCI / ROOM_NO_LIGHT) take over from this reminder."),
+        _c("OUTLET_SPACING", W, "Receptacle spacing too wide",
+           "A habitable room has drawn receptacles, but there is a point along its "
+           "walls more than 6 ft from the nearest one — a lamp/appliance cord "
+           "would have to cross a doorway to reach power. IRC E3901.2 requires "
+           "receptacles so that no point along a wall line is more than 6 ft from "
+           "one (i.e. one at least every 12 ft of wall run, measured around "
+           "corners). Add an `outlet` in the worst gap. Only rooms that declare an "
+           "outlet are checked (drawing the electrical layer is opt-in)."),
+        _c("OUTLET_GFCI", W, "Receptacle needs GFCI protection",
+           "A receptacle in a kitchen, bathroom, laundry or utility (a wet/damp "
+           "location) isn't marked `gfci`. IRC E3902 requires ground-fault "
+           "circuit-interrupter protection for receptacles in those rooms (and "
+           "outdoors). Add `gfci` to the `outlet`, or protect the circuit at the "
+           "panel and note it."),
+        _c("ROOM_NO_LIGHT", I, "Habitable room has power but no light",
+           "A habitable room draws receptacles or switches but no lighting outlet. "
+           "IRC E3903 requires at least one wall-switch-controlled lighting outlet "
+           "in every habitable room (a switched receptacle counts). Add a `light` "
+           "(or note a switched receptacle). Advisory — the switch is often there, "
+           "just not drawn."),
         # --- access ---------------------------------------------------------
         _c("NO_ENTRY", E, "No exterior door",
            "The plan has no exterior people-door — no way to enter the building. "

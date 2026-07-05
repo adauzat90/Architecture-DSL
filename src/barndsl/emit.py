@@ -69,6 +69,8 @@ def emit_dsl(plan: Barndominium) -> str:
         if ss.rear is not None:
             line += f" rear {_n(ss.rear)}"
         out.append(line)
+    if ss is not None and ss.has_building:
+        out.append(f"building at {_n(ss.building_x)},{_n(ss.building_y)}")
     if plan.program_spec is not None:
         spec = plan.program_spec
         line = f"program {spec.beds} bed"
@@ -205,5 +207,24 @@ def emit_dsl(plan: Barndominium) -> str:
                 f"stair {s.id} at {_n(s.x)},{_n(s.y)} "
                 f"size {_n(s.width)} x {_n(s.length)} from {s.from_level} to {s.to_level}"
             )
+
+    if getattr(plan, "outlets", None) or getattr(plan, "switches", None) or getattr(
+        plan, "lights", None
+    ):
+        out.append("")
+        for o in plan.outlets:
+            line = f"outlet in {o.room} wall {o.wall.value[0].upper()} offset {_n(o.offset)}"
+            if o.gfci:
+                line += " gfci"
+            out.append(line)
+        for sw in plan.switches:
+            out.append(
+                f"switch in {sw.room} wall {sw.wall.value[0].upper()} offset {_n(sw.offset)}"
+            )
+        for lt in plan.lights:
+            line = f"light in {lt.room} at {_n(lt.x)},{_n(lt.y)}"
+            if lt.kind != "ceiling":
+                line += f" kind {lt.kind}"
+            out.append(line)
 
     return "\n".join(out) + "\n"

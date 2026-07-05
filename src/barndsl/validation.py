@@ -950,6 +950,7 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_load_path(plan, add)
     _validate_plumbing_stack(plan, add)
     _validate_electrical_plan(plan, add)
+    _validate_electrical(plan, add)
     _validate_solar(plan, add)
     _validate_approach(plan, add)
     _validate_energy(plan, add)
@@ -1110,6 +1111,13 @@ def _validate_site(plan: Barndominium, add) -> None:
             )
         )
         return
+    if ss.has_building:
+        # The building is pinned on the lot, so measure each side's real yard and
+        # name the violated side + encroachment (ft-in) — stricter and clearer than
+        # the dimension-only fit below.
+        _validate_site_placed(plan, ss, add)
+        return
+
     if not ss.has_setback:
         return  # a `site` on its own imposes no check
 
@@ -1151,6 +1159,61 @@ def _validate_site(plan: Barndominium, add) -> None:
                 "`setback` — the footprint's bounding box (building + porches) "
                 "must fit inside the lot minus its setbacks.",
                 **loc,
+            )
+        )
+
+
+def _validate_site_placed(plan: Barndominium, ss, add) -> None:
+    """Setback check for a building pinned on the lot (``building at <x>,<y>``).
+
+    Measures the real clear yard on each lot edge — building (envelope + wings +
+    porches) to lot line — and reports each edge whose yard is short of its
+    required ``setback`` (or where the building crosses the lot line entirely),
+    naming the side and the encroachment in ft-in. A ``SETBACK`` error, like the
+    dimension-only check it supersedes."""
+    from .render import fmt_ft_in
+
+    minx, miny, maxx, maxy = _site_footprint_bounds(plan)
+    bx = ss.building_x or 0.0
+    by = ss.building_y or 0.0
+    lot_w = ss.width
+    lot_l = ss.length
+    front = ss.front or 0.0
+    rear = ss.rear or 0.0
+    side = ss.side or 0.0
+    # (label, clear yard on that edge, required setback there). front = south by
+    # convention; `side` applies to both the east and west yards.
+    checks = [
+        ("front (south)", by + miny, front),
+        ("rear (north)", lot_l - (by + maxy), rear),
+        ("west side", bx + minx, side),
+        ("east side", lot_w - (bx + maxx), side),
+    ]
+    problems: list[str] = []
+    for label, clear, req in checks:
+        if clear < req - EPSILON:
+            over = req - clear
+            if req > EPSILON:
+                problems.append(
+                    f"the {label} yard is {fmt_ft_in(max(0.0, clear))} but the "
+                    f"setback needs {_f(req)} ft — {fmt_ft_in(over)} short"
+                )
+            else:
+                problems.append(
+                    f"the building crosses the {label} lot line by {fmt_ft_in(over)}"
+                )
+    if problems:
+        add(
+            Issue(
+                Severity.ERROR,
+                "SETBACK",
+                "The building footprint violates the setbacks: "
+                + "; ".join(problems) + ".",
+                line=ss.setback_line or ss.building_line or ss.line,
+                col=ss.setback_col or ss.building_col or ss.col,
+                end_col=ss.setback_end_col or ss.building_end_col or ss.end_col,
+                hint="Move the building (`building at <x>,<y>`), shrink the "
+                "footprint, enlarge the `site`, or reduce the `setback`.",
             )
         )
 
@@ -4183,6 +4246,11 @@ def _validate_electrical_plan(plan: Barndominium, add) -> None:
     """
     if not getattr(plan, "electrical", False):
         return
+    # Once the plan actually draws its electrical layer, the sharper per-room
+    # checks (OUTLET_SPACING / OUTLET_GFCI / ROOM_NO_LIGHT) take over — the
+    # generic checklist would just be noise next to them.
+    if plan.outlets or plan.switches or plan.lights:
+        return
     parts = [
         "space receptacles so no point along any wall is more than 6 ft from one "
         "(IRC E3901.2), with GFCI protection at kitchens, baths, laundry and "
@@ -4209,6 +4277,118 @@ def _validate_electrical_plan(plan: Barndominium, add) -> None:
             "site plans.",
         )
     )
+
+
+def _receptacle_reach(room: Room, outlets: list) -> float:
+    """The worst-case distance (ft) from any point on ``room``'s wall line to the
+    nearest receptacle, walking the perimeter as a closed loop (so an outlet near
+    a corner covers the adjacent wall too). ``max_gap / 2`` — the midpoint of the
+    widest run between two receptacles — is the figure IRC E3901.2 caps at 6 ft.
+    Doorways (which reset wall space) aren't modelled, so this is a slightly
+    conservative wall-line measure."""
+    w, length = room.width, room.length
+    perim = 2.0 * (w + length)
+    if perim <= 0 or not outlets:
+        return perim  # nothing to reach
+    arcs: list[float] = []
+    for o in outlets:
+        if o.wall is Direction.SOUTH:
+            a = min(max(o.offset, 0.0), w)
+        elif o.wall is Direction.EAST:
+            a = w + min(max(o.offset, 0.0), length)
+        elif o.wall is Direction.NORTH:
+            a = w + length + (w - min(max(o.offset, 0.0), w))
+        else:  # WEST
+            a = 2.0 * w + length + (length - min(max(o.offset, 0.0), length))
+        arcs.append(a % perim)
+    arcs.sort()
+    gaps = [arcs[i + 1] - arcs[i] for i in range(len(arcs) - 1)]
+    gaps.append(perim - arcs[-1] + arcs[0])  # wrap-around gap (whole loop if n==1)
+    return max(gaps) / 2.0
+
+
+def _validate_electrical(plan: Barndominium, add) -> None:
+    """Per-room electrical checks — active for any room that draws its electrical
+    layer (declares an `outlet`/`switch`/`light`), independent of the `electrical`
+    directive. Rooms that draw nothing are never nagged (the layer is opt-in).
+
+    Checks: receptacle spacing (OUTLET_SPACING, IRC E3901.2 — no wall point > 6 ft
+    from a receptacle, in habitable rooms with outlets); GFCI protection
+    (OUTLET_GFCI, IRC E3902 — a wet-room receptacle not marked `gfci`); and a
+    lighting outlet (ROOM_NO_LIGHT, IRC E3903 — a habitable room with power but no
+    `light`)."""
+    if not (plan.outlets or plan.switches or plan.lights):
+        return
+    from .render import fmt_ft_in
+
+    by_id = {r.id: r for r in plan.rooms}
+    outlets_by: dict[str, list] = {}
+    for o in plan.outlets:
+        outlets_by.setdefault(o.room, []).append(o)
+    powered: set[str] = set(outlets_by)
+    for sw in plan.switches:
+        powered.add(sw.room)
+    lit = {lt.room for lt in plan.lights}
+
+    # GFCI — a receptacle in a wet/damp room that isn't ground-fault protected.
+    for o in plan.outlets:
+        room = by_id.get(o.room)
+        if room is not None and room.type in WET_TYPES and not o.gfci:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "OUTLET_GFCI",
+                    f"A receptacle in the {room.display_name.lower()} "
+                    f"({room.type.value.replace('_', ' ')}) isn't marked `gfci` — "
+                    "IRC E3902 requires ground-fault protection there.",
+                    room=o.room,
+                    line=o.line,
+                    col=o.col,
+                    end_col=o.end_col,
+                    hint="Add `gfci` to the outlet, or protect the circuit at the "
+                    "panel and note it on the electrical plan.",
+                )
+            )
+
+    # Receptacle spacing — only habitable rooms that opted in by drawing an outlet.
+    for rid, outs in outlets_by.items():
+        room = by_id.get(rid)
+        if room is None or room.type not in HABITABLE_TYPES:
+            continue
+        reach = _receptacle_reach(room, outs)
+        if reach > 6.0 + 1e-6:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "OUTLET_SPACING",
+                    f"In {room.display_name}, a point on the wall is up to "
+                    f"{fmt_ft_in(reach)} from the nearest receptacle — IRC E3901.2 "
+                    "allows no more than 6 ft (a receptacle at least every 12 ft of "
+                    "wall run).",
+                    room=rid,
+                    hint="Add an `outlet` in the widest gap so no wall point is "
+                    "more than 6 ft from one.",
+                )
+            )
+
+    # Lighting outlet — a habitable room with power but nothing to switch on.
+    for rid in sorted(powered):
+        room = by_id.get(rid)
+        if room is None or room.type not in HABITABLE_TYPES:
+            continue
+        if rid not in lit:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ROOM_NO_LIGHT",
+                    f"{room.display_name} draws receptacles/switches but no "
+                    "lighting outlet — IRC E3903 wants a wall-switch-controlled "
+                    "light in every habitable room.",
+                    room=rid,
+                    hint="Add a `light in " + rid + " at <x>,<y>` (or note a "
+                    "switched receptacle).",
+                )
+            )
 
 
 #: The rooms where lack of winter sun (a north-only aspect) most hurts comfort.

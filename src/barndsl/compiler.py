@@ -26,6 +26,10 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
     fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]  # place a fixture/furnishing
+    outlet in <room> wall N|S|E|W offset <ft> [gfci]      # receptacle on a room wall
+    switch in <room> wall N|S|E|W offset <ft>             # wall switch
+    light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]  # ceiling luminaire (room-local x,y)
+    building at <x>,<y>                # optional — place the building's SW corner on the lot
     frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
     roof gable|shed|monitor [pitch <rise:run>]            # optional roof form (default gable)
 
@@ -49,6 +53,7 @@ from .elements import (
     DOUBLE_LEAF_KINDS,
     OVERHEAD_DOOR_HEIGHT,
     OVERHEAD_DOOR_WIDTH,
+    LIGHT_KINDS,
     WALL_ATTRIBUTES,
     WINDOW_KINDS,
     Barndominium,
@@ -66,8 +71,9 @@ if TYPE_CHECKING:  # the annotation-only import; runtime resolution is lazy
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
-    "roof", "orientation", "finish", "accessible", "site", "setback", "suite",
-    "zone", "electrical", "street", "overhang", "climate", "fixture"
+    "roof", "orientation", "finish", "accessible", "site", "setback", "building",
+    "suite", "zone", "electrical", "street", "overhang", "climate", "fixture",
+    "outlet", "switch", "light",
 )
 
 #: Single-letter wall aliases the `fixture` statement accepts (N|S|E|W), plus the
@@ -83,6 +89,7 @@ _WALLS = "north, south, east, west"
 
 _DOOR_KINDS = frozenset(DOOR_KINDS)
 _WINDOW_KIND_SET = frozenset(WINDOW_KINDS)
+_LIGHT_KIND_SET = frozenset(LIGHT_KINDS)
 _WALL_ATTRS = ", ".join(WALL_ATTRIBUTES)
 _BED_WORDS = frozenset({"bed", "beds", "bedroom", "bedrooms"})
 #: 'bath' is an aggregate (bathroom + half_bath), matching the compile recap.
@@ -199,6 +206,20 @@ Statements:
         # (bath toilet/lavatory/tub, kitchen fridge/range/sink, laundry washer/
         # dryer) REPLACES just that seed. Baths, kitchens and laundries auto-seed
         # their fixtures with no `fixture` line at all.
+  outlet in <room> wall N|S|E|W offset <ft> [gfci]
+        # a receptacle on a room wall, `offset` ft from the wall's S/W start
+        # corner. `gfci` marks a ground-fault receptacle (required at kitchens,
+        # baths, laundries and outdoors, IRC E3902). Declaring any outlet opts the
+        # room into the receptacle-spacing check (no wall point > 6 ft from one,
+        # IRC E3901.2 -> OUTLET_SPACING); a wet-room outlet without `gfci` warns
+        # (OUTLET_GFCI). The electrical layer is opt-in — draw it or don't.
+  switch in <room> wall N|S|E|W offset <ft>
+        # a wall switch on a room wall (offset from the S/W start corner). A
+        # habitable room with power (outlets/switches) but no `light` gets the
+        # ROOM_NO_LIGHT lighting-outlet nudge (IRC E3903).
+  light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]
+        # a ceiling luminaire at ROOM-LOCAL x,y (feet from the room's SW corner,
+        # like a `fixture at`). kind defaults to ceiling.
   frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]
         # auto-place the post-and-beam structural frame over the footprint: bents
         # spaced <= bay ft along the long axis (default 12), each spanning the short
@@ -219,8 +240,12 @@ Statements:
         # the buildable rectangle is the lot minus its setbacks: front/rear
         # consume the plan's south/north depth, `side` clears BOTH east & west
         # edges. If the building footprint (envelope + wings + porches) doesn't
-        # fit inside it, that's a SETBACK error (checked by dimensions only —
-        # there is no lot-position statement). A `setback` with no `site` errors.
+        # fit inside it, that's a SETBACK error. A `setback` with no `site` errors.
+  building at <x>,<y>              # optional; place the building on the lot
+        # pins the plan origin (the SW envelope corner, world 0,0) at <x>,<y> in
+        # lot feet from the lot's SW corner. With it declared the setback check
+        # measures each side's real clearance and can name which side is encroached
+        # and by how much (ft-in); without it the check is dimensions-only.
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -730,6 +755,16 @@ def _parse_statement(
         ss = plan.site_spec
         assert ss is not None  # .setback() just created it
         ss.setback_line, ss.setback_col, ss.setback_end_col = lineno, kw.col, kw.end_col
+    elif key == "building":
+        # `building at <x>,<y>` — the plan origin (SW envelope corner) on the lot.
+        c.keyword("at")
+        bx = c.number("the building x on the lot")
+        by = c.number("the building y on the lot")
+        c.expect_end()
+        plan.building(bx, by)
+        ss = plan.site_spec
+        assert ss is not None  # .building() just created it
+        ss.building_line, ss.building_col, ss.building_end_col = lineno, kw.col, kw.end_col
     elif key == "roof":
         # `roof <style> [pitch <p>]` — style in gable|shed|monitor.
         style_tok = c.take("a roof style (gable|shed|monitor)")
@@ -1372,6 +1407,95 @@ def _parse_statement(
             )
         pf = plan.fixtures[-1]
         pf.line, pf.col, pf.end_col = lineno, kw.col, kw.end_col
+    elif key in ("outlet", "switch"):
+        # `outlet in <room> wall <N|S|E|W> offset <n> [gfci]`
+        # `switch in <room> wall <N|S|E|W> offset <n>`
+        c.keyword("in")
+        room_tok = c.ident("a room id")
+        wall = None
+        offset = 1.0
+        gfci = False
+        while (tok := c.peek()) is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "wall":
+                wt = c.take("a wall (N|S|E|W)")
+                wall = _FIXTURE_WALLS.get(wt.text.lower())
+                if wall is None:
+                    raise _ParseError(
+                        "BAD_WALL",
+                        f"Unknown wall '{wt.text}'.",
+                        wt.col,
+                        end_col=wt.end_col,
+                        hint="Use N, S, E or W (or north/south/east/west).",
+                    )
+            elif opt == "offset":
+                offset = c.number(f"the {key} offset")
+            elif opt == "gfci" and key == "outlet":
+                gfci = True
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown {key} option '{tok.text}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint=(
+                        "Options: wall N|S|E|W, offset <n>, gfci."
+                        if key == "outlet"
+                        else "Options: wall N|S|E|W, offset <n>."
+                    ),
+                )
+        if wall is None:
+            raise _ParseError(
+                "BAD_WALL",
+                f"A `{key}` needs a wall: `{key} in <room> wall N|S|E|W offset <n>`.",
+                kw.col,
+                end_col=kw.end_col,
+                hint="Name the wall (N|S|E|W) the device sits on.",
+            )
+        c.expect_end()
+        if key == "outlet":
+            plan.add_outlet(room_tok.text, wall, offset=offset, gfci=gfci)
+            plan.outlets[-1].line = lineno
+            plan.outlets[-1].col = kw.col
+            plan.outlets[-1].end_col = kw.end_col
+        else:
+            plan.add_switch(room_tok.text, wall, offset=offset)
+            plan.switches[-1].line = lineno
+            plan.switches[-1].col = kw.col
+            plan.switches[-1].end_col = kw.end_col
+    elif key == "light":
+        # `light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]`
+        c.keyword("in")
+        room_tok = c.ident("a room id")
+        c.keyword("at")
+        lx = c.number("the light x offset")
+        ly = c.number("the light y offset")
+        lkind = "ceiling"
+        while (tok := c.peek()) is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "kind":
+                kt = c.take("a light kind")
+                lkind = kt.text.lower()
+                if lkind not in _LIGHT_KIND_SET:
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"Unknown light kind '{kt.text}'.",
+                        kt.col,
+                        end_col=kt.end_col,
+                        hint=f"Use one of: {', '.join(LIGHT_KINDS)}.",
+                    )
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown light option '{tok.text}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint="Options: kind ceiling|pendant|fan|recessed.",
+                )
+        c.expect_end()
+        plan.add_light(room_tok.text, x=lx, y=ly, kind=lkind)
+        lm = plan.lights[-1]
+        lm.line, lm.col, lm.end_col = lineno, kw.col, kw.end_col
     else:
         raise _ParseError(
             "UNKNOWN_STMT",

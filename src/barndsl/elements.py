@@ -391,6 +391,74 @@ class PlacedFixture:
     end_col: int | None = None
 
 
+#: The luminaire kinds a ``light`` statement can name. ``ceiling`` is the default
+#: surface-mounted fixture; ``pendant`` hangs, ``fan`` is a ceiling fan/light,
+#: ``recessed`` is a can. They differ only in how they render — every one is a
+#: lighting outlet for the IRC E3903 room-lighting check.
+LIGHT_KINDS = ("ceiling", "pendant", "fan", "recessed")
+
+
+@dataclass
+class Outlet:
+    """A receptacle (the ``outlet`` statement) on a room wall.
+
+    ``wall`` is the room wall it sits on; ``offset`` is feet from the wall's
+    **start corner** (its south or west end — the same convention as a door or
+    window offset) to the receptacle. ``gfci`` marks a ground-fault receptacle
+    (required at kitchens, baths, laundries and outdoors, IRC E3902). The level
+    comes from the room, so an outlet carries none of its own. Receptacle spacing
+    (IRC E3901.2) is checked per room once a room declares any outlet.
+    """
+
+    room: str
+    wall: Direction
+    offset: float = 1.0
+    gfci: bool = False
+    #: Source location of the `outlet` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Switch:
+    """A wall switch (the ``switch`` statement) on a room wall.
+
+    Like :class:`Outlet` but it controls lighting rather than supplying power, so
+    it never carries a GFCI flag and isn't counted for receptacle spacing. Its
+    presence (with no ``light``) drives the ROOM_NO_LIGHT nudge. ``offset`` is
+    feet from the wall's south/west start corner.
+    """
+
+    room: str
+    wall: Direction
+    offset: float = 1.0
+    #: Source location of the `switch` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Light:
+    """A ceiling luminaire (the ``light`` statement) at a room-local point.
+
+    ``x``/``y`` are **room-local** feet from the room's south-west corner (like a
+    ``fixture`` position, unlike the wall-relative outlet/switch). ``kind`` is one
+    of :data:`LIGHT_KINDS` (``ceiling`` default). A habitable room that has power
+    (outlets/switches) but no light gets the ROOM_NO_LIGHT info (IRC E3903).
+    """
+
+    room: str
+    x: float
+    y: float
+    kind: str = "ceiling"
+    #: Source location of the `light` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
 @dataclass
 class Note:
     """A positioned annotation — the ``note "text" at <x>,<y> [level <n>]`` form.
@@ -712,6 +780,14 @@ class SiteSpec:
     front: float | None = None
     side: float | None = None
     rear: float | None = None
+    #: Optional placement of the building's plan origin (world ``0,0``, the
+    #: south-west envelope corner) on the lot — the ``building at <x>,<y>``
+    #: statement, in lot feet from the lot's south-west corner. ``None`` leaves
+    #: the building position unmodelled (the dimension-only setback fit still
+    #: runs); when set, the setback check measures each side's real clearance and
+    #: can name which side is encroached and by how much.
+    building_x: float | None = None
+    building_y: float | None = None
     #: Source location of the `site` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
@@ -720,6 +796,10 @@ class SiteSpec:
     setback_line: int | None = None
     setback_col: int | None = None
     setback_end_col: int | None = None
+    #: Source location of the `building` statement (textual front-end only).
+    building_line: int | None = None
+    building_col: int | None = None
+    building_end_col: int | None = None
 
     @property
     def has_dims(self) -> bool:
@@ -730,6 +810,11 @@ class SiteSpec:
     def has_setback(self) -> bool:
         """True if any of front/side/rear was declared."""
         return any(v is not None for v in (self.front, self.side, self.rear))
+
+    @property
+    def has_building(self) -> bool:
+        """True once a ``building at <x>,<y>`` has pinned the building on the lot."""
+        return self.building_x is not None and self.building_y is not None
 
 
 @dataclass
@@ -805,6 +890,14 @@ class Barndominium:
     #: to a room's auto-seeds (an explicit fixture of a seeded kind replaces that
     #: seed). See :class:`PlacedFixture` and :func:`barndsl.fixtures.resolve_room_fixtures`.
     fixtures: list[PlacedFixture] = field(default_factory=list)
+    #: Author-placed electrical devices (the ``outlet`` / ``switch`` / ``light``
+    #: statements). Opt-in — a room that declares any outlet is checked for
+    #: receptacle spacing (IRC E3901.2); a wet-room outlet is checked for GFCI
+    #: (E3902); a habitable room with power but no light gets a lighting nudge
+    #: (E3903). See :class:`Outlet`, :class:`Switch`, :class:`Light`.
+    outlets: list[Outlet] = field(default_factory=list)
+    switches: list[Switch] = field(default_factory=list)
+    lights: list[Light] = field(default_factory=list)
     notes: str = ""
     #: Positioned annotations (``note "text" at <x>,<y> [level <n>]``): leader-line
     #: callouts drawn on the plan SVG. Un-positioned notes stay in :attr:`notes`
@@ -1528,6 +1621,73 @@ class Barndominium:
         self.fixtures.append(
             PlacedFixture(kind, str(room), x, y, wd, rot, w)
         )
+        return self
+
+    def add_outlet(
+        self,
+        room: str,
+        wall: Direction | str,
+        *,
+        offset: float = 1.0,
+        gfci: bool = False,
+    ) -> "Barndominium":
+        """Place a receptacle (the ``outlet`` statement) on ``wall`` of ``room``.
+
+        ``offset`` is feet from the wall's south/west start corner. ``gfci`` marks
+        a ground-fault receptacle (kitchens, baths, laundries, outdoors — IRC
+        E3902). Declaring any outlet opts the room into the receptacle-spacing
+        check (IRC E3901.2). See :class:`Outlet`.
+        """
+        o = _finite(room, "outlet offset", offset)
+        self.outlets.append(Outlet(str(room), Direction(wall), o, bool(gfci)))
+        return self
+
+    def add_switch(
+        self, room: str, wall: Direction | str, *, offset: float = 1.0
+    ) -> "Barndominium":
+        """Place a wall switch (the ``switch`` statement) on ``wall`` of ``room``.
+
+        ``offset`` is feet from the wall's south/west start corner. See
+        :class:`Switch`.
+        """
+        o = _finite(room, "switch offset", offset)
+        self.switches.append(Switch(str(room), Direction(wall), o))
+        return self
+
+    def add_light(
+        self,
+        room: str,
+        *,
+        x: float,
+        y: float,
+        kind: str = "ceiling",
+    ) -> "Barndominium":
+        """Place a ceiling luminaire (the ``light`` statement) at room-local
+        ``x``,``y`` (feet from the room's SW corner). ``kind`` is one of
+        :data:`LIGHT_KINDS` (``ceiling`` default). See :class:`Light`."""
+        kind = str(kind).lower()
+        if kind not in LIGHT_KINDS:
+            raise ValueError(
+                f"light kind must be one of {LIGHT_KINDS}, got {kind!r}."
+            )
+        lx = _finite(room, "light x", x)
+        ly = _finite(room, "light y", y)
+        self.lights.append(Light(str(room), lx, ly, kind))
+        return self
+
+    def building(self, x: float, y: float) -> "Barndominium":
+        """Pin the building's plan origin on the lot — ``building at <x>,<y>``.
+
+        ``x``/``y`` place the plan's south-west corner (world ``0,0``) in lot feet
+        from the lot's south-west corner. Optional; needs a :meth:`site`. When set
+        with ``setback``s the fit check measures each side's real clearance (and
+        names an encroached side + its overrun) instead of the dimension-only
+        bounding-box test. See :class:`SiteSpec`.
+        """
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        self.site_spec.building_x = _finite("building", "x", x)
+        self.site_spec.building_y = _finite("building", "y", y)
         return self
 
     def connect(

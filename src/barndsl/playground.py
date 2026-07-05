@@ -98,7 +98,13 @@ from .fixtures import FIXTURES, resolve_room_fixtures
 from .gltf import build_scene, to_glb
 from .ifc import to_ifc
 from .packet import build_packet
-from .render import ROOM_COLORS, RenderConfig, render_svg, sheet_scale
+from .render import (
+    ROOM_COLORS,
+    RenderConfig,
+    render_site_svg,
+    render_svg,
+    sheet_scale,
+)
 from .scaffold import starter_dsl
 from .schedule import _schedules
 from .score import design_score
@@ -245,6 +251,15 @@ def compile_payload(source: str) -> dict:
         try:
             payload["title"] = plan.name
             payload["svg"] = render_svg(plan)
+            # The electrical layer as a separate SVG variant — the plan toolbar's
+            # ⚡ toggle swaps to it without a re-compile (kept offline/in-payload).
+            payload["electrical_svg"] = render_svg(
+                plan, RenderConfig(show_electrical=True)
+            )
+            # A schematic site plan, rendered only when a `site` is declared, shown
+            # on the Elevations tab beside the elevations.
+            if plan.site_spec is not None and plan.site_spec.has_dims:
+                payload["site_svg"] = render_site_svg(plan)
             payload["scene"] = scene_json(build_scene(plan))
             payload["score"] = design_score(result).to_dict()
             payload["metrics"] = plan.metrics()
@@ -298,6 +313,25 @@ def compile_payload(source: str) -> dict:
                 }
                 for i, nm in enumerate(plan.note_marks)
             ]
+            # Electrical devices (outlets/switches/lights), keyed by index within
+            # each list — the `index` the delete_outlet/switch/light edits take.
+            payload["electrical"] = {
+                "outlets": [
+                    {"index": i, "room": o.room, "wall": o.wall.value,
+                     "offset": o.offset, "gfci": o.gfci, "line": o.line}
+                    for i, o in enumerate(plan.outlets)
+                ],
+                "switches": [
+                    {"index": i, "room": s.room, "wall": s.wall.value,
+                     "offset": s.offset, "line": s.line}
+                    for i, s in enumerate(plan.switches)
+                ],
+                "lights": [
+                    {"index": i, "room": lt.room, "x": lt.x, "y": lt.y,
+                     "kind": lt.kind, "line": lt.line}
+                    for i, lt in enumerate(plan.lights)
+                ],
+            }
             # Print-to-scale: the architectural scale the plan fits Letter at, the
             # physical width to size the embedded SVG, and a scale-bar render — the
             # frontend's Print uses these so the printed sheet is a true-scale
@@ -1259,7 +1293,7 @@ _APP_HTML = r"""<!doctype html>
   .ov-multi { fill:none; stroke:#8a5cc0; stroke-width:2.4; stroke-dasharray:4 2.4; pointer-events:none; }
   .plan-row { flex:1; display:flex; min-height:0; }
   .plan-body { position:relative; flex:1; min-height:0; min-width:0; }
-  #panel-btn.on, #measure-btn.on { border-color:var(--accent); color:var(--accent); }
+  #panel-btn.on, #measure-btn.on, #elec-btn.on { border-color:var(--accent); color:var(--accent); }
   .edit-layer svg.measuring { cursor:crosshair; }
   .ov-measure { stroke:var(--accent); stroke-width:1.6; stroke-dasharray:5 3; }
   .ov-measure-t { fill:var(--accent); font-weight:700;
@@ -1716,6 +1750,8 @@ _APP_HTML = r"""<!doctype html>
           <button id="redo-btn" disabled title="Nothing to redo">↷ Redo</button>
           <button id="measure-btn" disabled
             title="Measure — drag between two points on the plan (M, edit mode)">⟷ Measure</button>
+          <button id="elec-btn"
+            title="Electrical layer — show outlets, switches &amp; ceiling lights">⚡ Electrical</button>
           <span class="level-switch" id="level-switch" hidden></span>
           <span class="multi-count" id="multi-count"></span>
           <span class="align-tools" id="align-tools" hidden>
@@ -1787,6 +1823,8 @@ const gutter = document.getElementById('gutter');
 const hl = document.getElementById('hl');
 const diagEl = document.getElementById('diagnostics');
 const planSvg = document.getElementById('plan-svg');
+const elecBtn = document.getElementById('elec-btn');
+let elecMode = false;  // ⚡ toggle: show the electrical layer on the plan SVG
 const viewsPane = document.getElementById('pane-views');
 const reportWrap = document.getElementById('report-wrap');
 const titleEl = document.getElementById('plan-title');
@@ -2094,7 +2132,7 @@ function applyResult(p){
   if (good){
     lastGood = p; scene3d = p.scene; sceneLoaded = false;
     viewport.classList.remove('stale');
-    planSvg.innerHTML = p.svg;
+    planSvg.innerHTML = (elecMode && p.electrical_svg) ? p.electrical_svg : p.svg;
     if (currentTab === 'plan') planZoom.refit(); else planNeedsFit = true;
     renderViews(p);
     renderReport(p);
@@ -2864,6 +2902,8 @@ function renderViews(p){
       pair[1] + ' elevation</figcaption><div class="svgbox">' + svg + '</div></figure>'; }
   if (p.section) html += '<figure data-view="section" title="Click to zoom">' +
     '<figcaption>Section</figcaption><div class="svgbox">' + p.section + '</div></figure>';
+  if (p.site_svg) html += '<figure data-view="site" title="Click to zoom">' +
+    '<figcaption>Site plan</figcaption><div class="svgbox">' + p.site_svg + '</div></figure>';
   viewsPane.innerHTML = html + '</div>';
 }
 
@@ -2875,10 +2915,11 @@ const lbZoom = makeZoom(lbSvg, {
   onChange: pct => { document.getElementById('lb-zpct').textContent = pct + '%'; },
 });
 const VIEW_LABEL = { south:'South elevation', north:'North elevation', east:'East elevation',
-  west:'West elevation', section:'Section' };
+  west:'West elevation', section:'Section', site:'Site plan' };
 function openLightbox(view){
   const p = lastGood; if (!p) return;
-  const svg = view === 'section' ? p.section : (p.elevations && p.elevations[view]);
+  const svg = view === 'section' ? p.section
+    : (view === 'site' ? p.site_svg : (p.elevations && p.elevations[view]));
   if (!svg) return;
   lbTitle.textContent = VIEW_LABEL[view] || 'View';
   lbSvg.innerHTML = svg;
@@ -3567,6 +3608,14 @@ function initEdit(){
     else { selectedRoomId = null; clearMultiSel(false); editNote(''); planZoom.refit(); }
   });
   measureBtn.addEventListener('click', () => setMeasure(!measureMode));
+  elecBtn.addEventListener('click', () => {
+    elecMode = !elecMode;
+    elecBtn.classList.toggle('on', elecMode);
+    // Swap the plan SVG in place — the electrical variant rides in the payload,
+    // so no re-compile and nothing leaves the page (offline).
+    if (lastGood) planSvg.innerHTML =
+      (elecMode && lastGood.electrical_svg) ? lastGood.electrical_svg : lastGood.svg;
+  });
   undoBtn.addEventListener('click', doUndo);
   redoBtn.addEventListener('click', doRedo);
   levelSwitch.addEventListener('click', e => {
@@ -4292,10 +4341,12 @@ function renderInspector(p){
       '<button data-btn="adddoor">＋ Door</button><button data-btn="addwindow">＋ Window</button>' +
       '<button data-btn="addentry">＋ Entry</button>' +
       '<button data-btn="addfix" title="Furnish — place a fixture or furniture piece in this room">＋ Fixture</button>' +
+      '<button data-btn="addelec" title="Add an outlet, switch or ceiling light to this room">＋ Electrical</button>' +
       '<button data-btn="duproom" title="Add a same-size twin beside this room (bed → bed2)">Duplicate</button>' +
       '<button class="danger" data-btn="delroom" title="Removes the room and everything on it — one undo brings it all back">Delete room</button></div>';
     if (dpForm && dpForm.op) h += addOpeningForm(p, r);
     if (dpForm === 'fx') h += addFixtureForm();
+    if (dpForm === 'elec') h += addElectricalForm(r);
     return h;
   }
   if (dpSel.t === 'op'){
@@ -4530,6 +4581,42 @@ function submitFixtureForm(){
   if (wall) ed.wall = wall;
   applyEdits([ed], 'add fixture');
 }
+// ＋ Electrical — mirrors ＋ Fixture: a type selector plus a wall+offset for an
+// outlet/switch (a light lands mid-room and can be dragged, like a fixture).
+function addElectricalForm(r){
+  return '<div class="dp-form"><div class="dp-grid">' +
+    '<label>type</label><select class="wide" id="ne-kind">' +
+    '<option value="outlet" selected>outlet</option>' +
+    '<option value="gfci">outlet (GFCI)</option>' +
+    '<option value="switch">switch</option>' +
+    '<option value="light">ceiling light</option></select>' +
+    '<label>wall</label><select class="wide" id="ne-wall" title="Wall the outlet/switch sits on (ignored for a light)">' +
+    optList(['N', 'S', 'E', 'W'], 'S') + '</select>' +
+    '<label>offset</label><input type="text" inputmode="text" id="ne-offset" ' +
+    'title="ft from the wall\\u2019s S/W end (outlet/switch)" value="3">' +
+    '</div><div class="dp-btns"><button data-btn="elecsubmit">Add device</button>' +
+    '<button data-btn="formcancel">Cancel</button></div>' +
+    '<div class="dp-note">Outlet/switch sit on the chosen wall; a light lands mid-room. Toggle ⚡ to see them.</div></div>';
+}
+function submitElectricalForm(){
+  const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
+  const r = p.rooms.find(x => x.id === dpSel.k); if (!r) return;
+  const kind = document.getElementById('ne-kind').value;
+  const wall = document.getElementById('ne-wall').value;
+  let offset = parseFtIn(document.getElementById('ne-offset').value);
+  if (!isFinite(offset) || offset < 0) offset = 3;
+  dpForm = null;
+  let ed;
+  if (kind === 'light'){
+    ed = { kind:'add_light', room:r.id, lkind:'ceiling',
+      x: snap(Math.max(0, r.w / 2)), y: snap(Math.max(0, r.l / 2)) };
+  } else if (kind === 'switch'){
+    ed = { kind:'add_switch', room:r.id, wall:wall, offset:snap(offset) };
+  } else {
+    ed = { kind:'add_outlet', room:r.id, wall:wall, offset:snap(offset), gfci:(kind === 'gfci') };
+  }
+  applyEdits([ed], 'add electrical');
+}
 // A same-type, same-size twin on the first side with clear floor (checked against
 // this level's rooms and the envelope); when every side is taken it still lands
 // east — the compiler's overlap diagnostic takes over as the teacher.
@@ -4580,10 +4667,12 @@ dpEl.addEventListener('click', e => {
     dpForm = { op: b.slice(3) }; renderPanel();
   }
   else if (b === 'addfix'){ dpForm = dpForm === 'fx' ? null : 'fx'; renderPanel(); }
+  else if (b === 'addelec'){ dpForm = dpForm === 'elec' ? null : 'elec'; renderPanel(); }
   else if (b === 'formcancel'){ dpForm = null; renderPanel(); }
   else if (b === 'roomsubmit') submitRoomForm();
   else if (b === 'opsubmit') submitOpeningForm();
   else if (b === 'fxsubmit') submitFixtureForm();
+  else if (b === 'elecsubmit') submitElectricalForm();
   else if (b === 'duproom'){
     const p = lastGood, r = p && dpSel && dpSel.t === 'room' && p.rooms.find(x => x.id === dpSel.k);
     if (r) duplicateRoom(r);

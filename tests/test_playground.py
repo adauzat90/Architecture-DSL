@@ -1138,3 +1138,59 @@ def test_plan_svg_always_carries_a_north_arrow():
     assert sited.plan is not None
     svg = render_svg(sited.plan)
     assert "true N · 30°" in svg and "plan north" not in svg
+
+
+# --- Phase 4: electrical layer + site plan in the playground ------------------
+
+_ELEC_SITE = """\
+plan "Wired"
+envelope 40 x 30
+ceiling 9
+site 120 x 90
+setback front 25 side 10 rear 20
+building at 40,30
+room living: living at 0,0 size 40 x 30
+outlet in living wall S offset 3 gfci
+switch in living wall E offset 1
+light in living at 20,15
+entry living south width 3 offset 10
+window living west width 10 offset 8
+"""
+
+
+def test_payload_carries_electrical_and_site_svg_variants():
+    p = compile_payload(_ELEC_SITE)
+    assert 'data-layer="electrical"' in p["electrical_svg"]
+    assert "electrical" not in p["svg"] or 'data-layer="electrical"' not in p["svg"]
+    assert p["site_svg"].startswith("<svg") and "BUILDING" in p["site_svg"]
+    elec = p["electrical"]
+    assert len(elec["outlets"]) == 1 and elec["outlets"][0]["gfci"] is True
+    assert len(elec["switches"]) == 1 and len(elec["lights"]) == 1
+
+
+def test_payload_omits_site_svg_when_no_lot():
+    p = compile_payload(CLEAN)
+    assert "site_svg" not in p
+    # The electrical variant is always present (the ⚡ toggle needs it).
+    assert "electrical_svg" in p
+
+
+def test_electrical_and_site_ui_markup_present():
+    html = render_app(CLEAN)
+    # The ⚡ plan-toolbar toggle and its swap logic.
+    assert 'id="elec-btn"' in html and "⚡ Electrical" in html
+    assert "elecMode" in html and "electrical_svg" in html
+    # The ＋ Electrical room-inspector affordance and its handlers.
+    assert 'data-btn="addelec"' in html and "＋ Electrical" in html
+    assert 'data-btn="elecsubmit"' in html
+    assert "addElectricalForm" in html and "submitElectricalForm" in html
+    assert 'id="ne-kind"' in html and 'id="ne-wall"' in html
+    # The site plan on the Elevations tab.
+    assert 'data-view="site"' in html and "site_svg" in html
+
+
+def test_electrical_site_ui_keeps_the_offline_guarantee():
+    html = render_app(_ELEC_SITE)
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
