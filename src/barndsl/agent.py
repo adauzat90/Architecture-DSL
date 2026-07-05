@@ -247,9 +247,13 @@ entry living west width 3 offset 24
 
 window living west width 14 offset 8
 window kitchen south width 8 offset 6
-window bath east width 4 offset 5
+window bath east width 4 offset 5 sill 5
 window bed1 north width 4 offset 3
 window bed2 north width 4 offset 3
+
+alarm smoke in bed1
+alarm smoke in bed2
+alarm smoke in hall
 """
 
 _GENERATE_SYSTEM = (

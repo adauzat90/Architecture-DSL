@@ -191,6 +191,23 @@ def emit_dsl(plan: Barndominium) -> str:
                 line += f" head {_n(w.head_height)}"
             out.append(line)
 
+    if plan.fixtures:
+        # Author-placed fixtures only. Auto-seeds (bath/kitchen/laundry footprints
+        # the layout derives) are never stored in `plan.fixtures`, so they never
+        # reach here — the emitted source carries exactly what the author wrote.
+        out.append("")
+        for f in plan.fixtures:
+            line = f"fixture {f.kind} in {f.room}"
+            if f.x is not None and f.y is not None:
+                line += f" at {_n(f.x)},{_n(f.y)}"
+            if f.wall is not None:
+                line += f" wall {f.wall.value[0].upper()}"
+            if f.rotation:
+                line += f" rotate {_n(f.rotation)}"
+            if f.width is not None:
+                line += f" width {_n(f.width)}"
+            out.append(line)
+
     if plan.porches:
         out.append("")
         for p in plan.porches:
@@ -225,6 +242,14 @@ def emit_dsl(plan: Barndominium) -> str:
             line = f"light in {lt.room} at {_n(lt.x)},{_n(lt.y)}"
             if lt.kind != "ceiling":
                 line += f" kind {lt.kind}"
+            out.append(line)
+
+    if getattr(plan, "alarms", None):
+        out.append("")
+        for a in plan.alarms:
+            line = f"alarm {a.kind} in {a.room}"
+            if a.x is not None and a.y is not None:
+                line += f" at {_n(a.x)},{_n(a.y)}"
             out.append(line)
 
     return "\n".join(out) + "\n"

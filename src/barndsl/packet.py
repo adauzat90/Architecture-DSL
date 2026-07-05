@@ -163,7 +163,10 @@ def _floor_plan(plan: Any, sheet: str = "Letter") -> str:
 
 
 def _has_electrical(plan: Any) -> bool:
-    return bool(plan.outlets or plan.switches or plan.lights)
+    return bool(
+        plan.outlets or plan.switches or plan.lights
+        or getattr(plan, "alarms", None)
+    )
 
 
 def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
@@ -178,6 +181,9 @@ def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
     n_gfci = sum(1 for o in plan.outlets if o.gfci)
     n_sw = len(plan.switches)
     n_light = len(plan.lights)
+    alarms = getattr(plan, "alarms", None) or []
+    n_smoke = sum(1 for a in alarms if a.is_smoke)
+    n_co = sum(1 for a in alarms if a.is_co)
     count_rows = "\n".join(
         f"<tr><td>{_tag(name)}</td><td class='num'>{n}</td></tr>"
         for name, n in (
@@ -185,11 +191,13 @@ def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
             ("— of which GFCI", n_gfci),
             ("Wall switches", n_sw),
             ("Ceiling lights", n_light),
+            ("Smoke alarms", n_smoke),
+            ("CO alarms", n_co),
         )
     )
     legend = (
         "<span class='badge'>⊙ receptacle · ⊙ GFCI = ground-fault · "
-        "S = switch · ⊗ = ceiling light</span>"
+        "S = switch · ⊗ = ceiling light · SD/CO = smoke/CO alarm</span>"
     )
     return f"""
 <section class="page">

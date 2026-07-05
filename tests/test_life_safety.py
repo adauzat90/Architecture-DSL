@@ -82,18 +82,21 @@ def test_ample_stair_has_no_headroom_flag():
 # --- smoke/CO alarms (R314/R315) --------------------------------------------
 
 
-def test_attached_garage_triggers_alarm_reminder():
+def test_plan_with_bedrooms_and_no_alarms_gets_the_reminder():
+    # The reworked reminder now keys on sleeping rooms (R314), not the garage:
+    # a plan with a bedroom but no `alarm` gets the teaching ALARM_CO info.
     plan = (
-        barndominium("x").envelope(60, 24).ceiling(9)
-        .add_room("living", T.LIVING, x=0, y=0, width=30, length=24)
-        .add_room("garage", T.GARAGE, x=30, y=0, width=30, length=24)
-        .connect("living", "garage", width=3)
-        .entrance("living", "south", width=3, offset=10)
+        barndominium("x").envelope(40, 24).ceiling(9)
+        .add_room("bed", T.BEDROOM, x=0, y=0, width=14, length=12)
+        .add_room("hall", T.HALLWAY, x=14, y=0, width=6, length=12)
+        .connect("bed", "hall", width=3)
+        .entrance("hall", "south", width=3, offset=2)
     )
     assert "ALARM_CO" in _codes(plan)
 
 
-def test_shop_bay_triggers_alarm_reminder():
+def test_no_bedrooms_no_alarm_reminder():
+    # An alarm-free shop building (no sleeping rooms) isn't nagged.
     plan = (
         barndominium("x").envelope(60, 24).ceiling(9)
         .add_room("living", T.LIVING, x=0, y=0, width=30, length=24)
@@ -101,13 +104,18 @@ def test_shop_bay_triggers_alarm_reminder():
         .connect("living", "shop", width=3)
         .entrance("living", "south", width=3, offset=10)
     )
-    assert "ALARM_CO" in _codes(plan)
-
-
-def test_no_garage_no_alarm_reminder():
-    plan = (
-        barndominium("x").envelope(20, 16).ceiling(9)
-        .add_room("living", T.LIVING, x=0, y=0, width=20, length=16)
-        .entrance("living", "south", width=3, offset=8)
-    )
     assert "ALARM_CO" not in _codes(plan)
+
+
+def test_declaring_alarms_silences_the_reminder():
+    # Once a plan declares the required alarms, the placement checks pass and no
+    # ALARM_* diagnostic remains.
+    plan = (
+        barndominium("x").envelope(40, 24).ceiling(9)
+        .add_room("bed", T.BEDROOM, x=0, y=0, width=14, length=12)
+        .add_room("hall", T.HALLWAY, x=14, y=0, width=6, length=12)
+        .connect("bed", "hall", width=3)
+        .entrance("hall", "south", width=3, offset=2)
+        .add_alarm("bed", "smoke").add_alarm("hall", "smoke")
+    )
+    assert not {c for c in _codes(plan) if c.startswith("ALARM")}

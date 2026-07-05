@@ -33,7 +33,10 @@ entry kitchen west width 3 offset 3
 window living south width 8 offset 2
 window kitchen north width 6 offset 6
 window bed  south width 4 offset 3
-window bath north width 3 offset 4
+window bath north width 3 offset 4 sill 5
+
+alarm smoke in bed
+alarm smoke in hall
 '''
 
 

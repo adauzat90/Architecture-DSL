@@ -354,6 +354,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("WINDOW_SILL", W, "Window head at or below its sill",
            "A window's head height is not above its sill height, so it encloses "
            "no glazed area. Set `head` above `sill` (both are ft above the floor)."),
+        _c("WINDOW_TEMPERED", W, "Window needs safety glazing",
+           "A window sits in an IRC R308.4 hazard location — within 24 in of a "
+           "door in the same wall plane (R308.4.1), within 60 in of a tub/shower "
+           "in a wet room (R308.4.5), or within 36 in of a stair flight "
+           "(R308.4.6/.7, simplified) — where human impact is likely, so its glass "
+           "must be tempered/safety glazing. The rule is derived from geometry "
+           "(there is no `tempered` attribute yet), and it also fills the window "
+           "schedule's Glazing column. Specify tempered glass on the schedule."),
         _c("ENTRY_INTERIOR", E, "Entry on an interior wall",
            "An exterior door is on a wall that doesn't face outside."),
         # --- stairs ---------------------------------------------------------
@@ -381,11 +389,26 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "overlooks a double-height void. Its open edge is a walking surface "
            "more than 30 in up and needs a 36 in guard with balusters that block a "
            "4 in sphere (IRC R312)."),
-        _c("ALARM_CO", I, "Smoke/CO alarms required",
-           "The plan has an attached garage/shop, so a carbon-monoxide alarm is "
-           "required outside each sleeping area (IRC R315), plus smoke alarms in "
-           "each bedroom, outside sleeping areas, and on every level (IRC R314). "
-           "The DSL can't place alarms — confirm them on the electrical plan."),
+        _c("ALARM_CO", I, "Smoke/CO alarms",
+           "Two roles, both info. On a plan that has bedrooms but declares NO "
+           "`alarm`, a teaching reminder to place smoke/CO alarms (IRC R314/R315). "
+           "Once alarms ARE declared, the carbon-monoxide check: bedrooms coexist "
+           "with an attached garage/shop but no `co`/`smoke_co` alarm sits outside "
+           "the sleeping areas (IRC R315). INFO — fuel-fired appliances aren't "
+           "modelled, so the attached garage/shop is the only trigger."),
+        _c("ALARM_BEDROOM", W, "Bedroom has no smoke alarm",
+           "A bedroom carries no `smoke` (or `smoke_co`) alarm. IRC R314.3 "
+           "requires a smoke alarm in each sleeping room. Runs only once a plan "
+           "declares any `alarm`. Add `alarm smoke in <bed>`."),
+        _c("ALARM_HALL", W, "No smoke alarm outside a sleeping area",
+           "No room adjacent to a bedroom carries a smoke alarm. IRC R314.3 wants "
+           "a smoke alarm outside each sleeping area; this approximates 'outside' "
+           "as a room sharing a door with the bedroom (a hallway if present, else "
+           "any adjacent room). Add `alarm smoke in <hall>`."),
+        _c("ALARM_LEVEL", W, "Level has no smoke alarm",
+           "A storey of the dwelling carries no smoke alarm. IRC R314.3(3) "
+           "requires at least one on every level, including basements. Add "
+           "`alarm smoke in <room on that level>`."),
         _c("ELECTRICAL_PLAN", I, "Electrical / life-safety checklist",
            "An opt-in reminder (the `electrical` directive) for code requirements "
            "the DSL can't place from geometry: receptacle spacing (no wall point "

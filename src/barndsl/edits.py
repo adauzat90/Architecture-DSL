@@ -44,7 +44,7 @@ import re
 from dataclasses import dataclass
 
 from .compiler import _PLACEMENT, CompileResult, _tokenize_line, compile_source
-from .elements import LIGHT_KINDS, RoomType
+from .elements import ALARM_KINDS, LIGHT_KINDS, RoomType
 from .geometry import shared_edge, wall_segment
 
 #: A valid room identifier for :class:`Edit` kinds that mint a new id
@@ -138,6 +138,8 @@ class Edit:
     #: ``offset``; ``add_light`` ``room``/``x``/``y``/``fkind`` (the light kind).
     #: ``delete_outlet``/``delete_switch``/``delete_light`` use ``index`` (the
     #: 0-based ordinal within that device list, as the payload lists them).
+    #: ``add_alarm`` uses ``room``/``fkind`` (the alarm kind smoke|co|smoke_co) +
+    #: optional ``x``/``y``; ``delete_alarm`` uses ``index``.
     gfci: bool = False
 
 
@@ -271,7 +273,11 @@ def edit_from_json(obj: object) -> Edit | EditError:
         return Edit("add_light", room=_as_str(obj.get("room")),
                     x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
                     fkind=_as_str(obj.get("lkind")))
-    if kind in ("delete_outlet", "delete_switch", "delete_light"):
+    if kind == "add_alarm":
+        return Edit("add_alarm", room=_as_str(obj.get("room")),
+                    fkind=_as_str(obj.get("akind")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+    if kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
         return Edit(kind, index=_as_int(obj.get("index")))
     return EditError("malformed", f"unknown edit kind {kind!r}")
 
@@ -500,7 +506,9 @@ def apply_edit(source: str, edit: Edit) -> EditResult:
         return _add_switch(source, result, edit)
     if edit.kind == "add_light":
         return _add_light(source, result, edit)
-    if edit.kind in ("delete_outlet", "delete_switch", "delete_light"):
+    if edit.kind == "add_alarm":
+        return _add_alarm(source, result, edit)
+    if edit.kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
         return _delete_electrical(source, result, edit)
     return _move_opening(source, result, edit)
 
@@ -715,7 +723,17 @@ def _validate_shape(edit: Edit) -> EditError | None:
             return EditError("bad_value",
                              f"add_light kind must be one of {', '.join(LIGHT_KINDS)}")
         return None
-    if edit.kind in ("delete_outlet", "delete_switch", "delete_light"):
+    if edit.kind == "add_alarm":
+        if not edit.room:
+            return EditError("malformed", "add_alarm needs a room")
+        kind = (edit.fkind or "smoke").lower()
+        if kind not in ALARM_KINDS:
+            return EditError("bad_value",
+                             f"add_alarm kind must be one of {', '.join(ALARM_KINDS)}")
+        if edit.x is not None and (not _finite(edit.x) or not _finite(edit.y)):
+            return EditError("malformed", "add_alarm x needs a matching finite y")
+        return None
+    if edit.kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
         if edit.index is None or edit.index < 0:
             return EditError("malformed", f"{edit.kind} needs an index >= 0")
         return None
@@ -1627,12 +1645,23 @@ def _add_light(source: str, result: CompileResult, edit: Edit) -> EditResult:
                               f"placed light in {edit.room}")
 
 
+def _add_alarm(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    kind = (edit.fkind or "smoke").lower()
+    stmt = f"alarm {kind} in {edit.room}"
+    if edit.x is not None and edit.y is not None:
+        stmt += f" at {_fmt(float(edit.x))},{_fmt(float(edit.y))}"
+    return _insert_after_room(source, result, edit.room, stmt,  # type: ignore[arg-type]
+                              f"placed {kind} alarm in {edit.room}")
+
+
 def _delete_electrical(source: str, result: CompileResult, edit: Edit) -> EditResult:
     assert result.plan is not None
     which = {
         "delete_outlet": ("outlets", "outlet"),
         "delete_switch": ("switches", "switch"),
         "delete_light": ("lights", "light"),
+        "delete_alarm": ("alarms", "alarm"),
     }[edit.kind]
     devices = getattr(result.plan, which[0])
     idx = edit.index

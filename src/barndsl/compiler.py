@@ -29,6 +29,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     outlet in <room> wall N|S|E|W offset <ft> [gfci]      # receptacle on a room wall
     switch in <room> wall N|S|E|W offset <ft>             # wall switch
     light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]  # ceiling luminaire (room-local x,y)
+    alarm smoke|co|smoke_co in <room> [at <x>,<y>]        # smoke/CO alarm (room-level, IRC R314/R315)
     building at <x>,<y>                # optional — place the building's SW corner on the lot
     frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
     roof gable|shed|monitor [pitch <rise:run>]            # optional roof form (default gable)
@@ -39,15 +40,24 @@ south-of <room>`` (abut an already-defined room), or one of each to pin a corner
 Coordinates are in feet; origin (0,0) is the south-west corner, x→east, y→north.
 ``<type>`` is a RoomType value (living, kitchen, bedroom, bathroom, hallway,
 shop, …); ``<wall>`` is north|south|east|west.
+
+Any LENGTH field (a size, position, offset, width, setback, ceiling…) accepts a
+feet-and-inches literal as well as decimal feet: ``12-6`` (= 12′6″ = 12.5 ft),
+``12′6″``, ``12′``, ``12'6``, ``12'`` and ``6″``. These are recognised only as a
+single whitespace-free token, so ``12 - 6`` (three tokens), ``door a - b`` and a
+plain negative ``-6`` keep their meanings; ``-12-6`` (negative feet + inches) is
+rejected, and ASCII ``12'6"`` is unsupported because ``"`` starts a string.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .elements import (
+    ALARM_KINDS,
     DEFAULT_DOUBLE_DOOR_WIDTH,
     DOOR_KINDS,
     DOUBLE_LEAF_KINDS,
@@ -73,7 +83,7 @@ _KEYWORDS = (
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
     "roof", "orientation", "finish", "accessible", "site", "setback", "building",
     "suite", "zone", "electrical", "street", "overhang", "climate", "fixture",
-    "outlet", "switch", "light",
+    "outlet", "switch", "light", "alarm",
 )
 
 #: Single-letter wall aliases the `fixture` statement accepts (N|S|E|W), plus the
@@ -90,6 +100,7 @@ _WALLS = "north, south, east, west"
 _DOOR_KINDS = frozenset(DOOR_KINDS)
 _WINDOW_KIND_SET = frozenset(WINDOW_KINDS)
 _LIGHT_KIND_SET = frozenset(LIGHT_KINDS)
+_ALARM_KIND_SET = frozenset(ALARM_KINDS)
 _WALL_ATTRS = ", ".join(WALL_ATTRIBUTES)
 _BED_WORDS = frozenset({"bed", "beds", "bedroom", "bedrooms"})
 #: 'bath' is an aggregate (bathroom + half_bath), matching the compile recap.
@@ -122,6 +133,11 @@ One statement per line. '#' begins a comment. Braces { } are optional.
 Measurements are in FEET. Origin (0,0) is the south-west corner; x increases
 east, y increases north. A room at x,y with size W x L occupies [x, x+W] east-west
 and [y, y+L] south-north (south wall=y, north=y+L, west=x, east=x+W).
+Any length may be written in decimal feet (12, 10.5) OR feet-and-inches as one
+token: 12-6, 12'6, 12', 12′6″, 12′ or 6″ (12-6 = 12′6″ = 12.5 ft). The dash form
+only reads as a length when there is no space around it, so `12 - 6`, `door a - b`
+and a plain `-6` are unaffected; `-12-6` (negative feet + inches) is rejected, and
+ASCII 12'6" (with the inch ") is not accepted because " starts a string.
 
 Statements:
   plan "Name"
@@ -220,6 +236,16 @@ Statements:
   light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]
         # a ceiling luminaire at ROOM-LOCAL x,y (feet from the room's SW corner,
         # like a `fixture at`). kind defaults to ceiling.
+  alarm smoke|co|smoke_co in <room> [at <x>,<y>]
+        # a smoke and/or carbon-monoxide alarm, placed at the room (a ceiling
+        # device — no wall/offset). `smoke` = smoke alarm (IRC R314), `co` = CO
+        # alarm (R315), `smoke_co` = a combination unit satisfying both (the only
+        # combo spelling — `combo` is not accepted). Optional `at <x>,<y>` is
+        # ROOM-LOCAL feet for the symbol (defaults to the room centre). Declaring
+        # any alarm turns on the placement checks: a bedroom without a smoke/combo
+        # alarm (ALARM_BEDROOM), a sleeping area with no adjacent-hall alarm
+        # (ALARM_HALL), a level with no smoke alarm (ALARM_LEVEL), and — with
+        # bedrooms + a garage/shop — no CO/combo alarm (ALARM_CO, info).
   frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]
         # auto-place the post-and-beam structural frame over the footprint: bents
         # spaced <= bay ft along the long axis (default 12), each spanning the short
@@ -308,6 +334,58 @@ class _Token:
 
 _SEPARATORS = set(" \t,:")
 _DROP = set("{}")
+
+# --- feet-and-inches length literals ----------------------------------------
+#
+# A LENGTH field (a size, position, offset, width, setback, ceiling…) accepts a
+# US feet-and-inches literal in addition to a decimal-feet number. These are all
+# recognised at the NUMBER-PARSING level (in `_Cursor.number`), not by the lexer:
+# the tokenizer already splits on whitespace and NOT on `-`/`'`/`′`/`″`, so
+# `12-6`, `12'6`, `12′6″` and `12′` each arrive as a SINGLE token, while the
+# separator forms keep their meanings — `12 - 6` and `door a - b` tokenize with a
+# standalone `-`, and a plain negative like `-6` still parses as a float. Doing
+# this in `number()` means the disambiguation is free: a length literal is only a
+# length literal when it's one whitespace-free token, exactly the property that
+# tells `12-6` (ft-in) apart from `12 - 6` (three tokens) and `a - b`.
+#
+# Accepted:  12-6  (12′6″ = 12.5 ft; inches 0–11.99, feet non-negative)
+#            12′6″  12′6  12′     (Unicode prime/double-prime; inches optional)
+#            12'6   12'            (ASCII foot mark; NO inch double-quote)
+#            6″                    (Unicode inches alone)
+# Rejected:  -12-6  (negative feet WITH an inch part — ambiguous sign; errors)
+#            12'6"  and  6"        (ASCII inch double-quote — `"` starts a string
+#                                   in the lexer, so it never reaches here intact)
+#: <feet>(' | ′)[<inches>][″] — the foot-mark form (ASCII or Unicode prime).
+_FT_IN_FOOT = re.compile(r"^(-?\d+(?:\.\d+)?)['′](\d+(?:\.\d+)?)?[″]?$")
+#: <feet>-<inches> — the dash form; feet must be non-negative (no leading `-`).
+_FT_IN_DASH = re.compile(r"^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$")
+#: <inches>″ — inches alone, Unicode double-prime only.
+_FT_IN_INCH = re.compile(r"^(-?\d+(?:\.\d+)?)″$")
+
+
+def _parse_ft_in(text: str) -> float | None:
+    """Parse a feet-and-inches length literal to decimal feet, or ``None`` if
+    ``text`` isn't one of the accepted forms (see the module note above). Inches
+    outside ``[0, 12)`` make it *not* a length literal (returns ``None``), so the
+    caller reports a plain malformed-number error rather than silently over-rolling
+    the inches into feet."""
+    m = _FT_IN_FOOT.match(text)
+    if m is not None:
+        ft = float(m.group(1))
+        inch = float(m.group(2)) if m.group(2) is not None else 0.0
+        if not (0.0 <= inch < 12.0):
+            return None
+        return ft + (-1.0 if ft < 0 else 1.0) * inch / 12.0
+    m = _FT_IN_DASH.match(text)
+    if m is not None:
+        inch = float(m.group(2))
+        if not (0.0 <= inch < 12.0):
+            return None
+        return float(m.group(1)) + inch / 12.0  # feet is non-negative here
+    m = _FT_IN_INCH.match(text)
+    if m is not None:
+        return float(m.group(1)) / 12.0
+    return None
 
 
 def _tokenize_line(line: str, lineno: int) -> list[_Token]:
@@ -406,11 +484,20 @@ class _Cursor:
         try:
             value = float(t.text)
         except ValueError:
+            # A LENGTH field also accepts a feet-and-inches literal (12-6, 12′6″,
+            # 12′, 12'6, 6″). These aren't valid floats, so try them here — the
+            # single-token property is what keeps `12-6` (ft-in) distinct from
+            # `12 - 6` / `a - b` (which tokenize with a standalone `-`).
+            ft_in = _parse_ft_in(t.text)
+            if ft_in is not None:
+                return ft_in
             raise _ParseError(
                 "BAD_NUMBER",
                 f"Expected a number for {what}, got '{t.text}'.",
                 t.col,
                 end_col=t.end_col,
+                hint="Use decimal feet (12 or 10.5) or feet-and-inches "
+                "(12-6, 12′6″, 12′, 12'6).",
             )
         if not math.isfinite(value):
             raise _ParseError(
@@ -1496,6 +1583,39 @@ def _parse_statement(
         plan.add_light(room_tok.text, x=lx, y=ly, kind=lkind)
         lm = plan.lights[-1]
         lm.line, lm.col, lm.end_col = lineno, kw.col, kw.end_col
+    elif key == "alarm":
+        # `alarm <smoke|co|smoke_co> in <room> [at <x>,<y>]`
+        kind_tok = c.ident("an alarm kind (smoke|co|smoke_co)")
+        akind = kind_tok.text.lower()
+        if akind not in _ALARM_KIND_SET:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown alarm kind '{kind_tok.text}'.",
+                kind_tok.col,
+                end_col=kind_tok.end_col,
+                hint=f"Use one of: {', '.join(ALARM_KINDS)} "
+                "(smoke_co is the combination unit).",
+            )
+        c.keyword("in")
+        room_tok = c.ident("a room id")
+        ax = ay = None
+        while (tok := c.peek()) is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "at":
+                ax = c.number("the alarm x offset")
+                ay = c.number("the alarm y offset")
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown alarm option '{tok.text}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint="Options: at <x>,<y> (room-local; a ceiling device).",
+                )
+        c.expect_end()
+        plan.add_alarm(room_tok.text, akind, x=ax, y=ay)
+        am = plan.alarms[-1]
+        am.line, am.col, am.end_col = lineno, kw.col, kw.end_col
     else:
         raise _ParseError(
             "UNKNOWN_STMT",

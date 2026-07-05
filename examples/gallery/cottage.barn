@@ -27,3 +27,7 @@ window living south width 8 offset 2
 window kitchen north width 6 offset 6
 window bed  south width 4 offset 3
 window bath north width 3 offset 4
+
+# Smoke alarms: one in the bedroom, one in the hall outside it (IRC R314).
+alarm smoke in bed
+alarm smoke in hall

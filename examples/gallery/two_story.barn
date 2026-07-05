@@ -40,5 +40,11 @@ entry laundry east width 3 offset 4
 window living south width 10 offset 2
 window kitchen south width 7 offset 6
 window bed north width 4 offset 5
-window bath north width 3 offset 2
+window bath north width 3 offset 2 sill 5
 window loft south width 10 offset 7
+
+# Smoke alarms: the bedroom + the hall outside it on the ground floor, and one on
+# the loft level so every storey is covered (IRC R314.3(3)).
+alarm smoke in bed
+alarm smoke in hall
+alarm smoke in loft

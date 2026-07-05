@@ -250,6 +250,9 @@ def test_pinwheel_example_compiles_clean_via_auto():
     assert any("dual" in n for n in out.notes)  # auto must reach for the dual here
     result = compile_source(emit_dsl(out.plan), name=out.plan.name)
     assert not result.errors, result.report()
-    # The only soft note is NO_BATH (the minimal pinwheel has no room for a bath);
-    # nothing structural should warn.
-    assert all(d.code == "NO_BATH" for d in result.warnings), result.report()
+    # The only soft warnings are NO_BATH (the minimal pinwheel has no room for a
+    # bath) and WINDOW_TEMPERED (a safety-glazing advisory the auto-layout can't
+    # yet suppress — no `tempered` override this pass); nothing structural warns.
+    assert all(
+        d.code in ("NO_BATH", "WINDOW_TEMPERED") for d in result.warnings
+    ), result.report()

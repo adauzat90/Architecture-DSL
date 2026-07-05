@@ -459,6 +459,45 @@ class Light:
     end_col: int | None = None
 
 
+#: The smoke/CO alarm kinds an ``alarm`` statement can name. ``smoke`` is a smoke
+#: alarm (IRC R314), ``co`` a carbon-monoxide alarm (IRC R315), and ``smoke_co``
+#: a combination unit that satisfies both. ``smoke_co`` is the sole spelling for
+#: the combo unit — ``combo`` is not accepted.
+ALARM_KINDS = ("smoke", "co", "smoke_co")
+
+
+@dataclass
+class Alarm:
+    """A smoke/CO alarm (the ``alarm`` statement) — a room-level ceiling device.
+
+    Alarms are placed at the room, not a wall point: ``alarm smoke in bed`` puts a
+    smoke alarm in room ``bed``. ``kind`` is one of :data:`ALARM_KINDS`. Optional
+    ``x``/``y`` are **room-local** feet from the room's SW corner (like a
+    ``light``); omitted, the renderer centres the symbol in the room. The alarm
+    drives the R314/R315 placement checks (ALARM_BEDROOM / ALARM_HALL / ALARM_LEVEL
+    / ALARM_CO) once any alarm is declared.
+    """
+
+    room: str
+    kind: str = "smoke"
+    x: float | None = None
+    y: float | None = None
+    #: Source location of the `alarm` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+    @property
+    def is_smoke(self) -> bool:
+        """True if this unit senses smoke (a plain smoke or a combo unit)."""
+        return self.kind in ("smoke", "smoke_co")
+
+    @property
+    def is_co(self) -> bool:
+        """True if this unit senses carbon monoxide (a CO or a combo unit)."""
+        return self.kind in ("co", "smoke_co")
+
+
 @dataclass
 class Note:
     """A positioned annotation — the ``note "text" at <x>,<y> [level <n>]`` form.
@@ -898,6 +937,10 @@ class Barndominium:
     outlets: list[Outlet] = field(default_factory=list)
     switches: list[Switch] = field(default_factory=list)
     lights: list[Light] = field(default_factory=list)
+    #: Author-placed smoke/CO alarms (the ``alarm`` statement). Room-level ceiling
+    #: devices. Declaring any alarm turns on the real R314/R315 placement checks
+    #: (ALARM_BEDROOM / ALARM_HALL / ALARM_LEVEL / ALARM_CO). See :class:`Alarm`.
+    alarms: list[Alarm] = field(default_factory=list)
     notes: str = ""
     #: Positioned annotations (``note "text" at <x>,<y> [level <n>]``): leader-line
     #: callouts drawn on the plan SVG. Un-positioned notes stay in :attr:`notes`
@@ -1673,6 +1716,32 @@ class Barndominium:
         lx = _finite(room, "light x", x)
         ly = _finite(room, "light y", y)
         self.lights.append(Light(str(room), lx, ly, kind))
+        return self
+
+    def add_alarm(
+        self,
+        room: str,
+        kind: str = "smoke",
+        *,
+        x: float | None = None,
+        y: float | None = None,
+    ) -> "Barndominium":
+        """Place a smoke/CO alarm (the ``alarm`` statement) in ``room``.
+
+        ``kind`` is one of :data:`ALARM_KINDS` (``smoke``, ``co``, or the
+        combination ``smoke_co``). ``x``/``y`` are optional **room-local** feet
+        from the room's SW corner; omit them to centre the symbol in the room.
+        See :class:`Alarm`."""
+        kind = str(kind).lower()
+        if kind not in ALARM_KINDS:
+            raise ValueError(
+                f"alarm kind must be one of {ALARM_KINDS}, got {kind!r}."
+            )
+        ax = None if x is None else _finite(room, "alarm x", x)
+        ay = None if y is None else _finite(room, "alarm y", y)
+        if (ax is None) != (ay is None):
+            raise ValueError("An alarm `at` needs both an x and a y offset.")
+        self.alarms.append(Alarm(str(room), kind, ax, ay))
         return self
 
     def building(self, x: float, y: float) -> "Barndominium":

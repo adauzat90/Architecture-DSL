@@ -124,7 +124,7 @@ _STATEMENT_KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "accessible", "electrical",
     "street", "overhang", "climate", "orientation", "finish", "site", "setback",
     "roof", "note", "program", "require", "room", "wall", "suite", "zone", "door",
-    "open", "entry", "window", "porch", "stair", "frame", "fixture",
+    "open", "entry", "window", "porch", "stair", "frame", "fixture", "alarm",
 )
 
 #: Secondary keywords — placement anchors, opening modifiers and option words that
@@ -330,6 +330,11 @@ def compile_payload(source: str) -> dict:
                     {"index": i, "room": lt.room, "x": lt.x, "y": lt.y,
                      "kind": lt.kind, "line": lt.line}
                     for i, lt in enumerate(plan.lights)
+                ],
+                "alarms": [
+                    {"index": i, "room": al.room, "kind": al.kind,
+                     "x": al.x, "y": al.y, "line": al.line}
+                    for i, al in enumerate(plan.alarms)
                 ],
             }
             # Print-to-scale: the architectural scale the plan fits Letter at, the
@@ -4589,14 +4594,17 @@ function addElectricalForm(r){
     '<option value="outlet" selected>outlet</option>' +
     '<option value="gfci">outlet (GFCI)</option>' +
     '<option value="switch">switch</option>' +
-    '<option value="light">ceiling light</option></select>' +
-    '<label>wall</label><select class="wide" id="ne-wall" title="Wall the outlet/switch sits on (ignored for a light)">' +
+    '<option value="light">ceiling light</option>' +
+    '<option value="smoke">smoke alarm</option>' +
+    '<option value="co">CO alarm</option>' +
+    '<option value="smoke_co">smoke+CO alarm</option></select>' +
+    '<label>wall</label><select class="wide" id="ne-wall" title="Wall the outlet/switch sits on (ignored for a light/alarm)">' +
     optList(['N', 'S', 'E', 'W'], 'S') + '</select>' +
     '<label>offset</label><input type="text" inputmode="text" id="ne-offset" ' +
     'title="ft from the wall\\u2019s S/W end (outlet/switch)" value="3">' +
     '</div><div class="dp-btns"><button data-btn="elecsubmit">Add device</button>' +
     '<button data-btn="formcancel">Cancel</button></div>' +
-    '<div class="dp-note">Outlet/switch sit on the chosen wall; a light lands mid-room. Toggle ⚡ to see them.</div></div>';
+    '<div class="dp-note">Outlet/switch sit on the chosen wall; a light or smoke/CO alarm lands mid-room. Toggle ⚡ to see them.</div></div>';
 }
 function submitElectricalForm(){
   const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
@@ -4607,7 +4615,9 @@ function submitElectricalForm(){
   if (!isFinite(offset) || offset < 0) offset = 3;
   dpForm = null;
   let ed;
-  if (kind === 'light'){
+  if (kind === 'smoke' || kind === 'co' || kind === 'smoke_co'){
+    ed = { kind:'add_alarm', room:r.id, akind:kind };   // room-level ceiling device
+  } else if (kind === 'light'){
     ed = { kind:'add_light', room:r.id, lkind:'ceiling',
       x: snap(Math.max(0, r.w / 2)), y: snap(Math.max(0, r.l / 2)) };
   } else if (kind === 'switch'){

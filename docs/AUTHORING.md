@@ -61,8 +61,14 @@ nominal figure `program area` does. Requirements never block a compile.
 
 ## The mental model
 
-- **Units are feet.** Everything is a plain number; no `ft`, no fractions like
-  `10'6"` — write `10.5`.
+- **Units are feet.** The default is a plain decimal number (`10.5`, no `ft`
+  suffix). Any length field also accepts a **feet-and-inches** literal written as
+  one token: `10-6`, `10'6`, `10'`, `10′6″`, `10′` or `6″` all mean the same as
+  `10.5` / `10` / `0.5`. The dash form only counts when there's no space around
+  it, so `12 - 6` (three tokens), `door a - b` and a bare negative `-6` keep their
+  meanings; `-12-6` (negative feet + inches) is rejected, and ASCII `10'6"` (with
+  the inch `"`) isn't accepted because `"` starts a string. `emit` normalises
+  everything back to decimal feet.
 - **Origin `(0,0)` is the south-west (bottom-left) corner.** `x` increases east,
   `y` increases north.
 - A room placed at `x,y` with `size W x L` occupies `[x, x+W]` east-west and
@@ -109,6 +115,7 @@ fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>] 
 outlet in <room> wall N|S|E|W offset <ft> [gfci]   # optional; a receptacle on a room wall
 switch in <room> wall N|S|E|W offset <ft>          # optional; a wall switch
 light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]   # optional; a ceiling luminaire (room-local x,y)
+alarm smoke|co|smoke_co in <room> [at <x>,<y>]   # optional; a smoke/CO alarm (room-level, IRC R314/R315)
 frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 ```
 
@@ -221,6 +228,24 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
   plan with the `electrical` directive but no drawn devices keeps the old
   one-shot `ELECTRICAL_PLAN` checklist. Toggle the layer with **⚡** in the
   playground's plan toolbar; the permit packet gains an **Electrical Plan** sheet.
+- **Smoke/CO alarms** ride the same electrical layer: `alarm smoke in <room>`,
+  `alarm co in <room>` or `alarm smoke_co in <room>` (the combination unit — the
+  only combo spelling) place a room-level ceiling device (an "SD"/"CO"/"SD/CO"
+  circle; optional `at <x>,<y>` moves the symbol, default room centre). A plan
+  with bedrooms but no `alarm` gets a teaching reminder (`ALARM_CO`, info). Once
+  any `alarm` is declared, the real placement checks run: a smoke alarm in each
+  bedroom (`ALARM_BEDROOM`, R314.3), one in a room adjacent to each bedroom
+  (`ALARM_HALL` — "outside the sleeping area", approximated as a room sharing a
+  door), one on every level (`ALARM_LEVEL`), and — where bedrooms meet a
+  garage/shop — a CO alarm outside the bedrooms (`ALARM_CO`, info; fuel appliances
+  aren't modelled). The packet's Electrical Plan sheet counts them.
+- **Safety glazing (IRC R308.4).** A window in a hazard location gets a
+  `WINDOW_TEMPERED` warning and reads "tempered" in the window schedule's Glazing
+  column: within 24 in of a hinged door on the same wall (a sidelite), a low
+  window (sill < 60 in) within 60 in of a tub/shower in a wet room, or a low
+  window (sill < 36 in) within 36 in of a stair. Raise the sill (a high privacy
+  window is exempt) or accept that the glass must be tempered — there is no
+  `tempered` override attribute yet, so the rule is derived from geometry.
 - `#` starts a comment. One statement per line. Braces `{ }` are ignored if you
   use them.
 

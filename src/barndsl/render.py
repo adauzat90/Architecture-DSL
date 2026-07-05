@@ -680,7 +680,10 @@ class _Renderer:
         ground-fault), wall switches ("S"), and ceiling lights (circled-X, with a
         kind variant) — over the plan in a muted ``data-layer="electrical"`` group.
         Devices carry no level of their own; they inherit their room's."""
-        if not (self.plan.outlets or self.plan.switches or self.plan.lights):
+        if not (
+            self.plan.outlets or self.plan.switches or self.plan.lights
+            or getattr(self.plan, "alarms", None)
+        ):
             return
         by_id = {r.id: r for r in self.plan.rooms}
         self.parts.append('<g data-layer="electrical">')
@@ -701,6 +704,13 @@ class _Renderer:
             if r is None or (level is not None and r.level != level):
                 continue
             self._light_symbol(self.sx(r.x + lt.x), self.sy(r.y + lt.y), lt.kind)
+        for al in getattr(self.plan, "alarms", None) or []:
+            r = by_id.get(al.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            ax = r.x + (al.x if al.x is not None else r.width / 2.0)
+            ay = r.y + (al.y if al.y is not None else r.length / 2.0)
+            self._alarm_symbol(self.sx(ax), self.sy(ay), al.kind)
         self.parts.append("</g>")
 
     def _elec_circle(self, cx, cy, rad, fill="#ffffff", sw=1.0):
@@ -752,6 +762,17 @@ class _Renderer:
         elif kind == "fan":
             self._line(cx - rad * 1.6, cy, cx + rad * 1.6, cy, ELEC_COLOR, sw=0.7)
             self._line(cx, cy - rad * 1.6, cx, cy + rad * 1.6, ELEC_COLOR, sw=0.7)
+
+    #: The label a smoke/CO alarm draws in its circle, by kind.
+    _ALARM_LABELS = {"smoke": "SD", "co": "CO", "smoke_co": "SD/CO"}
+
+    def _alarm_symbol(self, cx, cy, kind: str) -> None:
+        """A ceiling smoke/CO alarm: a small circle with "SD" (smoke), "CO" (carbon
+        monoxide) or "SD/CO" (a combination unit) centred in it."""
+        label = self._ALARM_LABELS.get(kind, "SD")
+        rad = 6.2 if kind == "smoke_co" else 4.6
+        self._elec_circle(cx, cy, rad)
+        self._text(cx, cy + 2.2, label, size=6, fill=ELEC_COLOR, weight="bold")
 
     def _draw_structure(self, level: int = 0):
         """Overlay the post-and-beam frame: beam centrelines + solid posts.

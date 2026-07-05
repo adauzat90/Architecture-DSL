@@ -944,6 +944,7 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_storage(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
+    _validate_safety_glazing(plan, add)
     _validate_stairs(plan, add, profile)
     _validate_guards(plan, add)
     _validate_life_safety(plan, add)
@@ -2212,6 +2213,167 @@ def _validate_openings(plan: Barndominium, add) -> None:
                 )
 
 
+# --- safety glazing (IRC R308.4) --------------------------------------------
+#
+# A single predicate, shared by the WINDOW_TEMPERED check below AND the window
+# schedule's "Glazing" column (schedule.py imports it), so the schedule can never
+# disagree with the diagnostic about which windows are hazard locations.
+
+#: Hazard-location proximities requiring tempered/safety glazing (IRC R308.4), ft.
+_TEMPERED_DOOR = 2.0    # 24 in of a door edge in the same wall plane (R308.4.1)
+_TEMPERED_WET = 5.0     # 60 in of a tub/shower in a wet room (R308.4.5)
+_TEMPERED_STAIR = 3.0   # 36 in of a stair flight (R308.4.6/.7, simplified)
+
+
+def _seg_axis(x1: float, y1: float, x2: float, y2: float) -> tuple[str, float, float, float]:
+    """An axis-aligned opening segment as ``(orientation, fixed, lo, hi)`` — ``'h'``
+    (runs in x at a fixed y) or ``'v'`` (runs in y at a fixed x)."""
+    if abs(y1 - y2) <= abs(x1 - x2):
+        return "h", (y1 + y2) / 2.0, min(x1, x2), max(x1, x2)
+    return "v", (x1 + x2) / 2.0, min(y1, y2), max(y1, y2)
+
+
+def _interval_gap(a_lo: float, a_hi: float, b_lo: float, b_hi: float) -> float:
+    """The gap between two 1-D intervals (``0`` when they overlap/touch)."""
+    if a_hi < b_lo:
+        return b_lo - a_hi
+    if b_hi < a_lo:
+        return a_lo - b_hi
+    return 0.0
+
+
+def _rect_seg_distance(
+    rx: float, ry: float, rw: float, rl: float,
+    x1: float, y1: float, x2: float, y2: float,
+) -> float:
+    """Minimum plan distance from the axis-aligned rect ``(rx,ry,rw,rl)`` to the
+    axis-aligned segment ``(x1,y1)-(x2,y2)``."""
+    dx = _interval_gap(rx, rx + rw, min(x1, x2), max(x1, x2))
+    dy = _interval_gap(ry, ry + rl, min(y1, y2), max(y1, y2))
+    return math.hypot(dx, dy)
+
+
+#: R308.4 exempts glazing whose bottom (sill) edge is high above the walking/
+#: standing surface — a person can't fall into it. R308.4.5 (wet) uses 60 in;
+#: R308.4.6/.7 (stairs) uses 36 in. These sill floors keep an ordinary high
+#: privacy window out of the hazard set (and are the built-in "escape hatch"
+#: until a `tempered` attribute exists).
+_TEMPERED_WET_SILL = 5.0    # 60 in bottom-edge exemption (R308.4.5)
+_TEMPERED_STAIR_SILL = 3.0  # 36 in bottom-edge exemption (R308.4.6/.7)
+
+
+def _room_door_segments(
+    plan: Barndominium, room: Room
+) -> list[tuple[float, float, float, float]]:
+    """World-space opening segments of every HINGED door that belongs to ``room``
+    — an exterior entry/double/french on one of its walls, or an interior swing/
+    double/french on a wall it shares. Overhead, cased, pocket and sliding doors
+    have no hinged leaf, so R308.4.1 doesn't count them. Scoping to the window's
+    OWN room keeps a door between two *other* rooms that merely lines up with the
+    wall from counting."""
+    by_id = {r.id: r for r in plan.rooms}
+    segs: list[tuple[float, float, float, float]] = []
+    for xd in plan.exterior_doors:
+        if xd.overhead or xd.room != room.id:
+            continue
+        segs.append(opening_endpoints(room, xd.wall, xd.offset, xd.width))
+    for d in plan.interior_doors:
+        if getattr(d, "kind", "swing") not in ("swing", "double", "french"):
+            continue
+        if room.id not in (d.room_a, d.room_b):
+            continue
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        w = min(d.width, edge.length)
+        offset = getattr(d, "offset", None)
+        if offset is None:
+            start = edge.mid - w / 2.0
+        else:
+            start = edge.lo + max(0.0, min(offset, edge.length - w))
+        if edge.orientation == "v":
+            segs.append((edge.pos, start, edge.pos, start + w))
+        else:
+            segs.append((start, edge.pos, start + w, edge.pos))
+    return segs
+
+
+def window_tempered_reason(plan: Barndominium, window) -> str | None:
+    """Why ``window`` is a safety-glazing hazard location (IRC R308.4), or ``None``.
+
+    The single rule behind both the WINDOW_TEMPERED warning and the window
+    schedule's Glazing column. Three simplified hazard locations, checked in order:
+
+    (a) within 24 in horizontally of either edge of a hinged door in the **same
+        wall plane** of the SAME room (a door sidelite) — R308.4.1;
+    (b) a low window (sill < 60 in) in a wet room whose wall segment lies within
+        60 in of a tub/shower footprint — R308.4.5;
+    (c) a low window (sill < 36 in) within 36 in of a stair flight footprint —
+        R308.4.6/.7 (simplified to a plan-distance-to-footprint test).
+
+    The sill floors are R308.4's own bottom-edge exemptions, and they double as the
+    built-in escape hatch (a high privacy window is not a hazard) until a
+    ``tempered`` override attribute exists.
+    """
+    by_id = {r.id: r for r in plan.rooms}
+    room = by_id.get(window.room)
+    if room is None:
+        return None
+    wx1, wy1, wx2, wy2 = opening_endpoints(room, window.wall, window.offset, window.width)
+    w_or, w_fixed, w_lo, w_hi = _seg_axis(wx1, wy1, wx2, wy2)
+    sill = getattr(window, "sill_height", 3.0)
+    # (a) door sidelite — a hinged door of the SAME room, coplanar, gap < 24 in.
+    for dx1, dy1, dx2, dy2 in _room_door_segments(plan, room):
+        d_or, d_fixed, d_lo, d_hi = _seg_axis(dx1, dy1, dx2, dy2)
+        if d_or != w_or or abs(d_fixed - w_fixed) > 0.1:
+            continue
+        if _interval_gap(w_lo, w_hi, d_lo, d_hi) < _TEMPERED_DOOR:
+            return "within 24 in of a door opening in the same wall — R308.4.1"
+    # (b) wet-zone tub/shower proximity (uses the resolved fixtures — seeds too).
+    if room.type in WET_TYPES and sill < _TEMPERED_WET_SILL:
+        from .fixtures import resolve_room_fixtures
+
+        for f in resolve_room_fixtures(plan, room):
+            if f.kind not in ("tub", "shower"):
+                continue
+            if _rect_seg_distance(f.x, f.y, f.width, f.length, wx1, wy1, wx2, wy2) < _TEMPERED_WET:
+                return "within 60 in of a tub/shower in a wet room — R308.4.5"
+    # (c) stair proximity (simplified footprint distance).
+    if sill < _TEMPERED_STAIR_SILL:
+        for s in plan.stairs:
+            if _rect_seg_distance(s.x, s.y, s.width, s.length, wx1, wy1, wx2, wy2) < _TEMPERED_STAIR:
+                return "within 36 in of a stair flight — R308.4.6 (simplified)"
+    return None
+
+
+def _validate_safety_glazing(plan: Barndominium, add) -> None:
+    """Flag each window in an IRC R308.4 hazard location as needing tempered glass.
+
+    One WINDOW_TEMPERED warning per offending window, naming the trigger. A future
+    ``tempered`` window attribute would be the override/escape hatch — for now the
+    rule derives it from geometry, so a genuinely tempered window still warns."""
+    for w in plan.windows:
+        reason = window_tempered_reason(plan, w)
+        if reason is None:
+            continue
+        add(
+            Issue(
+                Severity.WARNING,
+                "WINDOW_TEMPERED",
+                f"The window in '{w.room}' is a hazard location ({reason}), so it "
+                "needs safety (tempered) glazing.",
+                room=w.room,
+                hint="Specify tempered/safety glazing for this window on the window "
+                "schedule (human glazing in this location must resist impact, IRC "
+                "R308.4).",
+                **_door_loc(w),
+            )
+        )
+
+
 def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
     """Rooms on ``level`` whose footprint the stair lands in."""
     return [
@@ -2377,29 +2539,131 @@ def _validate_guards(plan: Barndominium, add) -> None:
 
 
 def _validate_life_safety(plan: Barndominium, add) -> None:
-    """Smoke/CO-alarm reminders the geometry can't place but code requires.
+    """Smoke/CO-alarm coverage (IRC R314/R315).
 
-    Kept conditional so it doesn't nag every plan: a carbon-monoxide alarm (IRC
-    R315) is required where a fuel-fired appliance or an **attached garage** is
-    present — a barndominium's attached garage/shop is the classic trigger — and
-    the same reminder carries the smoke-alarm placement (R314). Fires once when the
-    plan has an attached garage/shop.
+    Two modes, chosen by whether the plan **declares** any ``alarm``:
+
+    * No alarms declared — a single teaching reminder (info) on a plan that has
+      bedrooms, pointing at the ``alarm`` statement so the sharper checks below
+      can take over. A plan with no sleeping rooms isn't nagged.
+    * Alarms declared — the real placement checks: a smoke alarm in each bedroom
+      (ALARM_BEDROOM), a smoke alarm in a room adjacent to each bedroom
+      (ALARM_HALL, an approximation of "outside each sleeping area"), a smoke
+      alarm on every level (ALARM_LEVEL), and — where bedrooms coexist with an
+      attached garage/shop — a CO alarm outside the sleeping areas (ALARM_CO).
     """
-    garage = next((r for r in plan.rooms if r.type in GARAGE_TYPES), None)
-    if garage is None:
+    by_id = {r.id: r for r in plan.rooms}
+    bedrooms = [r for r in plan.rooms if r.type is RoomType.BEDROOM]
+    alarms = plan.alarms
+
+    if not alarms:
+        # Nothing declared. Teach the statement once, and only where sleeping
+        # rooms make it matter — an alarm-free shop building isn't nagged.
+        if bedrooms:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ALARM_CO",
+                    "This plan has bedrooms but declares no smoke/CO alarms. IRC "
+                    "R314 wants a smoke alarm in each bedroom, outside each "
+                    "sleeping area, and on every level; R315 wants a "
+                    "carbon-monoxide alarm outside sleeping areas where fuel "
+                    "appliances or an attached garage are present.",
+                    hint="Declare them so the placement checks can verify coverage — "
+                    "e.g. `alarm smoke in <bed>`, `alarm smoke in <hall>`, "
+                    "`alarm co in <hall>` (or `alarm smoke_co` for a combination "
+                    "unit).",
+                )
+            )
         return
-    add(
-        Issue(
-            Severity.INFO,
-            "ALARM_CO",
-            f"The plan has an attached garage/shop ('{garage.id}'), so a "
-            "carbon-monoxide alarm is required outside each sleeping area (IRC "
-            "R315), along with smoke alarms in each bedroom, outside each sleeping "
-            "area, and on every level (IRC R314).",
-            hint="Provide interconnected smoke/CO alarms — the DSL can't place them, "
-            "so confirm them on the electrical plan.",
+
+    # Alarms are declared -> verify placement.
+    smoke_rooms = {a.room for a in alarms if a.is_smoke}
+    # Rooms adjacent through an interior door (the "outside the door" graph).
+    adj: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
+    for d in plan.interior_doors:
+        if d.room_a in adj and d.room_b in adj:
+            adj[d.room_a].add(d.room_b)
+            adj[d.room_b].add(d.room_a)
+
+    # ALARM_BEDROOM — a smoke (or combo) alarm inside every bedroom (R314.3).
+    for b in bedrooms:
+        if b.id not in smoke_rooms:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ALARM_BEDROOM",
+                    f"Bedroom '{b.id}' has no smoke alarm. IRC R314.3 requires a "
+                    "smoke alarm in each sleeping room.",
+                    room=b.id,
+                    hint=f"Add `alarm smoke in {b.id}` (or `alarm smoke_co in "
+                    f"{b.id}` for a combination unit).",
+                )
+            )
+
+    # ALARM_HALL — a smoke alarm just outside each sleeping area (R314.3(2)).
+    # Approximation: a room ADJACENT to the bedroom (a hall preferred, else any
+    # room reachable through a door) must carry a smoke alarm.
+    for b in bedrooms:
+        neighbours = adj.get(b.id, set())
+        if not any(n in smoke_rooms for n in neighbours):
+            hall = next(
+                (n for n in neighbours if by_id.get(n) and by_id[n].type is RoomType.HALLWAY),
+                None,
+            )
+            target = hall or (next(iter(neighbours), None))
+            where = f" (e.g. `alarm smoke in {target}`)" if target else ""
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ALARM_HALL",
+                    f"No smoke alarm is outside the sleeping area of bedroom "
+                    f"'{b.id}': no room adjacent to it carries one (IRC R314.3 "
+                    "wants an alarm outside each sleeping area).",
+                    room=b.id,
+                    hint="Approximated as 'a room sharing a door with the bedroom' "
+                    "(a hallway if there is one, else any adjacent room)" + where + ".",
+                )
+            )
+
+    # ALARM_LEVEL — a smoke alarm on every level (R314.3(3)).
+    smoke_levels = {
+        by_id[a.room].level for a in alarms if a.is_smoke and a.room in by_id
+    }
+    for lvl in sorted({getattr(r, "level", 0) for r in plan.rooms}):
+        if lvl not in smoke_levels:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ALARM_LEVEL",
+                    f"Level {lvl} has no smoke alarm. IRC R314.3(3) requires at "
+                    "least one on every storey of the dwelling.",
+                    hint=f"Place `alarm smoke in <room on level {lvl}>`.",
+                )
+            )
+
+    # ALARM_CO — a CO alarm outside the sleeping areas where bedrooms coexist with
+    # an attached garage/shop (R315). INFO, not a warning: fuel-fired appliances
+    # aren't modelled, so the trigger is only the attached garage/shop we can see.
+    garage = next((r for r in plan.rooms if r.type in GARAGE_TYPES), None)
+    if bedrooms and garage is not None:
+        co_outside = any(
+            a.is_co and a.room in by_id and by_id[a.room].type is not RoomType.BEDROOM
+            for a in alarms
         )
-    )
+        if not co_outside:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ALARM_CO",
+                    f"The plan has bedrooms and an attached garage/shop "
+                    f"('{garage.id}'), so a carbon-monoxide alarm is required "
+                    "outside the sleeping areas (IRC R315), but none is declared.",
+                    hint="Add `alarm co in <hall>` (or `alarm smoke_co`) outside the "
+                    "bedrooms. INFO only — fuel-fired appliances aren't modelled, so "
+                    "this is triggered by the attached garage/shop alone.",
+                )
+            )
 
 
 def _validate_access(plan: Barndominium, add) -> None:

@@ -94,9 +94,17 @@ def door_rows(plan: Barndominium) -> list[dict]:
 
 
 def window_rows(plan: Barndominium) -> list[dict]:
-    """One row per window — marked W1, W2… — with kind, size, sill, glazed area."""
+    """One row per window — marked W1, W2… — with kind, size, sill, glazed area and
+    the glazing type ("tempered" for a safety-glazing hazard location, else "—").
+
+    The Glazing value is computed from the SAME predicate the WINDOW_TEMPERED check
+    uses (:func:`barndsl.validation.window_tempered_reason`), so the schedule and
+    the diagnostic can never disagree about which windows need tempered glass."""
+    from .validation import window_tempered_reason
+
     rows: list[dict] = []
     for i, w in enumerate(plan.windows, start=1):
+        tempered = window_tempered_reason(plan, w) is not None
         rows.append(
             {
                 "mark": f"W{i}",
@@ -107,6 +115,7 @@ def window_rows(plan: Barndominium) -> list[dict]:
                 "height": max(0.0, w.head_height - w.sill_height),
                 "sill": w.sill_height,
                 "area": w.glazed_area,
+                "glazing": "tempered" if tempered else "—",
             }
         )
     return rows
@@ -140,6 +149,7 @@ _WINDOW_COLS = [
     Column("Height", lambda r: _fmt_ft(r["height"])),
     Column("Sill", lambda r: _fmt_ft(r["sill"])),
     Column("Glazed", lambda r: f"{r['area']:.0f} sq ft"),
+    Column("Glazing", lambda r: r["glazing"]),
 ]
 
 
