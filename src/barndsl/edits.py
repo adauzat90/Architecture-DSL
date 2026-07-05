@@ -126,6 +126,13 @@ class Edit:
     env_w: float | None = None
     env_l: float | None = None
     ceiling: float | None = None
+    #: Positioned-note edits (the `note "text" at x,y [level n]` statement).
+    #: ``add_note`` uses ``text``/``x``/``y``/``level``; ``move_note`` uses
+    #: ``index`` (the 0-based ordinal among positioned notes) + ``x``/``y``;
+    #: ``set_note`` uses ``index`` + any of ``text``/``x``/``y``;
+    #: ``delete_note`` uses ``index``.
+    text: str | None = None
+    index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -135,7 +142,8 @@ class EditError:
     ``kind`` ∈ ``malformed`` (the edit itself is ill-formed — missing/mistyped
     fields), ``bad_value`` (a well-typed field carries an out-of-range or unknown
     value — an unknown room type, a non-positive size, an id already taken),
-    ``unknown_room`` / ``unknown_opening`` (no such target in the plan),
+    ``unknown_room`` / ``unknown_opening`` / ``unknown_note`` (no such target in
+    the plan),
     ``not_editable`` (the source doesn't compile, or the target has no authored
     source line — e.g. an auto-placed fixture seed). Never raised — returned inside
     :class:`EditResult` so the API stays exception-free.
@@ -233,6 +241,19 @@ def edit_from_json(obj: object) -> Edit | EditError:
         ew, el = _as_pair(obj.get("envelope"))
         return Edit("set_plan", pname=_as_str(obj.get("name")),
                     env_w=ew, env_l=el, ceiling=_as_num(obj.get("ceiling")))
+    if kind == "add_note":
+        return Edit("add_note", text=_as_str(obj.get("text")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
+                    level=_as_int(obj.get("level")))
+    if kind == "move_note":
+        return Edit("move_note", index=_as_int(obj.get("index")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+    if kind == "set_note":
+        return Edit("set_note", index=_as_int(obj.get("index")),
+                    text=_as_str(obj.get("text")) if "text" in obj else None,
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+    if kind == "delete_note":
+        return Edit("delete_note", index=_as_int(obj.get("index")))
     return EditError("malformed", f"unknown edit kind {kind!r}")
 
 
@@ -446,6 +467,14 @@ def apply_edit(source: str, edit: Edit) -> EditResult:
         return _set_fixture(source, result, edit)
     if edit.kind == "set_plan":
         return _set_plan(source, result, edit)
+    if edit.kind == "add_note":
+        return _add_note(source, result, edit)
+    if edit.kind == "move_note":
+        return _move_note(source, result, edit)
+    if edit.kind == "set_note":
+        return _set_note(source, result, edit)
+    if edit.kind == "delete_note":
+        return _delete_note(source, result, edit)
     return _move_opening(source, result, edit)
 
 
@@ -611,6 +640,36 @@ def _validate_shape(edit: Edit) -> EditError | None:
                 return EditError("bad_value", "envelope W and L must be positive")
         if edit.ceiling is not None and (not _finite(edit.ceiling) or edit.ceiling <= 0):
             return EditError("bad_value", "ceiling must be positive")
+        return None
+    if edit.kind == "add_note":
+        if edit.text is None or not edit.text.strip():
+            return EditError("malformed", "add_note needs a non-empty text")
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "add_note needs finite x and y")
+        if edit.level is not None and edit.level < 0:
+            return EditError("bad_value", "add_note level must be >= 0")
+        return None
+    if edit.kind == "move_note":
+        if edit.index is None or edit.index < 0:
+            return EditError("malformed", "move_note needs a note index >= 0")
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "move_note needs finite x and y")
+        return None
+    if edit.kind == "set_note":
+        if edit.index is None or edit.index < 0:
+            return EditError("malformed", "set_note needs a note index >= 0")
+        if edit.text is None and edit.x is None and edit.y is None:
+            return EditError("malformed", "set_note needs text, x, or y")
+        if edit.text is not None and not edit.text.strip():
+            return EditError("bad_value", "note text must be non-empty")
+        if edit.x is not None and not _finite(edit.x):
+            return EditError("bad_value", "set_note x must be finite")
+        if edit.y is not None and not _finite(edit.y):
+            return EditError("bad_value", "set_note y must be finite")
+        return None
+    if edit.kind == "delete_note":
+        if edit.index is None or edit.index < 0:
+            return EditError("malformed", "delete_note needs a note index >= 0")
         return None
     return EditError("malformed", f"unknown edit kind {edit.kind!r}")
 
@@ -1350,6 +1409,126 @@ def _set_plan(source: str, result: CompileResult, edit: Edit) -> EditResult:
     if new_source == source:
         return EditResult(source, changed=False, summary="plan unchanged")
     return EditResult(new_source, changed=True, summary="updated plan")
+
+
+# --- positioned-note edits ---------------------------------------------------
+# Notes carry no id, so a positioned note is keyed by its 0-based ordinal among
+# `plan.note_marks` — the order they appear in the source (the same order the
+# payload lists them), exactly how a repeated fixture-without-id is keyed.
+
+
+def _quote_note(text: str) -> str:
+    """Quote note text for the lexer, escaping backslashes and quotes."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _note_target(result: CompileResult, index: int | None):
+    """Resolve a positioned note by index → ``(note, line)`` or an EditError."""
+    assert result.plan is not None
+    marks = result.plan.note_marks
+    if index is None or index < 0 or index >= len(marks):
+        return EditError("unknown_note", f"no positioned note at index {index}")
+    nm = marks[index]
+    if nm.line is None:
+        return EditError("not_editable", f"note #{index} has no source line")
+    return nm, nm.line
+
+
+def _plan_head_line(lines: list[str], name: str) -> int | None:
+    for i, raw in enumerate(lines, start=1):
+        toks = _tokenize_line(raw, i)
+        if toks and toks[0].text.lower() == name:
+            return i
+    return None
+
+
+def _add_note(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    plan = result.plan
+    level = int(edit.level) if edit.level is not None else 0
+    stmt = (f"note {_quote_note(edit.text)} "  # type: ignore[arg-type]
+            f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}")  # type: ignore[arg-type]
+    if level:
+        stmt += f" level {level}"
+    lines = _lines(source)
+    note_lines = [nm.line for nm in plan.note_marks if nm.line is not None]
+    if note_lines:
+        after = max(note_lines)
+    else:
+        after = (_envelope_line(lines) or _plan_head_line(lines, "ceiling")
+                 or _plan_head_line(lines, "plan") or len(lines))
+    lines.insert(after, stmt)
+    return EditResult("\n".join(lines), changed=True, line=after + 1,
+                      summary=f"added note {stmt.split(None, 1)[1]}")
+
+
+def _move_note(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    found = _note_target(result, edit.index)
+    if isinstance(found, EditError):
+        return EditResult(source, error=found)
+    nm, line_no = found
+    tx, ty = float(edit.x), float(edit.y)  # type: ignore[arg-type]
+    if _close(tx, nm.x) and _close(ty, nm.y):
+        return EditResult(source, changed=False, line=line_no,
+                          summary=f"note already at {_fmt(tx)},{_fmt(ty)}")
+    lines = _lines(source)
+    raw = lines[line_no - 1]
+    toks = _tokenize_line(raw, line_no)
+    at_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "at"), None)
+    if at_idx is None or at_idx + 2 >= len(toks):
+        return EditResult(source, error=EditError("not_editable",
+                          "note line has no `at x,y` to rewrite"))
+    xt, yt = toks[at_idx + 1], toks[at_idx + 2]
+    newraw = _splice(raw, [
+        (xt.col - 1, xt.end_col - 1, _fmt(tx)),
+        (yt.col - 1, yt.end_col - 1, _fmt(ty)),
+    ])
+    lines[line_no - 1] = newraw
+    return EditResult("\n".join(lines), changed=True, line=line_no,
+                      summary=f"note → at {_fmt(tx)},{_fmt(ty)}")
+
+
+def _set_note(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    found = _note_target(result, edit.index)
+    if isinstance(found, EditError):
+        return EditResult(source, error=found)
+    nm, line_no = found
+    lines = _lines(source)
+    raw = lines[line_no - 1]
+    toks = _tokenize_line(raw, line_no)
+    splices: list[tuple[int, int, str]] = []
+    if edit.text is not None:
+        qt = next((t for t in toks[1:] if t.quoted), None)
+        if qt is None:
+            return EditResult(source, error=EditError("not_editable",
+                              "note line has no quoted text to rewrite"))
+        splices.append((qt.col - 1, qt.end_col - 1, _quote_note(edit.text)))
+    if edit.x is not None or edit.y is not None:
+        at_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "at"), None)
+        if at_idx is None or at_idx + 2 >= len(toks):
+            return EditResult(source, error=EditError("not_editable",
+                              "note line has no `at x,y` to rewrite"))
+        if edit.x is not None:
+            xt = toks[at_idx + 1]
+            splices.append((xt.col - 1, xt.end_col - 1, _fmt(float(edit.x))))
+        if edit.y is not None:
+            yt = toks[at_idx + 2]
+            splices.append((yt.col - 1, yt.end_col - 1, _fmt(float(edit.y))))
+    newraw = _splice(raw, splices)
+    if newraw == raw:
+        return EditResult(source, changed=False, line=line_no, summary="note unchanged")
+    lines[line_no - 1] = newraw
+    return EditResult("\n".join(lines), changed=True, line=line_no, summary="set note")
+
+
+def _delete_note(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    found = _note_target(result, edit.index)
+    if isinstance(found, EditError):
+        return EditResult(source, error=found)
+    _nm, line_no = found
+    new_source = _rebuild_without(_lines(source), {line_no})
+    return EditResult(new_source, changed=True, line=line_no,
+                      summary=f"deleted note #{edit.index}")
 
 
 __all__ = [

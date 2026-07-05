@@ -25,7 +25,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from .cost import estimate_cost
-from .render import render_svg
+from .render import RenderConfig, render_svg, sheet_scale
 from .schedule import _schedules
 from .score import design_score
 
@@ -53,6 +53,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .svgwrap { overflow-x: auto; border: 1px solid var(--line); padding: 10px;
            background: #fff; }
 .svgwrap svg { max-width: 100%; height: auto; }
+/* The true-scale floor-plan wrapper is sized in physical inches; the SVG must
+   fill it exactly — max-width alone shrinks an oversized drawing but would
+   never grow one, silently printing below the stated scale. content-box keeps
+   the inch width on the content itself (border-box would fold the wrapper's
+   padding/border into it, shaving ~2% off the printed scale). */
+.svgwrap.scaled { box-sizing: content-box; }
+.svgwrap.scaled svg { width: 100%; height: auto; display: block; }
 .diag { font-size: 13px; margin: 4px 0; padding: 8px 10px; border-left: 4px solid; }
 .diag.error { border-color: #c0392b; background: #fdeceb; }
 .diag.warning { border-color: #d68910; background: #fef6e9; }
@@ -120,21 +127,37 @@ def _cover(result: Any, plan: Any, est: dict[str, Any]) -> str:
 """
 
 
-def _floor_plan(plan: Any) -> str:
+#: Feet (′) and inches (″) glyphs for the scale statement.
+_FT_GLYPH, _IN_GLYPH = "′", "″"
+
+
+def _floor_plan(plan: Any, sheet: str = "Letter") -> str:
     # render_svg draws the dimensioned plan (overall dimension lines + per-room
-    # W x L, and one stacked block per level for a multi-story plan); inline it.
-    svg = render_svg(plan)
+    # W x L, and one stacked block per level for a multi-story plan). For the
+    # permit sheet — the drawing an architect submits — pick the largest standard
+    # architectural scale that fits the target sheet, size the embedded SVG in
+    # physical inches so the plan prints at that true scale, state the scale, and
+    # draw a graphic scale bar (which survives any reprographic resize).
+    ipf, label, css_w = sheet_scale(plan, sheet=sheet)
+    statement = f"SCALE: {label} = 1{_FT_GLYPH}-0{_IN_GLYPH} ({sheet})"
+    cfg = RenderConfig(scale_bar=True, scale_note=statement)
+    svg = render_svg(plan, cfg)
     levels = plan.levels()
     note = (
         f"One block per level ({len(levels)} levels)."
         if len(levels) > 1
-        else "Dimensions in feet."
+        else "Drawn to architectural scale."
     )
+    # Inline physical width (inches) so the plan prints at true scale; the graphic
+    # scale bar in the SVG is the reprographic-safe backup (browser print margins
+    # can't be guaranteed to the pixel — the scale statement + bar are the answer).
     return f"""
 <section class="page">
   <h2>Floor Plan</h2>
-  <div class="svgwrap">{svg}</div>
-  <p class="note">{_tag(note)} Not to scale when printed — verify all dimensions.</p>
+  <p class="sub">{_tag(statement)}</p>
+  <div class="svgwrap scaled" style="width:{css_w:.2f}in; max-width:100%;">{svg}</div>
+  <p class="note">{_tag(note)} Verify against the graphic scale bar and stated
+     dimensions.</p>
 </section>
 """
 
@@ -227,12 +250,17 @@ def build_packet(
     *,
     costs: dict[str, float] | None = None,
     multiplier: float = 1.0,
+    sheet: str = "Letter",
 ) -> str:
     """Return the full permit-sketch packet as a self-contained HTML string.
 
     ``result`` is a :class:`~barndsl.compiler.CompileResult` (needed for the
     diagnostics appendix); its ``plan`` must be non-``None``. ``costs`` and
     ``multiplier`` are passed straight to :func:`~barndsl.cost.estimate_cost`.
+    ``sheet`` selects the print sheet the floor plan is scaled to fit — one of
+    :data:`~barndsl.render.SHEETS` (``"Letter"`` default, ``"Tabloid"`` for
+    11×17); the largest standard architectural scale that fits is chosen and
+    stated on the sheet with a graphic scale bar.
     """
     plan = getattr(result, "plan", None)
     if plan is None:
@@ -240,7 +268,7 @@ def build_packet(
     est = estimate_cost(plan, overrides=costs, multiplier=multiplier)
     sections = (
         _cover(result, plan, est)
-        + _floor_plan(plan)
+        + _floor_plan(plan, sheet=sheet)
         + _schedule_tables(plan)
         + _cost_section(est)
         + _diagnostics(result)
@@ -260,9 +288,10 @@ def save_packet(
     *,
     costs: dict[str, float] | None = None,
     multiplier: float = 1.0,
+    sheet: str = "Letter",
 ) -> str:
     """Write :func:`build_packet` to ``path``. Returns the path."""
-    html = build_packet(result, costs=costs, multiplier=multiplier)
+    html = build_packet(result, costs=costs, multiplier=multiplier, sheet=sheet)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html)
     return path

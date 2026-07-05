@@ -100,6 +100,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two rooms share an id; ids must be unique."),
         _c("NO_BATH", W, "No bathroom",
            "The plan has no bathroom or half-bath."),
+        _c("NOTE_OUTSIDE", I, "Positioned note outside the footprint",
+           "A `note \"...\" at <x>,<y>` is anchored outside the building footprint "
+           "(envelope + wings). Often intentional — annotating the site, a setback, "
+           "or a future addition — so it's only a gentle nudge, never an error: if "
+           "the callout means to sit on the plan, move its `at` point inside the "
+           "walls."),
         _c("FLOOR_FINISH", W, "Unrecognised floor finish",
            "A room's `floor \"...\"` hint matched no material in the 3D palette, "
            "so it falls back to the default finish for its room type. Not "

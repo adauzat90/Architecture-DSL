@@ -963,6 +963,7 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_suites_zones(plan, add)
     _validate_structure(plan, add)
     _validate_finishes(plan, add)
+    _validate_notes(plan, add)
     # Local import: fixtures.py imports clear_box from this module.
     from .fixtures import validate_fixtures
 
@@ -979,6 +980,35 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
         )
 
     return ValidationReport(issues)
+
+
+def _validate_notes(plan: Barndominium, add) -> None:
+    """Gently flag a positioned ``note`` anchored outside the footprint (INFO).
+
+    Architects legitimately annotate the site, a setback, or a future addition
+    outside the walls, so this never blocks — it just points out a callout that
+    may have meant to land on the plan (see NOTE_OUTSIDE)."""
+    marks = getattr(plan, "note_marks", None)
+    if not marks:
+        return
+    secs = plan.footprint_sections()
+    for nm in marks:
+        if point_in_footprint(secs, nm.x, nm.y):
+            continue
+        snippet = nm.text if len(nm.text) <= 40 else nm.text[:37] + "…"
+        add(
+            Issue(
+                Severity.INFO,
+                "NOTE_OUTSIDE",
+                f"Note “{snippet}” is anchored outside the footprint at "
+                f"{_f(nm.x)},{_f(nm.y)}.",
+                line=nm.line,
+                col=nm.col,
+                end_col=nm.end_col,
+                hint="If the callout belongs on the plan, move its `at` point inside "
+                "the walls; annotating the site on purpose is fine.",
+            )
+        )
 
 
 def _validate_finishes(plan: Barndominium, add) -> None:

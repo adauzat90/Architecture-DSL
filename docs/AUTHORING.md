@@ -82,7 +82,10 @@ ceiling <H>                        # >= 7; 9–12 is typical
 floor <D>                          # optional; inter-floor assembly depth (ft). floor-to-floor = ceiling + D (default 1)
 accessible                         # optional; opt in to accessibility / aging-in-place nudges
 electrical                         # optional; opt in to the electrical / life-safety checklist reminder
-note "free text"                   # optional; repeatable
+note "free text" [at <x>,<y> [level <n>]]  # optional, repeatable. bare = free text;
+                                   #   `at <x>,<y>` = a leader callout drawn on the plan at
+                                   #   that world point (level default 0). Outside the
+                                   #   footprint → a gentle NOTE_OUTSIDE info, not an error.
 program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
 require adjacent|separate <room_a> <room_b>   # optional spatial intent (repeatable); also:
 require exterior <room> [<wall>]              #   `require area <room> >= <sqft>`
@@ -605,7 +608,7 @@ Brief grammar (one statement per line, `#` comments):
 | `street <wall>` | the wall facing the street/approach → APPROACH_ENTRY / APPROACH_GARAGE nudges |
 | `overhang <ft>` | roof eave/rake projection past the walls (shades south glass; widens the roof + takeoff) |
 | `climate <zone>` | IECC climate zone 1–8 → ENERGY_ENVELOPE R-value guidance + the WINDOW_HEAVY (WWR) ceiling |
-| `note "…"` | free text |
+| `note "…" [at <x>,<y> [level <n>]]` | free text, or a positioned leader callout drawn on the plan |
 | `room <id>: <type> <W> x <L> [level <n>]` | a room to place (no coordinates) |
 | `adjacent <a> <b> [<c> …]` | connect `<a>` to **each** of the rest — a hub. `adjacent hall bed1 bed2 bath` is the "rooms off a spine" idiom |
 | `entry <room>` | which room gets the front door (default: the first public room on an exterior wall) |

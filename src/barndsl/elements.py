@@ -392,6 +392,31 @@ class PlacedFixture:
 
 
 @dataclass
+class Note:
+    """A positioned annotation — the ``note "text" at <x>,<y> [level <n>]`` form.
+
+    A leader-line callout drawn on the plan: ``text`` labels the point ``(x, y)``
+    in **world/plan feet** (the same SW-origin frame as rooms — +x east, +y
+    north), on floor ``level`` (0 = ground). Un-positioned ``note "text"``
+    statements are *not* stored here — they keep flowing into
+    :attr:`Barndominium.notes` (the free-text block); only a note carrying an
+    ``at`` position becomes a :class:`Note`, drawn on the plan SVG with a leader.
+    A note whose anchor lies outside the footprint is a gentle ``NOTE_OUTSIDE``
+    info (architects annotate the site on purpose), never an error.
+    """
+
+    text: str
+    x: float
+    y: float
+    level: int = 0
+    #: Source location of the `note` statement (textual front-end only), so a
+    #: surgical edit can find its line and a diagnostic can point at it.
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
 class Section:
     """One rectangular block of the building footprint.
 
@@ -781,6 +806,10 @@ class Barndominium:
     #: seed). See :class:`PlacedFixture` and :func:`barndsl.fixtures.resolve_room_fixtures`.
     fixtures: list[PlacedFixture] = field(default_factory=list)
     notes: str = ""
+    #: Positioned annotations (``note "text" at <x>,<y> [level <n>]``): leader-line
+    #: callouts drawn on the plan SVG. Un-positioned notes stay in :attr:`notes`
+    #: (a plain string); only ``at``-positioned notes land here. See :class:`Note`.
+    note_marks: list[Note] = field(default_factory=list)
     #: Extra footprint blocks beyond the primary ``envelope`` rectangle. Empty for
     #: a plain rectangular building; one entry per ``wing`` for an L/T/U footprint.
     #: The primary block (the envelope at the origin) is implicit — see
@@ -979,8 +1008,34 @@ class Barndominium:
             self.roofing = str(roof)
         return self
 
-    def note(self, text: str) -> "Barndominium":
-        self.notes = (self.notes + "\n" + text).strip() if self.notes else text
+    def note(
+        self,
+        text: str,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        level: int = 0,
+    ) -> "Barndominium":
+        """Add a design note.
+
+        Plain ``note("verify well location")`` appends to the free-text
+        :attr:`notes` block (the historical behaviour, unchanged). Passing a
+        position — ``note("beam above", x=20, y=15, level=1)`` — instead records a
+        :class:`Note`: a leader-line callout anchored at ``(x, y)`` (world/plan
+        feet, SW origin) on floor ``level``, drawn on the plan SVG. Give **both**
+        ``x`` and ``y`` to position a note (a lone one is an error).
+        """
+        if x is None and y is None:
+            self.notes = (self.notes + "\n" + text).strip() if self.notes else text
+            return self
+        if x is None or y is None:
+            raise ValueError("a positioned note needs both x and y.")
+        lvl = int(level)
+        if lvl < 0:
+            raise ValueError("a note's level must be >= 0 (0 = ground).")
+        self.note_marks.append(
+            Note(str(text), _finite("note", "x", x), _finite("note", "y", y), lvl)
+        )
         return self
 
     def mark_accessible(self, value: bool = True) -> "Barndominium":

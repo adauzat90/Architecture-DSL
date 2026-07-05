@@ -97,7 +97,7 @@ from .fixtures import FIXTURES, resolve_room_fixtures
 from .gltf import build_scene, to_glb
 from .ifc import to_ifc
 from .packet import build_packet
-from .render import ROOM_COLORS, render_svg
+from .render import ROOM_COLORS, RenderConfig, render_svg, sheet_scale
 from .scaffold import starter_dsl
 from .schedule import _schedules
 from .score import design_score
@@ -272,6 +272,29 @@ def compile_payload(source: str) -> dict:
                         "rotate": f.rotation,
                     })
             payload["fixtures"] = fixtures
+            # Positioned notes (leader callouts) for the design panel + edit
+            # overlay. Keyed by index — the ordinal among positioned notes — which
+            # is the `index` the note edit kinds (add/move/set/delete_note) take.
+            payload["notes"] = [
+                {
+                    "index": i, "text": nm.text, "x": nm.x, "y": nm.y,
+                    "level": nm.level, "line": nm.line,
+                }
+                for i, nm in enumerate(plan.note_marks)
+            ]
+            # Print-to-scale: the architectural scale the plan fits Letter at, the
+            # physical width to size the embedded SVG, and a scale-bar render — the
+            # frontend's Print uses these so the printed sheet is a true-scale
+            # drawing (Letter default; the packet export supports Tabloid too).
+            ipf, label, css_w = sheet_scale(plan)
+            scale_note = f"SCALE: {label} = 1′-0″ (Letter)"
+            payload["print"] = {
+                "label": label, "sheet": "Letter",
+                "css_width_in": round(css_w, 3), "note": scale_note,
+            }
+            payload["print_svg"] = render_svg(
+                plan, RenderConfig(scale_bar=True, scale_note=scale_note)
+            )
             # Plan-level settings the design panel's form edits via `set_plan`.
             payload["settings"] = {
                 "name": plan.name,
@@ -1223,6 +1246,12 @@ _APP_HTML = r"""<!doctype html>
   .ov-stair { fill:rgba(150,130,90,.16); stroke:#9a8c66; stroke-dasharray:2 2;
     pointer-events:none; }
   .ov-stair-t { fill:#8a7f63; pointer-events:none; }
+  /* positioned notes — leader callout; the dot is the drag handle */
+  .ov-note { cursor:move; fill:#7A6A55; stroke:#fff; stroke-width:.5; }
+  .ov-note:hover, .ov-note.sel { fill:var(--accent); }
+  .ov-note-lead { stroke:#7A6A55; stroke-width:1; pointer-events:none; }
+  .ov-note-t { fill:#7A6A55; font-style:italic; pointer-events:none; }
+  .ov-note-t.sel { fill:var(--accent); }
   /* segmented floor switcher (multi-level plans, edit mode only) */
   .level-switch { display:flex; align-items:center; gap:4px; }
   .level-switch[hidden] { display:none; }
@@ -2680,6 +2709,12 @@ const PRINT_CSS =
   '.pnote{color:#777;font-size:12px;font-style:italic;margin-top:10px;}' +
   '.svgwrap{border:1px solid #ddd;padding:10px;overflow-x:auto;}' +
   '.svgwrap svg,figure svg{max-width:100%;height:auto;}' +
+  // The true-scale wrapper is sized in physical inches; the SVG must fill it
+  // exactly — max-width alone would never grow a drawing up to the stated
+  // scale, and border-box would fold the wrapper's padding/border into the
+  // inch width, shaving ~2% off the printed scale.
+  '.svgwrap.scaled{box-sizing:content-box;}' +
+  '.svgwrap.scaled svg{width:100%;height:auto;display:block;}' +
   '.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}' +
   'figure{margin:0;border:1px solid #ddd;border-radius:6px;overflow:hidden;padding:8px;}' +
   'figcaption{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#777;margin-bottom:6px;}' +
@@ -2710,12 +2745,21 @@ function buildPrintDoc(p){
   for (const pair of order){ if (elevs[pair[0]]) elevHtml +=
     '<figure><figcaption>' + pair[1] + ' elevation</figcaption>' + elevs[pair[0]] + '</figure>'; }
   if (p.section) elevHtml += '<figure><figcaption>Section</figcaption>' + p.section + '</figure>';
+  // Print the plan to a true architectural scale: use the scale-bar render and
+  // size it in physical inches (the server picked the largest scale that fits
+  // Letter). The stated scale + graphic bar survive any browser print margin.
+  const pr = p.print || {};
+  const planSvgSrc = p.print_svg || p.svg;
+  const wStyle = pr.css_width_in ? ' style="width:' + pr.css_width_in + 'in;max-width:100%;"' : '';
+  const scaleTb = pr.note ? ' · ' + esc(pr.note) : '';
   const body =
     '<section class="sheet cover"><h1>' + esc(title) + '</h1>' +
       '<p class="tb">Drawing packet · ' + esc(date) + ' · score ' + esc(score) +
-      (foot ? ' · ' + esc(foot) : '') + '</p></section>' +
-    '<section class="sheet"><h2>Floor plan</h2><div class="svgwrap">' + p.svg + '</div>' +
-      '<p class="pnote">Dimensions in feet — not to scale when printed; verify all dimensions.</p></section>' +
+      (foot ? ' · ' + esc(foot) : '') + scaleTb + '</p></section>' +
+    '<section class="sheet"><h2>Floor plan</h2>' +
+      (pr.note ? '<p class="tb">' + esc(pr.note) + '</p>' : '') +
+      '<div class="svgwrap' + (pr.css_width_in ? ' scaled' : '') + '"' + wStyle + '>' + planSvgSrc + '</div>' +
+      '<p class="pnote">Drawn to architectural scale — verify against the graphic scale bar.</p></section>' +
     (elevHtml ? '<section class="sheet"><h2>Elevations &amp; section</h2><div class="grid">' +
       elevHtml + '</div></section>' : '') +
     '<section class="sheet"><h2>Report</h2>' + reportHTML(p.report) + '</section>';
@@ -3123,8 +3167,8 @@ const planBody = document.querySelector('.plan-body');
 const levelSwitch = document.getElementById('level-switch');
 let editLevel = 0;                   // the floor the overlay currently edits
 let editMode = false, editReady = false;
-let editRooms = [], editOpens = [], editLevels = [0], editFixtures = [];
-let allRooms = [], allOpens = [], allStairs = [], allFixtures = [];   // every level — the dimmed underlay
+let editRooms = [], editOpens = [], editLevels = [0], editFixtures = [], editNotes = [];
+let allRooms = [], allOpens = [], allStairs = [], allFixtures = [], allNotes = [];   // every level — the dimmed underlay
 let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
 
 function snap(v){ return Math.round(v * 2) / 2; }          // 0.5 ft grid
@@ -3178,8 +3222,10 @@ function applyLevelFilter(){
   editRooms = allRooms.filter(r => r.level === editLevel);
   editOpens = allOpens.filter(o => o.level === editLevel);
   editFixtures = allFixtures.filter(f => f.level === editLevel);
+  editNotes = allNotes.filter(n => (n.level || 0) === editLevel);
 }
 function fixtureByKey(k){ return editFixtures.find(f => f.id === k); }
+function noteByIndex(i){ return editNotes.find(n => n.index === i); }
 function setEditLevel(lvl){
   if (editLevels.indexOf(lvl) < 0 || lvl === editLevel) return;
   editLevel = lvl; selectedRoomId = null;
@@ -3191,6 +3237,7 @@ function refreshEditData(p){
   if (p && p.rooms){
     allRooms = p.rooms; allOpens = p.openings || []; allStairs = p.stairs || [];
     allFixtures = p.fixtures || [];
+    allNotes = p.notes || [];
     editLevels = p.levels || [0];
     if (editLevels.indexOf(editLevel) < 0) editLevel = editLevels[0] || 0;  // clamp
     applyLevelFilter(); editReady = true;
@@ -3278,6 +3325,22 @@ function buildOverlay(){
       '" x2="' + seg[1].x + '" y2="' + Y(seg[1].y) + '" stroke="' + col +
       '" stroke-width="4.5" vector-effect="non-scaling-stroke" stroke-linecap="round"/>';
   }
+  // Positioned notes on this floor — a leader (dot → text, NE) drawn like the
+  // print callout; the dot is the drag handle (one move_note per drag).
+  for (const n of editNotes){
+    const sel = dpSel && dpSel.t === 'note' && dpSel.k === n.index;
+    const lead = Math.max(1.2, fs * 0.9);
+    const tx = n.x + lead, ty = n.y + lead;      // NE in plan feet (+x east, +y north)
+    s += '<line class="ov-note-lead" x1="' + n.x + '" y1="' + Y(n.y) + '" x2="' + tx +
+      '" y2="' + Y(ty) + '" vector-effect="non-scaling-stroke"/>';
+    if (labelFits(n.text, fs * 0.72, 24))
+      s += '<text class="ov-note-t' + (sel ? ' sel' : '') + '" x="' + (tx + 0.4) + '" y="' +
+        (Y(ty) + fs * 0.25) + '" font-size="' + (fs * 0.72) +
+        '" text-anchor="start" style="pointer-events:none">' + esc(n.text) + '</text>';
+    s += '<circle class="ov-note' + (sel ? ' sel' : '') + '" data-notekey="' + n.index +
+      '" cx="' + n.x + '" cy="' + Y(n.y) + '" r="' + Math.max(0.8, fs * 0.38) +
+      '" vector-effect="non-scaling-stroke"><title>' + esc(n.text) + '</title></circle>';
+  }
   // Stair footprints touching this floor (run or landing) — drawn over the rooms
   // so the cross-level anchor stays visible even where a room sits on it; inert
   // (pointer-events:none) so the room beneath stays draggable.
@@ -3344,6 +3407,11 @@ function addGhost(d){
     ghostEl.setAttribute('stroke', '#d1873f'); ghostEl.setAttribute('stroke-width', '5.5');
     ghostEl.setAttribute('stroke-linecap', 'round'); ghostEl.setAttribute('stroke-dasharray', '3 2');
     placeGhostLine(d.o, d.offset);
+  } else if (d.kind === 'note'){
+    ghostEl = document.createElementNS(NS, 'circle');
+    ghostEl.setAttribute('fill', 'rgba(122,106,85,.4)'); ghostEl.setAttribute('stroke', '#7A6A55');
+    ghostEl.setAttribute('stroke-width', '1.5');
+    placeGhostNote(d.cur.x, d.cur.y);
   } else {
     ghostEl = document.createElementNS(NS, 'rect');
     ghostEl.setAttribute('fill', 'rgba(209,135,63,.18)'); ghostEl.setAttribute('stroke', '#d1873f');
@@ -3361,6 +3429,11 @@ function placeGhostRect(x, y, w, l){ if (!ghostEl) return;
 function placeGhostLine(o, off){ if (!ghostEl) return; const seg = openSeg(o, off);
   ghostEl.setAttribute('x1', seg[0].x); ghostEl.setAttribute('y1', Y(seg[0].y));
   ghostEl.setAttribute('x2', seg[1].x); ghostEl.setAttribute('y2', Y(seg[1].y)); }
+function ovFontSize(){ const W = (ov.maxX - ov.minX) + 6, H = (ov.maxY - ov.minY) + 6;
+  return Math.max(1.1, Math.min(2.4, Math.min(W, H) * 0.05)); }
+function placeGhostNote(x, y){ if (!ghostEl) return;
+  ghostEl.setAttribute('cx', x); ghostEl.setAttribute('cy', Y(y));
+  ghostEl.setAttribute('r', Math.max(0.8, ovFontSize() * 0.38)); }
 
 // -- live dimension readout (a small chip near the cursor) --
 function showDim(html, e){
@@ -3505,8 +3578,12 @@ function onDown(e){
   const handleEl = e.target.closest('[data-handle]');
   const openEl = e.target.closest('[data-okey]');
   const fixEl = e.target.closest('[data-fixkey]');
+  const noteEl = e.target.closest('[data-notekey]');
   const roomEl = e.target.closest('[data-room]');
-  if (fixEl){
+  if (noteEl){
+    const n = noteByIndex(parseInt(noteEl.getAttribute('data-notekey'), 10)); if (!n) return;
+    drag = { kind:'note', n, P, cur:{ x:n.x, y:n.y }, calc:{ x:n.x, y:n.y }, moved:false };
+  } else if (fixEl){
     const f = fixtureByKey(fixEl.getAttribute('data-fixkey')); if (!f) return;
     drag = { kind:'fixture', f, P, cur:{ x:f.x, y:f.y, w:f.w, l:f.l }, calc:{ x:f.x, y:f.y }, moved:false };
   } else if (handleEl){
@@ -3572,6 +3649,12 @@ function onMove(e){
     const rm = allRooms.find(r => r.id === drag.f.room);
     const lx = nx - (rm ? rm.x : 0), ly = ny - (rm ? rm.y : 0);
     showDim(esc(drag.f.kind.replace(/_/g, ' ')) + ' — at ' + fmtFtIn(lx) + ', ' + fmtFtIn(ly), e);
+  } else if (drag.kind === 'note'){
+    const nx = snap(drag.cur.x + (P.x - drag.P.x)), ny = snap(drag.cur.y + (P.y - drag.P.y));
+    drag.calc = { x:nx, y:ny };
+    if (nx !== drag.cur.x || ny !== drag.cur.y) drag.moved = true;
+    placeGhostNote(nx, ny);
+    showDim('note — at ' + fmtFtIn(nx) + ', ' + fmtFtIn(ny), e);
   } else {
     const o = drag.o;
     const off = Math.max(o.min, Math.min(o.max, snap(projOffset(o, P) - o.width / 2)));
@@ -3610,6 +3693,10 @@ function onUp(e){
       applyEdits([{ kind:'add_fixture', room:d.f.room, fkind:d.f.kind, wall:d.f.wall, x:lx, y:ly }]);
     else            // rewrite the explicit fixture's `at x,y`
       applyEdits([{ kind:'move_fixture', key:d.f.id, x:lx, y:ly }]);
+  } else if (d.kind === 'note'){
+    if (!d.moved){ dpSelect('note', d.n.index);
+      if (d.n.line) jumpToLine(d.n.line); return; }
+    applyEdits([{ kind:'move_note', index:d.n.index, x:d.calc.x, y:d.calc.y }], 'move note');
   } else {
     if (!d.moved) return;
     applyEdits([{ kind:'move_opening', opening:d.o.kind, key:d.o.key, offset:d.offset }]);
@@ -3670,9 +3757,13 @@ function dpNote(msg, err){
 }
 // Selection is shared with the drag overlay: picking a room here rings it there.
 function dpSelect(t, k){
+  // Notes are keyed by numeric index; a panel row passes it as a string, the
+  // overlay as a number — normalise so every comparison downstream is number↔number.
+  if (t === 'note' && k != null) k = parseInt(k, 10);
   dpSel = k == null ? null : { t: t, k: k };
   dpForm = null;
   if (t === 'room'){ selectedRoomId = k; if (editMode) buildOverlay(); }
+  else if (t === 'note' && editMode) buildOverlay();
   renderPanel();
 }
 function togglePanel(open){
@@ -3741,8 +3832,19 @@ function renderPanel(){
           '<span class="dp-dim">' + fmtFtIn(o.width) + '</span></div>';
       }
     }
+    const nts = (p.notes || []).filter(n => (n.level || 0) === lv);
+    if (nts.length){
+      h += '<div class="dp-level">Notes' + (levels.length > 1 ? ' — level ' + lv : '') + '</div>';
+      for (const n of nts){
+        const nsel = dpSel && dpSel.t === 'note' && dpSel.k === n.index;
+        h += '<div class="dp-row' + (nsel ? ' sel' : '') + '" data-sel="note:' + n.index + '">' +
+          '<span class="dp-id">✎ ' + esc(n.text) + '</span>' +
+          '<span class="dp-dim">' + fmtFtIn(n.x) + ',' + fmtFtIn(n.y) + '</span></div>';
+      }
+    }
   }
-  h += '<div class="dp-btns"><button data-btn="addroom">＋ Room</button></div>';
+  h += '<div class="dp-btns"><button data-btn="addroom">＋ Room</button>' +
+    '<button data-btn="addnote" title="Add a positioned note — a leader callout on the plan">＋ Note</button></div>';
   if (dpForm === 'room') h += addRoomForm(p);
   h += renderInspector(p);
   h += '<div class="dp-note' + (dpNoteErr ? ' err' : '') + '" id="dp-note">' + esc(dpNoteMsg) + '</div>';
@@ -3788,6 +3890,15 @@ function renderInspector(p){
       h += '<label>sill</label><input type="number" min="0" step="0.25" data-act="op.sill" value="' + fnum(o.sill) + '"><span></span>';
     h += '</div><div class="dp-btns"><button class="danger" data-btn="delop">Delete ' + esc(opKindWord(o)) + '</button></div>';
     return h;
+  }
+  if (dpSel.t === 'note'){
+    const n = (p.notes || []).find(x => x.index === dpSel.k);
+    if (!n){ dpSel = null; return ''; }
+    return '<h5>Note</h5><div class="dp-grid">' +
+      '<label>text</label><input class="wide" data-act="note.text" value="' + esc(n.text) + '">' +
+      '<label>x</label><input type="text" inputmode="text" data-act="note.x" title="Anchor x (ft east of origin — accepts 12′6″)" value="' + trimNum(n.x) + '"><span></span>' +
+      '<label>y</label><input type="text" inputmode="text" data-act="note.y" title="Anchor y (ft north of origin — accepts 12′6″)" value="' + trimNum(n.y) + '"><span></span>' +
+      '</div><div class="dp-btns"><button class="danger" data-btn="delnote">Delete note</button></div>';
   }
   const f = (p.fixtures || []).find(x => x.id === dpSel.k);
   if (!f){ dpSel = null; return ''; }
@@ -3918,6 +4029,15 @@ function dpChange(act, el){
     if (act === 'fx.rotate' && isFinite(num)) applyEdits([Object.assign(base, { rotate:num })], 'fixture');
     else if (act === 'fx.wall' && v) applyEdits([Object.assign(base, { wall:v })], 'fixture');
     else if (act === 'fx.width' && isFinite(num) && num > 0) applyEdits([Object.assign(base, { width:num })], 'fixture');
+    return;
+  }
+  if (dpSel && dpSel.t === 'note'){
+    const n = (p.notes || []).find(x => x.index === dpSel.k); if (!n) return;
+    const base = { kind:'set_note', index:n.index };
+    if (act === 'note.text'){ const t = v.trim();
+      if (t && t !== n.text) applyEdits([Object.assign(base, { text:t })], 'edit note'); }
+    else if (act === 'note.x' && isFinite(num)) applyEdits([Object.assign(base, { x:num })], 'move note');
+    else if (act === 'note.y' && isFinite(num)) applyEdits([Object.assign(base, { y:num })], 'move note');
   }
 }
 
@@ -3930,9 +4050,32 @@ function dpDelete(){
   } else if (sel.t === 'op'){
     const o = (p.openings || []).find(x => x.key === sel.k);
     if (o) applyEdits([{ kind:'delete_opening', opening:o.kind, key:o.key }], 'delete opening');
+  } else if (sel.t === 'note'){
+    applyEdits([{ kind:'delete_note', index:sel.k }], 'delete note');
   } else {
     applyEdits([{ kind:'delete_fixture', id:sel.k }], 'delete fixture');
   }
+}
+
+// The ＋ Note button: drop a placeholder callout at the centre of the current
+// floor's rooms (or the whole plan), then select it — drag it or edit x/y after.
+function addNoteAtCenter(){
+  const p = lastGood;
+  if (!p || !p.rooms || !p.rooms.length){ dpNote('add a room before placing a note', true); return; }
+  const lvl = editMode ? editLevel : 0;
+  let rs = p.rooms.filter(r => r.level === lvl);
+  if (!rs.length) rs = p.rooms;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of rs){ minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.l); }
+  const cx = snap((minX + maxX) / 2), cy = snap((minY + maxY) / 2);
+  const ed = { kind:'add_note', text:'note', x:cx, y:cy };
+  if (lvl) ed.level = lvl;
+  applyEdits([ed], 'add note').then(ok => {
+    if (!ok) return;
+    const notes = (lastGood && lastGood.notes) || [];
+    if (notes.length) dpSelect('note', notes[notes.length - 1].index);
+  });
 }
 
 function submitRoomForm(){
@@ -4008,6 +4151,7 @@ dpEl.addEventListener('click', e => {
   if (!btn) return;
   const b = btn.getAttribute('data-btn');
   if (b === 'addroom'){ dpForm = dpForm === 'room' ? null : 'room'; renderPanel(); }
+  else if (b === 'addnote'){ addNoteAtCenter(); }
   else if (b === 'adddoor' || b === 'addwindow' || b === 'addentry'){
     dpForm = { op: b.slice(3) }; renderPanel();
   }
@@ -4020,7 +4164,7 @@ dpEl.addEventListener('click', e => {
     const p = lastGood, r = p && dpSel && dpSel.t === 'room' && p.rooms.find(x => x.id === dpSel.k);
     if (r) duplicateRoom(r);
   }
-  else if (b === 'delroom' || b === 'delop' || b === 'delfx') dpDelete();
+  else if (b === 'delroom' || b === 'delop' || b === 'delfx' || b === 'delnote') dpDelete();
 });
 dpEl.addEventListener('change', e => {
   const act = e.target.getAttribute && e.target.getAttribute('data-act');

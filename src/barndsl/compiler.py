@@ -13,7 +13,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     envelope <W> x <L>
     wing <W> x <L> at <x>,<y>          # optional — L/T/U footprint extensions
     ceiling <H>
-    note "free text"
+    note "free text" [at <x>,<y> [level <n>]]  # design note; positioned = a plan leader callout
     require adjacent|separate <a> <b>  # declared spatial intent, checked vs the plan
     require exterior <room> [<wall>]   # (also: require area <room> >= <sqft>)
     room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -124,7 +124,14 @@ Statements:
   floor <D>                       # inter-floor assembly depth (ft); floor-to-floor = ceiling + this
   accessible                      # opt-in: run accessibility / aging-in-place nudges
   electrical                      # opt-in: emit the electrical / life-safety checklist reminder
-  note "free text"                # optional design note
+  note "free text" [at <x>,<y> [level <n>]]
+                                  # a design note. Bare = free text carried in the
+                                  #   packet/notes; with `at <x>,<y>` it becomes a
+                                  #   leader-line callout drawn on the plan at that
+                                  #   world point (SW origin, +x east, +y north),
+                                  #   on floor `level` (default 0). A note anchored
+                                  #   outside the footprint is a gentle NOTE_OUTSIDE
+                                  #   info, not an error.
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior;
                                   #   storage = min closet+pantry sq ft
@@ -743,8 +750,25 @@ def _parse_statement(
                 "(optionally `pitch <rise:run>`).",
             )
     elif key == "note":
-        plan.note(c.take("a quoted note").text)
-        c.expect_end()
+        # `note "text"` (free-text) or, positioned, `note "text" at <x>,<y>
+        # [level <n>]` — a leader-line callout on the plan.
+        text = c.take("a quoted note").text
+        nxt = c.peek()
+        if nxt is not None and nxt.text.lower() == "at":
+            c.keyword("at")
+            x = c.number("the note x")
+            y = c.number("the note y")
+            level = 0
+            if (tok := c.peek()) is not None and tok.text.lower() == "level":
+                c.keyword("level")
+                level = c.level_value()
+            c.expect_end()
+            plan.note(text, x=x, y=y, level=level)
+            nm = plan.note_marks[-1]
+            nm.line, nm.col, nm.end_col = lineno, kw.col, kw.end_col
+        else:
+            plan.note(text)
+            c.expect_end()
     elif key == "program":
         # `program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`.
         # The first clause (bed) is mandatory; the rest are any order. bed/bath

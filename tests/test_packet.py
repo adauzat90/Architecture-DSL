@@ -67,6 +67,29 @@ def test_multi_level_plan_renders_a_block_per_level():
     assert "LEVEL 1" in html
 
 
+def test_floor_plan_states_the_architectural_scale_and_draws_a_scale_bar():
+    html = _html()
+    # The permit sheet is drawn to a real scale, stated in the title area…
+    assert "SCALE:" in html
+    assert "= 1′-0″ (Letter)" in html
+    # …and carries a graphic scale bar (the reprographic-safe backup).
+    assert "FEET" in html
+    # The embedded SVG is sized in physical inches so it prints at true scale.
+    assert "in; max-width:100%" in html
+    # The scaled wrapper forces the SVG to fill it (width:100%) — max-width
+    # alone shrinks but never grows, which would print below the stated scale
+    # whenever the chosen scale exceeds the drawing's natural CSS size.
+    assert 'class="svgwrap scaled"' in html
+    assert ".svgwrap.scaled svg { width: 100%;" in html
+
+
+def test_packet_sheet_selector_supports_tabloid():
+    letter = build_packet(compile_source(SRC), sheet="Letter")
+    tabloid = build_packet(compile_source(SRC), sheet="Tabloid")
+    assert "(Letter)" in letter
+    assert "(Tabloid)" in tabloid
+
+
 def test_schedules_section_has_rows():
     html = _html()
     assert "Room Schedule" in html

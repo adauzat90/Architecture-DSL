@@ -357,6 +357,43 @@ def test_app_contains_level_switcher_markup_and_shortcut():
     assert "//cdn" not in html and "<script src" not in html
 
 
+def test_app_contains_notes_ui_markup_and_stays_offline():
+    html = render_app(CLEAN)
+    # the Notes design-panel affordances, overlay markers, and note edit wiring
+    for token in ('data-btn="addnote"', "function addNoteAtCenter(",
+                  'data-act="note.text"', 'data-btn="delnote"',
+                  "data-notekey=", "kind:'add_note'", "kind:'move_note'",
+                  "class=\"ov-note"):
+        assert token in html, token
+    # the offline guarantee still holds (no external network references)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_ships_the_print_to_scale_path_and_stays_offline():
+    html = render_app(CLEAN)
+    # Print builds from the scale-bar SVG + physical width the payload carries.
+    for token in ("p.print_svg", "css_width_in", "function buildPrintDoc("):
+        assert token in html, token
+    assert "http://" not in html and "https://" not in html
+
+
+def test_compile_payload_carries_notes_and_print_scale():
+    src = (
+        'plan "N"\nenvelope 40 x 30\nceiling 10\n'
+        'note "verify" at 10,10\n'
+        "room living: living at 0,0 size 20 x 20\n"
+        "entry living south width 3\nwindow living north width 4\n"
+    )
+    p = compile_payload(src)
+    assert p["notes"] and {"index", "text", "x", "y", "level", "line"} <= set(p["notes"][0])
+    assert p["notes"][0]["text"] == "verify"
+    # print metadata + a scale-bar SVG for the true-scale print path
+    assert {"label", "sheet", "css_width_in", "note"} <= set(p["print"])
+    assert "SCALE:" in p["print"]["note"]
+    assert "FEET" in p["print_svg"]
+
+
 def test_edit_upper_level_room_changes_only_its_line(server):
     # Moving the two_story loft (level 1) must rewrite exactly the loft's line and
     # leave every other byte — including the ground floor — untouched.

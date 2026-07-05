@@ -105,6 +105,11 @@ def emit_dsl(plan: Barndominium) -> str:
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")
+    for nm in getattr(plan, "note_marks", None) or []:
+        line = f"note {_q(nm.text)} at {_n(nm.x)},{_n(nm.y)}"
+        if nm.level:
+            line += f" level {nm.level}"
+        out.append(line)
     if plan.frame_spec is not None:
         fs = plan.frame_spec
         # `post` is stored in feet; emit it back in inches (how it's authored).

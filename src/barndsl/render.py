@@ -39,6 +39,70 @@ def fmt_ft_in(feet: float) -> str:
         s = f"{ft}{_FT}-{inch}{_IN}"
     return f"-{s}" if neg else s
 
+#: Standard US architectural plan scales, as (inches-of-paper per foot, label),
+#: largest first — the set an architect steps through to fit a plan on a sheet.
+ARCH_SCALES: tuple[tuple[float, str], ...] = (
+    (1 / 4, '1/4"'),
+    (3 / 16, '3/16"'),
+    (1 / 8, '1/8"'),
+    (3 / 32, '3/32"'),
+    (1 / 16, '1/16"'),
+)
+
+#: Print sheets we size to, as (short, long) inches. Letter and Tabloid (a.k.a.
+#: 11×17 / ARCH B) cover the common permit submittals.
+SHEETS: dict[str, tuple[float, float]] = {
+    "Letter": (8.5, 11.0),
+    "Tabloid": (11.0, 17.0),
+}
+
+#: Printable margin (in) reserved on every edge when fitting a plan to a sheet.
+SHEET_MARGIN = 0.5
+
+
+def fit_scale(
+    svg_w_ft: float, svg_h_ft: float, sheet: str = "Letter"
+) -> tuple[float, str]:
+    """Largest standard architectural scale at which a plan fits a sheet.
+
+    ``svg_w_ft``/``svg_h_ft`` are the drawing's extents in **feet** (the SVG's
+    px size divided by its px-per-foot). Returns ``(inches_per_foot, label)`` —
+    the biggest of :data:`ARCH_SCALES` at which the drawing fits inside the
+    sheet's printable area in *either* orientation (portrait or landscape,
+    whichever admits the bigger scale). Falls back to the smallest scale if even
+    that overruns (a very large plan on a small sheet).
+    """
+    sw, sl = SHEETS.get(sheet, SHEETS["Letter"])
+    a = sw - 2 * SHEET_MARGIN
+    b = sl - 2 * SHEET_MARGIN
+    orientations = ((a, b), (b, a))  # portrait, landscape
+    for ipf, label in ARCH_SCALES:
+        for aw, ah in orientations:
+            if svg_w_ft * ipf <= aw + 1e-9 and svg_h_ft * ipf <= ah + 1e-9:
+                return ipf, label
+    return ARCH_SCALES[-1]
+
+
+def sheet_scale(
+    plan: Barndominium, config: "RenderConfig | None" = None, sheet: str = "Letter"
+) -> tuple[float, str, float]:
+    """Pick the print scale for ``plan`` and return ``(ipf, label, css_width_in)``.
+
+    ``ipf`` is inches-of-paper per foot and ``label`` its architectural name
+    (e.g. ``1/4"``); ``css_width_in`` is the physical width to give the embedded
+    SVG so its px-per-foot renders at exactly that scale — the number both print
+    paths set as the SVG's CSS ``width``. The plan drawing is then at true scale;
+    the fixed-pixel title/panel bands just ride along proportionally.
+    """
+    config = config or RenderConfig()
+    r = _Renderer(plan, config)
+    ppf = config.scale  # px per foot
+    svg_w_ft = r.width / ppf
+    svg_h_ft = r.height / ppf
+    ipf, label = fit_scale(svg_w_ft, svg_h_ft, sheet)
+    return ipf, label, svg_w_ft * ipf
+
+
 # Fill colours per room type (soft, print-friendly).
 ROOM_COLORS: dict[RoomType, str] = {
     RoomType.LIVING: "#FDE9D9",
@@ -65,6 +129,9 @@ WALL = "#2b2b2b"
 WINDOW_COLOR = "#2F6FB0"
 DIM_COLOR = "#888888"
 TEXT_COLOR = "#222222"
+# Positioned annotations (leader-line notes): a muted, print-friendly accent —
+# distinct from the dimension grey and the room ink, in the drafting-note family.
+NOTE_COLOR = "#7A6A55"
 # Fixtures/furniture: thin dark outlines, drafting style — subtle so the plan
 # stays readable (no fill, or a whisper of one).
 FIXTURE_COLOR = "#5a5a5a"
@@ -87,6 +154,13 @@ class RenderConfig:
     #: Print each room's W×L dimensions under its label (skipped for rooms too
     #: small to fit the extra line legibly).
     show_room_dims: bool = True
+    #: Draw a graphic scale bar (bottom-left, under the plan) — set by the print
+    #: and permit-packet paths so a printed sheet carries a bar that survives any
+    #: reprographic resize. Off for the screen render so the view stays uncluttered.
+    scale_bar: bool = False
+    #: Optional scale statement drawn beside the bar (e.g. ``SCALE: 1/4" = 1'-0"
+    #: (Letter)``). ``None`` draws the bar alone. Only used when ``scale_bar``.
+    scale_note: str | None = None
 
 
 def render_svg(plan: Barndominium, config: RenderConfig | None = None) -> str:
@@ -203,6 +277,12 @@ class _Renderer:
         panel_py = self.top + (self.label_gap if self.multi else 0.0)
         self.height = max(self.height, panel_py + self._panel_ph + 16.0)
 
+        # A print scale bar rides in an extra band at the very bottom of the sheet.
+        self._scale_bar_y = 0.0
+        if self.c.scale_bar:
+            self._scale_bar_y = self.height + 8.0
+            self.height += 44.0
+
     def _panel_content_height(self) -> float:
         """Pixel height the summary panel needs, from its top to below the last
         legend row — mirrors the y-cursor walk in :meth:`_draw_panel`."""
@@ -289,10 +369,13 @@ class _Renderer:
             self._draw_structure()
             self._draw_windows()
             self._draw_doors()
+            self._draw_notes()
             self._draw_chain_dims()
             self._draw_dimensions()
             self._draw_panel()
 
+        if self.c.scale_bar:
+            self._draw_scale_bar()
         self.parts.append("</svg>")
         return "\n".join(self.parts)
 
@@ -315,6 +398,7 @@ class _Renderer:
         self._draw_structure(level=lvl)
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
+        self._draw_notes(level=lvl)
         self._draw_stairs(lvl)
         self._draw_chain_dims(level=lvl)
 
@@ -831,6 +915,57 @@ class _Renderer:
                 self._text(cx, cy, f"{s.display_name} ↑{s.to_level}", size=9, fill="#6b5d3a")
             else:
                 self._text(cx, cy, f"{s.display_name} ↓{s.from_level}", size=9, fill="#8a7f63")
+
+    def _draw_notes(self, level: int = 0):
+        """Draw positioned notes on ``level`` as small italic leader callouts.
+
+        Each note is a filled dot at its world anchor, a 45° leader up-and-right
+        (NE) to the text, and the text set in a muted note colour. No collision
+        avoidance this pass — the offset is fixed, professional and unobtrusive."""
+        for nm in getattr(self.plan, "note_marks", None) or []:
+            if getattr(nm, "level", 0) != level:
+                continue
+            ax, ay = self.sx(nm.x), self.sy(nm.y)
+            # Leader: a short 45° run to the NE (screen +x, −y), then the text.
+            lead = 16.0
+            tx, ty = ax + lead, ay - lead
+            self.parts.append(
+                f'<circle cx="{ax:.1f}" cy="{ay:.1f}" r="2.4" fill="{NOTE_COLOR}" />'
+            )
+            self._line(ax, ay, tx, ty, NOTE_COLOR, 1.0)
+            self.parts.append(
+                f'<text x="{tx + 3:.1f}" y="{ty - 1:.1f}" font-family="{self.c.font}" '
+                f'font-size="10" fill="{NOTE_COLOR}" text-anchor="start" '
+                f'font-style="italic">{escape(nm.text)}</text>'
+            )
+
+    def _draw_scale_bar(self):
+        """Draw the graphic scale bar (bottom-left) + optional scale statement.
+
+        Alternating filled/empty 5 ft segments over a 10 ft run, labelled 0/5/10,
+        drawn in plan px (``scale`` px/ft) so it scales exactly with the drawing —
+        the mark that survives any reprographic resize of the printed sheet."""
+        x0 = self.c.margin_left
+        y0 = self._scale_bar_y
+        ppf = self.c.scale
+        seg_ft, n_seg = 5.0, 2
+        bar_h = 5.0
+        if self.c.scale_note:
+            self._text(
+                x0, y0 - 4, self.c.scale_note, size=10, anchor="start",
+                weight="bold", fill=TEXT_COLOR,
+            )
+        for i in range(n_seg):
+            sx = x0 + i * seg_ft * ppf
+            fill = NOTE_COLOR if i % 2 == 0 else "#ffffff"
+            self._rect(sx, y0, seg_ft * ppf, bar_h, fill=fill, stroke=WALL, sw=0.8)
+        for i in range(n_seg + 1):
+            sx = x0 + i * seg_ft * ppf
+            self._text(sx, y0 + bar_h + 11, f"{int(i * seg_ft)}", size=8, fill=TEXT_COLOR)
+        self._text(
+            x0 + n_seg * seg_ft * ppf + 16, y0 + bar_h, "FEET",
+            size=8, anchor="start", fill=TEXT_COLOR,
+        )
 
     def _draw_dimensions(self):
         # Overall dimensions span the whole footprint (incl. wings), not just the
