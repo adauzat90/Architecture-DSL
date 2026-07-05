@@ -1,8 +1,18 @@
 # Cross-file composition (`use`) — design
 
-Status: **design approved for Phase 7a/7b** · not yet implemented
+Status: **Phase 7a implemented** (translation-only core) · **Phase 7b pending**
+(mirror/rotate + attribute remap, duplicate-instance, parts browser).
 Prereqs shipped: full emit round-trip (every statement family), `barndsl fmt`
 (comment-preserving), accept pragmas, ft-in literals.
+
+7a shipped: `use "<relpath>" as <alias> at <x>,<y> [level <n>]` (translation
+only — `mirror`/`rotate` are a `BAD_OPTION` parse error that names 7b);
+fragment-mode compile (`compile_source(..., fragment=True)`); the sandboxed
+loader/resolver (`barndsl.compose`); stamping; the two diagnostic classes with
+dedupe + pragma anchoring; read-only stamped members + the `add/move/set/delete/
+inline_use` edits with whole-instance drag; `emit_dsl(plan, flatten=…)`; fmt
+support; the `examples/composed/parts/` starter library (bath_core, master_suite,
+kitchen_l, laundry_core) + the composed `examples/composed/cedar_ridge.barn`.
 
 ## 1. Goal
 

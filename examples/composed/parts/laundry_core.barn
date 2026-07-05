@@ -1,0 +1,4 @@
+# laundry_core — a laundry room. A laundry auto-seeds its washer and dryer along
+# a wall (a clean, code-clearing layout), so no `fixture` lines are needed.
+# Authored in local feet (SW corner 0,0); the host `use ... at` places it.
+room laundry: laundry at 0,0 size 8 x 7

@@ -1,0 +1,8 @@
+# kitchen_l — an L-shaped kitchen with an island. The kitchen auto-seeds its
+# fridge, range and sink (the work triangle); the island and an extra run of
+# counter are added explicitly. Authored in local feet (SW corner 0,0).
+room kitchen: kitchen at 0,0 size 14 x 12
+# a centre island (room-local feet from the kitchen's SW corner)
+fixture kitchen_island in kitchen at 5,5
+# daylight over the sink wall (place this wall exterior on the host)
+window kitchen north casement width 4 offset 5 sill 3

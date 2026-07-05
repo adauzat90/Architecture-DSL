@@ -910,6 +910,66 @@ class Requirement:
 
 
 @dataclass
+class UseSpec:
+    """A ``use "<relpath>" as <alias> at <x>,<y> [level <n>]`` statement (host side).
+
+    Records the author's intent to stamp a part into the host plan: the quoted
+    **relative** path to the part file, the required ``alias`` (every id inside the
+    part is stamped ``<alias>.<id>``), the ``at`` corner (the stamped bounding
+    box's SW corner in host feet) and the target ``level`` (default 0). Parsed at
+    compile time and kept on :attr:`Barndominium.uses` so :func:`barndsl.emit.emit_dsl`
+    can round-trip the ``use`` line **verbatim** (independently of whether it
+    resolved). The loader turns each resolved ``use`` into an :class:`Instance`.
+
+    Translation-only in Phase 7a — ``mirror``/``rotate`` are a later release.
+    """
+
+    relpath: str
+    alias: str
+    x: float
+    y: float
+    level: int = 0
+    #: Source location of the `use` statement (textual front-end only), so a
+    #: placement/instance diagnostic anchors to the `use` line and a surgical edit
+    #: can find it.
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Instance:
+    """A stamped part instance in a composed host plan.
+
+    Produced by the loader (:mod:`barndsl.compose`) from a resolved :class:`UseSpec`:
+    the part is fragment-compiled once, then a transformed copy of every element is
+    appended to the host plan with each id prefixed ``<alias>.``. This carries the
+    bookkeeping the playground panel, the whole-instance drag and the ``inline_use``
+    edit need — the alias, the part path, the placement, the stamped bounding box
+    (host coords), the stamped room ids and every stamped element object.
+    """
+
+    alias: str
+    relpath: str
+    part_path: str  # resolved absolute (realpath) path
+    x: float
+    y: float
+    level: int
+    #: Bounding box ``(min_x, min_y, max_x, max_y)`` of the stamped rooms, host feet.
+    bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    #: The stamped room ids (``<alias>.<id>``), in the part's declaration order.
+    room_ids: list[str] = field(default_factory=list)
+    #: Every stamped element object appended to the host (rooms, doors, windows,
+    #: fixtures, devices, alarms, notes) — used by emit to skip them and by
+    #: ``inline_use`` to flatten just this instance.
+    objects: list = field(default_factory=list)
+    #: Source location of the originating `use` statement.
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
 class Barndominium:
     """A complete barndominium floor plan.
 
@@ -1028,6 +1088,15 @@ class Barndominium:
     #: the placer; not authored directly (there is no `post`/`beam` statement).
     posts: list[Post] = field(default_factory=list)
     beams: list[Beam] = field(default_factory=list)
+    #: Cross-file composition (the ``use`` statement). :attr:`uses` are the parsed
+    #: ``use`` statements, kept verbatim so emit round-trips them (independent of
+    #: resolution). The loader (:mod:`barndsl.compose`) stamps each resolved use
+    #: into the plan and records an :class:`Instance`; :attr:`stamped_rooms` is the
+    #: set of stamped room ids (read-only members — an edit on one is refused, see
+    #: :mod:`barndsl.edits`). Empty for a plan with no ``use`` statements.
+    uses: list[UseSpec] = field(default_factory=list)
+    instances: list[Instance] = field(default_factory=list)
+    stamped_rooms: set[str] = field(default_factory=set)
 
     # -- fluent builder API ------------------------------------------------
     # Each method mutates the plan and returns ``self`` so calls chain. This

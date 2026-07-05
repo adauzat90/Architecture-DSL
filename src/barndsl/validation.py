@@ -194,6 +194,15 @@ class Issue:
     #: trail survives. ``accept_reason`` carries the quoted justification (if any).
     accepted: bool = False
     accept_reason: str | None = None
+    #: Cross-file composition (the ``use`` statement). A *part-internal* diagnostic
+    #: — one that fires inside a used part file regardless of where it's placed —
+    #: carries ``file`` (the resolved part path) and ``part`` (the relative path as
+    #: written in the ``use`` line). Its ``line`` anchors to the ``use`` statement in
+    #: the host buffer (the nearest thing there), while the message names the part's
+    #: own ``file:line``. ``None`` on an ordinary host diagnostic. See
+    #: :mod:`barndsl.compose`.
+    file: str | None = None
+    part: str | None = None
 
     def __str__(self) -> str:
         loc = f"line {self.line}: " if self.line else ""

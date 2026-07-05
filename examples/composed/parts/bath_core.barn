@@ -1,0 +1,8 @@
+# bath_core — a compact 3-piece bathroom that never trips the fixture-clearance
+# checks. Author it in its own local feet (SW corner at 0,0); the `use ... at`
+# on the host places it. A bathroom auto-seeds its toilet, lavatory and tub, so
+# no `fixture` lines are needed here — the seed layout clears IRC R307.1.
+room bath: bathroom at 0,0 size 8 x 6
+# A window daylights + ventilates the bath (place the part so this wall is
+# exterior, or accept BATH_VENT on the host `use` line for an interior core).
+window bath south casement width 2.5 offset 2.75 sill 4 tempered

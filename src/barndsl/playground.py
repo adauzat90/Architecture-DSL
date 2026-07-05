@@ -231,7 +231,7 @@ def _compile_summary(result: Any) -> dict:
     }
 
 
-def compile_payload(source: str) -> dict:
+def compile_payload(source: str, base_dir: str | None = None) -> dict:
     """Compile ``source`` and build the JSON the playground returns.
 
     Always includes ``ok``/``counts``/``diagnostics`` (the same shape as
@@ -242,8 +242,12 @@ def compile_payload(source: str) -> dict:
     frontend keeps its last good render), matching the CLI's build contract.
     Never raises on bad DSL; artifact-build failures are reported as
     ``render_error`` rather than propagating.
+
+    ``base_dir`` is the served file's directory — the root ``use "<relpath>"``
+    (cross-file composition) resolves against. ``None`` (a browser-opened buffer
+    with no folder) makes any ``use`` a teaching ``USE_UNRESOLVED`` diagnostic.
     """
-    result = compile_source(source)
+    result = compile_source(source, base_dir=base_dir)
     payload = result.to_dict()
     payload["recovered"] = result.recovered
     plan = result.plan
@@ -269,14 +273,34 @@ def compile_payload(source: str) -> dict:
             payload["section"] = section_svg(plan)
             # Compact overlay data for Tier 5 edit mode — the frontend draws its
             # interactive SVG from these (not the static plan SVG).
+            # Which alias each stamped room belongs to (None for a host room) — the
+            # panel greys stamped rows and the overlay drags the whole instance.
+            room_instance = {
+                rid: inst.alias for inst in plan.instances for rid in inst.room_ids
+            }
             payload["rooms"] = [
                 {
                     "id": r.id, "type": r.type.value,
                     "x": r.x, "y": r.y, "w": r.width, "l": r.length,
                     "level": r.level, "color": ROOM_COLORS.get(r.type, "#f0f0f0"),
                     "line": result.room_lines.get(r.id),
+                    "instance": room_instance.get(r.id),
                 }
                 for r in plan.rooms
+            ]
+            # Composed part instances (the `use` statements). Each carries the
+            # alias, the part file, the `at` corner + level, the stamped bounding
+            # box (for the whole-instance drag ghost), its member room ids and the
+            # `use` source line — everything the design panel's instance group and
+            # inspector, and the add/move/set/delete/inline_use edits, need.
+            payload["instances"] = [
+                {
+                    "alias": inst.alias, "relpath": inst.relpath,
+                    "x": inst.x, "y": inst.y, "level": inst.level,
+                    "bbox": list(inst.bbox), "rooms": list(inst.room_ids),
+                    "line": inst.line,
+                }
+                for inst in plan.instances
             ]
             payload["openings"] = opening_overlays(plan)
             payload["levels"] = plan.levels()
@@ -672,8 +696,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(data, dict) or not isinstance(data.get("source"), str):
             self._json({"error": 'expected {"source": "<dsl>"}'}, status=400)
             return
+        server: _PlaygroundServer = self.server  # type: ignore[assignment]
         try:
-            payload = compile_payload(data["source"])
+            payload = compile_payload(data["source"], base_dir=server.base_dir)
         except Exception as exc:  # a real bug — bad DSL never reaches here
             self._json({"error": f"internal error: {exc}"}, status=500)
             return
@@ -689,8 +714,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": 'expected {"source": "<dsl>"}'}, status=400)
             return
         source = data["source"]
+        server: _PlaygroundServer = self.server  # type: ignore[assignment]
         try:
-            result = compile_source(source)
+            result = compile_source(source, base_dir=server.base_dir)
             if result.plan is None or result.recovered:
                 self._json({"error": {
                     "kind": "parse_error",
@@ -722,15 +748,16 @@ class _Handler(BaseHTTPRequestHandler):
         if isinstance(edit, EditError):
             self._json({"error": {"kind": edit.kind, "message": edit.message}})
             return
+        server: _PlaygroundServer = self.server  # type: ignore[assignment]
         try:
-            result = apply_edit(data["source"], edit)
+            result = apply_edit(data["source"], edit, base_dir=server.base_dir)
         except Exception as exc:  # a real bug — refused edits return typed errors
             self._json({"error": f"internal error: {exc}"}, status=500)
             return
         if result.error is not None:
             self._json({"error": {"kind": result.error.kind, "message": result.error.message}})
             return
-        payload = compile_payload(result.source)
+        payload = compile_payload(result.source, base_dir=server.base_dir)
         payload["source"] = result.source
         payload["line"] = result.line
         payload["changed"] = result.changed
@@ -973,6 +1000,7 @@ class _PlaygroundServer(ThreadingHTTPServer):
         initial_source: str,
         designer: Designer | None = None,
         from_file: bool = False,
+        base_dir: str | None = None,
     ):
         super().__init__(address, _Handler)
         self.initial_source = initial_source
@@ -982,6 +1010,10 @@ class _PlaygroundServer(ThreadingHTTPServer):
         self.design_lock = threading.Lock()
         self.jobs_lock = threading.Lock()
         self.current_job: dict | None = None
+        #: The served file's directory — the root ``use "<relpath>"`` composition
+        #: resolves against (``barndsl serve plan.barn``). ``None`` when no file was
+        #: given (a scratch buffer), so any ``use`` is a ``USE_UNRESOLVED`` teacher.
+        self.base_dir = base_dir
 
 
 def make_server(
@@ -990,6 +1022,7 @@ def make_server(
     initial_source: str | None = None,
     designer: Designer | None = None,
     from_file: bool = False,
+    base_dir: str | None = None,
 ) -> _PlaygroundServer:
     """Build (but do not start) the playground server bound to ``host:port``.
 
@@ -1003,7 +1036,9 @@ def make_server(
     ``0.0.0.0`` implicitly.
     """
     source = initial_source if initial_source is not None else default_source()
-    return _PlaygroundServer((host, port), source, designer=designer, from_file=from_file)
+    return _PlaygroundServer(
+        (host, port), source, designer=designer, from_file=from_file, base_dir=base_dir
+    )
 
 
 def run(
@@ -1012,9 +1047,12 @@ def run(
     port: int = 8787,
     open_browser: bool = False,
     from_file: bool = False,
+    base_dir: str | None = None,
 ) -> int:
     """Start the playground and serve until interrupted. Returns a process code."""
-    httpd = make_server(host, port, initial_source=initial_source, from_file=from_file)
+    httpd = make_server(
+        host, port, initial_source=initial_source, from_file=from_file, base_dir=base_dir
+    )
     url = f"http://{host}:{httpd.server_address[1]}/"
     print(f"barndsl playground → {url}  (Ctrl-C to stop)")
     if open_browser:
@@ -1366,6 +1404,10 @@ _APP_HTML = r"""<!doctype html>
   .dp-sub .dp-row { padding:2px 7px; font-size:12px; }
   .dp-kind { color:var(--faint); font-size:11px; }
   .dp-seed { opacity:.75; font-style:italic; }
+  /* cross-file composition — instance group header + read-only stamped members */
+  .dp-inst .dp-id { color:var(--accent); }
+  .dp-stamped { opacity:.6; cursor:default; }
+  .dp-stamped .dp-id::before { content:'▢ '; color:var(--faint); }
   .dp-btns { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
   .design-panel button { font:inherit; font-size:11.5px; padding:4px 9px; border-radius:6px;
     border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer; }
@@ -1379,6 +1421,7 @@ _APP_HTML = r"""<!doctype html>
   .edit-layer svg { width:100%; height:100%; display:block; touch-action:none;
     -webkit-user-select:none; user-select:none; }
   .ov-room { cursor:move; }
+  .ov-room.ov-stamped { cursor:move; }   /* a stamped member drags the whole instance */
   .ov-open { cursor:grab; }
   .ov-handle { fill:var(--accent2); stroke:#fff; }
   /* fixtures/furniture — draggable; a seed is dashed until a drag authors it */
@@ -3550,7 +3593,7 @@ const alignTools = document.getElementById('align-tools');
 let editLevel = 0;                   // the floor the overlay currently edits
 let editMode = false, editReady = false;
 let editRooms = [], editOpens = [], editLevels = [0], editFixtures = [], editNotes = [];
-let allRooms = [], allOpens = [], allStairs = [], allFixtures = [], allNotes = [];   // every level — the dimmed underlay
+let allRooms = [], allOpens = [], allStairs = [], allFixtures = [], allNotes = [], allInstances = [];   // every level — the dimmed underlay
 let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
 // Overlay-level multi-selection (rooms only) — distinct from dpSel/selectedRoomId
 // (the inspector's single notion). Shift-click toggles; a plain click clears it.
@@ -3709,6 +3752,7 @@ function refreshEditData(p){
     allRooms = p.rooms; allOpens = p.openings || []; allStairs = p.stairs || [];
     allFixtures = p.fixtures || [];
     allNotes = p.notes || [];
+    allInstances = p.instances || [];
     editLevels = p.levels || [0];
     if (editLevels.indexOf(editLevel) < 0) editLevel = editLevels[0] || 0;  // clamp
     applyLevelFilter(); editReady = true;
@@ -3760,7 +3804,8 @@ function buildOverlay(){
       '" width="' + r.w + '" height="' + r.l + '" vector-effect="non-scaling-stroke"/>' + utext;
   }
   for (const r of editRooms){
-    const sel = r.id === selectedRoomId;
+    const stamped = !!r.instance;   // a `use` member — the whole instance drags as one
+    const sel = r.id === selectedRoomId && !stamped;
     const dims = fmtFtIn(r.w) + '×' + fmtFtIn(r.l);
     const idFits = labelFits(r.id, fs, r.w);
     const idText = idFits ? '<text x="' + (r.x + r.w / 2) + '" y="' + (Y(r.y + r.l / 2) - fs * 0.1) +
@@ -3770,11 +3815,14 @@ function buildOverlay(){
       (Y(r.y + r.l / 2) + fs * 1.05) + '" text-anchor="middle" font-size="' + (fs * 0.72) +
       '" fill="#777" style="pointer-events:none">' + dims + '</text>' : '';
     // A hidden id leaves a <title> so hover on the (interactive) room still names it.
-    const title = idFits ? '' : '<title>' + esc(r.id) + '</title>';
-    s += '<rect class="ov-room" data-room="' + esc(r.id) + '" x="' + r.x + '" y="' + Y(r.y + r.l) +
+    const title = idFits ? '' : '<title>' + esc(r.id) + (stamped ? ' — part ' + esc(r.instance) : '') + '</title>';
+    const instAttr = stamped ? ' data-instance="' + esc(r.instance) + '"' : '';
+    s += '<rect class="ov-room' + (stamped ? ' ov-stamped' : '') + '" data-room="' + esc(r.id) + '"' +
+      instAttr + ' x="' + r.x + '" y="' + Y(r.y + r.l) +
       '" width="' + r.w + '" height="' + r.l + '" fill="' + r.color + '" stroke="' +
-      (sel ? '#2F6FB0' : '#2b2b2b') + '" stroke-width="' + (sel ? 2.4 : 1) +
-      '" vector-effect="non-scaling-stroke">' + title + '</rect>' + idText + dimText;
+      (sel ? '#2F6FB0' : (stamped ? '#8a6d3b' : '#2b2b2b')) + '" stroke-width="' + (sel ? 2.4 : 1) +
+      '"' + (stamped ? ' stroke-dasharray="1.4 1"' : '') +
+      ' vector-effect="non-scaling-stroke">' + title + '</rect>' + idText + dimText;
     // Multi-selection ring — a distinct dashed violet outline over the room rect.
     if (multiSel.has(r.id))
       s += '<rect class="ov-multi" x="' + r.x + '" y="' + Y(r.y + r.l) +
@@ -4070,6 +4118,19 @@ function onDown(e){
   const noteEl = e.target.closest('[data-notekey]');
   const roomEl = e.target.closest('[data-room]');
   const roomId = roomEl && roomEl.getAttribute('data-room');
+  const instAlias = roomEl && roomEl.getAttribute('data-instance');
+  // A stamped member is read-only individually — dragging it drags the WHOLE
+  // instance (one move_use edit; the existing bounding-ghost machinery fits).
+  if (instAlias && !handleEl){
+    const inst = allInstances.find(i => i.alias === instAlias); if (!inst) return;
+    const bb = { x: inst.bbox[0], y: inst.bbox[1], w: inst.bbox[2] - inst.bbox[0], l: inst.bbox[3] - inst.bbox[1] };
+    if (multiSel.size) clearMultiSel(true);
+    drag = { kind:'moveuse', inst, P, ddx:0, ddy:0, moved:false, bbox: bb, cur: bb };
+    addGhost(drag);
+    try { svgEl.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault();
+    return;
+  }
   // Shift-click a room rect toggles it into the multi-selection (no drag starts).
   if (e.shiftKey && roomEl && !handleEl){ toggleMultiSel(roomId); e.preventDefault(); return; }
   // Dragging a member of a 2+ room selection moves the whole set as one.
@@ -4121,6 +4182,14 @@ function onMove(e){
     if (ddx || ddy) drag.moved = true;
     placeGhostRect(drag.bbox.x + ddx, drag.bbox.y + ddy, drag.bbox.w, drag.bbox.l);
     showDim(drag.members.length + ' rooms — Δ ' + fmtFtIn(ddx) + ', ' + fmtFtIn(ddy), e);
+    return;
+  }
+  if (drag.kind === 'moveuse'){
+    const ddx = snap(P.x - drag.P.x), ddy = snap(P.y - drag.P.y);
+    drag.ddx = ddx; drag.ddy = ddy;
+    if (ddx || ddy) drag.moved = true;
+    placeGhostRect(drag.bbox.x + ddx, drag.bbox.y + ddy, drag.bbox.w, drag.bbox.l);
+    showDim('part ' + esc(drag.inst.alias) + ' — Δ ' + fmtFtIn(ddx) + ', ' + fmtFtIn(ddy), e);
     return;
   }
   if (drag.kind === 'move'){
@@ -4187,6 +4256,13 @@ function onUp(e){
       clearMultiSel(false); dpSelect('room', d.pressed); return; }
     applyEdits(d.members.map(m => ({ kind:'move_room', room:m.id,
       x: snap(m.x0 + d.ddx), y: snap(m.y0 + d.ddy) })), 'move rooms');
+    return;
+  }
+  if (d.kind === 'moveuse'){
+    if (!d.moved){ dpSelect('inst', d.inst.alias);
+      if (d.inst.line) jumpToLine(d.inst.line); return; }
+    applyEdits([{ kind:'move_use', alias:d.inst.alias,
+      x: snap(d.inst.x + d.ddx), y: snap(d.inst.y + d.ddy) }], 'move part');
     return;
   }
   if (d.kind === 'move'){
@@ -4322,11 +4398,17 @@ function renderPanel(){
     '<input type="number" min="1" step="1" data-act="plan.envl" title="Envelope length (ft, south–north)" value="' + fnum(s.envelope && s.envelope[1]) + '">' +
     '<label>ceiling</label><input type="number" min="1" step="0.5" data-act="plan.ceil" value="' + fnum(s.ceiling) + '"><span></span>' +
     '</div>';
+  // Stamped rooms (from `use` instances) are read-only members — kept out of the
+  // Rooms/Openings lists and shown under Parts (greyed) instead.
+  const stampedSet = new Set();
+  (p.instances || []).forEach(inst => inst.rooms.forEach(rr => stampedSet.add(rr)));
+  const opStamped = o => o.kind === 'interior'
+    ? (stampedSet.has(o.a) || stampedSet.has(o.b)) : stampedSet.has(o.room);
   h += '<h5>Rooms</h5>';
   const levels = p.levels || [0];
   for (const lv of levels){
     if (levels.length > 1) h += '<div class="dp-level">Level ' + lv + '</div>';
-    for (const r of p.rooms.filter(r => r.level === lv)){
+    for (const r of p.rooms.filter(r => r.level === lv && !r.instance)){
       const sel = dpSel && dpSel.t === 'room' && dpSel.k === r.id;
       h += '<div class="dp-row' + (sel ? ' sel' : '') + '" data-sel="room:' + esc(r.id) + '">' +
         '<span class="swatch" style="background:' + esc(r.color) + '"></span>' +
@@ -4339,7 +4421,7 @@ function renderPanel(){
           '</span>' + (f.seed ? '<span class="dp-kind">auto</span>' : '') + '</div></div>';
       }
     }
-    const ops = (p.openings || []).filter(o => o.level === lv);
+    const ops = (p.openings || []).filter(o => o.level === lv && !opStamped(o));
     if (ops.length){
       h += '<div class="dp-level">Openings' + (levels.length > 1 ? ' — level ' + lv : '') + '</div>';
       for (const o of ops){
@@ -4360,6 +4442,28 @@ function renderPanel(){
       }
     }
   }
+  // Parts — each `use` instance as a collapsible group: a header row (▣ alias —
+  // filename) and its greyed member rooms (read-only stamps). Selecting the header
+  // opens the instance inspector (move/level/Delete/Duplicate/Inline).
+  if ((p.instances || []).length){
+    h += '<h5>Parts</h5>';
+    for (const inst of p.instances){
+      const file = (inst.relpath || '').split('/').pop();
+      const isel = dpSel && dpSel.t === 'inst' && dpSel.k === inst.alias;
+      h += '<div class="dp-row dp-inst' + (isel ? ' sel' : '') + '" data-sel="inst:' + esc(inst.alias) + '">' +
+        '<span class="dp-id">▣ ' + esc(inst.alias) + '</span>' +
+        '<span class="dp-kind">' + esc(file) + '</span>' +
+        '<span class="dp-dim">' + fmtFtIn(inst.x) + ',' + fmtFtIn(inst.y) +
+        (inst.level ? ' L' + inst.level : '') + '</span></div>';
+      for (const rid of (inst.rooms || [])){
+        const rm = p.rooms.find(x => x.id === rid);
+        h += '<div class="dp-sub"><div class="dp-row dp-stamped" title="Stamped from ' +
+          esc(inst.relpath) + ' — edit the part, or Inline the instance">' +
+          '<span class="dp-id">' + esc(rid) + '</span>' +
+          (rm ? '<span class="dp-kind">' + esc(rm.type) + '</span>' : '') + '</div></div>';
+      }
+    }
+  }
   h += '<div class="dp-btns"><button data-btn="addroom">＋ Room</button>' +
     '<button data-btn="addnote" title="Add a positioned note — a leader callout on the plan">＋ Note</button></div>';
   if (dpForm === 'room') h += addRoomForm(p);
@@ -4371,6 +4475,23 @@ function renderPanel(){
 function renderInspector(p){
   if (!dpSel)
     return '<h5>Properties</h5><div class="dp-note">Select a room, opening or fixture above — or click one on the plan in edit mode.</div>';
+  if (dpSel.t === 'inst'){
+    const inst = (p.instances || []).find(x => x.alias === dpSel.k);
+    if (!inst){ dpSel = null; return ''; }
+    const levels = p.levels || [0];
+    let lvOpts = '';
+    for (const lv of levels) lvOpts += '<option value="' + lv + '"' +
+      (lv === inst.level ? ' selected' : '') + '>' + lv + '</option>';
+    return '<h5>Instance — ' + esc(inst.alias) + '</h5><div class="dp-grid">' +
+      '<label>part</label><span class="dp-kind wide">' + esc(inst.relpath) + '</span>' +
+      '<label>at</label><input type="text" inputmode="text" data-act="inst.x" title="South-west corner x (ft — accepts 12′6″)" value="' + trimNum(inst.x) + '">' +
+      '<input type="text" inputmode="text" data-act="inst.y" title="South-west corner y (ft — accepts 12′6″)" value="' + trimNum(inst.y) + '">' +
+      '<label>level</label><select data-act="inst.level">' + lvOpts + '</select><span></span>' +
+      '</div><div class="dp-btns">' +
+      '<button data-btn="inlineinst" title="Replace the use with its stamped statements — makes the part local and editable">Inline</button>' +
+      '<button data-btn="dupinst" title="Add another instance of this part at a small offset">Duplicate</button>' +
+      '<button class="danger" data-btn="delinst" title="Remove the use line (and everything it stamped) — one undo brings it back">Delete instance</button></div>';
+  }
   if (dpSel.t === 'room'){
     const r = p.rooms.find(x => x.id === dpSel.k);
     if (!r){ dpSel = null; return ''; }
@@ -4550,6 +4671,18 @@ function dpChange(act, el){
     else if (act === 'fx.width' && isFinite(num) && num > 0) applyEdits([Object.assign(base, { width:num })], 'fixture');
     return;
   }
+  if (dpSel && dpSel.t === 'inst'){
+    const inst = (p.instances || []).find(x => x.alias === dpSel.k); if (!inst) return;
+    if (act === 'inst.x' || act === 'inst.y'){
+      const x = act === 'inst.x' ? num : inst.x, y = act === 'inst.y' ? num : inst.y;
+      if (isFinite(x) && isFinite(y)) applyEdits([{ kind:'move_use', alias:inst.alias, x:x, y:y }], 'move part');
+    } else if (act === 'inst.level'){
+      const lv = parseInt(v, 10);
+      if (isFinite(lv) && lv >= 0 && lv !== inst.level)
+        applyEdits([{ kind:'set_use', alias:inst.alias, level:lv }], 'part level');
+    }
+    return;
+  }
   if (dpSel && dpSel.t === 'note'){
     const n = (p.notes || []).find(x => x.index === dpSel.k); if (!n) return;
     const base = { kind:'set_note', index:n.index };
@@ -4684,6 +4817,20 @@ function duplicateRoom(r){
                 anchor:(pick ? pick[0] : 'east-of'), of:r.id, level:r.level }], 'duplicate room')
     .then(ok => { if (ok) dpSelect('room', id); });
 }
+// Duplicate an instance: a fresh alias for the same part, offset a little so the
+// stamped twin doesn't land exactly on the original (an add_use edit).
+function duplicateInstance(){
+  const p = lastGood; if (!p || !dpSel || dpSel.t !== 'inst') return;
+  const inst = (p.instances || []).find(x => x.alias === dpSel.k); if (!inst) return;
+  const aliases = new Set((p.instances || []).map(i => i.alias));
+  const base = inst.alias.replace(/\d+$/, '') || inst.alias;
+  let n = 2, alias = base + n;
+  while (aliases.has(alias)){ n++; alias = base + n; }
+  const off = 3;
+  applyEdits([{ kind:'add_use', relpath:inst.relpath, alias:alias,
+                x:inst.x + off, y:inst.y + off, level:inst.level }], 'duplicate part')
+    .then(ok => { if (ok) dpSelect('inst', alias); });
+}
 function submitOpeningForm(){
   const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
   const r = p.rooms.find(x => x.id === dpSel.k); if (!r) return;
@@ -4726,6 +4873,14 @@ dpEl.addEventListener('click', e => {
     const p = lastGood, r = p && dpSel && dpSel.t === 'room' && p.rooms.find(x => x.id === dpSel.k);
     if (r) duplicateRoom(r);
   }
+  else if (b === 'dupinst'){ duplicateInstance(); }
+  else if (b === 'inlineinst'){
+    if (dpSel && dpSel.t === 'inst') applyEdits([{ kind:'inline_use', alias:dpSel.k }], 'inline part');
+  }
+  else if (b === 'delinst'){
+    if (dpSel && dpSel.t === 'inst'){ const a = dpSel.k; dpSel = null;
+      applyEdits([{ kind:'delete_use', alias:a }], 'delete part'); }
+  }
   else if (b === 'delroom' || b === 'delop' || b === 'delfx' || b === 'delnote') dpDelete();
 });
 dpEl.addEventListener('change', e => {
@@ -4748,6 +4903,10 @@ function histInit(v){
   updateUndoRedo();
 }
 function histCommit(v, s, e, label){
+  // A write that changes nothing on screen must not mint an undo step — e.g. a
+  // blur re-firing `change` after a committed edit posts a no-op whose returned
+  // source is identical; pushing it would make the next undo appear dead.
+  if (v === histMirror) return;
   history.length = histIndex + 1;                 // a new change discards any redo tail
   history.push({ v: v, s: s, e: e, label: label });
   histIndex = history.length - 1;

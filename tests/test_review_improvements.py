@@ -321,7 +321,7 @@ def test_compile_result_to_dict_is_machine_readable():
     for d in data["diagnostics"]:
         assert set(d) == {
             "code", "severity", "line", "col", "end_col", "room", "message", "hint",
-            "accepted", "accept_reason",
+            "accepted", "accept_reason", "file", "part",
         }
 
 

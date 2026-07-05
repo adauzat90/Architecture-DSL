@@ -133,6 +133,12 @@ class Edit:
     #: ``delete_note`` uses ``index``.
     text: str | None = None
     index: int | None = None
+    #: Cross-file composition (the `use` statement). ``add_use`` uses
+    #: ``relpath``/``alias``/``x``/``y``/``level``; ``move_use`` ``alias``+``x``/``y``;
+    #: ``set_use`` ``alias``+``level`` (level-only in 7a); ``delete_use``/``inline_use``
+    #: ``alias``. The ``alias`` names the instance to act on.
+    relpath: str | None = None
+    alias: str | None = None
     #: Electrical edits (the `outlet`/`switch`/`light` statements). ``add_outlet``
     #: uses ``room``/``wall``/``offset``/``gfci``; ``add_switch`` ``room``/``wall``/
     #: ``offset``; ``add_light`` ``room``/``x``/``y``/``fkind`` (the light kind).
@@ -279,6 +285,21 @@ def edit_from_json(obj: object) -> Edit | EditError:
                     x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
     if kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
         return Edit(kind, index=_as_int(obj.get("index")))
+    if kind == "add_use":
+        return Edit("add_use", relpath=_as_str(obj.get("relpath")),
+                    alias=_as_str(obj.get("alias")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
+                    level=_as_int(obj.get("level")))
+    if kind == "move_use":
+        return Edit("move_use", alias=_as_str(obj.get("alias")),
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+    if kind == "set_use":
+        return Edit("set_use", alias=_as_str(obj.get("alias")),
+                    level=_as_int(obj.get("level")))
+    if kind == "delete_use":
+        return Edit("delete_use", alias=_as_str(obj.get("alias")))
+    if kind == "inline_use":
+        return Edit("inline_use", alias=_as_str(obj.get("alias")))
     return EditError("malformed", f"unknown edit kind {kind!r}")
 
 
@@ -445,7 +466,7 @@ def opening_overlays(plan) -> list[dict]:
 # --- the edit engine ---------------------------------------------------------
 
 
-def apply_edit(source: str, edit: Edit) -> EditResult:
+def apply_edit(source: str, edit: Edit, base_dir: str | None = None) -> EditResult:
     """Apply one :class:`Edit` to DSL ``source``, returning an :class:`EditResult`.
 
     Compiles ``source`` to locate the target statement, rewrites only the tokens
@@ -455,15 +476,36 @@ def apply_edit(source: str, edit: Edit) -> EditResult:
     with ``changed=False``; a relative placement is only converted to absolute
     when the coordinates actually change. Bad edits return a typed
     :class:`EditError`, never an exception.
+
+    ``base_dir`` is the directory ``use "<relpath>"`` paths resolve against (the
+    served file's folder) — so composition edits and the stamped-member guard see
+    the real composed plan. ``None`` leaves ``use`` unresolved (see
+    :func:`barndsl.compiler.compile_source`).
     """
     shape = _validate_shape(edit)
     if shape is not None:
         return EditResult(source, error=shape)
-    result = compile_source(source)
+    result = compile_source(source, base_dir=base_dir)
     if result.plan is None:
         return EditResult(
             source, error=EditError("not_editable", "source does not compile to a plan")
         )
+    # Cross-file composition edits act on the `use` line, not a stamped member.
+    if edit.kind == "add_use":
+        return _add_use(source, result, edit)
+    if edit.kind == "move_use":
+        return _move_use(source, result, edit)
+    if edit.kind == "set_use":
+        return _set_use(source, result, edit)
+    if edit.kind == "delete_use":
+        return _delete_use(source, result, edit)
+    if edit.kind == "inline_use":
+        return _inline_use(source, result, edit)
+    # Stamped members are read-only — an edit that would mutate one is refused with
+    # a typed teaching error (edit the part file, or Inline the instance).
+    member_err = _refuse_stamped(result, edit)
+    if member_err is not None:
+        return EditResult(source, error=member_err)
     if edit.kind == "move_room":
         return _move_room(source, result, edit)
     if edit.kind == "resize_room":
@@ -736,6 +778,32 @@ def _validate_shape(edit: Edit) -> EditError | None:
     if edit.kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
         if edit.index is None or edit.index < 0:
             return EditError("malformed", f"{edit.kind} needs an index >= 0")
+        return None
+    if edit.kind == "add_use":
+        if not edit.relpath:
+            return EditError("malformed", "add_use needs a part path")
+        if not edit.alias or not _IDENT_RE.match(edit.alias):
+            return EditError("bad_value", "add_use needs a valid alias (a plain identifier)")
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "add_use needs finite x and y")
+        if edit.level is not None and edit.level < 0:
+            return EditError("bad_value", "add_use level must be >= 0")
+        return None
+    if edit.kind == "move_use":
+        if not edit.alias:
+            return EditError("malformed", "move_use needs an alias")
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "move_use needs finite x and y")
+        return None
+    if edit.kind == "set_use":
+        if not edit.alias:
+            return EditError("malformed", "set_use needs an alias")
+        if edit.level is None or edit.level < 0:
+            return EditError("malformed", "set_use needs a level >= 0")
+        return None
+    if edit.kind in ("delete_use", "inline_use"):
+        if not edit.alias:
+            return EditError("malformed", f"{edit.kind} needs an alias")
         return None
     return EditError("malformed", f"unknown edit kind {edit.kind!r}")
 
@@ -1675,6 +1743,165 @@ def _delete_electrical(source: str, result: CompileResult, edit: Edit) -> EditRe
     new_source = _rebuild_without(_lines(source), {dev.line})
     return EditResult(new_source, changed=True, line=dev.line,
                       summary=f"deleted {which[1]} #{idx}")
+
+
+# --- cross-file composition edits (the `use` statement) ----------------------
+# Stamped members are read-only; instances are first-class. Member edits are
+# refused with a typed teaching error (edit the part, or Inline); the instance
+# lives on the `use` line, edited by add/move/set/delete/inline_use.
+
+
+def _instance_by_alias(result: CompileResult, alias: str | None):
+    for inst in getattr(result.plan, "instances", []):
+        if inst.alias == alias:
+            return inst
+    return None
+
+
+def _refuse_stamped(result: CompileResult, edit: Edit) -> EditError | None:
+    """A typed ``not_editable`` if ``edit`` would mutate a stamped member.
+
+    The stamped element is owned by its part file — the message points the author
+    at the part, or at Inlining the instance to make it local (§6)."""
+    plan = result.plan
+    assert plan is not None
+    stamped: set[str] = getattr(plan, "stamped_rooms", set())
+    if not stamped:
+        return None
+
+    def refuse(rid: str) -> EditError:
+        inst = next((i for i in plan.instances if rid in i.room_ids), None)
+        where = inst.relpath if inst is not None else "a part"
+        return EditError(
+            "not_editable",
+            f"{rid} is stamped from {where} — edit that file, or Inline the "
+            "instance to make it local.",
+        )
+
+    room_edits = {
+        "move_room", "resize_room", "set_room_type", "rename_room", "delete_room",
+        "add_fixture", "add_outlet", "add_switch", "add_light", "add_alarm",
+    }
+    if edit.kind in room_edits and edit.room in stamped:
+        return refuse(edit.room)
+    if edit.kind == "add_opening" and edit.opening in ("window", "entry") and edit.room in stamped:
+        return refuse(edit.room)
+    if edit.kind in ("move_fixture", "set_fixture", "delete_fixture") and edit.key:
+        # The fixture key is `<room>~<kind>~<i>`; its room is the leading segment.
+        room = edit.key.split("~", 1)[0]
+        if room in stamped:
+            return refuse(room)
+    return None
+
+
+def _use_line(result: CompileResult, alias: str) -> tuple[object | None, int | None]:
+    """The ``UseSpec`` (and its 1-based source line) for ``alias``, or ``(None, None)``."""
+    for u in getattr(result.plan, "uses", []):
+        if u.alias == alias:
+            return u, u.line
+    return None, None
+
+
+def _use_stmt(relpath: str, alias: str, x: float, y: float, level: int) -> str:
+    line = f'use "{relpath}" as {alias} at {_fmt(x)},{_fmt(y)}'
+    if level:
+        line += f" level {level}"
+    return line
+
+
+def _add_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    if _instance_by_alias(result, edit.alias) is not None or any(
+        u.alias == edit.alias for u in result.plan.uses
+    ):
+        return EditResult(source, error=EditError(
+            "bad_value", f"alias {edit.alias!r} is already used"))
+    level = int(edit.level) if edit.level is not None else 0
+    stmt = _use_stmt(edit.relpath, edit.alias, float(edit.x), float(edit.y), level)  # type: ignore[arg-type]
+    lines = _lines(source)
+    use_lines = [u.line for u in result.plan.uses if u.line is not None]
+    if use_lines:
+        after = max(use_lines)
+    else:
+        after = _envelope_line(lines) or len(lines)
+    lines.insert(after, stmt)
+    return EditResult("\n".join(lines), changed=True, line=after + 1,
+                      summary=f"added use {edit.alias}")
+
+
+def _move_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    use, line_no = _use_line(result, edit.alias)  # type: ignore[arg-type]
+    if use is None or line_no is None:
+        return EditResult(source, error=EditError(
+            "unknown_room", f"no instance {edit.alias!r} in the plan"))
+    nx, ny = float(edit.x), float(edit.y)  # type: ignore[arg-type]
+    if _close(use.x, nx) and _close(use.y, ny):  # type: ignore[attr-defined]
+        return EditResult(source, changed=False, line=line_no,
+                          summary=f"{edit.alias} unchanged")
+    stmt = _use_stmt(use.relpath, use.alias, nx, ny, use.level)  # type: ignore[attr-defined]
+    lines = _lines(source)
+    lines[line_no - 1] = _with_comment(lines[line_no - 1], stmt)
+    return EditResult("\n".join(lines), changed=True, line=line_no,
+                      summary=f"moved {edit.alias} to {_fmt(nx)},{_fmt(ny)}")
+
+
+def _set_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    use, line_no = _use_line(result, edit.alias)  # type: ignore[arg-type]
+    if use is None or line_no is None:
+        return EditResult(source, error=EditError(
+            "unknown_room", f"no instance {edit.alias!r} in the plan"))
+    level = int(edit.level)  # type: ignore[arg-type]
+    if use.level == level:  # type: ignore[attr-defined]
+        return EditResult(source, changed=False, line=line_no,
+                          summary=f"{edit.alias} already on level {level}")
+    stmt = _use_stmt(use.relpath, use.alias, use.x, use.y, level)  # type: ignore[attr-defined]
+    lines = _lines(source)
+    lines[line_no - 1] = _with_comment(lines[line_no - 1], stmt)
+    return EditResult("\n".join(lines), changed=True, line=line_no,
+                      summary=f"{edit.alias} → level {level}")
+
+
+def _delete_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    assert result.plan is not None
+    _use, line_no = _use_line(result, edit.alias)  # type: ignore[arg-type]
+    if line_no is None:
+        return EditResult(source, error=EditError(
+            "unknown_room", f"no instance {edit.alias!r} in the plan"))
+    new_source = _rebuild_without(_lines(source), {line_no})
+    return EditResult(new_source, changed=True, line=line_no,
+                      summary=f"deleted instance {edit.alias}")
+
+
+def _inline_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    """Replace the ``use`` line with the stamped members as literal statements —
+    the escape hatch that keeps text sovereign (§6). One undo step; the inlined
+    plan recompiles to the same composed plan."""
+    assert result.plan is not None
+    inst = _instance_by_alias(result, edit.alias)
+    _use, line_no = _use_line(result, edit.alias)  # type: ignore[arg-type]
+    if inst is None or line_no is None:
+        return EditResult(source, error=EditError(
+            "not_editable", f"instance {edit.alias!r} isn't stamped (nothing to inline)"))
+    from .emit import instance_lines
+
+    body = instance_lines(inst)
+    lines = _lines(source)
+    lines[line_no - 1:line_no] = body
+    return EditResult("\n".join(lines), changed=True, line=line_no,
+                      summary=f"inlined instance {edit.alias} ({len(body)} statement(s))")
+
+
+def _with_comment(raw: str, stmt: str) -> str:
+    """Replace ``raw``'s statement with ``stmt``, preserving any trailing comment
+    and leading indentation."""
+    from .pragma import _comment_start
+
+    indent = raw[:len(raw) - len(raw.lstrip())]
+    cut = _comment_start(raw)
+    comment = "" if cut is None else " " + raw[cut:].strip()
+    return f"{indent}{stmt}{comment}"
 
 
 __all__ = [

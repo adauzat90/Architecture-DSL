@@ -742,6 +742,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from .playground import run
 
     source = None
+    base_dir = None
     if getattr(args, "file", None):
         try:
             with open(args.file, encoding="utf-8") as fh:
@@ -749,9 +750,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"error: cannot read {args.file}: {exc.strerror or exc}", file=sys.stderr)
             return 2
+        # The served file's directory is the resolution root for `use` (cross-file
+        # composition); a scratch buffer (no file) leaves parts unresolvable.
+        base_dir = os.path.dirname(os.path.abspath(args.file))
     return run(
         initial_source=source, port=args.port, open_browser=getattr(args, "open", False),
-        from_file=source is not None,
+        from_file=source is not None, base_dir=base_dir,
     )
 
 

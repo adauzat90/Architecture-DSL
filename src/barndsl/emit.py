@@ -20,8 +20,184 @@ def _q(text: str) -> str:
     return f'"{escaped}"'
 
 
-def emit_dsl(plan: Barndominium) -> str:
-    """Return canonical DSL source for ``plan``."""
+def instance_lines(inst: object) -> list[str]:
+    """Canonical DSL statement lines for one stamped :class:`~barndsl.elements.Instance`.
+
+    The flattened form of a single ``use`` — every stamped element as a literal
+    host statement, dotted ids kept (so references keep resolving). Used by the
+    ``inline_use`` edit to replace one ``use`` line with its members in place, and
+    ordered rooms-first so relative reads never precede their target (stamped rooms
+    are absolute ``at`` anyway). Part-file comments don't survive (same rule as
+    :func:`emit_dsl`).
+    """
+    from .elements import (
+        Alarm, ExteriorDoor, InteriorDoor, Light, Note, Outlet, PlacedFixture,
+        Porch, Room, Switch, WallSpec, Window,
+    )
+
+    rooms, doors, exts, wins, fixts, elec, alarms, notes, porches, walls = (
+        [], [], [], [], [], [], [], [], [], [])
+    for o in getattr(inst, "objects", []):
+        if isinstance(o, Room):
+            rooms.append(_room_line(o))
+        elif isinstance(o, InteriorDoor):
+            doors.append(_interior_door_line(o))
+        elif isinstance(o, ExteriorDoor):
+            exts.append(_exterior_door_line(o))
+        elif isinstance(o, Window):
+            wins.append(_window_line(o))
+        elif isinstance(o, PlacedFixture):
+            fixts.append(_fixture_line(o))
+        elif isinstance(o, Outlet):
+            elec.append(_outlet_line(o))
+        elif isinstance(o, Switch):
+            elec.append(_switch_line(o))
+        elif isinstance(o, Light):
+            elec.append(_light_line(o))
+        elif isinstance(o, Alarm):
+            alarms.append(_alarm_line(o))
+        elif isinstance(o, Note):
+            notes.append(_note_line(o))
+        elif isinstance(o, Porch):
+            porches.append(_porch_line(o))
+        elif isinstance(o, WallSpec):
+            walls.append(f"wall {o.room_a} - {o.room_b} {' '.join(o.attributes)}")
+    return rooms + walls + doors + exts + wins + fixts + elec + alarms + notes + porches
+
+
+def _room_line(r: object) -> str:
+    line = (
+        f"room {r.id}: {r.type.value} at {_n(r.x)},{_n(r.y)} "  # type: ignore[attr-defined]
+        f"size {_n(r.width)} x {_n(r.length)}"  # type: ignore[attr-defined]
+    )
+    if getattr(r, "level", 0):
+        line += f" level {r.level}"  # type: ignore[attr-defined]
+    ch = getattr(r, "ceiling_height", None)
+    if ch is not None:
+        line += f" ceiling {_n(ch)}"
+    if getattr(r, "vaulted", False):
+        line += " vaulted"
+    return line
+
+
+def _interior_door_line(d: object) -> str:
+    kind = getattr(d, "kind", "swing")
+    if kind == "cased":
+        line = f"open {d.room_a} - {d.room_b} width {_n(d.width)}"  # type: ignore[attr-defined]
+    else:
+        line = f"door {d.room_a} - {d.room_b}"  # type: ignore[attr-defined]
+        if kind != "swing":
+            line += f" {kind}"
+        line += f" width {_n(d.width)}"  # type: ignore[attr-defined]
+    if d.offset is not None:  # type: ignore[attr-defined]
+        line += f" offset {_n(d.offset)}"  # type: ignore[attr-defined]
+    if getattr(d, "swing_into", None) is not None:
+        line += f" into {d.swing_into}"  # type: ignore[attr-defined]
+    if getattr(d, "hinge", None) is not None:
+        line += f" hinge {d.hinge}"  # type: ignore[attr-defined]
+    return line
+
+
+def _exterior_door_line(xd: object) -> str:
+    if getattr(xd, "kind", "entry") == "overhead":
+        h = xd.height if xd.height is not None else OVERHEAD_DOOR_HEIGHT  # type: ignore[attr-defined]
+        return (
+            f"door {xd.room} {xd.wall.value} overhead width {_n(xd.width)} "  # type: ignore[attr-defined]
+            f"height {_n(h)} offset {_n(xd.offset)}"  # type: ignore[attr-defined]
+        )
+    line = f"entry {xd.room} {xd.wall.value}"  # type: ignore[attr-defined]
+    if getattr(xd, "kind", "entry") in ("double", "french"):
+        line += f" {xd.kind}"  # type: ignore[attr-defined]
+    line += f" width {_n(xd.width)} offset {_n(xd.offset)}"  # type: ignore[attr-defined]
+    if not xd.egress:  # type: ignore[attr-defined]
+        line += " no-egress"
+    return line
+
+
+def _window_line(w: object) -> str:
+    line = f"window {w.room} {w.wall.value}"  # type: ignore[attr-defined]
+    if getattr(w, "kind", "casement") != "casement":
+        line += f" {w.kind}"  # type: ignore[attr-defined]
+    line += f" width {_n(w.width)} offset {_n(w.offset)}"  # type: ignore[attr-defined]
+    if abs(w.sill_height - 3.0) > 1e-6:  # type: ignore[attr-defined]
+        line += f" sill {_n(w.sill_height)}"  # type: ignore[attr-defined]
+    if abs(w.head_height - 6.67) > 1e-6:  # type: ignore[attr-defined]
+        line += f" head {_n(w.head_height)}"  # type: ignore[attr-defined]
+    if getattr(w, "tempered", False):
+        line += " tempered"
+    return line
+
+
+def _fixture_line(f: object) -> str:
+    line = f"fixture {f.kind} in {f.room}"  # type: ignore[attr-defined]
+    if f.x is not None and f.y is not None:  # type: ignore[attr-defined]
+        line += f" at {_n(f.x)},{_n(f.y)}"  # type: ignore[attr-defined]
+    if f.wall is not None:  # type: ignore[attr-defined]
+        line += f" wall {f.wall.value[0].upper()}"  # type: ignore[attr-defined]
+    if f.rotation:  # type: ignore[attr-defined]
+        line += f" rotate {_n(f.rotation)}"  # type: ignore[attr-defined]
+    if f.width is not None:  # type: ignore[attr-defined]
+        line += f" width {_n(f.width)}"  # type: ignore[attr-defined]
+    return line
+
+
+def _outlet_line(o: object) -> str:
+    line = f"outlet in {o.room} wall {o.wall.value[0].upper()} offset {_n(o.offset)}"  # type: ignore[attr-defined]
+    if o.gfci:  # type: ignore[attr-defined]
+        line += " gfci"
+    return line
+
+
+def _switch_line(sw: object) -> str:
+    return f"switch in {sw.room} wall {sw.wall.value[0].upper()} offset {_n(sw.offset)}"  # type: ignore[attr-defined]
+
+
+def _light_line(lt: object) -> str:
+    line = f"light in {lt.room} at {_n(lt.x)},{_n(lt.y)}"  # type: ignore[attr-defined]
+    if lt.kind != "ceiling":  # type: ignore[attr-defined]
+        line += f" kind {lt.kind}"  # type: ignore[attr-defined]
+    return line
+
+
+def _alarm_line(a: object) -> str:
+    line = f"alarm {a.kind} in {a.room}"  # type: ignore[attr-defined]
+    if a.x is not None and a.y is not None:  # type: ignore[attr-defined]
+        line += f" at {_n(a.x)},{_n(a.y)}"  # type: ignore[attr-defined]
+    return line
+
+
+def _note_line(nm: object) -> str:
+    line = f"note {_q(nm.text)} at {_n(nm.x)},{_n(nm.y)}"  # type: ignore[attr-defined]
+    if nm.level:  # type: ignore[attr-defined]
+        line += f" level {nm.level}"  # type: ignore[attr-defined]
+    return line
+
+
+def _porch_line(p: object) -> str:
+    tag = "covered" if p.covered else "open"  # type: ignore[attr-defined]
+    return (
+        f"porch {p.id} at {_n(p.x)},{_n(p.y)} "  # type: ignore[attr-defined]
+        f"size {_n(p.width)} x {_n(p.length)} {tag}"  # type: ignore[attr-defined]
+    )
+
+
+def emit_dsl(plan: Barndominium, flatten: bool = False) -> str:
+    """Return canonical DSL source for ``plan``.
+
+    Cross-file composition (see :mod:`barndsl.compose`) round-trips two ways:
+
+    * default (``flatten=False``) — emit each ``use`` line **verbatim**
+      (path/alias/at/level) and *skip* the elements it stamped, so the composed
+      plan is described by reference (host text + ``use`` lines).
+    * ``flatten=True`` — drop the ``use`` lines and emit the stamped elements as
+      literal host statements (dotted ids kept), inlining every part. Recompiling
+      the flattened form reproduces the same composed plan.
+    """
+    stamped = set() if flatten else {id(o) for inst in plan.instances for o in inst.objects}
+
+    def keep(objs: list) -> list:
+        return objs if flatten else [o for o in objs if id(o) not in stamped]
+
     out: list[str] = [f"plan {_q(plan.name)}"]
     out.append(f"envelope {_n(plan.envelope_width)} x {_n(plan.envelope_length)}")
     for wing in plan.wings:
@@ -95,19 +271,19 @@ def emit_dsl(plan: Barndominium) -> str:
             out.append(line)
         else:  # area
             out.append(f"require area {req.a} >= {_n(req.min_area)}")
-    for ws in getattr(plan, "wall_specs", None) or []:
+    for ws in keep(getattr(plan, "wall_specs", None) or []):
         # Declared wall attributes sit in the same contract block; attributes
         # are stored in canonical order, so this is already deterministic.
         out.append(f"wall {ws.room_a} - {ws.room_b} {' '.join(ws.attributes)}")
-    for s in getattr(plan, "suites", None) or []:
+    for s in keep(getattr(plan, "suites", None) or []):
         # Declared groupings ride the contract block, in declaration order.
         out.append(f"suite {s.id}: {' '.join(s.members)}")
-    for z in getattr(plan, "zones", None) or []:
+    for z in keep(getattr(plan, "zones", None) or []):
         out.append(f"zone {z.id}: {' '.join(z.members)}")
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")
-    for nm in getattr(plan, "note_marks", None) or []:
+    for nm in keep(getattr(plan, "note_marks", None) or []):
         line = f"note {_q(nm.text)} at {_n(nm.x)},{_n(nm.y)}"
         if nm.level:
             line += f" level {nm.level}"
@@ -120,9 +296,19 @@ def emit_dsl(plan: Barndominium) -> str:
             line += " no-ridge"
         out.append(line)
 
-    if plan.rooms:
+    if not flatten and plan.uses:
+        # Cross-file composition — emit the `use` lines verbatim; the stamped
+        # elements they pull in are skipped below (see `keep`).
         out.append("")
-        for r in plan.rooms:
+        for u in plan.uses:
+            line = f"use {_q(u.relpath)} as {u.alias} at {_n(u.x)},{_n(u.y)}"
+            if u.level:
+                line += f" level {u.level}"
+            out.append(line)
+
+    if keep(plan.rooms):
+        out.append("")
+        for r in keep(plan.rooms):
             line = (
                 f"room {r.id}: {r.type.value} at {_n(r.x)},{_n(r.y)} "
                 f"size {_n(r.width)} x {_n(r.length)}"
@@ -136,9 +322,9 @@ def emit_dsl(plan: Barndominium) -> str:
                 line += " vaulted"
             out.append(line)
 
-    if plan.interior_doors:
+    if keep(plan.interior_doors):
         out.append("")
-        for d in plan.interior_doors:
+        for d in keep(plan.interior_doors):
             kind = getattr(d, "kind", "swing" if getattr(d, "leaf", True) else "cased")
             if kind == "cased":
                 # Emit the terse `open` shorthand for a cased opening.
@@ -156,9 +342,9 @@ def emit_dsl(plan: Barndominium) -> str:
                 line += f" hinge {d.hinge}"
             out.append(line)
 
-    if plan.exterior_doors:
+    if keep(plan.exterior_doors):
         out.append("")
-        for xd in plan.exterior_doors:
+        for xd in keep(plan.exterior_doors):
             if getattr(xd, "kind", "entry") == "overhead":
                 # An overhead door has no egress flag (no-egress is implied);
                 # height is always emitted (7 is the stock default).
@@ -176,9 +362,9 @@ def emit_dsl(plan: Barndominium) -> str:
                 line += " no-egress"
             out.append(line)
 
-    if plan.windows:
+    if keep(plan.windows):
         out.append("")
-        for w in plan.windows:
+        for w in keep(plan.windows):
             line = f"window {w.room} {w.wall.value}"
             if getattr(w, "kind", "casement") != "casement":
                 line += f" {w.kind}"  # the kind rides right after the wall
@@ -193,12 +379,12 @@ def emit_dsl(plan: Barndominium) -> str:
                 line += " tempered"  # declared safety glazing (R308.4 escape hatch)
             out.append(line)
 
-    if plan.fixtures:
+    if keep(plan.fixtures):
         # Author-placed fixtures only. Auto-seeds (bath/kitchen/laundry footprints
         # the layout derives) are never stored in `plan.fixtures`, so they never
         # reach here — the emitted source carries exactly what the author wrote.
         out.append("")
-        for f in plan.fixtures:
+        for f in keep(plan.fixtures):
             line = f"fixture {f.kind} in {f.room}"
             if f.x is not None and f.y is not None:
                 line += f" at {_n(f.x)},{_n(f.y)}"
@@ -210,9 +396,9 @@ def emit_dsl(plan: Barndominium) -> str:
                 line += f" width {_n(f.width)}"
             out.append(line)
 
-    if plan.porches:
+    if keep(plan.porches):
         out.append("")
-        for p in plan.porches:
+        for p in keep(plan.porches):
             tag = "covered" if p.covered else "open"
             out.append(
                 f"porch {p.id} at {_n(p.x)},{_n(p.y)} "
@@ -227,28 +413,27 @@ def emit_dsl(plan: Barndominium) -> str:
                 f"size {_n(s.width)} x {_n(s.length)} from {s.from_level} to {s.to_level}"
             )
 
-    if getattr(plan, "outlets", None) or getattr(plan, "switches", None) or getattr(
-        plan, "lights", None
-    ):
+    outlets, switches, lights = keep(plan.outlets), keep(plan.switches), keep(plan.lights)
+    if outlets or switches or lights:
         out.append("")
-        for o in plan.outlets:
+        for o in outlets:
             line = f"outlet in {o.room} wall {o.wall.value[0].upper()} offset {_n(o.offset)}"
             if o.gfci:
                 line += " gfci"
             out.append(line)
-        for sw in plan.switches:
+        for sw in switches:
             out.append(
                 f"switch in {sw.room} wall {sw.wall.value[0].upper()} offset {_n(sw.offset)}"
             )
-        for lt in plan.lights:
+        for lt in lights:
             line = f"light in {lt.room} at {_n(lt.x)},{_n(lt.y)}"
             if lt.kind != "ceiling":
                 line += f" kind {lt.kind}"
             out.append(line)
 
-    if getattr(plan, "alarms", None):
+    if keep(plan.alarms):
         out.append("")
-        for a in plan.alarms:
+        for a in keep(plan.alarms):
             line = f"alarm {a.kind} in {a.room}"
             if a.x is not None and a.y is not None:
                 line += f" at {_n(a.x)},{_n(a.y)}"

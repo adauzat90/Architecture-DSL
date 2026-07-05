@@ -101,6 +101,40 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "`entry`/`window` option)."),
         _c("UNKNOWN_STMT", E, "Unknown statement",
            "The line doesn't start with a known statement keyword."),
+        # --- cross-file composition (the `use` statement + part files) ------
+        _c("USE_UNRESOLVED", E, "Part path can't be resolved",
+           "A `use \"<relpath>\"` names a part file that can't be resolved: the "
+           "path is missing, absolute, escapes the including file's directory "
+           "(`..`/symlink), exceeds the size limit, or the source has no home "
+           "directory to resolve against (a pasted or browser-opened buffer). "
+           "Paths are always relative to the including file — compile the file, "
+           "or serve its folder, and keep parts under it."),
+        _c("USE_ALIAS_DUP", E, "Duplicate use alias",
+           "Two `use` statements share an `as <alias>`. Every id inside a part is "
+           "stamped `<alias>.<id>`, so aliases must be unique across the plan — "
+           "give each instance its own (`m`, `m2`, `bath_1`, ...)."),
+        _c("USE_NESTED", E, "Nested use in a part",
+           "A part file contains its own `use` statement. Parts can't compose other "
+           "parts in v1 (`use` depth is 1) — flatten the inner part into this one, "
+           "or `use` both from the host."),
+        _c("USE_PART_INVALID", E, "Part fails to compile",
+           "A used part file doesn't compile cleanly on its own (in fragment mode): "
+           "it has one or more errors of its own. The part-internal diagnostics are "
+           "reported once, anchored to the part file — fix the part, then re-use it."),
+        _c("PART_HOST_STMT", E, "Host-only statement in a part",
+           "A part file uses a statement that describes a whole building, not a "
+           "reusable block — `envelope`, `plan`, `wing`, `ceiling`, `program`, "
+           "`require`, `site`, `setback`, `building`, `street`, `orientation`, "
+           "`roof`, `overhang`, `finish`, `frame`, `electrical`, `use` or `stair`. "
+           "A part borrows the host's; size it by its rooms and drop the statement."),
+        _c("PART_ORIGIN", I, "Part origin normalized",
+           "A part's south-west-most corner wasn't at 0,0, so the loader shifted "
+           "the whole part to the origin before stamping (the `at` on the `use` "
+           "line then places that corner). Harmless — parts are authored in their "
+           "own local feet and needn't start at 0,0."),
+        _c("PART_EMPTY", E, "Part declares no rooms",
+           "A part file (any `.barn` file with no `plan` header) must declare at "
+           "least one `room`. An empty part composes nothing."),
         # --- envelope / wings / top level -----------------------------------
         _c("ENVELOPE", E, "Bad envelope",
            "The envelope must have positive width and length, e.g. `envelope 60 x 40`."),

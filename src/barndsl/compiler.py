@@ -26,6 +26,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
     fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]  # place a fixture/furnishing
+    use "<relpath>" as <alias> at <x>,<y> [level <n>]     # stamp a part (cross-file composition)
     outlet in <room> wall N|S|E|W offset <ft> [gfci]      # receptacle on a room wall
     switch in <room> wall N|S|E|W offset <ft>             # wall switch
     light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]  # ceiling luminaire (room-local x,y)
@@ -52,6 +53,7 @@ rejected, and ASCII ``12'6"`` is unsupported because ``"`` starts a string.
 from __future__ import annotations
 
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -83,8 +85,19 @@ _KEYWORDS = (
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
     "roof", "orientation", "finish", "accessible", "site", "setback", "building",
     "suite", "zone", "electrical", "street", "overhang", "climate", "fixture",
-    "outlet", "switch", "light", "alarm",
+    "outlet", "switch", "light", "alarm", "use",
 )
+
+#: Statements that describe a whole *building*, not a reusable block — illegal
+#: inside a part file (fragment mode) → ``PART_HOST_STMT``. A part borrows the
+#: host's. ``use`` is host-only too but gets its own ``USE_NESTED`` code (no
+#: nesting in v1); ``stair`` is deferred with multi-level parts. See the design
+#: doc §3.1.
+_HOST_ONLY = frozenset({
+    "plan", "envelope", "wing", "ceiling", "program", "require", "site",
+    "setback", "building", "street", "orientation", "roof", "overhang",
+    "finish", "frame", "electrical", "stair",
+})
 
 #: Single-letter wall aliases the `fixture` statement accepts (N|S|E|W), plus the
 #: full names, mapped to a :class:`~barndsl.elements.Direction`.
@@ -96,6 +109,9 @@ _FIXTURE_WALLS = {
 }
 _TYPES = ", ".join(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
+
+#: A `use` alias is a plain identifier — no dot (dots namespace stamped ids).
+_ALIAS_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 _DOOR_KINDS = frozenset(DOOR_KINDS)
 _WINDOW_KIND_SET = frozenset(WINDOW_KINDS)
@@ -257,6 +273,20 @@ Statements:
         # alarm (ALARM_BEDROOM), a sleeping area with no adjacent-hall alarm
         # (ALARM_HALL), a level with no smoke alarm (ALARM_LEVEL), and — with
         # bedrooms + a garage/shop — no CO/combo alarm (ALARM_CO, info).
+  use "<relpath>" as <alias> at <x>,<y> [level <n>]
+        # cross-file composition: stamp a PART (any `.barn` file with no `plan`
+        # header — rooms/openings/windows/fixtures/devices in its own local feet)
+        # into this plan. `"<relpath>"` is quoted and RELATIVE to the including
+        # file's directory (absolute paths / `..` escapes / no-home-dir sources are
+        # USE_UNRESOLVED errors — parts stay under the folder you compile or serve).
+        # `as <alias>` is a required, unique identifier: every id inside the part is
+        # stamped `<alias>.<id>` (m.bed, m.bath), and host statements reference those
+        # namespaced ids like locals (`door great - m.bed`). `at <x>,<y>` places the
+        # stamped bounding box's SW corner (ft); `level <n>` lands it on host level n
+        # (default 0). The part is compiled once and stamped per use; part-internal
+        # diagnostics report once (anchored to the part file), placement-dependent
+        # ones per use (anchored to the `use` line). Translation only for now —
+        # `mirror`/`rotate` arrive in a later release.
   frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]
         # auto-place the post-and-beam structural frame over the footprint: bents
         # spaced <= bay ft along the long axis (default 12), each spanning the short
@@ -1639,6 +1669,58 @@ def _parse_statement(
         plan.add_alarm(room_tok.text, akind, x=ax, y=ay)
         am = plan.alarms[-1]
         am.line, am.col, am.end_col = lineno, kw.col, kw.end_col
+    elif key == "use":
+        # `use "<relpath>" as <alias> at <x>,<y> [level <n>]` — stamp a part.
+        # Translation-only in 7a: `mirror`/`rotate` are rejected (they arrive in 7b).
+        from .elements import UseSpec
+
+        path_tok = c.take("a quoted part path")
+        if not path_tok.quoted:
+            raise _ParseError(
+                "SYNTAX",
+                f"Expected a quoted part path, got '{path_tok.text}'.",
+                path_tok.col, end_col=path_tok.end_col,
+                hint='Quote the relative path, e.g. `use "parts/bath_core.barn" as b at 0,0`.',
+            )
+        c.keyword("as")
+        alias_tok = c.ident("an alias")
+        if not _ALIAS_RE.match(alias_tok.text):
+            raise _ParseError(
+                "SYNTAX",
+                f"'{alias_tok.text}' is not a valid alias.",
+                alias_tok.col, end_col=alias_tok.end_col,
+                hint="An alias is a plain identifier (letters, digits, underscore; "
+                "not starting with a digit), e.g. `as m`.",
+            )
+        c.keyword("at")
+        ux = c.number("the use x")
+        uy = c.number("the use y")
+        ulevel = 0
+        while (tok := c.peek()) is not None:
+            opt = tok.text.lower()
+            if opt == "level":
+                c.keyword("level")
+                ulevel = c.level_value()
+            elif opt in ("mirror", "rotate"):
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"`{opt}` on `use` arrives in a later release — place the part "
+                    "with `at` for now.",
+                    tok.col, end_col=tok.end_col,
+                    hint="Phase 7a composes by translation only; mirror/rotate "
+                    "(and their attribute remap) are Phase 7b.",
+                )
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown use option '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint="Options: level <n>. (mirror/rotate arrive in a later release.)",
+                )
+        plan.uses.append(
+            UseSpec(path_tok.text, alias_tok.text, ux, uy, ulevel,
+                    line=lineno, col=kw.col, end_col=kw.end_col)
+        )
     else:
         raise _ParseError(
             "UNKNOWN_STMT",
@@ -1725,6 +1807,8 @@ class CompileResult:
                     "hint": d.hint,
                     "accepted": getattr(d, "accepted", False),
                     "accept_reason": getattr(d, "accept_reason", None),
+                    "file": getattr(d, "file", None),
+                    "part": getattr(d, "part", None),
                 }
                 for d in sorted(
                     self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)
@@ -1758,8 +1842,66 @@ def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[st
     return out
 
 
+def _finish_fragment(
+    plan: Barndominium,
+    diagnostics: list[Issue],
+    source: str,
+    smap: "_SourceMap",
+    pragmas: list,
+    profile: "Profile | None",
+) -> CompileResult:
+    """Finish a fragment (part) compile: PART_EMPTY / origin normalization /
+    local-only validation. See :func:`compile_source` (``fragment=True``)."""
+    from .compose import PART_LOCAL_CODES, normalize_part_origin
+    from .pragma import apply_pragmas
+
+    if not plan.rooms:
+        diagnostics.append(Issue(
+            Severity.ERROR, "PART_EMPTY",
+            "A part declares no rooms — an empty part composes nothing.",
+            hint="Add at least one `room`, e.g. `room bath: bathroom at 0,0 size 8 x 8`.",
+        ))
+        apply_pragmas(diagnostics, pragmas)
+        return CompileResult(plan, diagnostics, source, room_lines=dict(smap.room_line))
+
+    if normalize_part_origin(plan) != (0.0, 0.0):
+        diagnostics.append(Issue(
+            Severity.INFO, "PART_ORIGIN",
+            "Part's south-west corner wasn't at 0,0 — normalized to the origin "
+            "before stamping.",
+            hint="Parts are authored in their own local feet; the `use ... at` "
+            "places this corner.",
+        ))
+    # A synthetic envelope covering the part lets the local checks run without an
+    # ENVELOPE error; the composed host validate is the real placement authority.
+    plan.envelope_width = max(r.x + r.width for r in plan.rooms)
+    plan.envelope_length = max(r.y + r.length for r in plan.rooms)
+
+    try:
+        report = validate(plan, profile)
+    except Exception:
+        report = None
+    if report is not None:
+        for iss in report.issues:
+            if iss.code not in PART_LOCAL_CODES:
+                continue  # whole-building / placement-dependent — skipped in a part
+            if iss.room is not None:
+                if iss.line is None:
+                    iss.line = smap.room_line.get(iss.room)
+                if iss.col is None and iss.room in smap.room_col:
+                    iss.col, iss.end_col = smap.room_col[iss.room]
+            diagnostics.append(iss)
+    apply_pragmas(diagnostics, pragmas)
+    return CompileResult(plan, diagnostics, source, room_lines=dict(smap.room_line))
+
+
 def compile_source(
-    source: str, name: str | None = None, profile: "Profile | None" = None
+    source: str,
+    name: str | None = None,
+    profile: "Profile | None" = None,
+    *,
+    fragment: bool = False,
+    base_dir: str | None = None,
 ) -> CompileResult:
     """Compile DSL ``source`` into a validated plan + diagnostics.
 
@@ -1767,6 +1909,18 @@ def compile_source(
     against (see :mod:`barndsl.profiles`); ``None`` uses the IRC baseline
     (:data:`~barndsl.profiles.DEFAULT`), which is byte-identical to the
     pre-profile behaviour.
+
+    Cross-file composition (see :mod:`barndsl.compose`):
+
+    * ``base_dir`` is the directory ``use "<relpath>"`` paths resolve against —
+      the including file's own directory. ``None`` (a pasted/browser source with
+      no home directory) makes any ``use`` a ``USE_UNRESOLVED`` error.
+    * ``fragment=True`` compiles a **part** file (a ``.barn`` with no ``plan``
+      header): no ``plan``/``envelope`` is required, host-only statements are
+      ``PART_HOST_STMT`` errors, at least one ``room`` is required (``PART_EMPTY``),
+      the origin is normalized to the SW corner (``PART_ORIGIN`` info), and only
+      *local* checks run (whole-building checks are skipped). This is what the
+      loader calls once per part; ordinary top-level compiles use ``fragment=False``.
     """
     from .pragma import apply_pragmas, parse_pragmas
 
@@ -1818,6 +1972,29 @@ def compile_source(
                 )
                 skipped = True
             continue
+        if fragment:
+            key = toks[0].text.lower()
+            if key == "use":
+                diagnostics.append(Issue(
+                    Severity.ERROR, "USE_NESTED",
+                    "A part file can't `use` another part (nesting is depth-1 in v1).",
+                    line=lineno, col=toks[0].col, end_col=toks[0].end_col,
+                    hint="Flatten the inner part into this one, or `use` both from "
+                    "the host.",
+                ))
+                skipped = True
+                continue
+            if key in _HOST_ONLY:
+                diagnostics.append(Issue(
+                    Severity.ERROR, "PART_HOST_STMT",
+                    f"`{key}` describes a whole building — a part borrows the "
+                    "host's. Remove it; size the part by its rooms.",
+                    line=lineno, col=toks[0].col, end_col=toks[0].end_col,
+                    hint="A part is any `.barn` file with no `plan` header: rooms, "
+                    "openings, windows, fixtures, devices — in its own local feet.",
+                ))
+                skipped = True
+                continue
         try:
             _parse_statement(toks, plan, smap, lineno)
         except _ParseError as err:
@@ -1833,6 +2010,21 @@ def compile_source(
                 )
             )
             skipped = True
+
+    # Fragment mode (a part file): no plan/envelope required, ≥1 room, origin
+    # normalized, only local checks. The loader (compose.load_part) calls this.
+    if fragment:
+        return _finish_fragment(plan, diagnostics, source, smap, pragmas, profile)
+
+    # Cross-file composition: resolve + stamp every `use` into `plan` BEFORE
+    # validation, so overlap/envelope/egress/adjacency run on the composed plan.
+    # Resolution errors and (deduped) part-internal diagnostics are appended now;
+    # placement-dependent (instance) findings are reclassified after validate.
+    composition = None
+    if plan.uses:
+        from .compose import compose_uses
+
+        composition = compose_uses(plan, base_dir, diagnostics, profile)
 
     # Statement-level error recovery (review §1.3): a statement that failed to
     # parse already recorded its diagnostic and was skipped, but the *surviving*
@@ -1883,7 +2075,21 @@ def compile_source(
         report = None
         diagnostics.append(_recovery_limit("Validation"))
     if report is not None:
+        stamped_map = composition.stamped_map if composition is not None else {}
+        part_keys = composition.part_keys if composition is not None else {}
         for iss in report.issues:
+            # A diagnostic on a *stamped* room is either a duplicate of a
+            # part-internal finding (already reported once, so drop it) or a
+            # placement-dependent *instance* finding (re-anchor to the `use` line,
+            # name the alias). See compose.compose_uses.
+            if iss.room is not None and iss.room in stamped_map:
+                local, inst = stamped_map[iss.room]
+                if (iss.code, local) in part_keys.get(inst.part_path, ()):
+                    continue  # part-internal — reported once via the fragment
+                iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
+                iss.message = f"instance {inst.alias}: {iss.message}"
+                diagnostics.append(iss)
+                continue
             # Anchor semantic diagnostics to the room's `room ...` line, and point
             # the caret at the room's id token, so quality/code-check issues get the
             # same column-accurate underline as syntax errors.
@@ -1892,7 +2098,7 @@ def compile_source(
                     iss.line = smap.room_line.get(iss.room)
                 if iss.col is None and iss.room in smap.room_col:
                     iss.col, iss.end_col = smap.room_col[iss.room]
-        diagnostics.extend(report.issues)
+            diagnostics.append(iss)
     # Suppression pragmas run last, once every diagnostic carries its resolved
     # line (semantic issues were just anchored to their room's statement line):
     # a pragma downgrades the matched warnings/infos to accepted INFOs and flags
@@ -1904,6 +2110,12 @@ def compile_source(
 
 
 def compile_file(path: str, profile: "Profile | None" = None) -> CompileResult:
-    """Compile a ``.barn`` file (see :func:`compile_source` for ``profile``)."""
+    """Compile a ``.barn`` file (see :func:`compile_source` for ``profile``).
+
+    The file's own directory is the resolution root for any ``use "<relpath>"``
+    (cross-file composition) — parts are found relative to the including file.
+    """
     with open(path, encoding="utf-8") as fh:
-        return compile_source(fh.read(), profile=profile)
+        return compile_source(
+            fh.read(), profile=profile, base_dir=os.path.dirname(os.path.abspath(path))
+        )

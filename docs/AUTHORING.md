@@ -810,6 +810,65 @@ blank lines and statement order untouched. It refuses to touch a file with parse
 errors, so it can't mask breakage. In the playground, **Format** (Shift+Alt+F)
 does the same, as one undo step. `fmt(fmt(x)) == fmt(x)`.
 
+## Reusable blocks: `use` (cross-file composition)
+
+A **part** is any `.barn` file with **no `plan` header** — rooms, interior
+doors/opens, windows, fixtures, electrical devices, alarms and positioned notes,
+authored in its own local feet (SW corner at 0,0). It's a proven, reusable block:
+a bath core that never trips `FIXTURE_TOILET_CLEARANCE`, a master suite, a kitchen
+L. The starter library lives in `examples/composed/parts/`.
+
+Stamp a part into a plan with
+
+```
+use "<relpath>" as <alias> at <x>,<y> [level <n>]
+```
+
+* `"<relpath>"` is quoted and **relative to the including file's directory**.
+  Absolute paths, `..` escapes, and pasted/browser sources with no home directory
+  are `USE_UNRESOLVED` errors — keep parts under the folder you compile or serve.
+* `as <alias>` is required and unique. Every id inside the part is stamped
+  `<alias>.<id>`, so a `bed` room becomes `m.bed`. **Host statements reference the
+  namespaced ids exactly like locals** — `door great - m.bed`, `alarm smoke in m.bed`.
+* `at <x>,<y>` places the stamped bounding box's SW corner; `level <n>` lands it
+  on host level *n* (default 0). Translation only for now — `mirror`/`rotate`
+  arrive in a later release (they're a clear parse error until then).
+
+The part is compiled **once** (in *fragment mode* — no envelope required, only
+its own local checks run) and stamped per `use`. Everything downstream — render,
+packet, exports, score — sees ordinary namespaced rooms, so composition needs no
+new code anywhere else. Diagnostics split in two: a **part-internal** finding
+(one that fires inside the part regardless of placement) is reported **once**,
+anchored to the part file (`in part parts/master_suite.barn:12 — …`); a
+**placement-dependent** finding (overlap, out of envelope, egress) fires **per
+use**, anchored to the `use` line with the alias named (`instance m: …`). Accept
+either with a `# barndsl: accept CODE` pragma — on the part's line for the former,
+on the `use` line for the latter.
+
+A worked composition (`examples/composed/cedar_ridge.barn`):
+
+```
+plan "Cedar Ridge (composed)"
+envelope 48 x 30
+ceiling 10
+
+use "parts/master_suite.barn" as m  at 0,0
+use "parts/kitchen_l.barn"    as k  at 26,18
+use "parts/bath_core.barn"    as b1 at 40,0
+
+room great: living at 0,13 size 22 x 17
+door great - m.bed width 3 into m.bed hinge near   # host door into a stamped room
+door dining - k.kitchen cased width 8
+```
+
+`emit_dsl(plan)` writes the `use` lines **verbatim** and skips the elements they
+stamped; `emit_dsl(plan, flatten=True)` drops the `use` lines and writes the
+stamped members as literal statements (dotted ids kept), inlining every part.
+In the playground the served folder is the resolution root; stamped members are
+**read-only** (edit the part file, or use **Inline** to make one instance local),
+while the instance itself is first-class — drag it, retarget its `at`/level,
+Delete, Duplicate or Inline from the design panel's **Parts** group.
+
 ## Two front-ends, one core
 
 You can also build a plan with the embedded **Python builder** — same rules, same

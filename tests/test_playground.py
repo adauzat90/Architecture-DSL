@@ -1194,3 +1194,12 @@ def test_electrical_site_ui_keeps_the_offline_guarantee():
     assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
     assert "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+def test_history_never_mints_an_undo_step_for_a_no_op_write():
+    # A programmatic write whose text equals the on-screen mirror (e.g. a blur
+    # re-firing `change` after a committed edit, whose no-op edit echoes the same
+    # source) must not push a history state — otherwise the next undo appears
+    # dead. Pinned at the single funnel every writer uses.
+    html = render_app(CLEAN)
+    assert "if (v === histMirror) return;" in html

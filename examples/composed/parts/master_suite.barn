@@ -1,0 +1,19 @@
+# master_suite — a primary bedroom with its ensuite bath and walk-in closet,
+# read as one unit. Authored in local feet (SW corner 0,0). Stamp it with
+# `use "parts/master_suite.barn" as m at <x>,<y>` and the ids become m.bed,
+# m.bath, m.wic — reference them from the host (`door hall - m.bed`).
+room bed: bedroom at 0,0 size 14 x 13
+room bath: bathroom east-of bed align far size 8 x 7
+room wic: closet east-of bed align near size 8 x 6
+
+# the suite's internal circulation
+door bed - bath width 2.5 offset 1 into bath hinge far
+open bed - wic width 2.5
+
+# an egress + light window on the bedroom (place the bed's west wall exterior)
+window bed south casement width 4 offset 4 sill 2
+
+# a smoke alarm in the sleeping room (IRC R314)
+alarm smoke in bed
+
+suite primary: bed bath wic
