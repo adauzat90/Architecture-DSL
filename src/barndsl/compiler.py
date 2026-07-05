@@ -26,7 +26,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
     fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]  # place a fixture/furnishing
-    use "<relpath>" as <alias> at <x>,<y> [level <n>]     # stamp a part (cross-file composition)
+    use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]  # stamp a part
     outlet in <room> wall N|S|E|W offset <ft> [gfci]      # receptacle on a room wall
     switch in <room> wall N|S|E|W offset <ft>             # wall switch
     light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]  # ceiling luminaire (room-local x,y)
@@ -273,7 +273,7 @@ Statements:
         # alarm (ALARM_BEDROOM), a sleeping area with no adjacent-hall alarm
         # (ALARM_HALL), a level with no smoke alarm (ALARM_LEVEL), and — with
         # bedrooms + a garage/shop — no CO/combo alarm (ALARM_CO, info).
-  use "<relpath>" as <alias> at <x>,<y> [level <n>]
+  use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]
         # cross-file composition: stamp a PART (any `.barn` file with no `plan`
         # header — rooms/openings/windows/fixtures/devices in its own local feet)
         # into this plan. `"<relpath>"` is quoted and RELATIVE to the including
@@ -283,10 +283,14 @@ Statements:
         # stamped `<alias>.<id>` (m.bed, m.bath), and host statements reference those
         # namespaced ids like locals (`door great - m.bed`). `at <x>,<y>` places the
         # stamped bounding box's SW corner (ft); `level <n>` lands it on host level n
-        # (default 0). The part is compiled once and stamped per use; part-internal
-        # diagnostics report once (anchored to the part file), placement-dependent
-        # ones per use (anchored to the `use` line). Translation only for now —
-        # `mirror`/`rotate` arrive in a later release.
+        # (default 0). `mirror y` flips the part east↔west, `mirror x` north↔south;
+        # `rotate 90|180|270` turns it counter-clockwise (rooms are axis-aligned, so
+        # only 90° steps). With both, the part is ROTATED FIRST, THEN MIRRORED in its
+        # own local frame; the transformed bounding box's SW corner still lands at
+        # `at`. Wall directions, wall offsets and fixture rotations all remap so the
+        # stamped copy stays code-clean. The part is compiled once and stamped per
+        # use; part-internal diagnostics report once (anchored to the part file),
+        # placement-dependent ones per use (anchored to the `use` line).
   frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]
         # auto-place the post-and-beam structural frame over the footprint: bents
         # spaced <= bay ft along the long axis (default 12), each spanning the short
@@ -1670,8 +1674,8 @@ def _parse_statement(
         am = plan.alarms[-1]
         am.line, am.col, am.end_col = lineno, kw.col, kw.end_col
     elif key == "use":
-        # `use "<relpath>" as <alias> at <x>,<y> [level <n>]` — stamp a part.
-        # Translation-only in 7a: `mirror`/`rotate` are rejected (they arrive in 7b).
+        # `use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]`
+        # — stamp a part, optionally rotated (ccw) then mirrored in its local frame.
         from .elements import UseSpec
 
         path_tok = c.take("a quoted part path")
@@ -1696,29 +1700,51 @@ def _parse_statement(
         ux = c.number("the use x")
         uy = c.number("the use y")
         ulevel = 0
+        umirror: str | None = None
+        urotate = 0
         while (tok := c.peek()) is not None:
             opt = tok.text.lower()
             if opt == "level":
                 c.keyword("level")
                 ulevel = c.level_value()
-            elif opt in ("mirror", "rotate"):
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"`{opt}` on `use` arrives in a later release — place the part "
-                    "with `at` for now.",
-                    tok.col, end_col=tok.end_col,
-                    hint="Phase 7a composes by translation only; mirror/rotate "
-                    "(and their attribute remap) are Phase 7b.",
-                )
+            elif opt == "mirror":
+                c.keyword("mirror")
+                axis_tok = c.take("a mirror axis (x or y)")
+                axis = axis_tok.text.lower()
+                if axis not in ("x", "y"):
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"`mirror` takes an axis x or y, got '{axis_tok.text}'.",
+                        axis_tok.col, end_col=axis_tok.end_col,
+                        hint="`mirror y` flips east↔west; `mirror x` flips north↔south.",
+                    )
+                umirror = axis
+            elif opt == "rotate":
+                c.keyword("rotate")
+                ang_tok = c.take("a rotation of 90, 180 or 270")
+                try:
+                    ang = int(float(ang_tok.text))
+                except ValueError:
+                    ang = -1
+                if ang_tok.quoted or ang not in (90, 180, 270):
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"`rotate` on `use` takes 90, 180 or 270, got '{ang_tok.text}'.",
+                        ang_tok.col, end_col=ang_tok.end_col,
+                        hint="Rooms are axis-aligned, so a part turns in 90° steps "
+                        "(90, 180 or 270) — a quarter, half or three-quarter turn.",
+                    )
+                urotate = ang
             else:
                 raise _ParseError(
                     "BAD_OPTION",
                     f"Unknown use option '{tok.text}'.",
                     tok.col, end_col=tok.end_col,
-                    hint="Options: level <n>. (mirror/rotate arrive in a later release.)",
+                    hint="Options: level <n>, mirror x|y, rotate 90|180|270.",
                 )
         plan.uses.append(
             UseSpec(path_tok.text, alias_tok.text, ux, uy, ulevel,
+                    mirror=umirror, rotate=urotate,
                     line=lineno, col=kw.col, end_col=kw.end_col)
         )
     else:

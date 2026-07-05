@@ -297,6 +297,7 @@ def compile_payload(source: str, base_dir: str | None = None) -> dict:
                 {
                     "alias": inst.alias, "relpath": inst.relpath,
                     "x": inst.x, "y": inst.y, "level": inst.level,
+                    "mirror": inst.mirror, "rotate": inst.rotate,
                     "bbox": list(inst.bbox), "rooms": list(inst.room_ids),
                     "line": inst.line,
                 }
@@ -387,7 +388,87 @@ def compile_payload(source: str, base_dir: str | None = None) -> dict:
             payload["report"] = report_data(result)
         except Exception as exc:  # a plan that lowers oddly must not 500 the API
             payload["render_error"] = str(exc)
+    # The Parts browser (7b): the plan-less `.barn` part files beside the served
+    # file (and in a `parts/` subfolder), so the panel can list them and Insert a
+    # `use`. A browser-opened buffer has no `base_dir` → an empty list (the panel
+    # then shows its teaching sentence).
+    payload["parts_available"] = scan_parts(base_dir)
     return payload
+
+
+#: Cap on the number of part files the browser lists — a library, not a filesystem
+#: crawl. A directory with more parts than this is trimmed (alphabetical).
+MAX_LISTED_PARTS = 32
+
+
+def scan_parts(base_dir: str | None) -> list[dict]:
+    """List plan-less ``.barn`` part files under ``base_dir`` (and ``base_dir/parts``).
+
+    Cheap on purpose — each file is *sniffed*, not compiled: its statements are
+    read line by line until the first keyword, and a file whose first statement is
+    ``plan`` (a whole building, not a part) is skipped. ``rooms`` counts the
+    ``room`` statement lines. Returns ``[{relpath, name, rooms}]`` sorted by
+    relpath, capped at :data:`MAX_LISTED_PARTS`. ``None`` base_dir → ``[]``.
+    """
+    if not base_dir or not os.path.isdir(base_dir):
+        return []
+    seen: set[str] = set()
+    out: list[dict] = []
+    dirs = [(base_dir, "")]
+    parts_sub = os.path.join(base_dir, "parts")
+    if os.path.isdir(parts_sub):
+        dirs.append((parts_sub, "parts/"))
+    for folder, prefix in dirs:
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".barn"):
+                continue
+            full = os.path.join(folder, name)
+            if not os.path.isfile(full):
+                continue
+            relpath = prefix + name
+            if relpath in seen:
+                continue
+            info = _sniff_part(full)
+            if info is None:  # a full plan (has a `plan` header) — not a part
+                continue
+            seen.add(relpath)
+            out.append({"relpath": relpath, "name": info[0], "rooms": info[1]})
+            if len(out) >= MAX_LISTED_PARTS:
+                return out
+    return out
+
+
+def _sniff_part(path: str) -> tuple[str, int] | None:
+    """Sniff a ``.barn`` file without compiling it: ``(name, room_count)`` for a
+    plan-less part, or ``None`` if it carries a ``plan`` header (a whole building)
+    or can't be read. ``name`` is the file stem; ``room_count`` counts ``room``
+    statement lines (0 means the file has no rooms — still listed, teaching that a
+    part needs one)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read(MAX_PART_SNIFF_BYTES)
+    except OSError:
+        return None
+    rooms = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        head = line.split(None, 1)[0].lower()
+        if head == "plan":
+            return None  # a whole-building file, not a part
+        if head == "room":
+            rooms += 1
+    return (os.path.splitext(os.path.basename(path))[0], rooms)
+
+
+#: How many bytes of a candidate part to read when sniffing (a part file is small
+#: — the loader caps whole parts at 256 KiB; the sniff only needs the statements).
+MAX_PART_SNIFF_BYTES = 64 * 1024
 
 
 # --- the report (cost / schedules / energy / areas) payload ------------------
@@ -4450,11 +4531,14 @@ function renderPanel(){
     for (const inst of p.instances){
       const file = (inst.relpath || '').split('/').pop();
       const isel = dpSel && dpSel.t === 'inst' && dpSel.k === inst.alias;
+      let xform = '';
+      if (inst.rotate) xform += ' ↻' + inst.rotate + '°';
+      if (inst.mirror) xform += ' ⇄' + inst.mirror;
       h += '<div class="dp-row dp-inst' + (isel ? ' sel' : '') + '" data-sel="inst:' + esc(inst.alias) + '">' +
         '<span class="dp-id">▣ ' + esc(inst.alias) + '</span>' +
         '<span class="dp-kind">' + esc(file) + '</span>' +
         '<span class="dp-dim">' + fmtFtIn(inst.x) + ',' + fmtFtIn(inst.y) +
-        (inst.level ? ' L' + inst.level : '') + '</span></div>';
+        (inst.level ? ' L' + inst.level : '') + esc(xform) + '</span></div>';
       for (const rid of (inst.rooms || [])){
         const rm = p.rooms.find(x => x.id === rid);
         h += '<div class="dp-sub"><div class="dp-row dp-stamped" title="Stamped from ' +
@@ -4465,8 +4549,10 @@ function renderPanel(){
     }
   }
   h += '<div class="dp-btns"><button data-btn="addroom">＋ Room</button>' +
-    '<button data-btn="addnote" title="Add a positioned note — a leader callout on the plan">＋ Note</button></div>';
+    '<button data-btn="addnote" title="Add a positioned note — a leader callout on the plan">＋ Note</button>' +
+    '<button data-btn="parts" title="Insert a reusable part (a plan-less .barn file beside this plan)">▣ Parts</button></div>';
   if (dpForm === 'room') h += addRoomForm(p);
+  if (dpForm === 'parts') h += partsBrowser(p);
   h += renderInspector(p);
   h += '<div class="dp-note' + (dpNoteErr ? ' err' : '') + '" id="dp-note">' + esc(dpNoteMsg) + '</div>';
   dpEl.innerHTML = h;
@@ -4482,11 +4568,21 @@ function renderInspector(p){
     let lvOpts = '';
     for (const lv of levels) lvOpts += '<option value="' + lv + '"' +
       (lv === inst.level ? ' selected' : '') + '>' + lv + '</option>';
+    const mir = inst.mirror || '';
+    let mirOpts = '';
+    for (const m of [['', '—'], ['x', 'x (N↔S)'], ['y', 'y (E↔W)']])
+      mirOpts += '<option value="' + m[0] + '"' + (m[0] === mir ? ' selected' : '') + '>' + m[1] + '</option>';
+    const rot = inst.rotate || 0;
+    let rotOpts = '';
+    for (const a of [0, 90, 180, 270])
+      rotOpts += '<option value="' + a + '"' + (a === rot ? ' selected' : '') + '>' + a + '°</option>';
     return '<h5>Instance — ' + esc(inst.alias) + '</h5><div class="dp-grid">' +
       '<label>part</label><span class="dp-kind wide">' + esc(inst.relpath) + '</span>' +
       '<label>at</label><input type="text" inputmode="text" data-act="inst.x" title="South-west corner x (ft — accepts 12′6″)" value="' + trimNum(inst.x) + '">' +
       '<input type="text" inputmode="text" data-act="inst.y" title="South-west corner y (ft — accepts 12′6″)" value="' + trimNum(inst.y) + '">' +
       '<label>level</label><select data-act="inst.level">' + lvOpts + '</select><span></span>' +
+      '<label>mirror</label><select data-act="inst.mirror" title="Reflect the part — y flips east↔west, x flips north↔south">' + mirOpts + '</select>' +
+      '<select data-act="inst.rotate" title="Rotate the part counter-clockwise (90° steps)">' + rotOpts + '</select>' +
       '</div><div class="dp-btns">' +
       '<button data-btn="inlineinst" title="Replace the use with its stamped statements — makes the part local and editable">Inline</button>' +
       '<button data-btn="dupinst" title="Add another instance of this part at a small offset">Duplicate</button>' +
@@ -4559,6 +4655,51 @@ function nextRoomId(p, base){
   let n = 1, id = base;
   while (ids.has(id)){ n++; id = base + n; }
   return id;
+}
+// The Parts browser: the plan-less .barn parts beside the served file (scanned
+// server-side into p.parts_available). Each row Inserts a `use` at plan centre
+// with a fresh alias. Empty (or a browser-opened buffer with no folder) teaches
+// where parts come from.
+function partsBrowser(p){
+  const parts = p.parts_available || [];
+  if (!parts.length)
+    return '<div class="dp-form"><div class="dp-note">Put plan-less .barn part ' +
+      'files beside the served plan (or in parts/) and they appear here.</div>' +
+      '<div class="dp-btns"><button data-btn="formcancel">Close</button></div></div>';
+  let rows = '';
+  for (const part of parts){
+    const rn = (typeof part.rooms === 'number') ? part.rooms : null;
+    rows += '<div class="dp-row"><span class="dp-id">▣ ' + esc(part.name || part.relpath) + '</span>' +
+      '<span class="dp-kind">' + esc(part.relpath) + (rn != null ? ' · ' + rn + 'r' : '') + '</span>' +
+      '<button data-part="' + esc(part.relpath) + '">Insert</button></div>';
+  }
+  return '<div class="dp-form">' + rows +
+    '<div class="dp-btns"><button data-btn="formcancel">Close</button></div>' +
+    '<div class="dp-note">Insert drops a `use` at the plan centre — move, mirror or rotate it in the inspector.</div></div>';
+}
+// Mint a fresh instance alias from a base (reused by Duplicate + Parts Insert):
+// bath → bath2, bath3, … skipping any alias already taken.
+function mintAlias(p, base){
+  const aliases = new Set((p.instances || []).map(i => i.alias));
+  const stem = (base || 'p').replace(/\d+$/, '').replace(/[^A-Za-z0-9_]/g, '') || 'p';
+  let n = aliases.has(stem) || /\d$/.test(base || '') ? 2 : 0, alias = n ? stem + n : stem;
+  while (aliases.has(alias)){ n = (n || 1) + 1; alias = stem + n; }
+  return alias;
+}
+function insertPart(relpath){
+  const p = lastGood; if (!p) return;
+  let cx = 0, cy = 0;
+  if (p.rooms && p.rooms.length){
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const r of p.rooms){ minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+      maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.l); }
+    cx = snap((minX + maxX) / 2); cy = snap((minY + maxY) / 2);
+  }
+  const stem = (relpath.split('/').pop() || 'part').replace(/\.barn$/, '');
+  const alias = mintAlias(p, stem.split(/[^A-Za-z0-9_]/)[0] || 'p');
+  dpForm = null;
+  applyEdits([{ kind:'add_use', relpath:relpath, alias:alias, x:cx, y:cy }], 'insert part')
+    .then(ok => { if (ok) dpSelect('inst', alias); });
 }
 function addRoomForm(p){
   const rooms = p.rooms.map(r => r.id);
@@ -4680,6 +4821,11 @@ function dpChange(act, el){
       const lv = parseInt(v, 10);
       if (isFinite(lv) && lv >= 0 && lv !== inst.level)
         applyEdits([{ kind:'set_use', alias:inst.alias, level:lv }], 'part level');
+    } else if (act === 'inst.mirror'){
+      applyEdits([{ kind:'set_use', alias:inst.alias, mirror: v || null }], 'part mirror');
+    } else if (act === 'inst.rotate'){
+      const a = parseInt(v, 10) || 0;
+      applyEdits([{ kind:'set_use', alias:inst.alias, rotate: a }], 'part rotate');
     }
     return;
   }
@@ -4822,14 +4968,13 @@ function duplicateRoom(r){
 function duplicateInstance(){
   const p = lastGood; if (!p || !dpSel || dpSel.t !== 'inst') return;
   const inst = (p.instances || []).find(x => x.alias === dpSel.k); if (!inst) return;
-  const aliases = new Set((p.instances || []).map(i => i.alias));
-  const base = inst.alias.replace(/\d+$/, '') || inst.alias;
-  let n = 2, alias = base + n;
-  while (aliases.has(alias)){ n++; alias = base + n; }
+  const alias = mintAlias(p, inst.alias);
   const off = 3;
-  applyEdits([{ kind:'add_use', relpath:inst.relpath, alias:alias,
-                x:inst.x + off, y:inst.y + off, level:inst.level }], 'duplicate part')
-    .then(ok => { if (ok) dpSelect('inst', alias); });
+  const ed = { kind:'add_use', relpath:inst.relpath, alias:alias,
+    x:inst.x + off, y:inst.y + off, level:inst.level };
+  if (inst.mirror) ed.mirror = inst.mirror;
+  if (inst.rotate) ed.rotate = inst.rotate;
+  applyEdits([ed], 'duplicate part').then(ok => { if (ok) dpSelect('inst', alias); });
 }
 function submitOpeningForm(){
   const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
@@ -4848,6 +4993,8 @@ function submitOpeningForm(){
 }
 
 dpEl.addEventListener('click', e => {
+  const part = e.target.closest('[data-part]');
+  if (part){ insertPart(part.getAttribute('data-part')); return; }
   const row = e.target.closest('[data-sel]');
   if (row){
     const raw = row.getAttribute('data-sel'), i = raw.indexOf(':');
@@ -4858,6 +5005,7 @@ dpEl.addEventListener('click', e => {
   if (!btn) return;
   const b = btn.getAttribute('data-btn');
   if (b === 'addroom'){ dpForm = dpForm === 'room' ? null : 'room'; renderPanel(); }
+  else if (b === 'parts'){ dpForm = dpForm === 'parts' ? null : 'parts'; renderPanel(); }
   else if (b === 'addnote'){ addNoteAtCenter(); }
   else if (b === 'adddoor' || b === 'addwindow' || b === 'addentry'){
     dpForm = { op: b.slice(3) }; renderPanel();

@@ -12,7 +12,10 @@ ceiling 10
 # barndsl: accept BED_PRIVACY "open-plan suite off the great room"
 use "parts/master_suite.barn" as m  at 0,0
 use "parts/kitchen_l.barn"    as k  at 26,18
-use "parts/bath_core.barn"    as b1 at 40,0
+# `mirror y` reflects the bath core east↔west (Phase 7b): its window offset
+# re-derives to the same exterior wall while the interior fixture layout flips —
+# the dual-orientation motif a mirror-image pair of cores is built from.
+use "parts/bath_core.barn"    as b1 at 40,0 mirror y
 use "parts/laundry_core.barn" as lc at 40,6
 
 # --- the host's own rooms -----------------------------------------------------

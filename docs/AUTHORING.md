@@ -821,7 +821,7 @@ L. The starter library lives in `examples/composed/parts/`.
 Stamp a part into a plan with
 
 ```
-use "<relpath>" as <alias> at <x>,<y> [level <n>]
+use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]
 ```
 
 * `"<relpath>"` is quoted and **relative to the including file's directory**.
@@ -831,8 +831,16 @@ use "<relpath>" as <alias> at <x>,<y> [level <n>]
   `<alias>.<id>`, so a `bed` room becomes `m.bed`. **Host statements reference the
   namespaced ids exactly like locals** — `door great - m.bed`, `alarm smoke in m.bed`.
 * `at <x>,<y>` places the stamped bounding box's SW corner; `level <n>` lands it
-  on host level *n* (default 0). Translation only for now — `mirror`/`rotate`
-  arrive in a later release (they're a clear parse error until then).
+  on host level *n* (default 0).
+* `mirror x|y` reflects the part and `rotate 90|180|270` turns it counter-clockwise
+  (rooms are axis-aligned, so only 90° steps — `rotate 45` is a teaching error).
+  **`mirror y` flips east↔west** (a vertical mirror line), **`mirror x` flips
+  north↔south**. With **both**, the part is **rotated first, then mirrored** in its
+  own local frame; the transformed bounding box's SW corner still lands at `at`.
+  Wall directions, wall offsets, interior-door offsets and fixture rotations all
+  remap so the stamped copy stays code-clean — a bath core that clears its
+  clearances clears them mirrored or turned. Set them live in the playground's
+  instance inspector (mirror / rotate selects), or via `set_use`.
 
 The part is compiled **once** (in *fragment mode* — no envelope required, only
 its own local checks run) and stamped per `use`. Everything downstream — render,
@@ -854,20 +862,24 @@ ceiling 10
 
 use "parts/master_suite.barn" as m  at 0,0
 use "parts/kitchen_l.barn"    as k  at 26,18
-use "parts/bath_core.barn"    as b1 at 40,0
+use "parts/bath_core.barn"    as b1 at 40,0 mirror y   # the mirror-image core
 
 room great: living at 0,13 size 22 x 17
 door great - m.bed width 3 into m.bed hinge near   # host door into a stamped room
 door dining - k.kitchen cased width 8
 ```
 
-`emit_dsl(plan)` writes the `use` lines **verbatim** and skips the elements they
-stamped; `emit_dsl(plan, flatten=True)` drops the `use` lines and writes the
-stamped members as literal statements (dotted ids kept), inlining every part.
+`emit_dsl(plan)` writes the `use` lines **verbatim** (transform included) and skips
+the elements they stamped; `emit_dsl(plan, flatten=True)` drops the `use` lines and
+writes the stamped members as literal statements in **world coordinates** (the
+transform baked in, dotted ids kept), inlining every part. Recompiling the
+flattened form reproduces the same composed plan.
 In the playground the served folder is the resolution root; stamped members are
 **read-only** (edit the part file, or use **Inline** to make one instance local),
-while the instance itself is first-class — drag it, retarget its `at`/level,
-Delete, Duplicate or Inline from the design panel's **Parts** group.
+while the instance itself is first-class — drag it, retarget its `at`/level/mirror/
+rotate, Delete, Duplicate or Inline from the design panel's **Parts** group. The
+same panel's **▣ Parts** button lists the plan-less `.barn` files beside the served
+plan (and in `parts/`) — click **Insert** to stamp one at the plan centre.
 
 ## Two front-ends, one core
 

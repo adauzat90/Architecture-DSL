@@ -1203,3 +1203,67 @@ def test_history_never_mints_an_undo_step_for_a_no_op_write():
     # dead. Pinned at the single funnel every writer uses.
     html = render_app(CLEAN)
     assert "if (v === histMirror) return;" in html
+
+
+# --- cross-file composition: the Parts browser (Phase 7b) --------------------
+
+_COMPOSED_DIR = os.path.join(EXAMPLES, "composed")
+
+
+def test_scan_parts_lists_plan_less_files_under_a_folder():
+    from barndsl.playground import scan_parts
+
+    parts = scan_parts(_COMPOSED_DIR)
+    rels = {p["relpath"] for p in parts}
+    # the four starter parts live in parts/ — listed with the parts/ prefix
+    assert "parts/bath_core.barn" in rels
+    assert {"parts/master_suite.barn", "parts/kitchen_l.barn",
+            "parts/laundry_core.barn"} <= rels
+    # the whole-building example (has a `plan` header) is NOT a part
+    assert "cedar_ridge.barn" not in rels
+    # each entry carries a name + a room count sniffed without a full compile
+    bath = next(p for p in parts if p["relpath"] == "parts/bath_core.barn")
+    assert bath["name"] == "bath_core" and bath["rooms"] == 1
+
+
+def test_scan_parts_without_base_dir_is_empty():
+    from barndsl.playground import scan_parts
+
+    assert scan_parts(None) == []
+
+
+def test_scan_parts_is_capped(tmp_path):
+    from barndsl.playground import MAX_LISTED_PARTS, scan_parts
+
+    for i in range(MAX_LISTED_PARTS + 8):
+        (tmp_path / f"p{i:03d}.barn").write_text("room a: bathroom at 0,0 size 8 x 6\n")
+    parts = scan_parts(str(tmp_path))
+    assert len(parts) == MAX_LISTED_PARTS
+
+
+def test_compile_payload_carries_parts_available_with_base_dir():
+    with open(os.path.join(_COMPOSED_DIR, "cedar_ridge.barn"), encoding="utf-8") as fh:
+        composed = fh.read()
+    p = compile_payload(composed, base_dir=_COMPOSED_DIR)
+    rels = {x["relpath"] for x in p["parts_available"]}
+    assert "parts/bath_core.barn" in rels
+    # the composed plan's instances carry their transform for the panel/emit
+    b1 = next(i for i in p["instances"] if i["alias"] == "b1")
+    assert b1["mirror"] == "y" and b1["rotate"] == 0
+
+
+def test_compile_payload_parts_available_empty_without_base_dir():
+    p = compile_payload(CLEAN)  # a browser-opened buffer has no home directory
+    assert p["parts_available"] == []
+
+
+def test_app_has_parts_browser_markup_and_stays_offline():
+    html = render_app(CLEAN)
+    for token in ("function partsBrowser(", "function insertPart(",
+                  "function mintAlias(", "parts_available", "data-part=",
+                  "data-btn=\"parts\"", "and they appear here",
+                  "data-act=\"inst.mirror\"", "data-act=\"inst.rotate\""):
+        assert token in html, token
+    # the offline guarantee holds — no external references
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html and "//cdn" not in html and "<script src" not in html

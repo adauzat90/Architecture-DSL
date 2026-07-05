@@ -304,6 +304,10 @@ def emit_dsl(plan: Barndominium, flatten: bool = False) -> str:
             line = f"use {_q(u.relpath)} as {u.alias} at {_n(u.x)},{_n(u.y)}"
             if u.level:
                 line += f" level {u.level}"
+            if getattr(u, "mirror", None):
+                line += f" mirror {u.mirror}"
+            if getattr(u, "rotate", 0):
+                line += f" rotate {u.rotate}"
             out.append(line)
 
     if keep(plan.rooms):

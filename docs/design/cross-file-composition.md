@@ -1,18 +1,28 @@
 # Cross-file composition (`use`) — design
 
-Status: **Phase 7a implemented** (translation-only core) · **Phase 7b pending**
-(mirror/rotate + attribute remap, duplicate-instance, parts browser).
+Status: **Phase 7a + 7b implemented** (translation core + mirror/rotate transform).
 Prereqs shipped: full emit round-trip (every statement family), `barndsl fmt`
 (comment-preserving), accept pragmas, ft-in literals.
 
-7a shipped: `use "<relpath>" as <alias> at <x>,<y> [level <n>]` (translation
-only — `mirror`/`rotate` are a `BAD_OPTION` parse error that names 7b);
+7a shipped: `use "<relpath>" as <alias> at <x>,<y> [level <n>]`;
 fragment-mode compile (`compile_source(..., fragment=True)`); the sandboxed
 loader/resolver (`barndsl.compose`); stamping; the two diagnostic classes with
 dedupe + pragma anchoring; read-only stamped members + the `add/move/set/delete/
 inline_use` edits with whole-instance drag; `emit_dsl(plan, flatten=…)`; fmt
 support; the `examples/composed/parts/` starter library (bath_core, master_suite,
 kitchen_l, laundry_core) + the composed `examples/composed/cedar_ridge.barn`.
+
+7b shipped: the `[mirror x|y] [rotate 90|180|270]` transform on `use` (rotate-then-
+mirror in local coords; `rotate 45` / `mirror z` are teaching errors); the §5 remap
+table in the stamper (geometry about the part bbox, wall directions per the table,
+wall/interior-door offsets **re-derived from the transformed geometry**, fixture
+rotation composed/reflected); the property tests (mirror∘mirror ≡ id, rotate⁴ ≡ id,
+rotate 270 ≡ rotate 90³, the offset oracle, mirror-invariant part diagnostics);
+transformed inline + flatten equivalence; `set_use` gaining `mirror`/`rotate` (with
+the instance inspector's mirror/rotate selects) + transform-carrying `add_use`
+(faithful Duplicate); and the playground **Parts browser** (a `parts_available`
+payload the design panel lists with per-part **Insert**). cedar_ridge now stamps a
+`mirror y` bath core.
 
 ## 1. Goal
 
@@ -139,22 +149,36 @@ Rooms are axis-aligned, so rotation is restricted to 90° multiples and mirror
 to the two axes — both are closed over the model. The fiddly, test-heavy part
 is **attribute remapping**, specified here so implementation is mechanical:
 
+- **Composition order (decided):** with both a `rotate` and a `mirror`, the part
+  is **rotated first, then mirrored** in its own local frame. The stamper builds
+  the single 2×2 matrix `M = mirror · rotate`; emit, `inline`/`flatten` and the
+  edit line-rebuilds all reproduce the `at …[ mirror …][ rotate …]` clause in that
+  order, so the pipeline is self-consistent (`barndsl.compose._Xform`).
 - Geometry mirrors/rotates about the part's local bbox (then `at` places the
-  transformed bbox's SW corner — the stamp always lands where you said).
+  transformed bbox's SW corner — the stamp always lands where you said; a 90/270
+  turn swaps the bbox width and length).
 - Wall directions remap: rotate 90° ccw ⇒ S→E, E→N, N→W, W→S; mirror y ⇒
-  E↔W, N/S fixed (and vice versa for mirror x).
-- Wall-attached offsets recompute from the new wall's start corner (S/W
-  start convention): on a mirrored wall of length L with feature width w,
-  `offset' = L − offset − w`. Applies to windows, doors, outlets, switches,
-  and wall-backed fixtures.
-- Fixture `rotate` composes additively mod 360; door swing `into` refs are
+  E↔W, N/S fixed (and vice versa for mirror x). (`_ROT90_WALL` / `_MIRROR_*_WALL`.)
+- **Wall-attached offsets are re-derived from the transformed geometry** (decided:
+  the robust route, not composed formulas): the feature's span endpoints are
+  transformed and the new offset is measured from the new wall's start corner
+  (S/W convention). This reproduces `offset' = L − offset − w` for a mirror and
+  handles rotations without formula-chaining, and it doubles as the property-test
+  oracle. Applies to windows, exterior doors, outlets, switches. Interior doors
+  between part rooms store only an offset from the shared wall's low end (their
+  geometry is derived from the two rooms at validate/render time), so that offset
+  is re-derived from the **transformed shared edge** (a `None`/centred offset is
+  transform-invariant and stays `None`); no other remap is needed.
+- Fixtures: the room-local anchor transforms as the SW corner of the footprint
+  rect; `rotate` composes additively mod 360 under a rotation and **reflects under
+  a mirror** — `rotation' = (−rotation) mod 360` for `mirror y` (a vertical mirror
+  line negates the plan turn) and `(180 − rotation) mod 360` for `mirror x`; the
+  wall backing remaps like any wall direction. Door swing `into` refs are
   id-prefixed and otherwise unchanged (side-ness is derived from geometry).
-- Round-trip property tests: stamp∘mirror∘mirror ≡ stamp; rotate⁴ ≡ identity;
-  every remapped offset re-derived from geometry equals the transform of the
-  original point.
-
-Translation-only ships first (7a) precisely because this table is where the
-bugs live.
+- Round-trip property tests (all implemented): stamp∘mirror∘mirror ≡ stamp;
+  rotate⁴ ≡ identity; rotate 270 ≡ rotate 90³; every remapped offset re-derived
+  from geometry equals the stamped offset; and a mirrored part keeps the same
+  part-internal diagnostic set (clearances are mirror-invariant).
 
 ## 6. Single source of truth — the crux
 

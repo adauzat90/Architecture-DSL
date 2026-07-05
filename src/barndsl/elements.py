@@ -911,17 +911,23 @@ class Requirement:
 
 @dataclass
 class UseSpec:
-    """A ``use "<relpath>" as <alias> at <x>,<y> [level <n>]`` statement (host side).
+    """A ``use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]``
+    statement (host side).
 
     Records the author's intent to stamp a part into the host plan: the quoted
     **relative** path to the part file, the required ``alias`` (every id inside the
     part is stamped ``<alias>.<id>``), the ``at`` corner (the stamped bounding
-    box's SW corner in host feet) and the target ``level`` (default 0). Parsed at
-    compile time and kept on :attr:`Barndominium.uses` so :func:`barndsl.emit.emit_dsl`
-    can round-trip the ``use`` line **verbatim** (independently of whether it
-    resolved). The loader turns each resolved ``use`` into an :class:`Instance`.
+    box's SW corner in host feet), the target ``level`` (default 0) and the
+    optional transform. Parsed at compile time and kept on
+    :attr:`Barndominium.uses` so :func:`barndsl.emit.emit_dsl` can round-trip the
+    ``use`` line **verbatim** (independently of whether it resolved). The loader
+    turns each resolved ``use`` into an :class:`Instance`.
 
-    Translation-only in Phase 7a — ``mirror``/``rotate`` are a later release.
+    :attr:`mirror` is ``"x"`` / ``"y"`` / ``None`` and :attr:`rotate` is one of
+    ``0`` / ``90`` / ``180`` / ``270`` (a counter-clockwise turn). When both are
+    given the part is **rotated first, then mirrored** in its own local frame —
+    the composition order the stamper (:mod:`barndsl.compose`), emit and the edit
+    engine all reproduce identically (Phase 7b).
     """
 
     relpath: str
@@ -929,6 +935,12 @@ class UseSpec:
     x: float
     y: float
     level: int = 0
+    #: The instance transform (Phase 7b). ``mirror`` reflects the part about a
+    #: local axis — ``"y"`` swaps east↔west (a vertical mirror line), ``"x"``
+    #: swaps north↔south. ``rotate`` is a counter-clockwise turn in 90° steps.
+    #: Composition order is rotate-then-mirror in local coords.
+    mirror: str | None = None
+    rotate: int = 0
     #: Source location of the `use` statement (textual front-end only), so a
     #: placement/instance diagnostic anchors to the `use` line and a surgical edit
     #: can find it.
@@ -955,6 +967,10 @@ class Instance:
     x: float
     y: float
     level: int
+    #: The instance transform baked into the stamped elements (Phase 7b) — carried
+    #: so emit/edits can round-trip the `use` line and the panel can show it.
+    mirror: str | None = None
+    rotate: int = 0
     #: Bounding box ``(min_x, min_y, max_x, max_y)`` of the stamped rooms, host feet.
     bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     #: The stamped room ids (``<alias>.<id>``), in the part's declaration order.

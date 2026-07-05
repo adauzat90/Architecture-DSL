@@ -135,10 +135,18 @@ class Edit:
     index: int | None = None
     #: Cross-file composition (the `use` statement). ``add_use`` uses
     #: ``relpath``/``alias``/``x``/``y``/``level``; ``move_use`` ``alias``+``x``/``y``;
-    #: ``set_use`` ``alias``+``level`` (level-only in 7a); ``delete_use``/``inline_use``
-    #: ``alias``. The ``alias`` names the instance to act on.
+    #: ``set_use`` ``alias`` + any of ``level``/``mirror``/``rotate`` (7b — a
+    #: ``null`` mirror or ``0`` rotate clears that flag; ``*_set`` says the key was
+    #: present); ``delete_use``/``inline_use`` ``alias``. The ``alias`` names the
+    #: instance to act on.
     relpath: str | None = None
     alias: str | None = None
+    #: ``set_use`` transform (7b). ``mirror`` is ``"x"``/``"y"``/``None``; ``rotate``
+    #: reuses the ``rotate`` field above (0/90/180/270). ``mirror_set``/``rotate_set``
+    #: distinguish an absent key from an explicit clear.
+    mirror: str | None = None
+    mirror_set: bool = False
+    rotate_set: bool = False
     #: Electrical edits (the `outlet`/`switch`/`light` statements). ``add_outlet``
     #: uses ``room``/``wall``/``offset``/``gfci``; ``add_switch`` ``room``/``wall``/
     #: ``offset``; ``add_light`` ``room``/``x``/``y``/``fkind`` (the light kind).
@@ -289,13 +297,17 @@ def edit_from_json(obj: object) -> Edit | EditError:
         return Edit("add_use", relpath=_as_str(obj.get("relpath")),
                     alias=_as_str(obj.get("alias")),
                     x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
-                    level=_as_int(obj.get("level")))
+                    level=_as_int(obj.get("level")),
+                    mirror=_as_str(obj.get("mirror")),
+                    rotate=_as_num(obj.get("rotate")))
     if kind == "move_use":
         return Edit("move_use", alias=_as_str(obj.get("alias")),
                     x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
     if kind == "set_use":
         return Edit("set_use", alias=_as_str(obj.get("alias")),
-                    level=_as_int(obj.get("level")))
+                    level=_as_int(obj.get("level")),
+                    mirror=_as_str(obj.get("mirror")), mirror_set=("mirror" in obj),
+                    rotate=_as_num(obj.get("rotate")), rotate_set=("rotate" in obj))
     if kind == "delete_use":
         return Edit("delete_use", alias=_as_str(obj.get("alias")))
     if kind == "inline_use":
@@ -798,8 +810,10 @@ def _validate_shape(edit: Edit) -> EditError | None:
     if edit.kind == "set_use":
         if not edit.alias:
             return EditError("malformed", "set_use needs an alias")
-        if edit.level is None or edit.level < 0:
-            return EditError("malformed", "set_use needs a level >= 0")
+        if edit.level is not None and edit.level < 0:
+            return EditError("malformed", "set_use level must be >= 0")
+        if edit.level is None and not edit.mirror_set and not edit.rotate_set:
+            return EditError("malformed", "set_use needs a level, mirror or rotate")
         return None
     if edit.kind in ("delete_use", "inline_use"):
         if not edit.alias:
@@ -1802,10 +1816,15 @@ def _use_line(result: CompileResult, alias: str) -> tuple[object | None, int | N
     return None, None
 
 
-def _use_stmt(relpath: str, alias: str, x: float, y: float, level: int) -> str:
+def _use_stmt(relpath: str, alias: str, x: float, y: float, level: int,
+              mirror: str | None = None, rotate: int = 0) -> str:
     line = f'use "{relpath}" as {alias} at {_fmt(x)},{_fmt(y)}'
     if level:
         line += f" level {level}"
+    if mirror:
+        line += f" mirror {mirror}"
+    if rotate:
+        line += f" rotate {int(rotate)}"
     return line
 
 
@@ -1817,7 +1836,10 @@ def _add_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
         return EditResult(source, error=EditError(
             "bad_value", f"alias {edit.alias!r} is already used"))
     level = int(edit.level) if edit.level is not None else 0
-    stmt = _use_stmt(edit.relpath, edit.alias, float(edit.x), float(edit.y), level)  # type: ignore[arg-type]
+    mirror = edit.mirror if edit.mirror in ("x", "y") else None
+    rotate = int(edit.rotate) if edit.rotate in (90, 180, 270) else 0
+    stmt = _use_stmt(edit.relpath, edit.alias, float(edit.x), float(edit.y), level,  # type: ignore[arg-type]
+                     mirror, rotate)
     lines = _lines(source)
     use_lines = [u.line for u in result.plan.uses if u.line is not None]
     if use_lines:
@@ -1839,7 +1861,9 @@ def _move_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
     if _close(use.x, nx) and _close(use.y, ny):  # type: ignore[attr-defined]
         return EditResult(source, changed=False, line=line_no,
                           summary=f"{edit.alias} unchanged")
-    stmt = _use_stmt(use.relpath, use.alias, nx, ny, use.level)  # type: ignore[attr-defined]
+    umir, urot = use.mirror, use.rotate  # type: ignore[attr-defined]
+    stmt = _use_stmt(use.relpath, use.alias, nx, ny, use.level,  # type: ignore[attr-defined]
+                     umir, urot)
     lines = _lines(source)
     lines[line_no - 1] = _with_comment(lines[line_no - 1], stmt)
     return EditResult("\n".join(lines), changed=True, line=line_no,
@@ -1852,15 +1876,27 @@ def _set_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
     if use is None or line_no is None:
         return EditResult(source, error=EditError(
             "unknown_room", f"no instance {edit.alias!r} in the plan"))
-    level = int(edit.level)  # type: ignore[arg-type]
-    if use.level == level:  # type: ignore[attr-defined]
+    level = int(edit.level) if edit.level is not None else use.level  # type: ignore[attr-defined]
+    mirror = use.mirror  # type: ignore[attr-defined]
+    if edit.mirror_set:
+        mirror = edit.mirror if edit.mirror in ("x", "y") else None
+    rotate: int = use.rotate  # type: ignore[attr-defined]
+    if edit.rotate_set:
+        r = int(edit.rotate) if edit.rotate is not None else 0
+        if r not in (0, 90, 180, 270):
+            return EditResult(source, error=EditError(
+                "bad_value", "set_use rotate must be 0, 90, 180 or 270"))
+        rotate = r
+    cur = (use.level, use.mirror, use.rotate)  # type: ignore[attr-defined]
+    if cur == (level, mirror, rotate):
         return EditResult(source, changed=False, line=line_no,
-                          summary=f"{edit.alias} already on level {level}")
-    stmt = _use_stmt(use.relpath, use.alias, use.x, use.y, level)  # type: ignore[attr-defined]
+                          summary=f"{edit.alias} unchanged")
+    stmt = _use_stmt(use.relpath, use.alias, use.x, use.y, level,  # type: ignore[attr-defined]
+                     mirror, rotate)
     lines = _lines(source)
     lines[line_no - 1] = _with_comment(lines[line_no - 1], stmt)
     return EditResult("\n".join(lines), changed=True, line=line_no,
-                      summary=f"{edit.alias} → level {level}")
+                      summary=f"set instance {edit.alias}")
 
 
 def _delete_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
