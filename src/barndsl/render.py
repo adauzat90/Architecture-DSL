@@ -145,20 +145,34 @@ class _Renderer:
         # Multi-story: draw one floor-plan block per level, stacked vertically.
         self.levels = plan.levels()
         self.multi = len(self.levels) > 1
+        # Effective top margin. A single-level plan whose north wall carries a
+        # chain dimension needs that extra row to clear the title block, so grow
+        # the top band minimally when one is present (multi-level plans reserve
+        # the north row inside ``label_gap`` below).
+        self.top = config.margin_top
+        if not self.multi and self._level_has_north_chain(0):
+            self.top += 12.0
         self.label_gap = 28.0  # space above each level's envelope for its label
+        # A north-side chain dimension sits in the band above each level's
+        # envelope, sharing it with the "LEVEL n" caption. When any level draws
+        # one, deepen that band so the chain clears the caption below it.
+        if self.multi and any(
+            self._level_has_north_chain(lvl) for lvl in self.levels
+        ):
+            self.label_gap = 46.0
         self.block_stride = self.label_gap + self.content_h + 34.0
-        self._block_top = config.margin_top  # set per level when rendering
+        self._block_top = self.top  # set per level when rendering
         if self.multi:
             n = len(self.levels)
             self.height = (
-                config.margin_top + self.label_gap + self.content_h
+                self.top + self.label_gap + self.content_h
                 + (n - 1) * self.block_stride + config.margin_bottom
             )
         else:
-            self.height = config.margin_top + self.content_h + config.margin_bottom
+            self.height = self.top + self.content_h + config.margin_bottom
 
     def _env_top(self, i: int) -> float:
-        return self.c.margin_top + self.label_gap + i * self.block_stride
+        return self.top + self.label_gap + i * self.block_stride
 
     # -- coordinate transform ---------------------------------------------
 
@@ -224,6 +238,7 @@ class _Renderer:
             self._draw_structure()
             self._draw_windows()
             self._draw_doors()
+            self._draw_chain_dims()
             self._draw_dimensions()
             self._draw_panel()
 
@@ -233,8 +248,11 @@ class _Renderer:
     def _draw_level_block(self, lvl: int) -> None:
         label = f"LEVEL {lvl}" + (" — GROUND" if lvl == 0 else "")
         label += f"   ({self._extent_label()})"
+        # With a reserved north-chain row (deepened ``label_gap``) the caption
+        # rides at the top of the band so the chain sits below it, clear.
+        cap_dy = (self.label_gap - 18) if self.label_gap > 28 else 12
         self._text(
-            self.c.margin_left, self._block_top - 12, label,
+            self.c.margin_left, self._block_top - cap_dy, label,
             size=13, anchor="start", weight="bold", fill="#333333",
         )
         if lvl == 0:
@@ -247,6 +265,7 @@ class _Renderer:
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
         self._draw_stairs(lvl)
+        self._draw_chain_dims(level=lvl)
 
     def _draw_street(self):
         """Mark the street/approach edge (a thick grey line + label) on the side the
@@ -765,7 +784,7 @@ class _Renderer:
         # primary envelope block.
         fx0, fy0, fx1, fy1 = self.plan.bounds()
         # Overall width dimension below the plan.
-        y = self.c.margin_top + self.content_h + 28
+        y = self.top + self.content_h + 28
         self._dim_line(
             self.sx(fx0), y, self.sx(fx1), y, f"{fx1 - fx0:.0f}′", horizontal=True
         )
@@ -791,13 +810,119 @@ class _Renderer:
                 f'transform="rotate(-90 {x1 - 6:.1f} {(y1 + y2) / 2:.1f})">{escape(label)}</text>'
             )
 
+    # -- chained per-side exterior dimension strings -----------------------
+
+    #: Offset (px) of a chain dimension line from its exterior wall — inside the
+    #: overall dimension line (28/34 px out), so the two rows read as one family.
+    _CHAIN_OFFSET = 15.0
+    _CHAIN_TICK = 4.0
+
+    def _chain_breaks(
+        self,
+        side: str,
+        rooms: list,
+        fx0: float,
+        fy0: float,
+        fx1: float,
+        fy1: float,
+        tol: float = 1e-6,
+    ) -> tuple[list[float], float, float]:
+        """Break points partitioning one exterior ``side`` (N/S/E/W).
+
+        Collect where the edges of rooms *touching* that exterior wall project
+        onto it, add the envelope span ends, then sort, clamp and dedupe. Rooms
+        inset from the wall contribute nothing (their edges aren't on it), so a
+        side no room reaches back onto degrades to the bare span (one segment).
+        Returns ``(points, span_lo, span_hi)``.
+        """
+        if side in ("S", "N"):
+            lo, hi = fx0, fx1
+            if side == "S":
+                touch = [r for r in rooms if abs(r.y - fy0) <= tol]
+            else:
+                touch = [r for r in rooms if abs(r.y2 - fy1) <= tol]
+            raw = [c for r in touch for c in (r.x, r.x2)]
+        else:
+            lo, hi = fy0, fy1
+            if side == "W":
+                touch = [r for r in rooms if abs(r.x - fx0) <= tol]
+            else:
+                touch = [r for r in rooms if abs(r.x2 - fx1) <= tol]
+            raw = [c for r in touch for c in (r.y, r.y2)]
+        pts: list[float] = []
+        for c in sorted([lo, hi, *raw]):
+            c = min(max(c, lo), hi)
+            if not pts or c - pts[-1] > tol:
+                pts.append(c)
+        return pts, lo, hi
+
+    def _level_has_north_chain(self, level: int) -> bool:
+        fx0, fy0, fx1, fy1 = self.plan.bounds()
+        rooms = [r for r in self.plan.rooms if r.level == level]
+        pts, _, _ = self._chain_breaks("N", rooms, fx0, fy0, fx1, fy1)
+        return len(pts) > 2
+
+    @staticmethod
+    def _label_min_px(label: str) -> float:
+        """Rough pixel run a size-9 segment label needs (skip it below this)."""
+        return len(label) * 5.5
+
+    def _draw_chain_dims(self, level: int | None = None) -> None:
+        """Draw a chained dimension string along each exterior side that has an
+        interior break — a run of tick-to-tick segments between the wall and the
+        overall dimension line. Sides with no interior break are left to the
+        overall dimension (no duplicated single-segment string)."""
+        fx0, fy0, fx1, fy1 = self.plan.bounds()
+        rooms = [r for r in self.plan.rooms if level is None or r.level == level]
+        for side in ("S", "N", "W", "E"):
+            pts, _, _ = self._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
+            if len(pts) <= 2:
+                continue  # no interior break — the overall dim already covers it
+            self._chain_string(side, pts, fx0, fy0, fx1, fy1)
+
+    def _chain_string(
+        self, side: str, pts: list[float], fx0: float, fy0: float, fx1: float, fy1: float
+    ) -> None:
+        off, tick = self._CHAIN_OFFSET, self._CHAIN_TICK
+        if side in ("S", "N"):
+            wy = self.sy(fy0 if side == "S" else fy1)
+            ly = wy + off if side == "S" else wy - off
+            xs = [self.sx(p) for p in pts]
+            self._line(xs[0], ly, xs[-1], ly, DIM_COLOR, 1.0)
+            for x in xs:
+                self._line(x, ly - tick, x, ly + tick, DIM_COLOR, 1.0)
+            for a, b, xa, xb in zip(pts, pts[1:], xs, xs[1:]):
+                label = f"{b - a:g}′"
+                if (xb - xa) < self._label_min_px(label):
+                    continue
+                ty = ly - 3 if side == "S" else ly + 10
+                self._text((xa + xb) / 2, ty, label, size=9, fill=DIM_COLOR)
+        else:
+            wx = self.sx(fx0 if side == "W" else fx1)
+            lx = wx - off if side == "W" else wx + off
+            ys = [self.sy(p) for p in pts]
+            self._line(lx, ys[0], lx, ys[-1], DIM_COLOR, 1.0)
+            for y in ys:
+                self._line(lx - tick, y, lx + tick, y, DIM_COLOR, 1.0)
+            for a, b, ya, yb in zip(pts, pts[1:], ys, ys[1:]):
+                label = f"{b - a:g}′"
+                if abs(yb - ya) < self._label_min_px(label):
+                    continue
+                cy = (ya + yb) / 2
+                tx = lx + 4 if side == "W" else lx - 4
+                self.parts.append(
+                    f'<text x="{tx:.1f}" y="{cy:.1f}" font-family="{self.c.font}" '
+                    f'font-size="9" fill="{DIM_COLOR}" text-anchor="middle" '
+                    f'transform="rotate(-90 {tx:.1f} {cy:.1f})">{escape(label)}</text>'
+                )
+
     def _draw_panel(self, multi: bool = False):
         px = self.c.margin_left + self.content_w + self.c.gutter
         if multi:
-            py = self.c.margin_top + self.label_gap
+            py = self.top + self.label_gap
             ph = (len(self.levels) - 1) * self.block_stride + self.content_h
         else:
-            py = self.c.margin_top
+            py = self.top
             ph = self.content_h
         pw = self.c.panel_width
         m = self.plan.metrics()
