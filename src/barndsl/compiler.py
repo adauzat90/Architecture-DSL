@@ -52,6 +52,7 @@ rejected, and ASCII ``12'6"`` is unsupported because ``"`` starts a string.
 
 from __future__ import annotations
 
+import difflib
 import math
 import os
 import re
@@ -109,7 +110,20 @@ _FIXTURE_WALLS = {
     "w": Direction.WEST, "west": Direction.WEST,
 }
 _TYPES = ", ".join(t.value for t in RoomType)
+#: The room-type names as a plain list, for did-you-mean ranking (BAD_TYPE).
+_TYPE_VALUES = tuple(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
+
+
+def _did_you_mean(word: str, options: tuple[str, ...] | list[str]) -> str:
+    """A leading ``Did you mean `x` or `y`?`` clause for ``word`` against
+    ``options`` (empty when nothing is close). Mirrors the accept-pragma's use of
+    :func:`difflib.get_close_matches` so a misspelled keyword/type ranks the near
+    hits instead of dumping the whole list."""
+    hits = difflib.get_close_matches(word.lower(), list(options), n=3)
+    if not hits:
+        return ""
+    return "Did you mean " + " or ".join(f"`{h}`" for h in hits) + "? "
 
 #: A `use` alias is a plain identifier — no dot (dots namespace stamped ids).
 _ALIAS_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -442,6 +456,86 @@ def _parse_ft_in(text: str) -> float | None:
     return None
 
 
+#: Words a first-time user reaches for to mean feet/inches, which the DSL never
+#: accepts (a length is one token: 12, 12-6 or 12′6″). Recognised only to *teach*.
+_FEET_WORDS = {"feet", "ft", "foot"}
+_INCH_WORDS = {"inches", "inch", "in", "ins"}
+#: `<digits>('|′)<digits?>` — the foot-mark form a user typed before an ASCII `"`.
+_FOOTMARK_STEM = re.compile(r"^(\d+(?:\.\d+)?)['′](\d+(?:\.\d+)?)?$")
+
+
+def _ftin_string_hint(raw: str, quote_col: int) -> str | None:
+    """Teach the ``12'6\"`` slip that opens a string literal.
+
+    When an unterminated ``"`` immediately follows a digit — the tell-tale of a
+    user writing feet-and-inches with the ASCII inch mark (``12'6"``) — return a
+    targeted hint translating it to an accepted form (``12-6`` / ``12′6″``);
+    otherwise ``None`` (the generic add-the-quote hint stands). ``quote_col`` is
+    the 1-based column of the opening quote."""
+    idx = quote_col - 2  # 0-based index of the char just before the quote
+    if idx < 0 or idx >= len(raw) or not raw[idx].isdigit():
+        return None
+    # Grab the bareword run right before the quote (the would-be length token).
+    j = idx
+    while j >= 0 and raw[j] not in ' \t,:"#{}':
+        j -= 1
+    stem = raw[j + 1:idx + 1]
+    m = _FOOTMARK_STEM.match(stem)
+    if m is not None:
+        ft, inch = m.group(1), m.group(2)
+        dash = f"{ft}-{inch}" if inch else ft
+        uni = f"{ft}′{inch}″" if inch else f"{ft}′"
+        bad = stem + '"'
+        return (
+            f"Feet-and-inches uses a dash or unicode marks — write `{dash}` or "
+            f"`{uni}`, not `{bad}` (the ASCII `\"` opens a string literal)."
+        )
+    return (
+        "Feet-and-inches uses a dash (`12-6`) or unicode marks (`12′6″`); the "
+        "ASCII `\"` opens a string literal, so it can't close a length."
+    )
+
+
+def _units_word_hint(toks: list[_Token], unit_idx: int) -> str | None:
+    """Teach ``12 feet 6 inches`` — a length spelled out in words.
+
+    ``toks[unit_idx]`` is a ``feet``/``ft``/``foot`` token; the token before it is
+    the feet number, and an optional ``<n> inches`` may follow. Return a hint that
+    translates the literal input to the accepted single-token form (``12-6``),
+    or ``None`` when the shape isn't the words-for-units slip."""
+    if unit_idx <= 0 or unit_idx >= len(toks):
+        return None
+    if toks[unit_idx].text.lower() not in _FEET_WORDS:
+        return None
+    feet_tok = toks[unit_idx - 1]
+    if feet_tok.quoted:
+        return None
+    try:
+        float(feet_tok.text)
+    except ValueError:
+        return None
+    feet = feet_tok.text
+    literal = f"{feet} {toks[unit_idx].text}"
+    inch: str | None = None
+    # Optional `<inches> inch(es)` right after the feet word.
+    if unit_idx + 2 < len(toks) and toks[unit_idx + 2].text.lower() in _INCH_WORDS:
+        cand = toks[unit_idx + 1]
+        if not cand.quoted:
+            try:
+                float(cand.text)
+                inch = cand.text
+                literal += f" {cand.text} {toks[unit_idx + 2].text}"
+            except ValueError:
+                inch = None
+    dash = f"{feet}-{inch}" if inch else feet
+    uni = f"{feet}′{inch}″" if inch else f"{feet}′"
+    return (
+        f"Feet-and-inches is one token — write `{dash}` (or `{uni}`), e.g. "
+        f"`size {dash} x <length>`. `{literal}` is several tokens the parser "
+        "can't read as one length."
+    )
+
+
 def _tokenize_line(line: str, lineno: int) -> list[_Token]:
     tokens: list[_Token] = []
     i, n = 0, len(line)
@@ -627,11 +721,15 @@ class _Cursor:
     def keyword(self, expected: str) -> _Token:
         t = self.take(f"'{expected}'")
         if t.text.lower() != expected:
+            # A first-timer spelling a length in words (`size 12 feet 6 inches x
+            # 14`) trips here on the missing `x`; teach the single-token form.
+            hint = _units_word_hint(self.toks, self.i - 1)
             raise _ParseError(
                 "SYNTAX",
                 f"Expected '{expected}', got '{t.text}'.",
                 t.col,
                 end_col=t.end_col,
+                hint=hint,
             )
         return t
 
@@ -642,7 +740,7 @@ class _Cursor:
         except ValueError:
             raise _ParseError(
                 "BAD_TYPE",
-                f"Unknown room type '{t.text}'.",
+                f"{_did_you_mean(t.text, _TYPE_VALUES)}Unknown room type '{t.text}'.",
                 t.col,
                 hint=f"Use one of: {_TYPES}.",
                 end_col=t.end_col,
@@ -671,6 +769,8 @@ class _Cursor:
                     "`align`/`offset` go on the relative anchor, before `size` "
                     "(e.g. `room x: bedroom east-of y align far size 12 x 11`)."
                 )
+            elif _units_word_hint(self.toks, self.i) is not None:
+                hint = _units_word_hint(self.toks, self.i)  # type: ignore[assignment]
             else:
                 hint = "Remove the extra token(s)."
             raise _ParseError(
@@ -978,6 +1078,7 @@ def _parse_statement(
             if cat is None:
                 raise _ParseError(
                     "BAD_TYPE",
+                    f"{_did_you_mean(noun.text, _TYPE_VALUES)}"
                     f"Unknown program room type '{noun.text}'.",
                     noun.col,
                     end_col=noun.end_col,
@@ -1776,7 +1877,7 @@ def _parse_statement(
     else:
         raise _ParseError(
             "UNKNOWN_STMT",
-            f"Unknown statement '{kw.text}'.",
+            f"{_did_you_mean(kw.text, _KEYWORDS)}Unknown statement '{kw.text}'.",
             kw.col,
             hint=f"Statements start with one of: {', '.join(_KEYWORDS)}.",
             end_col=kw.end_col,
@@ -1994,6 +2095,7 @@ def compile_source(
         toks = _tokenize_line(raw, lineno)
         unterminated = next((t for t in toks if t.unterminated), None)
         if unterminated is not None:
+            ftin_hint = _ftin_string_hint(raw, unterminated.col)
             diagnostics.append(
                 Issue(
                     Severity.ERROR,
@@ -2002,7 +2104,7 @@ def compile_source(
                     line=lineno,
                     col=unterminated.col,
                     end_col=unterminated.end_col,
-                    hint='Add the closing quote, e.g. `plan "Name"`.',
+                    hint=ftin_hint or 'Add the closing quote, e.g. `plan "Name"`.',
                 )
             )
             skipped = True

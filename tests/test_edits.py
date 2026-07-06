@@ -828,3 +828,104 @@ def test_gallery_first_room_retype_recompiles(name, source):
     assert r.ok, f"{name}: {r.error}"
     # setting a room to its own type is a no-op; the source must be untouched.
     assert not r.changed and r.source == source, name
+
+
+# --- Phase 14: fit_envelope + add_room auto-placement ------------------------
+
+_STRANDED = """\
+plan "Fit Me"
+envelope 30 x 40
+ceiling 9
+room living: living at 0,0 size 24 x 15
+room kitchen: kitchen at 24,0 size 16 x 15
+"""
+
+
+def _oob(source):
+    return [d for d in compile_source(source).diagnostics if d.code == "OUT_OF_BOUNDS"]
+
+
+def test_fit_envelope_scales_rooms_into_bounds():
+    # kitchen runs x 24..40 in a 30-wide envelope -> OUT_OF_BOUNDS before.
+    assert _oob(_STRANDED)
+    res = apply_edit(_STRANDED, edit_from_json({"kind": "fit_envelope"}))
+    assert res.error is None and res.changed
+    assert not _oob(res.source)             # repaired
+    plan = compile_source(res.source).plan
+    # per-axis proportional scale: bbox width 40 -> 30 is x0.75.
+    living, kitchen = plan.room("living"), plan.room("kitchen")
+    assert abs(living.width - 18) < 0.05 and abs(kitchen.width - 12) < 0.05
+    # adjacency survives — the shared wall stays shared.
+    assert abs(living.x2 - kitchen.x) < 1e-6
+
+
+def test_fit_envelope_is_one_edit_json_and_noop_when_already_fits():
+    good = (
+        'plan "ok"\nenvelope 40 x 30\nceiling 9\n'
+        "room a: living at 0,0 size 20 x 30\n"
+        "room b: kitchen at 20,0 size 20 x 30\n"
+    )
+    res = apply_edit(good, edit_from_json({"kind": "fit_envelope"}))
+    assert res.error is None and not res.changed    # nothing to scale
+
+
+def test_fit_envelope_degenerate_clamps_without_error():
+    # A single oversize room: scaled + clamped fully inside the envelope.
+    src = 'plan "d"\nenvelope 20 x 20\nceiling 9\nroom a: living at 0,0 size 40 x 40\n'
+    res = apply_edit(src, edit_from_json({"kind": "fit_envelope"}))
+    assert res.error is None and res.changed
+    plan = compile_source(res.source).plan
+    a = plan.room("a")
+    assert a.x >= -1e-6 and a.y >= -1e-6
+    assert a.x2 <= 20 + 1e-6 and a.y2 <= 20 + 1e-6
+
+
+def test_add_room_auto_picks_a_free_non_overlapping_spot():
+    src = (
+        'plan "auto"\nenvelope 40 x 30\nceiling 9\n'
+        "room living: living at 0,0 size 20 x 30\n"
+        "room kitchen: kitchen at 20,0 size 20 x 15\n"
+    )
+    # free area is x20..40, y15..30 (a 20x15 pocket) — a 12x12 room fits there.
+    res = apply_edit(src, edit_from_json(
+        {"kind": "add_room", "id": "bed2", "type": "bedroom", "w": 12, "l": 12, "auto": True}))
+    assert res.error is None and res.changed
+    result = compile_source(res.source)
+    assert not [d for d in result.diagnostics if d.code in ("ROOM_OVERLAP", "OUT_OF_BOUNDS")]
+    bed2 = result.plan.room("bed2")
+    assert bed2 is not None
+    # abuts an existing room (kitchen's north wall at y=15), so it can get a door.
+    assert abs(bed2.y - 15) < 1e-6
+
+
+def test_add_room_auto_shrinks_to_min_8x8_when_needed():
+    # A 20x20 envelope with a 20x12 room leaves only a 20x8 strip — a 12x12 won't
+    # fit, so auto retries at 8x8 and lands it.
+    src = (
+        'plan "shrink"\nenvelope 20 x 20\nceiling 9\n'
+        "room living: living at 0,0 size 20 x 12\n"
+    )
+    res = apply_edit(src, edit_from_json(
+        {"kind": "add_room", "id": "bed2", "type": "bedroom", "w": 12, "l": 12, "auto": True}))
+    assert res.error is None and res.changed
+    bed2 = compile_source(res.source).plan.room("bed2")
+    assert bed2 is not None
+    assert bed2.width <= 8 + 1e-6 and bed2.length <= 8 + 1e-6
+
+
+def test_add_room_auto_falls_back_to_origin_when_nothing_fits():
+    # A full envelope: never refuse — drop it at the origin so the overlap
+    # diagnostic can teach.
+    src = 'plan "full"\nenvelope 20 x 20\nceiling 9\nroom living: living at 0,0 size 20 x 20\n'
+    res = apply_edit(src, edit_from_json(
+        {"kind": "add_room", "id": "bed2", "type": "bedroom", "w": 12, "l": 12, "auto": True}))
+    assert res.error is None and res.changed
+    assert "room bed2: bedroom at 0,0 size 12 x 12" in res.source
+
+
+def test_add_room_still_supports_explicit_anchor_and_at():
+    src = 'plan "a"\nenvelope 40 x 30\nceiling 9\nroom living: living at 0,0 size 20 x 30\n'
+    res = apply_edit(src, edit_from_json(
+        {"kind": "add_room", "id": "k", "type": "kitchen", "w": 12, "l": 12,
+         "anchor": "east-of", "of": "living"}))
+    assert res.error is None and "east-of living" in res.source

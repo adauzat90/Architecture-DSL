@@ -167,6 +167,10 @@ class Edit:
     #: ``add_alarm`` uses ``room``/``fkind`` (the alarm kind smoke|co|smoke_co) +
     #: optional ``x``/``y``; ``delete_alarm`` uses ``index``.
     gfci: bool = False
+    #: ``add_room`` auto-placement: when ``True`` (and no ``at``/``anchor`` is
+    #: given) the verb scans the envelope for the first free spot the new room
+    #: fits, preferring one that abuts an existing room so it can get a door.
+    auto: bool = False
 
 
 @dataclass(frozen=True)
@@ -250,7 +254,10 @@ def edit_from_json(obj: object) -> Edit | EditError:
                     w=_as_num(obj.get("w")), l=_as_num(obj.get("l")),
                     x=ax, y=ay,
                     anchor=_as_str(obj.get("anchor")), of=_as_str(obj.get("of")),
-                    level=_as_int(obj.get("level")))
+                    level=_as_int(obj.get("level")),
+                    auto=obj.get("auto") is True)
+    if kind == "fit_envelope":
+        return Edit("fit_envelope")
     if kind == "delete_room":
         return Edit("delete_room", room=_as_str(obj.get("room")))
     if kind == "add_opening":
@@ -557,6 +564,8 @@ def apply_edit(source: str, edit: Edit, base_dir: str | None = None) -> EditResu
         return _rename_room(source, result, edit)
     if edit.kind == "add_room":
         return _add_room(source, result, edit)
+    if edit.kind == "fit_envelope":
+        return _fit_envelope(source, result, edit)
     if edit.kind == "delete_room":
         return _delete_room(source, result, edit)
     if edit.kind == "add_opening":
@@ -675,11 +684,16 @@ def _validate_shape(edit: Edit) -> EditError | None:
                 return EditError("bad_value", f"unknown anchor {edit.anchor!r}")
             if not edit.of:
                 return EditError("malformed", "add_room anchor needs an `of` room")
+        elif edit.auto:
+            pass  # auto-placement — the free spot is found at apply time
         else:
             return EditError("malformed",
-                             "add_room needs a placement: `at` [x,y] or `anchor`+`of`")
+                             "add_room needs a placement: `at` [x,y], `anchor`+`of`, "
+                             "or `auto`")
         if edit.level is not None and edit.level < 0:
             return EditError("bad_value", "add_room level must be >= 0")
+        return None
+    if edit.kind == "fit_envelope":
         return None
     if edit.kind == "delete_room":
         if not edit.room:
@@ -1317,15 +1331,32 @@ def _add_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
                           f"room id {edit.room!r} is already taken"))
     rtype = RoomType(edit.rtype.lower()).value  # type: ignore[union-attr]
     level = int(edit.level) if edit.level is not None else 0
+    w, l = float(edit.w), float(edit.l)  # type: ignore[arg-type]
+    has_at = edit.x is not None or edit.y is not None
     if edit.anchor is not None:  # relative placement — the target must exist
         if plan.room(edit.of) is None:  # type: ignore[arg-type]
             return EditResult(source, error=EditError("unknown_room",
                               f"anchor room {edit.of!r} not in the plan"))
         placement = f"{edit.anchor} {edit.of}"
-    else:
+    elif has_at:
         placement = f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}"  # type: ignore[arg-type]
+    else:
+        # Auto-placement: scan the envelope for the first free spot the room fits,
+        # preferring one that abuts an existing room (so it can get a door). If it
+        # won't fit anywhere at its size, retry at a minimum 8×8; failing that,
+        # drop it at the origin so the compiler's overlap diagnostic can teach —
+        # add_room never refuses.
+        spot = _free_spot(plan, level, w, l)
+        if spot is None and (w > 8.0 or l > 8.0):
+            sw, sl = min(w, 8.0), min(l, 8.0)
+            shrunk = _free_spot(plan, level, sw, sl)
+            if shrunk is not None:
+                spot, w, l = shrunk, sw, sl
+        if spot is None:
+            spot = (0.0, 0.0)
+        placement = f"at {_fmt(spot[0])},{_fmt(spot[1])}"
     stmt = (f"room {edit.room}: {rtype} {placement} "
-            f"size {_fmt(float(edit.w))} x {_fmt(float(edit.l))}")  # type: ignore[arg-type]
+            f"size {_fmt(w)} x {_fmt(l)}")
     if level:
         stmt += f" level {level}"
 
@@ -1341,6 +1372,104 @@ def _add_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
     lines.insert(after, stmt)
     return EditResult("\n".join(lines), changed=True, line=after + 1,
                       summary=f"added room {edit.room} ({rtype})")
+
+
+def _rects_overlap(ax: float, ay: float, aw: float, al: float, r) -> bool:
+    """True if the ``aw×al`` rect at ``(ax, ay)`` overlaps room ``r`` (>tol area)."""
+    return (ax < r.x2 - 1e-6 and r.x < ax + aw - 1e-6
+            and ay < r.y2 - 1e-6 and r.y < ay + al - 1e-6)
+
+
+def _rects_abut(ax: float, ay: float, aw: float, al: float, r) -> bool:
+    """True if the ``aw×al`` rect at ``(ax, ay)`` shares a wall segment with ``r``
+    (a touching edge with positive overlap along it) — the tell of a spot that can
+    later carry a door."""
+    ax2, ay2 = ax + aw, ay + al
+    y_over = min(ay2, r.y2) - max(ay, r.y) > 1e-6
+    x_over = min(ax2, r.x2) - max(ax, r.x) > 1e-6
+    vert = (abs(ax2 - r.x) < 1e-6 or abs(ax - r.x2) < 1e-6) and y_over
+    horiz = (abs(ay2 - r.y) < 1e-6 or abs(ay - r.y2) < 1e-6) and x_over
+    return vert or horiz
+
+
+def _free_spot(plan, level: int, w: float, l: float) -> tuple[float, float] | None:
+    """First envelope spot (1-ft grid) a ``w×l`` room fits without overlapping any
+    same-level room, preferring a spot that abuts one. ``None`` if none fits.
+
+    Deterministic row-major scan from the origin, so the pick is reproducible and
+    naturally lands beside what's already placed."""
+    env_w = float(plan.envelope_width)
+    env_l = float(plan.envelope_length)
+    if w > env_w + 1e-6 or l > env_l + 1e-6 or env_w <= 0 or env_l <= 0:
+        return None
+    rooms = [r for r in plan.rooms if r.level == level]
+    max_x = int(math.floor(env_w - w + 1e-6))
+    max_y = int(math.floor(env_l - l + 1e-6))
+    first: tuple[float, float] | None = None
+    for gy in range(0, max_y + 1):
+        y = float(gy)
+        for gx in range(0, max_x + 1):
+            x = float(gx)
+            if any(_rects_overlap(x, y, w, l, r) for r in rooms):
+                continue
+            if first is None:
+                first = (x, y)
+            if not rooms or any(_rects_abut(x, y, w, l, r) for r in rooms):
+                return (x, y)  # prefers an abutting spot; first-fit when placed alone
+    return first
+
+
+def _fit_envelope(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    """Scale every room's position and size proportionally into the current
+    envelope, then clamp, so an envelope shrink that stranded rooms out of bounds
+    is repaired in one undoable step. Adjacencies survive because every room shares
+    the same per-axis scale and origin shift; clamping only nudges float overshoot."""
+    assert result.plan is not None
+    plan = result.plan
+    env_w = float(plan.envelope_width)
+    env_l = float(plan.envelope_length)
+    rooms = [r for r in plan.rooms if r.id in result.room_lines]
+    if not rooms or env_w <= 0 or env_l <= 0:
+        return EditResult(source, changed=False,
+                          summary="nothing to fit into the envelope")
+
+    min_x = min(r.x for r in rooms)
+    min_y = min(r.y for r in rooms)
+    bbox_w = max(r.x2 for r in rooms) - min_x
+    bbox_l = max(r.y2 for r in rooms) - min_y
+    # Shrink to fit when the footprint overflows an axis; never enlarge a plan
+    # that already fits (scale caps at 1.0). Guard degenerate zero-width footprints.
+    sx = min(1.0, env_w / bbox_w) if bbox_w > 1e-6 else 1.0
+    sy = min(1.0, env_l / bbox_l) if bbox_l > 1e-6 else 1.0
+
+    lines = _lines(source)
+    changed = False
+    for r in rooms:
+        nw = min(r.width * sx, env_w)
+        nl = min(r.length * sy, env_l)
+        nx = (r.x - min_x) * sx
+        ny = (r.y - min_y) * sy
+        nx = min(max(0.0, nx), max(0.0, env_w - nw))
+        ny = min(max(0.0, ny), max(0.0, env_l - nl))
+        line_no = result.room_lines[r.id]
+        raw = lines[line_no - 1]
+        toks = _tokenize_line(raw, line_no)
+        size_idx = _room_size_index(toks)
+        placement = toks[3:size_idx]
+        wt, lt = toks[size_idx + 1], toks[size_idx + 3]  # size <W> x <L>
+        splices = [
+            (placement[0].col - 1, placement[-1].end_col - 1,
+             f"at {_fmt(nx)},{_fmt(ny)}"),
+            (wt.col - 1, wt.end_col - 1, _fmt(nw)),
+            (lt.col - 1, lt.end_col - 1, _fmt(nl)),
+        ]
+        newraw = _splice(raw, splices)
+        if newraw != raw:
+            lines[line_no - 1] = newraw
+            changed = True
+    return EditResult("\n".join(lines), changed=changed,
+                      line=result.room_lines[rooms[0].id],
+                      summary=f"fit {len(rooms)} room(s) into {_fmt(env_w)} × {_fmt(env_l)}")
 
 
 def _delete_room(source: str, result: CompileResult, edit: Edit) -> EditResult:

@@ -1267,3 +1267,99 @@ def test_app_has_parts_browser_markup_and_stays_offline():
     # the offline guarantee holds — no external references
     assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
     assert "https://" not in html and "//cdn" not in html and "<script src" not in html
+
+
+# --- Phase 14: offline /api/layout, clean cold start, offline Design form -----
+
+
+def _layout(srv, body):
+    status, data = _request(srv, "POST", "/api/layout", json.dumps(body))
+    return status, json.loads(data)
+
+
+def test_layout_endpoint_valid_brief_compiles_clean(server):
+    from barndsl.compiler import compile_source
+
+    status, p = _layout(server, {
+        "bedrooms": 3, "bathrooms": 2, "width": 40, "length": 30,
+        "open_kitchen": True, "extras": ["garage"], "name": "Fresh Start",
+    })
+    assert status == 200
+    assert "error" not in p and isinstance(p["source"], str)
+    result = compile_source(p["source"])
+    assert result.ok, [d.code for d in result.errors]
+    assert result.plan.metrics()["bedroom_count"] == 3
+
+
+def test_layout_endpoint_clamps_hostile_numbers_without_crashing(server):
+    # Absurd/mistyped values are clamped, not fatal — always a 200 with source.
+    status, p = _layout(server, {
+        "bedrooms": 99999, "bathrooms": -5, "width": -1, "length": "abc",
+        "extras": ["garage", "evil-drop-tables", "shop"], "name": '"; DROP',
+    })
+    assert status == 200 and "source" in p
+    # the injected quote was stripped, so the `plan "..."` line stays well-formed
+    # (exactly one quote pair) and the source still parses to a plan.
+    from barndsl.compiler import compile_source
+
+    first = p["source"].splitlines()[0]
+    assert first.count('"') == 2
+    assert compile_source(p["source"]).plan is not None
+
+
+def test_layout_endpoint_non_object_body_is_400(server):
+    status, _ = _request(server, "POST", "/api/layout", json.dumps([1, 2, 3]))
+    assert status == 400
+
+
+def test_layout_endpoint_ignores_unknown_extras(server):
+    status, p = _layout(server, {"bedrooms": 1, "bathrooms": 1,
+                                 "width": 30, "length": 24, "extras": ["nope"]})
+    assert status == 200 and "garage" not in p["source"]
+
+
+def test_layout_brief_text_shape():
+    from barndsl.playground import layout_brief_text
+
+    txt = layout_brief_text("My Barndo", 2, 1, 40, 30, True, ["garage"])
+    assert txt.startswith('plan "My Barndo"')
+    assert "envelope 40 x 30" in txt
+    assert "room garage: garage" in txt and "adjacent" in txt and "entry living" in txt
+
+
+def test_default_source_is_the_clean_scaffold_not_cedar():
+    # Cold start: a fresh session opens the known-clean starter (0/0/0), not the
+    # example that carries diagnostics.
+    from barndsl.compiler import compile_source
+    from barndsl.playground import default_source
+    from barndsl.scaffold import starter_dsl
+
+    src = default_source()
+    assert src == starter_dsl("My Barndo")
+    result = compile_source(src)
+    assert result.ok and not result.errors and not result.warnings
+    assert "Cedar Ridge" not in src
+
+
+def test_cedar_ridge_stays_available_as_an_example():
+    # Flipping the cold start must not remove Cedar Ridge — it's still bundled.
+    names = {ex["name"] for ex in load_examples()}
+    assert "cedar_ridge.barn" in names
+
+
+def test_app_has_offline_design_form_and_layout_wiring():
+    html = render_app(CLEAN)
+    for token in ("Design (offline — rule-based)", "Design with Claude",
+                  "id=\"od-btn\"", "/api/layout", "function designOffline(",
+                  "od-beds", "od-extras", "open kitchen"):
+        assert token in html, token
+    # still fully offline
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html and "//cdn" not in html and "<script src" not in html
+
+
+def test_app_has_envelope_fit_assist_wiring():
+    html = render_app(CLEAN)
+    for token in ("function offerFitIfStranded(", "fit_envelope",
+                  "Fit rooms to new envelope", "function fitEnvelope("):
+        assert token in html, token

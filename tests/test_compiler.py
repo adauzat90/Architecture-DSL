@@ -147,3 +147,71 @@ def test_compiled_plan_renders():
     result = compile_file(EXAMPLE)
     svg = render_svg(result.plan)
     assert svg.startswith("<svg") and "Cedar Ridge" in svg
+
+
+# --- Phase 14: feet-and-inches input teaching + did-you-mean ------------------
+
+
+def _errors(src):
+    return [d for d in compile_source(src).diagnostics if d.severity.value == "error"]
+
+
+def _one(src, code):
+    hits = [d for d in _errors(src) if d.code == code]
+    assert hits, f"expected a {code} error in:\n{src}"
+    return hits[0]
+
+
+def test_ftin_ascii_inch_mark_teaches_dash_form():
+    # `12'6"` — the ASCII " opens a string literal; the targeted hint translates
+    # the user's input to an accepted feet-and-inches form instead of a bare
+    # "unterminated string".
+    d = _one('plan "x"\nenvelope 40 x 30\nroom a: living at 0,0 size 12\'6" x 14\n',
+             "UNTERMINATED_STRING")
+    assert d.hint == (
+        "Feet-and-inches uses a dash or unicode marks — write `12-6` or `12′6″`, "
+        "not `12'6\"` (the ASCII `\"` opens a string literal)."
+    )
+
+
+def test_ftin_words_teaches_single_token_form():
+    # `12 feet 6 inches` — spelled out; the SYNTAX error's hint translates it.
+    d = _one('plan "x"\nenvelope 40 x 30\nroom a: living at 0,0 size 12 feet 6 inches x 14\n',
+             "SYNTAX")
+    assert d.hint == (
+        "Feet-and-inches is one token — write `12-6` (or `12′6″`), e.g. "
+        "`size 12-6 x <length>`. `12 feet 6 inches` is several tokens the parser "
+        "can't read as one length."
+    )
+
+
+def test_valid_ftin_still_parses_unchanged():
+    # The teaching must never change what a valid source does.
+    r = compile_source(
+        'plan "x"\nenvelope 40 x 30\nceiling 9\n'
+        "room a: living at 0,0 size 12-6 x 14\n"
+        "entry a south width 3 offset 2\n"
+    )
+    assert not r.recovered and r.plan is not None
+    assert abs(r.plan.room("a").width - 12.5) < 1e-6
+
+
+def test_bad_type_prepends_did_you_mean():
+    d = _one('plan "x"\nenvelope 40 x 30\nroom a: livingroom at 0,0 size 12 x 14\n',
+             "BAD_TYPE")
+    assert d.message.startswith("Did you mean `living`?")
+    # the full list stays in the hint
+    assert "kitchen" in d.hint and "bedroom" in d.hint
+
+
+def test_unknown_stmt_prepends_did_you_mean():
+    d = _one('plan "x"\nenvelope 40 x 30\nrom a: living at 0,0 size 12 x 14\n',
+             "UNKNOWN_STMT")
+    assert "Did you mean `room`" in d.message
+    assert "room" in d.hint
+
+
+def test_unknown_stmt_no_match_has_no_did_you_mean():
+    # A word with no close keyword just names it — no misleading suggestion.
+    d = _one('plan "x"\nenvelope 40 x 30\nqwertyxyz a b c\n', "UNKNOWN_STMT")
+    assert "Did you mean" not in d.message

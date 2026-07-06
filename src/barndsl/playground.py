@@ -79,6 +79,7 @@ source is broken.
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import uuid
@@ -207,15 +208,165 @@ def load_examples() -> list[dict]:
 
 
 def default_source() -> str:
-    """Starter DSL to preload the editor: the cedar_ridge example, else a scaffold."""
-    path = os.path.join(_examples_dir(), "cedar_ridge.barn")
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return fh.read()
-    except OSError:
-        from .scaffold import starter_dsl
+    """Starter DSL to preload a fresh (no-file) session: the known-clean scaffold.
 
-        return starter_dsl("My Barndo")
+    A first-ever visitor lands on the reassuring 0/0/0 starter — the same plan the
+    "New" button loads — rather than a rich example carrying diagnostics. The
+    Cedar Ridge example stays one click away in Load example (it's still bundled in
+    :func:`load_examples`); this only changes what an empty editor opens with."""
+    from .scaffold import starter_dsl
+
+    return starter_dsl("My Barndo")
+
+
+# --- offline auto-layout (POST /api/layout) ----------------------------------
+#
+# The browser's Design panel has an offline, rule-based path that needs no API
+# key: a small form (bedrooms/bathrooms/envelope/extra rooms/open-kitchen) is
+# turned into an adjacency brief and run through the same space-filling solver the
+# CLI's ``barndsl layout`` uses. The result is DSL the editor loads as one
+# undoable checkpoint. All inputs are clamped and the room program is bounded, so
+# a hostile payload can't blow up the (localhost-only) solve.
+
+#: Wall-clock budget (seconds) for one offline solve — a hard deadline so a
+#: pathological program can't wedge the request thread.
+LAYOUT_DEADLINE = 6.0
+
+#: Extra rooms the offline form offers: checkbox value -> (room type, target area
+#: sqft). Interior room types only — the fill engine tiles them into the envelope.
+#: A `porch` is an exterior landing, not a fill room, so it's intentionally absent.
+_LAYOUT_EXTRAS: dict[str, tuple[str, int]] = {
+    "garage": ("garage", 400),
+    "shop": ("shop", 300),
+    "office": ("office", 120),
+    "dining": ("dining", 160),
+    "mudroom": ("mudroom", 80),
+    "laundry": ("laundry", 60),
+}
+
+
+def _clamp_int(value: object, lo: int, hi: int, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return default
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
+def _clamp_float(value: object, lo: float, hi: float, default: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(f):
+        return default
+    return max(lo, min(hi, f))
+
+
+def layout_brief_text(
+    name: str, beds: int, baths: int, width: float, length: float,
+    open_kitchen: bool, extras: list[str],
+) -> str:
+    """Compose an adjacency brief (the ``barndsl layout`` grammar) from the offline
+    Design form's fields. Living + kitchen are always present; a hall spine appears
+    once there are two or more private rooms so bedrooms/baths hang off it and get
+    doors. Extras attach to a sensible neighbour."""
+    rooms: list[tuple[str, str, int, int | None]] = [
+        ("living", "living", 360, None),
+        ("kitchen", "kitchen", 240, None),
+    ]
+    for e in extras:
+        rtype, area = _LAYOUT_EXTRAS[e]
+        rooms.append((e, rtype, area, None))
+    private = beds + baths
+    hall = private >= 2
+    if hall:
+        rooms.append(("hall", "hallway", max(96, private * 40), 4))
+    bed_ids = [f"bed{i + 1}" for i in range(beds)]
+    bath_ids = [f"bath{i + 1}" for i in range(baths)]
+    for i, rid in enumerate(bed_ids):
+        rooms.append((rid, "bedroom", 176 if i == 0 else 150, None))
+    for i, rid in enumerate(bath_ids):
+        rooms.append((rid, "bathroom", 84 if i == 0 else 70, None))
+
+    lines = [f'plan "{name}"', f"envelope {width:g} x {length:g}", "ceiling 9", ""]
+    for rid, rtype, area, mn in rooms:
+        stmt = f"room {rid}: {rtype} area {area}"
+        if mn:
+            stmt += f" min {mn}"
+        lines.append(stmt)
+    lines.append("")
+
+    adj: list[tuple[str, ...]] = [("living", "kitchen")]
+    if hall:
+        adj.append(("living", "hall"))
+        privates = bed_ids + bath_ids
+        if privates:
+            adj.append(tuple(["hall", *privates]))
+    else:
+        if bed_ids:
+            adj.append(("living", bed_ids[0]))
+        if bath_ids:
+            adj.append((bed_ids[0] if bed_ids else "living", bath_ids[0]))
+    for e in extras:
+        if e == "garage":
+            adj.append(("mudroom" if "mudroom" in extras else "kitchen", "garage"))
+        elif e == "shop":
+            adj.append(("garage" if "garage" in extras else "living", "shop"))
+        elif e == "office":
+            adj.append(("hall" if hall else "living", "office"))
+        elif e == "dining":
+            adj.append(("kitchen", "dining"))
+        elif e == "mudroom":
+            adj.append(("kitchen", "mudroom"))
+        elif e == "laundry":
+            adj.append(("hall" if hall else "kitchen", "laundry"))
+    for pair in adj:
+        lines.append("adjacent " + " ".join(pair))
+    lines.append("entry living")
+    return "\n".join(lines) + "\n"
+
+
+def layout_source_from_form(
+    name: str, beds: int, baths: int, width: float, length: float,
+    open_kitchen: bool, extras: list[str],
+) -> str:
+    """Solve the offline brief and return emitted ``.barn`` source. Runs the
+    space-filling engine (the CLI ``barndsl layout`` default); raises on an
+    unsolvable program (caught by the handler and reported friendly)."""
+    from .emit import emit_dsl
+    from .layout2 import parse_brief2, solve_layout2
+
+    text = layout_brief_text(name, beds, baths, width, length, open_kitchen, extras)
+    brief = parse_brief2(text)
+    result = solve_layout2(brief, engine="auto")
+    return emit_dsl(result.plan)
+
+
+def _run_with_deadline(fn: Callable[[], Any], deadline: float) -> Any:
+    """Run ``fn`` on a daemon thread, returning its result or raising. A run that
+    overruns ``deadline`` raises :class:`TimeoutError` (the orphaned thread is a
+    daemon and dies with the process — acceptable for a bounded local solve)."""
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["result"] = fn()
+        except Exception as exc:  # propagated to the caller after the join
+            box["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(deadline)
+    if t.is_alive():
+        raise TimeoutError("layout solve exceeded its deadline")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 # --- the compile endpoint payload --------------------------------------------
@@ -682,7 +833,7 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path not in (
             "/api/compile", "/api/edit", "/api/compare", "/api/fmt",
-            "/api/export", "/api/design", "/api/design/cancel",
+            "/api/export", "/api/design", "/api/design/cancel", "/api/layout",
         ):
             self._json({"error": "not found"}, status=404)
             return
@@ -699,10 +850,63 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_compare(data)
         elif path == "/api/export":
             self._handle_export(data)
+        elif path == "/api/layout":
+            self._handle_layout(data)
         elif path == "/api/design":
             self._handle_design(data)
         else:
             self._handle_cancel(data)
+
+    def _handle_layout(self, data: object) -> None:
+        """Solve the offline Design form into DSL (no API key required).
+
+        The body is ``{bedrooms, bathrooms, width, length, open_kitchen, extras[],
+        name?}``. Every number is clamped and the extra-room list is whitelisted, so
+        the room program is bounded before it reaches the solver; the solve runs
+        under a wall-clock deadline. Success is ``{"source": "<dsl>"}``; a failed or
+        timed-out solve is a normal 200 with a typed ``error`` (never a stack trace).
+        A non-object body is a 400."""
+        if not isinstance(data, dict):
+            self._json({"error": 'expected a JSON object of layout fields'}, status=400)
+            return
+        raw_name = data.get("name")
+        name = (
+            raw_name.replace('"', "").strip()[:60]
+            if isinstance(raw_name, str) and raw_name.replace('"', "").strip()
+            else "My Barndo"
+        )
+        beds = _clamp_int(data.get("bedrooms"), 0, 8, 2)
+        baths = _clamp_int(data.get("bathrooms"), 0, 6, 1)
+        width = _clamp_float(data.get("width"), 12.0, 200.0, 40.0)
+        length = _clamp_float(data.get("length"), 12.0, 200.0, 30.0)
+        open_kitchen = bool(data.get("open_kitchen"))
+        raw_extras = data.get("extras")
+        extras: list[str] = []
+        if isinstance(raw_extras, list):
+            for e in raw_extras:
+                if isinstance(e, str) and e in _LAYOUT_EXTRAS and e not in extras:
+                    extras.append(e)
+        try:
+            source = _run_with_deadline(
+                lambda: layout_source_from_form(
+                    name, beds, baths, width, length, open_kitchen, extras
+                ),
+                LAYOUT_DEADLINE,
+            )
+        except TimeoutError:
+            self._json({"error": {
+                "kind": "timeout",
+                "message": "The rule-based designer took too long — try fewer "
+                           "rooms or a larger envelope.",
+            }})
+            return
+        except Exception as exc:  # an unsolvable program — friendly, never a 500
+            self._json({"error": {
+                "kind": "layout_error",
+                "message": f"Could not lay out that program: {exc}",
+            }})
+            return
+        self._json({"source": source})
 
     def _handle_compile(self, data: object) -> None:
         if not isinstance(data, dict) or not isinstance(data.get("source"), str):
@@ -1253,6 +1457,26 @@ _APP_HTML = r"""<!doctype html>
   #stop-btn { background:transparent; color:var(--err); border-color:var(--err); }
   .agent-note { font-size:11px; color:var(--faint); line-height:1.4; }
   .agent-note.bad { color:var(--warn); }
+  /* Offline (rule-based) Design form — the no-API-key on-ramp. */
+  .offline-design { border:1px solid var(--line); border-radius:9px;
+    background:var(--editor); padding:2px 4px; }
+  .offline-design > summary { cursor:pointer; font-size:11.5px; font-weight:600;
+    color:var(--ink); padding:6px 6px; list-style-position:inside; }
+  .od-body { padding:2px 6px 8px; display:flex; flex-direction:column; gap:8px; }
+  .od-grid { display:grid; grid-template-columns:auto 1fr auto 1fr; gap:6px 8px;
+    align-items:center; }
+  .od-grid label { color:var(--muted); font-size:11px; white-space:nowrap; }
+  .od-grid input { width:100%; font:inherit; font-size:12px; padding:4px 6px;
+    border:1px solid var(--line); border-radius:6px; background:var(--panel);
+    color:var(--ink); outline:none; }
+  .od-grid input:focus { border-color:var(--accent); }
+  .od-check { font-size:11.5px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+  .od-xt { display:flex; flex-wrap:wrap; gap:5px 10px; }
+  .od-xt label { font-size:11.5px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+  #od-btn { background:var(--okc); color:#fff; border-color:transparent; flex:1; }
+  #od-btn:disabled { opacity:.5; cursor:default; }
+  .od-or { font-size:11px; font-weight:600; color:var(--faint); text-transform:uppercase;
+    letter-spacing:.04em; margin-top:2px; }
   .left { width:36%; min-width:280px; display:flex; flex-direction:column;
     border-right:1px solid var(--line); }
   .right { flex:1; display:flex; flex-direction:column; min-width:0; }
@@ -1773,10 +1997,32 @@ _APP_HTML = r"""<!doctype html>
     </div>
     <div class="thread" id="thread"></div>
     <div class="composer">
+      <details class="offline-design" id="offline-design" open>
+        <summary>Design (offline — rule-based)</summary>
+        <div class="od-body">
+          <div class="od-grid">
+            <label>bedrooms</label>
+            <input type="number" id="od-beds" min="0" max="8" step="1" value="3">
+            <label>bathrooms</label>
+            <input type="number" id="od-baths" min="0" max="6" step="1" value="2">
+            <label>width (ft)</label>
+            <input type="number" id="od-w" min="12" max="200" step="1" value="40">
+            <label>length (ft)</label>
+            <input type="number" id="od-l" min="12" max="200" step="1" value="30">
+          </div>
+          <label class="od-check"><input type="checkbox" id="od-open" checked> open kitchen / living</label>
+          <div class="od-xt" id="od-extras"></div>
+          <div class="composer-row">
+            <button id="od-btn" title="Lay out a starting plan with no API key">Design offline</button>
+          </div>
+          <div class="agent-note" id="od-note">No API key needed — a deterministic space-filling layout you can then edit.</div>
+        </div>
+      </details>
+      <div class="od-or">Design with Claude (needs API key)</div>
       <textarea id="brief" spellcheck="false"
         placeholder="Describe the barndo you want — e.g. &quot;3 bed 2 bath, open kitchen, 2-car shop bay, ~1800 sq ft&quot;. Then Design."></textarea>
       <div class="composer-row">
-        <button id="send-btn">Design</button>
+        <button id="send-btn">Design with Claude</button>
         <button id="stop-btn" hidden>Stop</button>
       </div>
       <div class="agent-note" id="agent-note"></div>
@@ -3597,6 +3843,56 @@ function initAgent(){
 }
 initAgent();
 
+// --- offline (rule-based) Design form ---------------------------------------
+// Turns the small form into a POST /api/layout call (no API key), then loads the
+// returned DSL through setSource — the same funnel New/Open/example use, so it is
+// exactly ONE undoable checkpoint. Works whether or not the Claude agent is on.
+const OD_EXTRAS = [
+  ['garage', '2-car garage'], ['shop', 'shop bay'], ['office', 'office'],
+  ['dining', 'dining'], ['mudroom', 'mudroom'], ['laundry', 'laundry'],
+];
+const odBtn = document.getElementById('od-btn');
+const odNote = document.getElementById('od-note');
+(function initOfflineExtras(){
+  const wrap = document.getElementById('od-extras');
+  if (!wrap) return;
+  wrap.innerHTML = OD_EXTRAS.map(([v, lbl]) =>
+    '<label><input type="checkbox" class="od-x" value="' + v + '"' +
+    (v === 'garage' ? ' checked' : '') + '> ' + esc(lbl) + '</label>').join('');
+})();
+function odNum(id, def){ const v = parseFloat(document.getElementById(id).value);
+  return isFinite(v) ? v : def; }
+async function designOffline(){
+  const extras = Array.prototype.map.call(
+    document.querySelectorAll('.od-x:checked'), c => c.value);
+  const body = {
+    bedrooms: odNum('od-beds', 3), bathrooms: odNum('od-baths', 2),
+    width: odNum('od-w', 40), length: odNum('od-l', 30),
+    open_kitchen: document.getElementById('od-open').checked,
+    extras: extras, name: (lastGood && lastGood.settings && lastGood.settings.name) || 'My Barndo',
+  };
+  odBtn.disabled = true;
+  if (odNote){ odNote.className = 'agent-note'; odNote.textContent = 'Laying out…'; }
+  try {
+    const resp = await fetch('/api/layout', { method:'POST',
+      headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+    const j = await resp.json();
+    if (!resp.ok || !j || j.error){
+      const msg = (j && j.error && (j.error.message || j.error)) || ('layout failed (' + resp.status + ')');
+      if (odNote){ odNote.className = 'agent-note bad'; odNote.textContent = String(msg); }
+      return;
+    }
+    setSource(j.source, 'design offline');   // one undoable checkpoint
+    if (odNote){ odNote.className = 'agent-note';
+      odNote.textContent = 'Laid out a starting plan — edit it, or tweak the form and design again.'; }
+  } catch (err){
+    if (odNote){ odNote.className = 'agent-note bad'; odNote.textContent = 'Connection error: ' + String(err); }
+  } finally {
+    odBtn.disabled = false;
+  }
+}
+if (odBtn) odBtn.addEventListener('click', designOffline);
+
 // --- Tier 5: direct-manipulation edit mode ----------------------------------
 // An interactive SVG overlay drawn from the payload's `rooms`/`openings`. Drags
 // become surgical DSL text edits (POST /api/edit) so the source stays the source
@@ -4597,6 +4893,13 @@ function nextRoomId(p, base){
   while (ids.has(id)){ n++; id = base + n; }
   return id;
 }
+// A short, typed id stem for a room type, so "+ Room" defaults to bed2/bath2/…
+// rather than the literal "room". Falls back to the type name itself.
+const ROOM_STEM = { bedroom:'bed', bathroom:'bath', half_bath:'bath', hallway:'hall',
+  mudroom:'mud', laundry:'laundry', utility:'util', kitchen:'kitchen', living:'living',
+  dining:'dining', office:'office', closet:'closet', pantry:'pantry', garage:'garage',
+  shop:'shop', porch:'porch', loft:'loft' };
+function typedRoomId(p, type){ return nextRoomId(p, ROOM_STEM[type] || type || 'room'); }
 // The Parts browser: the plan-less .barn parts beside the served file (scanned
 // server-side into p.parts_available). Each row Inserts a `use` at plan centre
 // with a fresh alias. Empty (or a browser-opened buffer with no folder) teaches
@@ -4646,15 +4949,17 @@ function addRoomForm(p){
   const rooms = p.rooms.map(r => r.id);
   const of0 = (dpSel && dpSel.t === 'room') ? dpSel.k : rooms[0];
   return '<div class="dp-form"><div class="dp-grid">' +
-    '<label>name</label><input class="wide" id="nr-id" value="' + esc(nextRoomId(p, 'room')) + '">' +
+    '<label>name</label><input class="wide" id="nr-id" value="' + esc(typedRoomId(p, 'bedroom')) + '">' +
     '<label>type</label><select class="wide" id="nr-type">' + optList(HIGHLIGHT.types || [], 'bedroom') + '</select>' +
     '<label>size</label><input type="number" id="nr-w" min="1" step="0.5" value="12">' +
     '<input type="number" id="nr-l" min="1" step="0.5" value="12">' +
-    '<label>place</label><select id="nr-anchor">' + optList(DP_ANCHORS, 'east-of') + '</select>' +
+    '<label>place</label><select id="nr-anchor"><option value="auto" selected>auto — find space</option>' +
+    optList(DP_ANCHORS, '') + '</select>' +
     '<select id="nr-of">' + optList(rooms, of0) + '</select>' +
     '</div><div class="dp-btns"><button data-btn="roomsubmit">Add room</button>' +
     '<button data-btn="formcancel">Cancel</button></div>' +
-    '<div class="dp-note">Anchored to a neighbour — drag it on the plan afterwards to fine-tune.</div></div>';
+    '<div class="dp-note">Auto drops it in the first free spot beside a neighbour — ' +
+    'drag it on the plan afterwards to fine-tune.</div></div>';
 }
 // The furnish palette: every fixture kind the compiler knows (HIGHLIGHT.fixtures,
 // the same list the autocomplete offers), shown with spaces instead of underscores.
@@ -4698,6 +5003,30 @@ function addOpeningForm(p, r){
     '<div class="dp-note">The compiler checks placement — watch the diagnostics for a teaching hint.</div></div>';
 }
 
+// --- envelope resize assist -------------------------------------------------
+// Shrinking the envelope can strand rooms OUT_OF_BOUNDS (everything turns red).
+// When an envelope edit newly introduces that, OFFER a one-click "Fit rooms to
+// new envelope" (a fit_envelope edit — proportional scale + clamp, one undo step);
+// never rescale silently.
+function oobCount(diags){
+  let n = 0; for (const d of (diags || [])) if (d.code === 'OUT_OF_BOUNDS') n++;
+  return n;
+}
+function fitEnvelope(){
+  applyEdits([{ kind:'fit_envelope' }], 'fit rooms to envelope').then(ok => {
+    if (ok) dpNote('Fit the rooms into the envelope.');
+  });
+}
+function offerFitIfStranded(before){
+  const after = oobCount(diagnostics);
+  if (after > 0 && before === 0){
+    dpNote(after + ' room(s) now fall outside the envelope.', true);
+    showNotice('That envelope leaves ' + after + ' room(s) out of bounds. Fit them to the new size?',
+      [{ label:'Fit rooms to new envelope', fn:fitEnvelope },
+       { label:'Leave as is', ghost:true }]);
+  }
+}
+
 function dpChange(act, el){
   const p = lastGood; if (!p) return;
   // Dimension fields accept feet-and-inches (12'6", 12-6) as well as decimals;
@@ -4712,8 +5041,11 @@ function dpChange(act, el){
   if (act === 'plan.envw' || act === 'plan.envl'){
     const w = act === 'plan.envw' ? num : (s.envelope || [])[0];
     const l = act === 'plan.envl' ? num : (s.envelope || [])[1];
-    if (isFinite(w) && isFinite(l) && w > 0 && l > 0)
-      applyEdits([{ kind:'set_plan', envelope:[w, l] }], 'plan settings');
+    if (isFinite(w) && isFinite(l) && w > 0 && l > 0){
+      const before = oobCount(diagnostics);
+      applyEdits([{ kind:'set_plan', envelope:[w, l] }], 'plan settings')
+        .then(ok => { if (ok) offerFitIfStranded(before); });
+    }
     return;
   }
   if (act === 'plan.ceil'){
@@ -4834,9 +5166,13 @@ function submitRoomForm(){
   if (!id || !(w > 0) || !(l > 0)){ dpNote('a room needs a name and a positive size', true); return; }
   const ofRoom = p.rooms.find(r => r.id === of);
   dpForm = null;
-  applyEdits([{ kind:'add_room', id:id, type:type, w:w, l:l, anchor:anchor, of:of,
-                level: ofRoom ? ofRoom.level : 0 }], 'add room')
-    .then(ok => { if (ok) dpSelect('room', id); });
+  // "auto" lets the server pick the first free spot (no overlap); an explicit
+  // anchor keeps the old relative placement.
+  const ed = { kind:'add_room', id:id, type:type, w:w, l:l,
+               level: ofRoom ? ofRoom.level : 0 };
+  if (anchor === 'auto'){ ed.auto = true; }
+  else { ed.anchor = anchor; ed.of = of; }
+  applyEdits([ed], 'add room').then(ok => { if (ok) dpSelect('room', id); });
 }
 function submitFixtureForm(){
   const p = lastGood; if (!p || !dpSel || dpSel.t !== 'room') return;
@@ -4991,8 +5327,18 @@ dpEl.addEventListener('click', e => {
   else if (b === 'delroom' || b === 'delop' || b === 'delfx' || b === 'delnote') dpDelete();
 });
 dpEl.addEventListener('change', e => {
+  // "+ Room": follow the type with a matching default name (bed2/bath2/…) until
+  // the user hand-edits the name field.
+  if (e.target.id === 'nr-type'){
+    const idEl = document.getElementById('nr-id');
+    if (idEl && !idEl.dataset.dirty && lastGood)
+      idEl.value = typedRoomId(lastGood, e.target.value);
+  }
   const act = e.target.getAttribute && e.target.getAttribute('data-act');
   if (act) dpChange(act, e.target);
+});
+dpEl.addEventListener('input', e => {
+  if (e.target.id === 'nr-id') e.target.dataset.dirty = '1';
 });
 (function initPanel(){
   let v = null; try { v = localStorage.getItem(LS_PANEL); } catch (e){}
