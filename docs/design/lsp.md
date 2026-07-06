@@ -1,6 +1,7 @@
 # `barndsl lsp` — a stdlib Language Server
 
-Status: **design approved** · not yet implemented
+Status: **implemented** (`barndsl lsp`, `src/barndsl/lsp.py`; editor wiring in
+[`docs/EDITORS.md`](../EDITORS.md))
 Prereqs shipped: sub-2ms compiles, `Issue.file/part/accepted` fields, `fmt`
 (comment-preserving), the parts scanner (`scan_parts`), `DSL_REFERENCE`,
 `rename_room` in the surgical-edit engine.

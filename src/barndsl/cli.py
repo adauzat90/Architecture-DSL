@@ -56,6 +56,14 @@
         a chat pane lights up on the left: a brief in, the Claude compile-critique
         -revise loop streamed live, the best-scoring plan landed in the editor.
 
+    barndsl lsp [--check]
+        Run the stdlib Language Server over stdio (JSON-RPC 2.0, zero
+        dependencies): live diagnostics, hover docs, id-aware completions,
+        go-to-definition across `use` boundaries, format-on-save and the
+        playground's quick-fixes, for any LSP editor (VS Code, Neovim, Helix,
+        Zed). `--check` prints the negotiated capabilities and exits. See
+        docs/EDITORS.md for editor wiring.
+
     barndsl revit FILE.barn [--out FILE.json] [--frame]
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
         (levels, deduplicated walls, hosted doors/windows, room seeds, structural
@@ -737,6 +745,15 @@ def _cmd_view3d(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_lsp(args: argparse.Namespace) -> int:
+    """Run the stdlib Language Server over stdio (or print capabilities)."""
+    from .lsp import check, run_stdio
+
+    if getattr(args, "check", False):
+        return check()
+    return run_stdio()
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     """Start the local web playground (editor + live diagnostics + 2D/3D views)."""
     from .playground import run
@@ -1275,6 +1292,18 @@ def main(argv: list[str] | None = None) -> int:
         "--open", action="store_true", help="open the playground in a browser"
     )
     p_serve.set_defaults(func=_cmd_serve)
+
+    p_lsp = sub.add_parser(
+        "lsp",
+        help="run the stdlib Language Server over stdio (live diagnostics, hover, "
+        "completion, go-to-definition, formatting, code actions) for any LSP editor",
+    )
+    p_lsp.add_argument(
+        "--check",
+        action="store_true",
+        help="print the negotiated capabilities and exit (smoke-test editor configs)",
+    )
+    p_lsp.set_defaults(func=_cmd_lsp)
 
     p_elev = sub.add_parser(
         "elevation", help="render a schematic exterior elevation (one face) to SVG"

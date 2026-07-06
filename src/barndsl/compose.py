@@ -726,3 +726,84 @@ def compose_uses(
         total += 1
 
     return comp
+
+
+# --- part-file browsing (the playground Parts panel + the LSP part completions) --
+#
+# `scan_parts` lives here, beside the `use` loader, because both answer the same
+# question — "what parts are available under this directory?" — and both key off
+# the plan-less-`.barn`-is-a-part rule. The playground and `barndsl.lsp` both
+# import it (the playground re-exports it for backward compatibility).
+
+#: Cap on the number of part files a browse lists — a library, not a filesystem
+#: crawl. A directory with more parts than this is trimmed (alphabetical).
+MAX_LISTED_PARTS = 32
+
+#: How many bytes of a candidate part to read when sniffing (a part file is small
+#: — the loader caps whole parts at 256 KiB; the sniff only needs the statements).
+MAX_PART_SNIFF_BYTES = 64 * 1024
+
+
+def scan_parts(base_dir: str | None) -> list[dict]:
+    """List plan-less ``.barn`` part files under ``base_dir`` (and ``base_dir/parts``).
+
+    Cheap on purpose — each file is *sniffed*, not compiled: its statements are
+    read line by line until the first keyword, and a file whose first statement is
+    ``plan`` (a whole building, not a part) is skipped. ``rooms`` counts the
+    ``room`` statement lines. Returns ``[{relpath, name, rooms}]`` sorted by
+    relpath, capped at :data:`MAX_LISTED_PARTS`. ``None`` base_dir → ``[]``.
+    """
+    if not base_dir or not os.path.isdir(base_dir):
+        return []
+    seen: set[str] = set()
+    out: list[dict] = []
+    dirs = [(base_dir, "")]
+    parts_sub = os.path.join(base_dir, "parts")
+    if os.path.isdir(parts_sub):
+        dirs.append((parts_sub, "parts/"))
+    for folder, prefix in dirs:
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".barn"):
+                continue
+            full = os.path.join(folder, name)
+            if not os.path.isfile(full):
+                continue
+            relpath = prefix + name
+            if relpath in seen:
+                continue
+            info = _sniff_part(full)
+            if info is None:  # a full plan (has a `plan` header) — not a part
+                continue
+            seen.add(relpath)
+            out.append({"relpath": relpath, "name": info[0], "rooms": info[1]})
+            if len(out) >= MAX_LISTED_PARTS:
+                return out
+    return out
+
+
+def _sniff_part(path: str) -> tuple[str, int] | None:
+    """Sniff a ``.barn`` file without compiling it: ``(name, room_count)`` for a
+    plan-less part, or ``None`` if it carries a ``plan`` header (a whole building)
+    or can't be read. ``name`` is the file stem; ``room_count`` counts ``room``
+    statement lines (0 means the file has no rooms — still listed, teaching that a
+    part needs one)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read(MAX_PART_SNIFF_BYTES)
+    except OSError:
+        return None
+    rooms = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        head = line.split(None, 1)[0].lower()
+        if head == "plan":
+            return None  # a whole-building file, not a part
+        if head == "room":
+            rooms += 1
+    return (os.path.splitext(os.path.basename(path))[0], rooms)

@@ -566,6 +566,8 @@ barndsl gltf    examples/cedar_ridge.barn --out plan.glb  # → 3D model (glTF 2
 barndsl ifc     examples/cedar_ridge.barn --out plan.ifc  # → IFC4 BIM (Revit/ArchiCAD/any IFC viewer)
 barndsl view3d  examples/cedar_ridge.barn --out plan.html # → single-file 3D viewer
 barndsl serve   examples/cedar_ridge.barn --open   # local web playground (editor + live 2D/3D)
+barndsl lsp                                        # stdlib Language Server over stdio (VS Code/Neovim/Helix — see docs/EDITORS.md)
+barndsl lsp --check                                # print the negotiated LSP capabilities and exit
 barndsl layout  examples/birch_run.brief --emit    # adjacency brief → placed plan
 barndsl revit   examples/cedar_ridge.barn --out plan.json  # → Revit exchange JSON
 barndsl revit-import plan.json --out recovered.barn        # Revit exchange JSON → DSL
@@ -630,6 +632,16 @@ metrics; a dropdown loads the bundled examples; the last good render stays up
 dependency, no CDN, and it works offline** (nothing is uploaded anywhere). The 3D
 tab reuses the same inline WebGL renderer `barndsl view3d` writes. `barndsl serve
 plan.barn` preloads a file; `--port` picks the port.
+
+**Language server.** `barndsl lsp` is the same compiler-as-teacher experience for
+your own editor — a stdlib Language Server (JSON-RPC 2.0 over stdio, zero
+dependencies) that any LSP client speaks. Live diagnostics as you type, hover docs
+for every statement, id-aware completions (room ids, stamped `alias.id`, the
+fixture catalog, `use "…"` part paths), go-to-definition across `use` boundaries,
+format-on-save (`fmt`), the playground's quick-fixes and *Accept CODE* pragma
+actions, and rename-a-room-everywhere. `barndsl lsp --check` prints the negotiated
+capabilities; [`docs/EDITORS.md`](docs/EDITORS.md) has VS Code / Neovim / Helix
+wiring.
 
 *Editor + viewport ergonomics.* The editor has muted **DSL syntax highlighting**
 (keywords, room types, strings, numbers and comments — the token vocabulary is
