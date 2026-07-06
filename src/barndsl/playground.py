@@ -1334,7 +1334,12 @@ _APP_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Touch: page-wide pinch stays enabled (user scaling is never disabled) so the
+     report tab can pinch natively; the plan pane's own pinch handler consumes
+     gestures over it.
+     interactive-widget=resizes-content shrinks the layout (editor pane, flex:1) when
+     the on-screen keyboard opens instead of covering the toolbar. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>barndsl playground</title>
 <link rel="icon" href="data:,">
 <style>
@@ -1518,7 +1523,9 @@ _APP_HTML = r"""<!doctype html>
     white-space:pre; overflow:auto; tab-size:2; }
 
   .diagnostics { height:34%; min-height:120px; overflow:auto; background:var(--panel);
-    border-top:1px solid var(--line); font-size:12.5px; }
+    border-top:1px solid var(--line); font-size:12.5px;
+    /* a finger must still scroll the list — keep vertical panning with the browser */
+    touch-action:pan-y; }
   .diag-head { display:flex; gap:8px; align-items:center; padding:7px 12px;
     position:sticky; top:0; background:var(--panel); border-bottom:1px solid var(--line); }
   .count { font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:20px;
@@ -1662,7 +1669,12 @@ _APP_HTML = r"""<!doctype html>
     background:var(--bg); }
   .dp-note { margin-top:6px; font-size:11px; color:var(--faint); }
   .dp-note.err { color:var(--err); }
-  .edit-layer { position:absolute; inset:0; background:var(--bg); }
+  .edit-layer { position:absolute; inset:0; background:var(--bg); overflow:hidden; }
+  /* the overlay's pan/pinch transform rides on this inner wrapper (not the <svg>),
+     so svgEl.getScreenCTM() — which folds in ancestor CSS transforms — keeps the
+     drag math exact under a two-finger zoom. transform-origin at 0,0 matches the
+     midpoint math in pinchEdit(). */
+  .edit-tf { position:absolute; inset:0; transform-origin:0 0; }
   .edit-layer svg { width:100%; height:100%; display:block; touch-action:none;
     -webkit-user-select:none; user-select:none; }
   .ov-room { cursor:move; }
@@ -1796,8 +1808,12 @@ _APP_HTML = r"""<!doctype html>
     font-variant-numeric:tabular-nums; }
   .zoom-ctl .zfit { width:auto; padding:0 9px; font-size:12px; font-weight:600; }
   .plan-body .svgbox { overflow:hidden; align-items:flex-start; justify-content:flex-start;
-    padding:0; }
+    padding:0;
+    /* the JS pan/pinch controller owns every gesture here (overflow is hidden, so
+       there is nothing to native-scroll) — hand it all touches, page never fights it */
+    touch-action:none; }
   .plan-body .svgbox svg { position:absolute; top:0; left:0; transform-origin:0 0; }
+  .lb-body .svgbox { touch-action:none; }   /* elevation lightbox: same JS zoom/pan */
 
   /* --- live dimension readout chip (edit mode) --- */
   #dim-chip { position:absolute; z-index:12; display:none; pointer-events:none;
@@ -1913,6 +1929,53 @@ _APP_HTML = r"""<!doctype html>
   .lb-body .svgbox { position:absolute; inset:0; overflow:hidden; padding:0;
     align-items:flex-start; justify-content:flex-start; cursor:grab; }
   .lb-body .svgbox svg { position:absolute; top:0; left:0; transform-origin:0 0; }
+
+  /* =====================================================================
+     TOUCH / COARSE-POINTER SUPPORT (Phase 21)
+     ---------------------------------------------------------------------
+     touch-action policy, by surface (why each is what it is):
+       .split-h .............. none      pane-resize drag must never scroll
+       #three-canvas ......... none      orbit/pan owns every gesture
+       .edit-layer svg ....... none      room drag / pinch must never scroll
+       .plan-body .svgbox .... none      JS pan+pinch controller owns gestures
+       .lb-body .svgbox ...... none      lightbox JS zoom/pan owns gestures
+       .diagnostics .......... pan-y     a finger must still scroll the list
+       #editor / .report-wrap  (default) native scroll + page pinch stay live
+     ---------------------------------------------------------------------
+     Coarse pointers (finger): grow hit targets to a ~40px comfortable size
+     with padding / min-height only — the desktop (fine-pointer) look never
+     changes because these rules are gated behind @media (pointer: coarse).
+     ===================================================================== */
+  /* overlay nudge chevrons — a touch stand-in for the arrow-key nudge, shown
+     only around the selected room on a coarse pointer (drawn in buildOverlay) */
+  .ov-nudge { fill:var(--accent2); opacity:.9; cursor:pointer; }
+  .ov-nudge-g .hit { fill:transparent; }   /* invisible finger-sized tap halo */
+  .ov-nudge-t { fill:#fff; font-weight:700; pointer-events:none; }
+  /* measure endpoints — small dots on fine pointers, fat grab circles on coarse */
+  .ov-measure-end { fill:var(--accent); stroke:var(--panel); stroke-width:.14em; }
+
+  @media (pointer: coarse){
+    /* toolbar / tab / pill buttons: comfortable spacing + tall enough to tap */
+    .tbtn, .tab, .edit-bar button, .align-tools button, .lvl-chip,
+    .design-panel button, .find-bar button, .menu-list button, .na {
+      min-height:40px; padding-top:9px; padding-bottom:9px; }
+    .edit-bar { gap:14px; row-gap:8px; flex-wrap:wrap; }
+    .toolbar { gap:9px; }
+    .tabs { gap:6px; }
+    /* the small zoom stepper: bigger keys */
+    .zoom-ctl button { width:38px; height:38px; font-size:18px; }
+    .zoom-ctl .zfit { width:auto; }
+    /* diagnostics + panel rows: a full finger-height strike area */
+    .diag-row { padding-top:12px; padding-bottom:12px; }
+    .dp-row { padding-top:9px; padding-bottom:9px; }
+    /* panel inputs / selects: 40px tall so a fingertip lands cleanly */
+    .design-panel input, .design-panel select { min-height:40px; padding:8px 9px; }
+    /* the ☰ Design / Edit toggle checkbox: a bigger box */
+    .edit-toggle input, #three-toggles input { width:20px; height:20px; }
+    /* selection cues can't rely on hover on touch — keep the fixture/note grab
+       affordance visible by default (a soft outline), hover just intensifies it */
+    .ov-fixture { stroke-width:1.4; }
+  }
 
   /* --- print the current viewport, not the three-pane app chrome --- */
   @media print {
@@ -3541,16 +3604,65 @@ function makeZoom(box, opts){
   }
   box.addEventListener('wheel', e => { e.preventDefault();
     zoomAt(Math.exp(-e.deltaY * 0.0012), e.clientX, e.clientY); }, { passive:false });
-  box.addEventListener('pointerdown', e => { if (!svg()) return; dragging = true; moved = false;
-    sx = e.clientX - tx; sy = e.clientY - ty; box.setPointerCapture(e.pointerId);
+  // --- unified pointer input: one finger / mouse pans, two fingers pinch-zoom ---
+  // Pointer Events cover mouse, touch and pen with one code path. Each active
+  // pointer is captured (so a drag that leaves the box still tracks) and remembered
+  // in `ptrs`; a second pointer promotes the gesture to a pinch around the two-finger
+  // midpoint (reusing zoomAt, exactly like the +/− buttons), driving the same scale.
+  // pointercancel (iOS fires it when it steals the gesture) tears down cleanly — no
+  // stuck pan. Mouse behaviour is unchanged: a single mouse pointer only ever pans.
+  const ptrs = new Map();          // pointerId -> {x,y}
+  let pinchD = 0;                  // last two-finger distance (0 = not pinching)
+  let lastTapT = 0, lastTapX = 0, lastTapY = 0;   // touch double-tap → fit
+  function twoPts(){ return Array.from(ptrs.values()); }
+  box.addEventListener('pointerdown', e => { if (!svg()) return;
+    ptrs.set(e.pointerId, { x:e.clientX, y:e.clientY });
+    try { box.setPointerCapture(e.pointerId); } catch(_){}
+    if (ptrs.size >= 2){                     // promote to pinch: stop the pan
+      dragging = false; const p = twoPts();
+      pinchD = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+      box.style.cursor = ''; return;
+    }
+    dragging = true; moved = false;
+    sx = e.clientX - tx; sy = e.clientY - ty;
     if (box.hasAttribute('tabindex')) try { box.focus({ preventScroll:true }); } catch(_){}
     box.style.cursor = 'grabbing'; });
   box.addEventListener('keydown', zoomKeys);
-  box.addEventListener('pointerup', e => { dragging = false; box.style.cursor = '';
-    if (!moved && opts.onClick) opts.onClick(e); });
-  box.addEventListener('pointermove', e => { if (!dragging) return;
+  box.addEventListener('pointermove', e => {
+    if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x:e.clientX, y:e.clientY });
+    if (pinchD && ptrs.size >= 2){           // pinch: zoom about the moving midpoint
+      const p = twoPts(), d = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+      const mx = (p[0].x + p[1].x) / 2, my = (p[0].y + p[1].y) / 2;
+      if (d > 0 && pinchD > 0) zoomAt(d / pinchD, mx, my);
+      pinchD = d; moved = true; return;
+    }
+    if (!dragging) return;
     tx = e.clientX - sx; ty = e.clientY - sy; moved = true; apply(); });
-  box.addEventListener('dblclick', () => fit());
+  function endPtr(e){
+    ptrs.delete(e.pointerId);
+    try { box.releasePointerCapture(e.pointerId); } catch(_){}
+    if (ptrs.size < 2) pinchD = 0;
+    if (ptrs.size === 1){                     // one finger lifted from a pinch → resume pan
+      const p = twoPts()[0]; dragging = true; moved = true; sx = p.x - tx; sy = p.y - ty; return;
+    }
+    if (ptrs.size === 0){ dragging = false; box.style.cursor = '';
+      if (!moved){
+        // Touch double-tap on empty space = Fit (mirrors the Fit button / dblclick).
+        if (e.pointerType && e.pointerType !== 'mouse'){
+          const now = Date.now();
+          const onRoom = e.target && e.target.closest && e.target.closest('[data-room]');
+          if (!onRoom && now - lastTapT < 320 &&
+              Math.abs(e.clientX - lastTapX) < 32 && Math.abs(e.clientY - lastTapY) < 32){
+            lastTapT = 0; fit();
+          } else { lastTapT = now; lastTapX = e.clientX; lastTapY = e.clientY; }
+        }
+        if (opts.onClick) opts.onClick(e);
+      }
+    }
+  }
+  box.addEventListener('pointerup', endPtr);
+  box.addEventListener('pointercancel', endPtr);
+  box.addEventListener('dblclick', () => fit());   // mouse double-click (unchanged)
   return {
     fit,
     zoomIn(){ zoomAt(1.25); }, zoomOut(){ zoomAt(0.8); },
@@ -3946,9 +4058,31 @@ let editMode = false, editReady = false;
 let editRooms = [], editOpens = [], editLevels = [0], editFixtures = [], editNotes = [];
 let allRooms = [], allOpens = [], allStairs = [], allFixtures = [], allNotes = [], allInstances = [];   // every level — the dimmed underlay
 let selectedRoomId = null, svgEl = null, ghostEl = null, drag = null, ov = null;
+let editTfEl = null;   // the `.edit-tf` wrapper carrying the touch pan/pinch transform
 // Overlay-level multi-selection (rooms only) — distinct from dpSel/selectedRoomId
 // (the inspector's single notion). Shift-click toggles; a plain click clears it.
 const multiSel = new Set();
+// Coarse pointer (finger) — bigger overlay handles + on-screen nudge chevrons.
+const COARSE = (function(){ try { return matchMedia('(pointer: coarse)').matches; } catch(_){ return false; } })();
+
+// -- edit-overlay pan/pinch transform (touch only) --
+// The overlay <svg> auto-fits the pane via viewBox+preserveAspectRatio, so identity
+// IS "fit". Touch pan/pinch layers a CSS transform on the .edit-tf wrapper on top of
+// that; a rebuild or a leave resets to identity (back to fit). Desktop never sets it.
+let editTf = { s: 1, tx: 0, ty: 0 };
+const ETF_MIN = 0.3, ETF_MAX = 8;
+function applyEditTf(){ if (editTfEl)
+  editTfEl.style.transform = 'translate(' + editTf.tx + 'px,' + editTf.ty + 'px) scale(' + editTf.s + ')'; }
+function resetEditTf(){ editTf = { s: 1, tx: 0, ty: 0 }; applyEditTf(); }
+// Zoom the overlay about a screen point (pinch midpoint), same math as makeZoom.zoomAt.
+function zoomEditAt(factor, cx, cy){
+  const r = editLayer.getBoundingClientRect();
+  const mx = cx - r.left, my = cy - r.top;
+  const ns = Math.min(ETF_MAX, Math.max(ETF_MIN, editTf.s * factor));
+  editTf.tx = mx - (mx - editTf.tx) * (ns / editTf.s);
+  editTf.ty = my - (my - editTf.ty) * (ns / editTf.s);
+  editTf.s = ns; applyEditTf();
+}
 
 function snap(v){ return Math.round(v * 2) / 2; }          // 0.5 ft grid
 function Y(py){ return ov.MID - py; }                       // plan y (north up) → svg y
@@ -4029,18 +4163,23 @@ function distributeRooms(axis){
 function initEdit(){
   // Parse an inline <svg> so the SVG namespace comes from the DOM (no namespace
   // URL literal in the page — the app stays free of external-looking references).
-  editLayer.innerHTML = '<svg preserveAspectRatio="xMidYMid meet"></svg>';
-  svgEl = editLayer.firstChild;
+  // The <svg> nests in a `.edit-tf` wrapper that carries the touch pan/pinch
+  // transform (see the CSS note): scaling the wrapper, not the <svg>, keeps
+  // svgEl.getScreenCTM() — which toPlan() relies on — exact under a two-finger zoom.
+  editLayer.innerHTML = '<div class="edit-tf"><svg preserveAspectRatio="xMidYMid meet"></svg></div>';
+  editTfEl = editLayer.firstChild;
+  svgEl = editTfEl.firstChild;
   svgEl.addEventListener('pointerdown', onDown);
   svgEl.addEventListener('pointermove', onMove);
   svgEl.addEventListener('pointerup', onUp);
-  svgEl.addEventListener('pointercancel', cancelDrag);
+  svgEl.addEventListener('pointercancel', onCancel);
   editChk.addEventListener('change', () => {
     editMode = editChk.checked; editLayer.hidden = !editMode;
     planSvg.style.display = editMode ? 'none' : '';
     document.getElementById('plan-zoom').style.display = editMode ? 'none' : '';
     measureBtn.disabled = !editMode;
     if (!editMode) setMeasure(false);
+    resetEditTf();
     renderLevelSwitcher();
     if (editMode) buildOverlay();
     else { selectedRoomId = null; clearMultiSel(false); editNote(''); planZoom.refit(); }
@@ -4132,6 +4271,17 @@ function refreshEditData(p){
 function labelFits(text, fontSize, boxW){
   return (String(text).length * fontSize * 0.6) <= (boxW - 0.4);
 }
+// One on-screen nudge chevron: a visible dot + glyph over a fat, invisible finger
+// halo. `pyPlan` is in plan feet (north up); the halo carries the data-nudge hit.
+function nudgeChevron(dir, px, pyPlan, rr, glyph){
+  const cy = Y(pyPlan);
+  return '<g class="ov-nudge-g" data-nudge="' + dir + '">' +
+    '<circle class="ov-nudge" cx="' + px + '" cy="' + cy + '" r="' + rr +
+      '" vector-effect="non-scaling-stroke"/>' +
+    '<text class="ov-nudge-t" x="' + px + '" y="' + (cy + rr * 0.34) +
+      '" text-anchor="middle" font-size="' + (rr * 1.1) + '">' + glyph + '</text>' +
+    '<circle class="hit" cx="' + px + '" cy="' + cy + '" r="' + (rr * 1.7) + '"/></g>';
+}
 
 function buildOverlay(){
   if (!editMode || !svgEl) return;
@@ -4150,7 +4300,10 @@ function buildOverlay(){
   ov = { minX, minY, maxX, maxY, MID: minY + maxY };
   svgEl.setAttribute('viewBox', (minX - pad) + ' ' + (minY - pad) + ' ' + W + ' ' + H);
   const fs = Math.max(1.1, Math.min(2.4, Math.min(W, H) * 0.05));
-  const hs = Math.max(0.8, Math.min(2.2, Math.min(W, H) * 0.032));
+  // Coarse pointers (finger) get fatter resize handles — a bigger grab area without
+  // touching the desktop (fine-pointer) look.
+  const hs = COARSE ? Math.max(1.4, Math.min(3.4, Math.min(W, H) * 0.05))
+                    : Math.max(0.8, Math.min(2.2, Math.min(W, H) * 0.032));
   let s = '';
   // Dimmed context: rooms on the other floors, as non-interactive outlines. Their
   // id is fit-or-hidden (no title — they're inert, pointer-events:none).
@@ -4248,6 +4401,15 @@ function buildOverlay(){
       s += '<rect class="ov-handle h-' + p[0] + '" data-handle="' + p[0] + '" data-room="' + esc(r.id) +
         '" x="' + (p[1] - hs / 2) + '" y="' + (Y(p[2]) - hs / 2) + '" width="' + hs + '" height="' + hs +
         '" vector-effect="non-scaling-stroke"/>';
+    }
+    // On-screen nudge chevrons (coarse pointer only) — a touch stand-in for the
+    // arrow-key nudge, one 1 ft step per tap, arranged N/E/S/W around the room.
+    if (COARSE){
+      const rr = Math.max(1.6, hs * 0.9), gap = rr + 0.8;
+      s += nudgeChevron('up',    r.x + r.w / 2, r.y + r.l + gap, rr, '↑');
+      s += nudgeChevron('down',  r.x + r.w / 2, r.y - gap,       rr, '↓');
+      s += nudgeChevron('left',  r.x - gap,     r.y + r.l / 2,   rr, '←');
+      s += nudgeChevron('right', r.x + r.w + gap, r.y + r.l / 2, rr, '→');
     }
   }
   svgEl.innerHTML = s;
@@ -4412,6 +4574,16 @@ function drawMeasure(a, b){
   t.textContent = measureLabel(a, b);
   svgEl.appendChild(ln); svgEl.appendChild(t);
   measureEls = [ln, t];
+  // Endpoint dots — small on a mouse, fat grab circles on a coarse (finger) pointer.
+  const er = fs * (COARSE ? 0.5 : 0.22);
+  for (const end of [a, b]){
+    const c = document.createElementNS(NS, 'circle');
+    c.setAttribute('class', 'ov-measure-end');
+    c.setAttribute('cx', end.x); c.setAttribute('cy', Y(end.y)); c.setAttribute('r', er);
+    c.setAttribute('vector-effect', 'non-scaling-stroke');
+    c.setAttribute('pointer-events', 'none');
+    svgEl.appendChild(c); measureEls.push(c);
+  }
 }
 
 // -- keyboard nudge: arrows step the selected room(s) 1 ft (Shift: one 3 ft module) --
@@ -4459,8 +4631,39 @@ function cancelNudge(){
 }
 
 // -- pointer interactions --
+// One code path for mouse, touch and pen (Pointer Events). Every active pointer is
+// captured and remembered in `editPtrs`; a second pointer promotes to a pinch-zoom
+// of the overlay (abandoning any one-finger drag cleanly). On touch, one finger on a
+// room/handle drags it while one finger on empty space pans the overlay — the tablet-
+// CAD convention. Mouse behaviour is untouched: a single mouse pointer never pans/pinches.
+const editPtrs = new Map();          // pointerId -> {x,y}
+let editPinchD = 0;                  // last pinch distance (0 = not pinching)
+let eLastTapT = 0, eLastTapX = 0, eLastTapY = 0;   // empty-space touch double-tap → fit
+function abortDrag(){ if (!drag) return; drag = null; removeGhost(); clearGuides(); hideDim(); }
 function onDown(e){
   if (!editMode || !ov) return;
+  editPtrs.set(e.pointerId, { x:e.clientX, y:e.clientY });
+  // Second finger → pinch. Drop any one-finger drag with no edit written (clean abort).
+  if (editPtrs.size >= 2){
+    abortDrag(); cancelNudge();
+    const p = Array.from(editPtrs.values());
+    editPinchD = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    try { svgEl.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault(); return;
+  }
+  // Tap an on-screen nudge chevron → step the selection 1 ft (touch arrow-keys).
+  const nEl = e.target.closest('[data-nudge]');
+  if (nEl){
+    const members = multiSel.size >= 2 ? selectedRooms()
+      : (roomById(selectedRoomId) ? [roomById(selectedRoomId)] : []);
+    if (members.length){
+      const d = nEl.getAttribute('data-nudge');
+      nudgeMembers(members, d === 'left' ? -1 : d === 'right' ? 1 : 0,
+        d === 'down' ? -1 : d === 'up' ? 1 : 0,
+        members.length > 1 ? 'nudge rooms' : 'nudge room');
+    }
+    e.preventDefault(); return;
+  }
   flushNudge();                      // commit any pending keyboard move first
   const P = toPlan(e);
   if (measureMode){
@@ -4520,12 +4723,32 @@ function onDown(e){
     if (id !== selectedRoomId){ selectedRoomId = id; buildOverlay(); }
     drag = { kind:'move', id, P, cur:{ x:r.x, y:r.y, w:r.w, l:r.l },
       calc:{ x:r.x, y:r.y, w:r.w, l:r.l }, moved:false };
-  } else { return; }
+  } else if (e.pointerType && e.pointerType !== 'mouse'){
+    // One finger on empty space (touch) → pan the overlay; a double-tap here = Fit.
+    const now = Date.now();
+    if (now - eLastTapT < 320 && Math.abs(e.clientX - eLastTapX) < 32 &&
+        Math.abs(e.clientY - eLastTapY) < 32){ eLastTapT = 0; resetEditTf(); e.preventDefault(); return; }
+    eLastTapT = now; eLastTapX = e.clientX; eLastTapY = e.clientY;
+    drag = { kind:'panedit', sx: e.clientX - editTf.tx, sy: e.clientY - editTf.ty };
+    try { svgEl.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault(); return;
+  } else { return; }   // empty-space mouse click: no-op, exactly as before
   addGhost(drag);
   try { svgEl.setPointerCapture(e.pointerId); } catch(_){}
   e.preventDefault();
 }
 function onMove(e){
+  if (editPtrs.has(e.pointerId)) editPtrs.set(e.pointerId, { x:e.clientX, y:e.clientY });
+  if (editPinchD && editPtrs.size >= 2){          // pinch: zoom the overlay about the midpoint
+    const p = Array.from(editPtrs.values());
+    const d = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    const mx = (p[0].x + p[1].x) / 2, my = (p[0].y + p[1].y) / 2;
+    if (d > 0 && editPinchD > 0) zoomEditAt(d / editPinchD, mx, my);
+    editPinchD = d; return;
+  }
+  if (drag && drag.kind === 'panedit'){
+    editTf.tx = e.clientX - drag.sx; editTf.ty = e.clientY - drag.sy; applyEditTf(); return;
+  }
   if (!drag) return;
   const P = toPlan(e);
   if (drag.kind === 'measure'){
@@ -4602,9 +4825,13 @@ function onMove(e){
   }
 }
 function onUp(e){
+  editPtrs.delete(e.pointerId);
+  try { svgEl.releasePointerCapture(e.pointerId); } catch(_){}
+  if (editPtrs.size >= 1){ editPinchD = 0; return; }   // a finger of a pinch lifted — wait for the rest
+  editPinchD = 0;
+  if (drag && drag.kind === 'panedit'){ drag = null; return; }
   if (!drag) return;
   const d = drag; drag = null; removeGhost(); clearGuides(); hideDim();
-  try { svgEl.releasePointerCapture(e.pointerId); } catch(_){}
   if (d.kind === 'measure'){
     // A click without a drag leaves nothing; a real span stays until the next one.
     if (d.a.x === d.b.x && d.a.y === d.b.y) clearMeasure();
@@ -4655,6 +4882,14 @@ function onUp(e){
   }
 }
 function cancelDrag(){ if (!drag) return; drag = null; removeGhost(); clearGuides(); hideDim(); buildOverlay(); }
+// pointercancel (iOS fires it when the browser takes over the gesture) — drop the
+// pointer, end any pinch, and abort the drag with no edit written or state stuck.
+function onCancel(e){
+  editPtrs.delete(e.pointerId);
+  if (editPtrs.size < 2) editPinchD = 0;
+  if (drag && drag.kind === 'panedit'){ drag = null; return; }
+  cancelDrag();
+}
 
 // -- apply a sequence of edits atomically (from the client's view) --
 async function applyEdits(edits, label){
@@ -5380,6 +5615,13 @@ dpEl.addEventListener('change', e => {
 });
 dpEl.addEventListener('input', e => {
   if (e.target.id === 'nr-id') e.target.dataset.dirty = '1';
+});
+// On-screen-keyboard safety: when a panel field takes focus, scroll it into view so
+// the iPad keyboard (which resizes the layout via interactive-widget) can't hide it.
+dpEl.addEventListener('focusin', e => {
+  const el = e.target;
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT'))
+    try { el.scrollIntoView({ block:'nearest' }); } catch(_){}
 });
 (function initPanel(){
   let v = null; try { v = localStorage.getItem(LS_PANEL); } catch (e){}

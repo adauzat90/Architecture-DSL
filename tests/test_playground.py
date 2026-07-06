@@ -1394,3 +1394,83 @@ def test_app_autocomplete_knows_the_counter_along_grammar():
     assert "items = ['from'];" in html             # after the wall
     # And it explicitly skips the numeric from/to/depth slots (no popup there).
     assert "from/to/depth" in html
+
+
+# --- Phase 21: iPad / touch support (structural pins on the SPA markup) -------
+
+
+def test_app_viewport_meta_is_touch_and_keyboard_safe():
+    """Pinch stays available page-wide; the OSK resizes the layout, not covers it."""
+    html = render_app(CLEAN)
+    assert "interactive-widget=resizes-content" in html
+    # never disable page pinch (no user-scalable=no / maximum-scale clamp)
+    assert "user-scalable=no" not in html
+    assert "maximum-scale" not in html
+
+
+def test_app_touch_action_discipline_per_surface():
+    """Each interactive surface picks a deliberate touch-action (see the CSS note)."""
+    html = render_app(CLEAN)
+    # the plan pane + edit overlay + splitters + canvas own every gesture (none)…
+    assert ".plan-body .svgbox" in html and "touch-action:none" in html
+    assert "touch-action:none" in html  # edit-layer svg + split-h + three-canvas
+    # …while the diagnostics list must still finger-scroll vertically
+    assert "touch-action:pan-y" in html
+    # the documented policy table ships in the stylesheet
+    assert "TOUCH / COARSE-POINTER SUPPORT" in html
+
+
+def test_app_coarse_pointer_media_block_bumps_hit_targets():
+    html = render_app(CLEAN)
+    assert "@media (pointer: coarse)" in html
+    # buttons/rows grow to a comfortable ~40px touch size
+    assert "min-height:40px" in html
+    # JS also detects a coarse pointer to grow SVG handles + show nudge chevrons
+    assert "matchMedia('(pointer: coarse)')" in html
+    assert "const COARSE" in html
+
+
+def test_app_edit_overlay_uses_pointer_events_with_capture_and_cancel():
+    html = render_app(CLEAN)
+    for token in ("svgEl.addEventListener('pointerdown', onDown)",
+                  "svgEl.addEventListener('pointermove', onMove)",
+                  "svgEl.addEventListener('pointerup', onUp)",
+                  "svgEl.addEventListener('pointercancel', onCancel)",
+                  "setPointerCapture", "function onCancel(", "abortDrag"):
+        assert token in html, token
+
+
+def test_app_plan_pane_has_two_finger_pinch_and_double_tap_fit():
+    html = render_app(CLEAN)
+    # pinch = two active pointers driving the existing zoomAt (not gesturechange)
+    assert "const ptrs = new Map()" in html
+    assert "gesturechange" not in html
+    assert "pinchD" in html and "zoomAt(d / pinchD" in html
+    # touch double-tap on empty space mirrors Fit
+    assert "lastTapT" in html
+
+
+def test_app_edit_overlay_has_transform_pan_pinch_and_panedit():
+    html = render_app(CLEAN)
+    for token in ("class=\"edit-tf\"", "function zoomEditAt(", "function applyEditTf(",
+                  "function resetEditTf(", "kind:'panedit'", "editPtrs", "editPinchD"):
+        assert token in html, token
+
+
+def test_app_has_touch_nudge_chevrons_and_measure_endpoints():
+    html = render_app(CLEAN)
+    assert "function nudgeChevron(" in html
+    assert "data-nudge" in html and "ov-nudge" in html
+    assert "ov-measure-end" in html
+
+
+def test_app_panel_inputs_scroll_into_view_on_focus():
+    html = render_app(CLEAN)
+    assert "dpEl.addEventListener('focusin'" in html
+    assert "scrollIntoView({ block:'nearest' })" in html
+
+
+def test_touch_support_keeps_the_app_offline():
+    html = render_app(CLEAN)
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html and "//cdn" not in html and "<script src" not in html

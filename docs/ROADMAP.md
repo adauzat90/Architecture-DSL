@@ -241,12 +241,36 @@ chaining) are in the composition doc §13.
 
 ---
 
-## Phase 21 — iPad / touch support for the playground (M) — **awaiting go-ahead**
+## Phase 21 — iPad / touch support for the playground (M) — **SHIPPED**
 
-Explicitly parked by the owner; do not start unprompted. Scope when unblocked:
-pointer-events for drag/select/measure (unify mouse/touch), larger hit
-targets on coarse pointers, pinch-zoom/pan on the plan pane that doesn't fight
-the browser, and an on-screen keyboard-safe editor layout.
+**Status:** shipped. The playground is now genuinely usable with a finger without
+any change to the mouse/keyboard experience.
+
+- **Pointer Events everywhere:** edit-mode drag/select/measure, the plan pan/zoom
+  controller, and the pane splitters all run one pointer-event path (mouse + touch +
+  pen) with `setPointerCapture` on the active target. `pointercancel` (iOS fires it
+  when it steals a gesture) aborts a drag cleanly — no stuck state, no phantom edit.
+- **touch-action discipline:** the plan pane, edit overlay, splitters and 3D canvas
+  take `none` (the app owns every gesture); the diagnostics list keeps `pan-y` so a
+  finger still scrolls it; the editor and report tab keep native scroll + page pinch.
+  The per-surface policy is documented in a CSS comment block.
+- **Pinch-zoom + pan:** two fingers pinch the plan around the gesture midpoint
+  (driving the existing `zoomAt` scale mechanism); one finger pans; a double-tap fits.
+  In edit mode a finger on empty space pans/pinches the overlay (via a CSS transform on
+  a `.edit-tf` wrapper, so the drag math via `getScreenCTM()` stays exact) while a
+  finger on a room/handle drags it.
+- **Coarse-pointer ergonomics:** a `@media (pointer: coarse)` block grows buttons,
+  tabs, list rows and panel inputs to ~40 px, and JS grows the SVG resize handles and
+  measure endpoints. On-screen nudge chevrons (touch arrow-keys) appear around the
+  selected room.
+- **OSK-safe layout:** the viewport meta uses `interactive-widget=resizes-content`
+  (page pinch still enabled), and panel fields `scrollIntoView` on focus.
+
+Verified on iPad-like Playwright contexts (landscape 1024×768, portrait 768×1024,
+`has_touch`/`is_mobile`, dsf 2) plus a desktop mouse regression pass — tap-select,
+one-finger drag → surgical edit, pointercancel abort, pinch-zoom, double-tap fit,
+measure, finger-scroll, nudge chevrons, and coarse-pointer computed styles all pass.
+The playground stays fully offline (zero external references).
 
 ---
 

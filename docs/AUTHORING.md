@@ -1080,6 +1080,29 @@ See `examples/composed/cedar_ridge_v2.barn` for a plan that uses all three: a
 parametric bath sized with `with`, a nested guest wing (its bath is a nested part),
 and a two-level shop-with-loft.
 
+## Touch devices (iPad, touch laptops)
+
+The playground is usable with a finger — nothing to enable, it adapts to a coarse
+pointer automatically.
+
+- **Plan pane (view mode):** one finger drags to pan, two fingers pinch to zoom
+  around the point between them, and a double-tap fits the plan to the pane (same as
+  the **Fit** button). The zoom stepper and **Fit** still work too.
+- **Edit layout:** turn on **Edit layout**, then tap a room to select it and drag it
+  (or a corner/edge handle) to move or resize — each drag writes one surgical edit to
+  the code, exactly like the mouse. One finger on empty space pans the overlay and two
+  fingers pinch-zoom it; a room or handle under the finger drags instead (the usual
+  tablet-CAD convention). If iOS takes over a gesture mid-drag, the drag aborts cleanly
+  with nothing written.
+- **Nudge chevrons:** with a room selected on a touch device, four arrows appear around
+  it — each tap nudges the room 1 ft (the touch stand-in for the arrow keys).
+- **Measure** works by dragging between two points, same as on the desktop; endpoints
+  get fatter grab circles on touch.
+- Hit targets (buttons, tabs, list rows, panel fields, drag handles) grow to a
+  comfortable finger size on touch, and the on-screen keyboard shrinks the editor
+  rather than hiding the toolbar. Page-wide pinch-to-zoom stays available (e.g. on the
+  **Report** tab); only the plan pane consumes its own pinch gestures.
+
 ## Two front-ends, one core
 
 You can also build a plan with the embedded **Python builder** — same rules, same
