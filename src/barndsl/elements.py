@@ -2158,6 +2158,9 @@ class Barndominium:
             "roof_area_sqft": roof_area,
             "overhang_ft": float(oh),
             "covered_porch_roof_sqft": covered_porch_roof,
+            # Flat platform area of every porch (covered or open) — each carries a
+            # slab whether or not it is roofed.
+            "porch_sqft": sum(p.area for p in self.porches),
             "climate_zone": float(self.climate) if self.climate is not None else 0.0,
             "foundation_concrete_yd3": concrete_ft3 / 27.0,
             "bedroom_count": float(

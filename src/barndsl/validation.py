@@ -373,6 +373,89 @@ def _f(value: float) -> str:
     return f"{value:g}"
 
 
+#: The largest plausible plan dimension, in feet. No barndominium envelope side,
+#: room, or wing runs anywhere near 1000 ft (three football fields end to end); a
+#: value beyond it is a typo or an overflow that would poison every area product
+#: with ``inf``. Sides past this are rejected (DIM_IMPLAUSIBLE) and clamped so the
+#: rest of the takeoff/summary stays finite.
+MAX_PLAN_DIMENSION = 1000.0
+
+
+def _dim_desc(value: float) -> str:
+    """A dimension for a diagnostic message — never the literal ``inf``/``nan``
+    (which would itself leak an ``inf`` into the output)."""
+    return _f(value) if math.isfinite(value) else "non-finite"
+
+
+def _implausible_dim(value: float) -> bool:
+    return not math.isfinite(value) or value > MAX_PLAN_DIMENSION
+
+
+def _check_dimensions(plan: Barndominium, add) -> None:
+    """Reject non-finite or absurdly large envelope/room/wing sides.
+
+    A finite-but-enormous side (``envelope 1e308 x 1e308``) sails past the
+    positive-dimension checks yet overflows every area product to ``inf``,
+    leaking ``inf sq ft`` into the takeoff. Flag it (DIM_IMPLAUSIBLE, error) and
+    clamp the offending value to :data:`MAX_PLAN_DIMENSION` so the rest of the
+    report stays finite and readable — the plan is already unbuildable, the clamp
+    is cosmetic. Runs first in :func:`validate`, so every later check and the
+    metrics takeoff see finite numbers."""
+    clamp = MAX_PLAN_DIMENSION
+
+    if _implausible_dim(plan.envelope_width) or _implausible_dim(plan.envelope_length):
+        add(
+            Issue(
+                Severity.ERROR,
+                "DIM_IMPLAUSIBLE",
+                f"Envelope {_dim_desc(plan.envelope_width)} x "
+                f"{_dim_desc(plan.envelope_length)} ft is implausible — each side "
+                f"must be finite and <= {MAX_PLAN_DIMENSION:.0f} ft.",
+                hint=f"Use a realistic footprint in feet (each side <= "
+                f"{MAX_PLAN_DIMENSION:.0f}).",
+            )
+        )
+        if _implausible_dim(plan.envelope_width):
+            plan.envelope_width = clamp
+        if _implausible_dim(plan.envelope_length):
+            plan.envelope_length = clamp
+    for room in plan.rooms:
+        if _implausible_dim(room.width) or _implausible_dim(room.length):
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "DIM_IMPLAUSIBLE",
+                    f"Room size {_dim_desc(room.width)} x {_dim_desc(room.length)} ft "
+                    f"is implausible — each side must be finite and <= "
+                    f"{MAX_PLAN_DIMENSION:.0f} ft.",
+                    room=room.id,
+                    hint=f"Use a realistic room size in feet (each side <= "
+                    f"{MAX_PLAN_DIMENSION:.0f}).",
+                )
+            )
+            if _implausible_dim(room.width):
+                room.width = clamp
+            if _implausible_dim(room.length):
+                room.length = clamp
+    for i, w in enumerate(plan.wings, start=1):
+        if _implausible_dim(w.width) or _implausible_dim(w.length):
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "DIM_IMPLAUSIBLE",
+                    f"Wing #{i} size {_dim_desc(w.width)} x {_dim_desc(w.length)} ft "
+                    f"is implausible — each side must be finite and <= "
+                    f"{MAX_PLAN_DIMENSION:.0f} ft.",
+                    hint=f"Use a realistic wing size in feet (each side <= "
+                    f"{MAX_PLAN_DIMENSION:.0f}).",
+                )
+            )
+            if _implausible_dim(w.width):
+                w.width = clamp
+            if _implausible_dim(w.length):
+                w.length = clamp
+
+
 def _amended(profile: Profile, field: str) -> bool:
     """True when ``profile`` enforces a value other than the IRC baseline for
     ``field`` — used to keep a diagnostic's wording honest (and byte-identical
@@ -897,13 +980,17 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     issues: list[Issue] = []
     add = issues.append
 
+    # Reject + clamp non-finite/absurd dimensions FIRST, so no later check or the
+    # metrics takeoff ever sees an `inf`-poisoned value (see _check_dimensions).
+    _check_dimensions(plan, add)
+
     if plan.envelope_width <= 0 or plan.envelope_length <= 0:
         add(
             Issue(
                 Severity.ERROR,
                 "ENVELOPE",
                 "Envelope must have positive dimensions.",
-                hint="Declare the footprint, e.g. `envelope 60 x 40`.",
+                hint="Declare the footprint: `envelope 60 x 40`.",
             )
         )
     _check_wings(plan, add)
@@ -942,7 +1029,7 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
                 Severity.ERROR,
                 "EMPTY",
                 "Plan has no rooms.",
-                hint="Add rooms, e.g. `room living: living at 0,0 size 20 x 16`.",
+                hint="Add rooms: `room living: living at 0,0 size 20 x 16`.",
             )
         )
         return ValidationReport(issues)

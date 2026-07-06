@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from .constants import DEFAULT_ROOF_PITCH
 from .elements import Barndominium
 from .fixtures import fixtures_for
 from .geometry import shared_edge
@@ -63,6 +64,8 @@ DEFAULT_UNIT_COSTS: dict[str, float] = {
     "fixture_sink": 950.0,  # kitchen sink + rough-in
     "fixture_range": 1300.0,  # appliance allowance
     "fixture_refrigerator": 1700.0,  # appliance allowance
+    "fixture_washer": 700.0,  # washer hookup (supply/drain box) + appliance allowance
+    "fixture_dryer": 650.0,  # dryer 240 V/gas + vent run + appliance allowance
     "countertop_lf": 75.0,  # fabricated + installed countertop, per linear foot
     # -- per-conditioned-sqft allowances --
     "electrical_sqft": 9.0,
@@ -80,7 +83,18 @@ _WINDOW_KEY = {
 
 #: Fixture kind (see :data:`barndsl.fixtures.FIXTURES`) → unit-cost key, in the
 #: order lines are emitted (deterministic).
-_FIXTURE_ORDER = ("toilet", "lavatory", "tub", "shower", "sink", "range", "refrigerator")
+_FIXTURE_ORDER = (
+    "toilet", "lavatory", "tub", "shower", "sink", "range", "refrigerator",
+    "washer", "dryer",
+)
+
+#: Line the estimate ends with — the assemblies it does NOT price. Kept honest
+#: against what actually has a line above (see :func:`estimate_cost`): plumbing
+#: fixtures and an HVAC allowance ARE itemised, so they are qualified here.
+EXCLUSIONS = (
+    "Excludes: site work, well/septic, permits, mechanical (HVAC) unless "
+    "itemized, GC overhead & profit."
+)
 
 
 def _as_plan(plan_or_result: Any) -> Barndominium:
@@ -183,12 +197,29 @@ def estimate_cost(
     # -- Foundation --
     add("Foundation", "Slab-on-grade", m["footprint_sqft"], "sqft", "slab_sqft",
         "metrics: footprint_sqft")
+    # Every porch (covered or open) is a platform on its own slab, at the same
+    # slab rate as the house floor.
+    add("Foundation", "Porch slab", m.get("porch_sqft", 0.0), "sqft", "slab_sqft",
+        "metrics: porch_sqft (porch platforms)")
 
     # -- Shell --
     add("Shell", "Exterior walls", m["exterior_wall_area_sqft"], "sqft",
         "exterior_wall_sqft", "metrics: exterior_wall_area_sqft")
+    # A gable roof adds a triangle of wall at each gable end (the two walls the
+    # ridge runs *between*): base = envelope width, rise = half-span × pitch, so
+    # one triangle is width²·pitch/4 and the pair is width²·pitch/2. Sheathed and
+    # sided like the rest of the shell, so priced at the exterior-wall rate.
+    if plan.roof_style == "gable":
+        pitch = plan.roof_pitch if plan.roof_pitch is not None else DEFAULT_ROOF_PITCH
+        gable_area = plan.envelope_width * plan.envelope_width * pitch / 2.0
+        add("Shell", "Gable-end walls", gable_area, "sqft", "exterior_wall_sqft",
+            "gable ends: envelope width & roof pitch")
     add("Shell", "Roof", m["roof_area_sqft"], "sqft", "roof_sqft",
         "metrics: roof_area_sqft (sloped)")
+    # Covered porches carry their own roof (already sloped by the pitch), at the
+    # same roof rate as the main roof.
+    add("Shell", "Porch roof", m.get("covered_porch_roof_sqft", 0.0), "sqft",
+        "roof_sqft", "metrics: covered_porch_roof_sqft (sloped)")
 
     # -- Partitions --
     add("Partitions", "Interior partition walls", _interior_wall_lf(plan), "lf",
@@ -249,6 +280,7 @@ def estimate_cost(
         "multiplier": multiplier,
         "band_pct": BAND_PCT,
         "disclaimer": DISCLAIMER,
+        "exclusions": EXCLUSIONS,
         "assemblies": lines,
         "subtotals": subtotals,
         "total": {
@@ -295,6 +327,8 @@ def cost_text(est: dict[str, Any]) -> str:
         f"(range {_money(t['low'])} – {_money(t['high'])}, "
         f"+/-{est['band_pct']:g}%)"
     )
+    lines.append("")
+    lines.append(est.get("exclusions", EXCLUSIONS))
     lines.append("")
     lines.append(f"NOTE: {est['disclaimer']}")
     return "\n".join(lines)

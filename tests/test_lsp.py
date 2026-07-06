@@ -218,6 +218,55 @@ def test_malformed_frame_does_not_kill_server():
     assert 1 in ids  # the good message after the bad frame was still served
 
 
+def test_bad_content_length_resyncs_to_next_frame():
+    """A frame with a non-integer Content-Length must not brick the stream: the
+    reader resyncs to the following valid frame instead of feeding its body into
+    every subsequent header. The exact 'brick' scenario — a corrupt frame, then
+    valid shutdown/exit — the server must still answer."""
+    stream = (b"Content-Length: notanumber\r\n\r\n"
+              + _frame({"jsonrpc": "2.0", "id": 9, "method": "shutdown"})
+              + _frame({"jsonrpc": "2.0", "method": "exit"}))
+    out = io.BytesIO()
+    code = Server(io.BytesIO(stream), out).run()
+    assert code == 0  # clean shutdown → exit reached after recovery
+    out.seek(0)
+    ids = []
+    while (m := read_message(out)) is not None:
+        if m.get("id") is not None:
+            ids.append(m["id"])
+    assert 9 in ids  # the shutdown request after the corrupt frame was answered
+
+
+def test_resync_recovers_when_bad_frame_carries_a_body():
+    """The body-prepend case: the corrupt frame has a body, and frames are
+    concatenated with no separator, so the next header is mid-buffer. Resync
+    still finds it byte-for-byte."""
+    good = {"jsonrpc": "2.0", "id": 3, "method": "shutdown"}
+    stream = (b"Content-Type: x\r\n\r\n{\"stray\":\"body\"}"
+              + _frame(good)
+              + _frame({"jsonrpc": "2.0", "method": "exit"}))
+    st = ByteStream(stream)
+    first = read_message(st)
+    assert first == good  # resynced straight to the next valid frame
+    assert read_message(st) == {"jsonrpc": "2.0", "method": "exit"}
+
+
+def test_garbage_bytes_before_a_frame_recover():
+    """Leading garbage with no recoverable header, then a clean frame: the
+    garbage frame resyncs onto the good one."""
+    good = {"jsonrpc": "2.0", "id": 5}
+    st = ByteStream(b"Nonsense: yes\r\n\r\nzzzz" + _frame(good))
+    assert read_message(st) == good
+
+
+def test_resync_unrecoverable_raises_then_clean_eof():
+    # No Content-Length anywhere → resync exhausts at EOF and raises (existing
+    # missing-header contract), and a plain empty stream is still a clean None.
+    with pytest.raises(lsp.ProtocolError):
+        read_message(ByteStream(b"X-Other: 1\r\n\r\n{}"))
+    assert read_message(ByteStream(b"")) is None
+
+
 # --- diagnostics (§3.1) ------------------------------------------------------
 
 
@@ -505,14 +554,22 @@ def test_code_action_errors_get_no_accept():
 #: (hint, expected snippet-or-None) — the shared fixtures both the Python
 #: ``quickfix_snippet`` and the playground ``quickFixSnippet`` JS must agree on.
 _QUICKFIX_FIXTURES = [
-    ("Add a bathroom, e.g. `room bath: bathroom at 24,15 size 16 x 15`.",
-     "room bath: bathroom at 24,15 size 16 x 15"),
     ("Add `alarm smoke in bed`.", "alarm smoke in bed"),
-    ("Declare the footprint, e.g. `envelope 60 x 40`.", "envelope 60 x 40"),
+    # A genuine "add the missing X" fix leads with a colon (not `e.g.`) so it is
+    # offered — the reworded ENVELOPE/EMPTY hints look like this.
+    ("Declare the footprint: `envelope 60 x 40`.", "envelope 60 x 40"),
+    ("Add rooms: `room living: living at 0,0 size 20 x 16`.",
+     "room living: living at 0,0 size 20 x 16"),
     ("Set `ceiling 9` or greater (9–12 is typical).", "ceiling 9"),
     ("Use positive feet, e.g. `size 12 x 10`.", None),   # `size` is a modifier, not a head
     ("Declare a real lot: `site <W> x <L>`.", None),     # carries placeholders
     ("Give each room a unique id.", None),               # no backticked snippet
+    # An example lead-in (`e.g.`/`for example`/`like`) marks an *illustration* of
+    # syntax for a malformed line, not a droppable fix — never offered.
+    ('Add the closing quote, e.g. `plan "Name"`.', None),   # UNTERMINATED_STRING
+    ("The program starts with a bedroom count, e.g. `program 3 bed`.", None),
+    ("Use positive feet, for example `wing 20 x 24 at 40,0`.", None),
+    ("Concentrate glass, like `roof gable`.", None),
 ]
 
 
@@ -531,6 +588,7 @@ def test_quickfix_parity_with_playground_js():
 
     stmt = set(_STATEMENT_KEYWORDS)
     placeholder = re.compile(r"\.\.\.|…|[<>]")
+    example_lead = re.compile(r"(?:e\.g\.|for example|like)[\s,]*$", re.IGNORECASE)
 
     def js_quickfix(hint):
         if not hint:
@@ -538,8 +596,11 @@ def test_quickfix_parity_with_playground_js():
         for m in re.finditer(r"`([^`]+)`", hint):
             snip = m.group(1).strip()
             head = (snip.split() or [""])[0].lower()
-            if head in stmt and not placeholder.search(snip):
-                return snip
+            if head not in stmt or placeholder.search(snip):
+                continue
+            if example_lead.search(hint[: m.start()]):
+                continue
+            return snip
         return None
 
     for hint, _expected in _QUICKFIX_FIXTURES:
@@ -552,6 +613,21 @@ def test_playground_js_still_defines_the_heuristic():
 
     assert "function quickFixSnippet(hint)" in _APP_HTML
     assert "QUICKFIX_PLACEHOLDER = /\\.\\.\\.|…|[<>]/" in _APP_HTML
+    assert "QUICKFIX_EXAMPLE_LEAD = /(?:e\\.g\\.|for example|like)[\\s,]*$/i" in _APP_HTML
+
+
+def test_unterminated_string_offers_no_quickfix():
+    """Regression: an unterminated-string error illustrates the closed-quote
+    syntax with ``e.g. `plan "Name"`` — that is NOT an insertable fix (inserting
+    it leaves the real error), so no Apply/code-action is offered. Pinned against
+    the REAL compiled hint, in both the Python and JS heuristics."""
+    from barndsl.compiler import compile_source
+
+    res = compile_source('plan "Untied\n')
+    stringy = [d for d in res.diagnostics if d.code == "UNTERMINATED_STRING"]
+    assert stringy, "expected an UNTERMINATED_STRING diagnostic"
+    for d in stringy:
+        assert quickfix_snippet(d.hint) is None, d.hint
 
 
 # --- rename (§3.8) -----------------------------------------------------------

@@ -295,6 +295,7 @@ def _cost_section(est: dict[str, Any]) -> str:
     <tr class="total-row"><td colspan="4">Range (+/-{est['band_pct']:g}%)</td>
         <td class="num">${t['low']:,.0f} – ${t['high']:,.0f}</td><td></td></tr>
   </table>
+  <p class="note">{_tag(est.get('exclusions', ''))}</p>
   <p class="note">{_tag(est['disclaimer'])}</p>
 </section>
 """

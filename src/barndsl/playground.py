@@ -2610,17 +2610,25 @@ function escAttr(s){ return esc(s).replace(/"/g, '&quot;'); }
 // A hint often embeds a paste-able DSL line in backticks, e.g.
 // "…e.g. `entry a south width 3 offset 4`." We surface an Apply button only when
 // that snippet is a *complete, literal* statement the author can drop in as-is:
-// its first word is a statement head (not a modifier) and it carries no
-// placeholder (…/</>) they would still have to fill in. `site <W> x <L>` and
-// `size 12 x 10` both correctly get no button.
+// its first word is a statement head (not a modifier), it carries no placeholder
+// (…/</>) they would still have to fill in, and it is NOT introduced as an
+// example (e.g. / for example / like right before the backtick). That last guard
+// separates a droppable fix ("Declare the footprint: `envelope 60 x 40`") from
+// an illustration of the syntax a malformed line should have had ("Add the
+// closing quote, e.g. `plan \"Name\"`") — inserting the illustration would leave
+// the real error untouched. `site <W> x <L>` and `size 12 x 10` also get no
+// button. Mirrors quickfix_snippet in lsp.py (shared-fixture parity test).
 const QUICKFIX_PLACEHOLDER = /\.\.\.|…|[<>]/;
+const QUICKFIX_EXAMPLE_LEAD = /(?:e\.g\.|for example|like)[\s,]*$/i;
 function quickFixSnippet(hint){
   if (!hint) return null;
   const re = /`([^`]+)`/g; let m;
   while ((m = re.exec(hint))){
     const snip = m[1].trim();
     const head = (snip.split(/\s+/)[0] || '').toLowerCase();
-    if (HL_STMT.has(head) && !QUICKFIX_PLACEHOLDER.test(snip)) return snip;
+    if (!HL_STMT.has(head) || QUICKFIX_PLACEHOLDER.test(snip)) continue;
+    if (QUICKFIX_EXAMPLE_LEAD.test(hint.slice(0, m.index))) continue;
+    return snip;
   }
   return null;
 }

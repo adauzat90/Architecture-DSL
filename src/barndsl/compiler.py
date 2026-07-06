@@ -55,6 +55,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -1975,6 +1976,10 @@ def compile_source(
     """
     from .pragma import apply_pragmas, parse_pragmas
 
+    # Strip a leading UTF-8 BOM for API callers who pass raw file text (the CLI's
+    # read helper strips it too; stripping here keeps direct compile_source users
+    # from a stray U+FEFF making the first token unlexable).
+    source = _strip_bom(source)
     diagnostics: list[Issue] = []
     plan = Barndominium(name=name or "Untitled")
     smap = _SourceMap()
@@ -2160,13 +2165,55 @@ def compile_source(
     )
 
 
+class SourceReadError(Exception):
+    """A file the user pointed at could not be read — missing, a directory, no
+    permission, or not UTF-8 text. Carries a clean one-line ``<path>: <reason>``
+    message so the CLI can print ``error: …`` and exit 2 instead of dumping a
+    traceback from deep in the I/O stack."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+        self.reason = reason
+
+
+def _strip_bom(text: str) -> str:
+    """Drop a leading UTF-8 byte-order mark. Some editors (Notepad, older VS on
+    Windows) prepend U+FEFF; left in, it makes the first token unlexable."""
+    return text[1:] if text.startswith("﻿") else text
+
+
+def read_source_file(path: str) -> tuple[str, str | None]:
+    """Read DSL source for a file-taking command: ``(text, base_dir)``.
+
+    ``-`` reads standard input (an untitled buffer — ``base_dir`` ``None``, so a
+    ``use`` relpath is unresolvable, the same as a pasted source). Otherwise the
+    file's UTF-8 text (any leading BOM stripped) with its own directory as the
+    ``use`` resolution root. Raises :class:`SourceReadError` — never a raw
+    traceback — for a missing file, a directory, a permission error, or bytes
+    that are not valid UTF-8."""
+    if path == "-":
+        return _strip_bom(sys.stdin.read()), None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        raise SourceReadError(path, "no such file") from None
+    except IsADirectoryError:
+        raise SourceReadError(path, "is a directory") from None
+    except PermissionError:
+        raise SourceReadError(path, "permission denied") from None
+    except UnicodeDecodeError:
+        raise SourceReadError(path, "not valid UTF-8 text") from None
+    return _strip_bom(text), os.path.dirname(os.path.abspath(path))
+
+
 def compile_file(path: str, profile: "Profile | None" = None) -> CompileResult:
     """Compile a ``.barn`` file (see :func:`compile_source` for ``profile``).
 
     The file's own directory is the resolution root for any ``use "<relpath>"``
     (cross-file composition) — parts are found relative to the including file.
-    """
-    with open(path, encoding="utf-8") as fh:
-        return compile_source(
-            fh.read(), profile=profile, base_dir=os.path.dirname(os.path.abspath(path))
-        )
+    ``path`` may be ``-`` to read standard input. A file that cannot be read
+    raises :class:`SourceReadError` (a clean message, no traceback)."""
+    text, base_dir = read_source_file(path)
+    return compile_source(text, profile=profile, base_dir=base_dir)

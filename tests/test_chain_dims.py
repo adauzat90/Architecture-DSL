@@ -154,5 +154,82 @@ def test_multistory_chain_uses_each_levels_own_rooms():
         plan = compile_source(fh.read()).plan
     svg = render_svg(plan, RenderConfig(show_room_dims=False))
     assert "LEVEL 0" in svg and "LEVEL 1" in svg
-    # South wall of level 0 splits 39 ft into 24 + 15 at the living/kitchen edge.
-    assert "24′" in svg and "15′" in svg
+    # South wall of level 0: the living/kitchen room edge at 24 ft plus the living
+    # window (10 ft) and entry jambs now break the chain, so the kitchen keeps its
+    # 15 ft segment and the 10 ft window segment reads on the outermost tier.
+    assert "15′" in svg and "10′" in svg
+
+
+# --- exterior opening jamb breaks (§5b) --------------------------------------
+
+# One room filling a 40 ft wall, with a door and two windows on its south side.
+# The outermost chain should read wall / opening / wall at each jamb:
+#   0—6 wall, 6—9 door(3), 9—14 wall(5), 14—18 window(4), 18—24 wall(6),
+#   24—29 window(5), 29—40 wall(11).
+_OPENINGS = (
+    'plan "Openings"\n'
+    "envelope 40 x 24\n"
+    "ceiling 9\n"
+    "room living: living at 0,0 size 40 x 24\n"
+    "entry living south width 3 offset 6\n"
+    "window living south width 4 offset 14\n"
+    "window living south width 5 offset 24\n"
+)
+
+
+def test_openings_break_the_chain_wall_opening_wall():
+    plan = compile_source(_OPENINGS).plan
+    r = _Renderer(plan, RenderConfig(show_room_dims=False))
+    # The south run has NO interior room boundary, only opening jambs — yet it
+    # now breaks at each jamb (hand-computed break coordinates).
+    pts, _, _ = r._chain_breaks("S", plan.rooms, 0.0, 0.0, 40.0, 24.0)
+    pts = r._with_jambs(pts, r._opening_jambs("S", plan.rooms, 0.0, 0.0, 40.0))
+    assert pts == [0.0, 6.0, 9.0, 14.0, 18.0, 24.0, 29.0, 40.0]
+
+
+def test_opening_jamb_labels_render_on_the_south_chain():
+    plan = compile_source(_OPENINGS).plan
+    svg = render_svg(plan, RenderConfig(show_room_dims=False))
+    # The opening widths (3/4/5) and wall segments (6/5/6/11) all appear as chain
+    # labels — a wall that would otherwise be one bare 40 ft span.
+    for seg in ("3′", "4′", "5′", "6′", "11′"):
+        assert seg in svg, seg
+
+
+def test_tiny_jamb_segment_collapses_into_its_neighbour():
+    # A window whose near jamb sits 0.3 ft from the room-edge break collapses
+    # (< 1 ft of label space); the far jamb, well clear, still breaks.
+    src = (
+        'plan "Collapse"\n'
+        "envelope 40 x 24\n"
+        "ceiling 9\n"
+        "room a: living at 0,0 size 20 x 24\n"
+        "room b: kitchen at 20,0 size 20 x 24\n"
+        "window b south width 4 offset 0.3\n"
+    )
+    plan = compile_source(src).plan
+    r = _Renderer(plan, RenderConfig(show_room_dims=False))
+    jambs = r._opening_jambs("S", plan.rooms, 0.0, 0.0, 40.0)
+    assert sorted(jambs) == [20.3, 24.3]  # near + far jamb
+    merged = r._with_jambs([0.0, 20.0, 40.0], jambs)
+    # 20.3 is within 1 ft of the room edge at 20 → dropped; 24.3 kept.
+    assert merged == [0.0, 20.0, 24.3, 40.0]
+
+
+def test_interior_doors_add_no_plan_leader():
+    # An interior door between two rooms must NOT introduce a jamb break on any
+    # exterior chain (this phase adds interior-door offsets to the SCHEDULE only).
+    src = (
+        'plan "Interior"\n'
+        "envelope 20 x 12\n"
+        "ceiling 9\n"
+        "room a: living at 0,0 size 12 x 12\n"
+        "room b: kitchen at 12,0 size 8 x 12\n"
+        "door a - b width 3 offset 4\n"
+    )
+    plan = compile_source(src).plan
+    r = _Renderer(plan, RenderConfig())
+    # No exterior openings → the south chain has only the room-boundary break.
+    pts, _, _ = r._chain_breaks("S", plan.rooms, 0.0, 0.0, 20.0, 12.0)
+    merged = r._with_jambs(pts, r._opening_jambs("S", plan.rooms, 0.0, 0.0, 20.0))
+    assert merged == [0.0, 12.0, 20.0]

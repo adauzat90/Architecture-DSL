@@ -138,6 +138,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
         # --- envelope / wings / top level -----------------------------------
         _c("ENVELOPE", E, "Bad envelope",
            "The envelope must have positive width and length, e.g. `envelope 60 x 40`."),
+        _c("DIM_IMPLAUSIBLE", E, "Implausible dimension",
+           "An envelope, room, or wing side is non-finite or larger than the "
+           "1000 ft plausibility limit — no barndominium runs that far, and such a "
+           "value overflows the area takeoff to `inf`. Almost always a typo (a "
+           "stray digit, or feet entered as inches × something). Use a realistic "
+           "measurement in feet; the value is clamped so the rest of the report "
+           "still reads, but the plan stays unbuildable until it is fixed."),
         _c("WING_SIZE", E, "Bad wing size",
            "A `wing` block must have positive dimensions."),
         _c("FOOTPRINT_SPLIT", E, "Disconnected footprint",

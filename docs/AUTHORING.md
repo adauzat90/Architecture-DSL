@@ -444,6 +444,10 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 ## The rules the compiler enforces
 
 **Errors (must fix):**
+- Every envelope, room, and wing side is a **plausible dimension** — finite and
+  no larger than **1000 ft** (`DIM_IMPLAUSIBLE`). A bigger value is a typo (a
+  stray digit, or an overflow) that would poison the area takeoff with `inf`; it
+  is rejected and clamped so the rest of the report still reads.
 - Rooms stay inside the envelope and don't overlap (same level).
 - A `door` connects two *different* rooms that **share a wall** (or, across
   levels, stack). Corner-only contact is **not** a shared wall. `open` is the
@@ -840,6 +844,13 @@ blank lines and statement order untouched. It refuses to touch a file with parse
 errors, so it can't mask breakage. In the playground, **Format** (Shift+Alt+F)
 does the same, as one undo step. `fmt(fmt(x)) == fmt(x)`.
 
+**Reading from stdin.** `compile`, `fmt`, and `score` accept `-` as the file
+argument to read the source from standard input (`… | barndsl compile -`); it
+compiles as an untitled buffer, so a `use` relpath can't resolve (paste the part
+inline instead). A leading UTF-8 BOM is stripped automatically. When a file
+can't be read — missing, a directory, no permission, or not UTF-8 — the tool
+prints a one-line `error: <path>: <reason>` and exits **2**, never a traceback.
+
 ## Reusable blocks: `use` (cross-file composition)
 
 A **part** is any `.barn` file with **no `plan` header** — rooms, interior
@@ -1008,3 +1019,29 @@ fixture clearances, the design-quality nudges) is unchanged.
 may sit **outside** the envelope (e.g. a front porch at a negative `y`) and is
 exempt from the overlap / out-of-bounds / area checks that apply to rooms — so
 place it wherever it physically goes (typically just outside an `entry`).
+
+Every porch carries a **slab** line in `barndsl cost`; a `covered` porch adds a
+**porch-roof** line too (at the same slab/roof rates as the house).
+
+## Schedules and estimates
+
+- **`barndsl schedule --doors --windows`** now includes a **Near jamb** column:
+  the layout offset from the wall's canonical **start corner** to the opening's
+  near jamb (the edge a framer measures to), stated as e.g. `4′ from W`. A
+  horizontal (north/south) wall is measured from its **W**est end, a vertical
+  (east/west) wall from its **S**outh end. Interior doors report it too; a door
+  with no `offset` is centred, so its near jamb sits half the leftover to one
+  side. The 2D plan's outermost chain dimension also **breaks at exterior opening
+  jambs** (wall-segment / opening-width / wall-segment); interior doors get the
+  schedule offset only, no plan leader.
+- **`barndsl cost`** itemizes the shell (including **gable-end wall triangles**
+  for a gable roof), foundation, partitions, openings, plumbing fixtures **and
+  laundry washer/dryer**, systems (electrical + HVAC allowances) and finishes,
+  then prints an **exclusions** footer (site work, well/septic, permits, HVAC
+  unless itemized, GC overhead & profit). Every unit cost is overridable with
+  `--costs FILE.json`.
+- **`barndsl compare A B`** buckets diagnostics by how their count moved:
+  `resolved` (gone entirely in B), `introduced` (new in B), `fewer` (dropped but
+  still firing, `CODE (5 → 4)`) and `more` (rose). When both sides compile
+  cleanly it also shows the **cost delta** (`Cost: $196,227 → $200,794
+  (+$4,567)`).

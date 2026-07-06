@@ -119,6 +119,76 @@ def test_interior_double_doors_priced_as_a_pair():
     )
 
 
+# A plan with a laundry (washer+dryer), a covered porch, and an explicit gable
+# roof — the completeness additions. Envelope 40x30, pitch defaults to 4:12.
+_COMPLETE = """\
+plan "Complete"
+envelope 40 x 30
+ceiling 9
+roof gable
+room living: living at 0,0 size 24 x 30
+room laundry: laundry at 24,0 size 16 x 15
+room bath: bathroom at 24,15 size 16 x 15
+porch front at 0,-8 size 24 x 8 covered
+entry living south width 3 offset 4
+"""
+
+
+def _named_line(est, item):
+    for ln in est["assemblies"]:
+        if ln["item"] == item:
+            return ln
+    raise AssertionError(f"no assembly line named {item!r}")
+
+
+def test_washer_and_dryer_are_costed_for_a_laundry():
+    est = estimate_cost(compile_source(_COMPLETE))
+    w, d = _named_line(est, "Washer"), _named_line(est, "Dryer")
+    assert w["quantity"] == 1 and d["quantity"] == 1
+    assert w["cost"] == DEFAULT_UNIT_COSTS["fixture_washer"]
+    assert d["cost"] == DEFAULT_UNIT_COSTS["fixture_dryer"]
+    assert w["cost"] > 0 and d["cost"] > 0  # no longer $0
+
+
+def test_porch_slab_and_covered_porch_roof_lines():
+    import math
+
+    est = estimate_cost(compile_source(_COMPLETE))
+    slab = _named_line(est, "Porch slab")
+    # 24 x 8 porch platform = 192 sqft at the $9 slab rate.
+    assert slab["quantity"] == 192
+    assert slab["cost"] == 192 * DEFAULT_UNIT_COSTS["slab_sqft"]
+    roof = _named_line(est, "Porch roof")
+    # Covered porch roof is the flat area sloped by sec(atan(pitch)), pitch 4:12.
+    slope = math.hypot(1.0, 4.0 / 12.0)
+    assert abs(roof["quantity"] - round(192 * slope, 2)) < 0.01
+    assert roof["cost_key"] == "roof_sqft"
+
+
+def test_gable_end_triangles_added_only_for_a_gable_roof():
+    est = estimate_cost(compile_source(_COMPLETE))
+    gable = _named_line(est, "Gable-end walls")
+    # Two triangles, base = envelope width 40, rise = 20 * (4/12): total
+    # 40**2 * (4/12) / 2 = 266.67 sqft, sheathed at the exterior-wall rate.
+    assert abs(gable["quantity"] - round(40 * 40 * (4.0 / 12.0) / 2.0, 2)) < 0.01
+    assert gable["cost_key"] == "exterior_wall_sqft"
+    # A shed roof has no gable ends → no such line.
+    shed = estimate_cost(compile_source(_COMPLETE.replace("roof gable", "roof shed")))
+    assert not any(ln["item"] == "Gable-end walls" for ln in shed["assemblies"])
+
+
+def test_exclusions_footer_present_and_overridable_costs_still_work():
+    est = estimate_cost(compile_source(_COMPLETE))
+    assert "Excludes: site work" in est["exclusions"]
+    assert "GC overhead & profit" in cost_text(est)
+    # HVAC IS itemised, so the footer qualifies it ("unless itemized").
+    assert any(ln["item"] == "HVAC allowance" for ln in est["assemblies"])
+    assert "unless itemized" in est["exclusions"]
+    # Overrides still reach the new keys.
+    bumped = estimate_cost(compile_source(_COMPLETE), overrides={"fixture_washer": 1000.0})
+    assert _named_line(bumped, "Washer")["cost"] == 1000.0
+
+
 def test_estimate_is_json_safe_and_deterministic():
     a, b = _est(), _est()
     assert a == b

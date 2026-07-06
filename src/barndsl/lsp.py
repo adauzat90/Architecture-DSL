@@ -56,6 +56,67 @@ class ProtocolError(Exception):
     """A framing/decoding failure that the read loop logs and recovers from."""
 
 
+#: Cap on the forward scan when resynchronising after a corrupt header — a single
+#: bad frame costs at most this many bytes of scanning, never the whole stream.
+_MAX_RESYNC = 1024 * 1024
+_CONTENT_LENGTH_TOKEN = b"content-length:"
+
+
+def _content_length(raw_head: bytes) -> int | None:
+    """The ``Content-Length`` value in a header block, or ``None`` when it is
+    absent or unparseable (a non-integer value). A plausible-but-out-of-range
+    length still parses here; the range guard lives at the call site."""
+    length: int | None = None
+    for line in raw_head.split(b"\r\n"):
+        if not line:
+            continue
+        name, sep, value = line.partition(b":")
+        if sep and name.strip().lower() == b"content-length":
+            try:
+                length = int(value.strip())
+            except ValueError:
+                return None
+    return length
+
+
+def _resync(stream: Any, seed: bytes) -> tuple[bytes, bytes] | None:
+    """Recover the next frame after a malformed header.
+
+    A corrupt frame — a non-integer or missing ``Content-Length`` — leaves its
+    body unconsumed, and JSON-RPC frames are concatenated with no separator, so
+    those bytes would prepend (and wreck) every following header, leaving the
+    server alive but permanently deaf. Instead, scan forward — reading one byte
+    at a time so we never over-read past the recovered frame's header into its
+    body — for the next ``Content-Length:`` line that completes to a ``\r\n\r\n``
+    delimiter and parses. ``seed`` is the bytes already past the bad delimiter.
+    Returns ``(raw_head, rest)`` at the recovered header, or ``None`` when none
+    reappears before EOF or the :data:`_MAX_RESYNC` budget runs out.
+    """
+    tok = _CONTENT_LENGTH_TOKEN
+    buf = bytearray(seed)
+    scanned = len(seed)
+    while True:
+        p = bytes(buf).lower().find(tok)
+        if p != -1:
+            region = buf[p:]
+            if b"\r\n\r\n" in region:
+                raw_head, _, rest = bytes(region).partition(b"\r\n\r\n")
+                if _content_length(raw_head) is not None:
+                    return raw_head, rest
+                del buf[: p + len(tok)]  # unparseable here — skip and rescan
+                continue
+            del buf[:p]  # header started but not yet complete; keep from token
+        elif len(buf) > len(tok):
+            del buf[: len(buf) - (len(tok) - 1)]  # keep only a straddling prefix
+        if scanned >= _MAX_RESYNC:
+            return None
+        chunk = stream.read(1)
+        if not chunk:
+            return None
+        buf += chunk
+        scanned += 1
+
+
 def read_message(stream: Any) -> dict | None:
     """Read one ``Content-Length``-framed JSON-RPC message from ``stream``.
 
@@ -63,10 +124,12 @@ def read_message(stream: Any) -> dict | None:
     or a test fake feeding bytes in arbitrary chunks). Returns the decoded object,
     or ``None`` at a clean end of input. Robust to split reads (the body is read
     in a loop until ``Content-Length`` bytes arrive) and to unicode bodies
-    (decoded as UTF-8). A malformed header or an undecodable/invalid JSON body
-    raises :class:`ProtocolError` so the caller can log and continue rather than
-    crash. The body is decoded but *not* required to be a JSON object here —
-    dispatch validates the shape.
+    (decoded as UTF-8). A malformed header **resynchronises** to the next frame
+    (see :func:`_resync`) so one bad frame can't brick the stream; an
+    unrecoverable header (none reappears before EOF) or an undecodable/invalid
+    JSON body raises :class:`ProtocolError` so the caller can log and continue
+    rather than crash. The body is decoded but *not* required to be a JSON object
+    here — dispatch validates the shape.
     """
     header = b""
     while b"\r\n\r\n" not in header:
@@ -77,19 +140,14 @@ def read_message(stream: Any) -> dict | None:
             raise ProtocolError("unexpected EOF in header")
         header += chunk
     raw_head, _, rest = header.partition(b"\r\n\r\n")
-    length = None
-    for line in raw_head.split(b"\r\n"):
-        if not line:
-            continue
-        name, _, value = line.partition(b":")
-        if name.strip().lower() == b"content-length":
-            try:
-                length = int(value.strip())
-            except ValueError as exc:
-                raise ProtocolError(f"bad Content-Length: {value!r}") from exc
+    length = _content_length(raw_head)
     if length is None:
-        raise ProtocolError("missing Content-Length header")
-    if length < 0 or length > 64 * 1024 * 1024:
+        recovered = _resync(stream, rest)
+        if recovered is None:
+            raise ProtocolError("malformed header, no frame to resync to")
+        raw_head, rest = recovered
+        length = _content_length(raw_head)
+    if length is None or length < 0 or length > 64 * 1024 * 1024:
         raise ProtocolError(f"implausible Content-Length: {length}")
     body = bytearray(rest[:length])
     # `rest` may already hold some (or all) of the body from a batched read.
@@ -255,6 +313,10 @@ _STATEMENT_DOCS = _build_statement_docs()
 #: A placeholder the author would still have to fill in — an incomplete snippet.
 _QUICKFIX_PLACEHOLDER = re.compile(r"\.\.\.|…|[<>]")
 _BACKTICKED = re.compile(r"`([^`]+)`")
+#: An *example* lead-in right before the backtick (``…e.g. `plan "Name"``): the
+#: snippet illustrates syntax for a malformed line, it is NOT a line to insert.
+#: Genuine "add the missing X" hints lead with a colon instead (`Declare … :`).
+_QUICKFIX_EXAMPLE_LEAD = re.compile(r"(?:e\.g\.|for example|like)[\s,]*$", re.IGNORECASE)
 #: The statement heads a quick-fix snippet must start with — the same set the
 #: playground injects as ``HIGHLIGHT.statements`` (``HL_STMT`` in the JS), so the
 #: Python function and the JS ``quickFixSnippet`` agree by construction.
@@ -267,18 +329,26 @@ def quickfix_snippet(hint: str | None) -> str | None:
     A hint often carries an example in backticks (``…e.g. `entry a south width 3
     offset 4`.``). We surface one only when it is a *complete, literal* statement
     the author can drop in as-is: its first word is a statement head (not a
-    modifier like ``size``) and it carries no placeholder (``…``/``<>``). This is
-    the exact heuristic the playground's ``quickFixSnippet`` JS runs, ported here
-    so the LSP code-action and the playground Apply button never drift (pinned by
-    a shared-fixture parity test).
+    modifier like ``size``), it carries no placeholder (``…``/``<>``), and it is
+    **not introduced as an example** (``e.g.`` / ``for example`` / ``like`` right
+    before the backtick). That last guard is what separates a droppable fix
+    (``Declare the footprint: `envelope 60 x 40```) from an illustration of the
+    syntax a malformed line should have had (UNTERMINATED_STRING's ``Add the
+    closing quote, e.g. `plan "Name"``): inserting the illustration leaves the
+    real error untouched. This is the exact heuristic the playground's
+    ``quickFixSnippet`` JS runs, ported here so the LSP code-action and the
+    playground Apply button never drift (pinned by a shared-fixture parity test).
     """
     if not hint:
         return None
     for m in _BACKTICKED.finditer(hint):
         snip = m.group(1).strip()
         head = (snip.split() or [""])[0].lower()
-        if head in _QUICKFIX_STATEMENTS and not _QUICKFIX_PLACEHOLDER.search(snip):
-            return snip
+        if head not in _QUICKFIX_STATEMENTS or _QUICKFIX_PLACEHOLDER.search(snip):
+            continue
+        if _QUICKFIX_EXAMPLE_LEAD.search(hint[: m.start()]):
+            continue  # an illustrative example, not an insertable fix
+        return snip
     return None
 
 

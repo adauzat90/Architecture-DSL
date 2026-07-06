@@ -19,7 +19,8 @@ import io
 from dataclasses import dataclass
 from typing import Callable
 
-from .elements import Barndominium
+from .elements import Barndominium, Direction
+from .geometry import shared_edge
 from .render import fmt_ft_in
 from .validation import clear_dimensions, exterior_walls
 
@@ -32,6 +33,21 @@ class Column:
 
 def _fmt_ft(v: float) -> str:
     return fmt_ft_in(v)
+
+
+def _wall_start_corner(wall: Direction) -> str:
+    """The corner an opening's offset is measured *from* — the wall's canonical
+    south/west start. A horizontal wall (north/south) starts at its **W**est end;
+    a vertical wall (east/west) starts at its **S**outh end. Framers lay out to
+    this end, so the schedule states it beside every offset."""
+    return "W" if wall in (Direction.NORTH, Direction.SOUTH) else "S"
+
+
+def _offset_cell(offset: float | None, corner: str) -> str:
+    """Render a near-jamb offset as ``<ft-in> from <corner>`` (or ``—``)."""
+    if offset is None:
+        return "—"
+    return f"{fmt_ft_in(offset)} from {corner}"
 
 
 # -- row builders ---------------------------------------------------------
@@ -67,6 +83,18 @@ def door_rows(plan: Barndominium) -> list[dict]:
     n = 0
     for d in plan.interior_doors:
         n += 1
+        # Near-jamb offset from the shared wall's south/west start. An explicit
+        # `offset` is that distance directly; `None` centres the leaf, so the near
+        # jamb sits half the leftover to one side. `hi`/`lo` come from the shared
+        # edge (the wall the door actually sits on).
+        a, b = plan.room(d.room_a), plan.room(d.room_b)
+        edge = shared_edge(a, b) if a is not None and b is not None else None
+        if edge is None:
+            offset, corner = None, ""
+        else:
+            w = min(d.width, edge.length)
+            offset = d.offset if d.offset is not None else max(0.0, (edge.length - w) / 2.0)
+            corner = "W" if edge.orientation == "h" else "S"
         rows.append(
             {
                 "mark": f"D{n}",
@@ -74,6 +102,8 @@ def door_rows(plan: Barndominium) -> list[dict]:
                 "from": d.room_a,
                 "to": d.room_b,
                 "width": d.width,
+                "offset": offset,
+                "corner": corner,
             }
         )
     for xd in plan.exterior_doors:
@@ -88,6 +118,8 @@ def door_rows(plan: Barndominium) -> list[dict]:
                 "from": xd.room,
                 "to": f"exterior ({xd.wall.value})",
                 "width": xd.width,
+                "offset": xd.offset,
+                "corner": _wall_start_corner(xd.wall),
             }
         )
     return rows
@@ -125,6 +157,8 @@ def window_rows(plan: Barndominium) -> list[dict]:
                 "sill": w.sill_height,
                 "area": w.glazed_area,
                 "glazing": glazing,
+                "offset": w.offset,  # already the distance to the near jamb
+                "corner": _wall_start_corner(w.wall),
             }
         )
     return rows
@@ -148,6 +182,9 @@ _DOOR_COLS = [
     Column("From", lambda r: r["from"]),
     Column("To", lambda r: r["to"]),
     Column("Width", lambda r: _fmt_ft(r["width"])),
+    # Layout offset to the near jamb, from the wall's canonical start corner —
+    # what a framer measures to. Interior doors report it too (no plan leader).
+    Column("Near jamb", lambda r: _offset_cell(r["offset"], r["corner"])),
 ]
 _WINDOW_COLS = [
     Column("Mark", lambda r: r["mark"]),
@@ -157,6 +194,7 @@ _WINDOW_COLS = [
     Column("Width", lambda r: _fmt_ft(r["width"])),
     Column("Height", lambda r: _fmt_ft(r["height"])),
     Column("Sill", lambda r: _fmt_ft(r["sill"])),
+    Column("Near jamb", lambda r: _offset_cell(r["offset"], r["corner"])),
     Column("Glazed", lambda r: f"{r['area']:.0f} sq ft"),
     Column("Glazing", lambda r: r["glazing"]),
 ]

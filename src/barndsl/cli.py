@@ -87,7 +87,7 @@ import os
 import sys
 
 from . import __version__
-from .compiler import compile_file, compile_source
+from .compiler import SourceReadError, compile_file, compile_source, read_source_file
 from .render import save_svg
 
 
@@ -600,8 +600,7 @@ def _cmd_fmt(args: argparse.Namespace) -> int:
     rc = 0
     changed_any = False
     for path in args.files:
-        with open(path, encoding="utf-8") as fh:
-            original = fh.read()
+        original, _ = read_source_file(path)  # `-` reads stdin; clean I/O errors
         # Refuse to format a file with parse errors — fmt must never mask breakage.
         result = compile_source(original)
         if result.plan is None or result.recovered:
@@ -615,12 +614,13 @@ def _cmd_fmt(args: argparse.Namespace) -> int:
             if changed:
                 print(f"would reformat {path}")
                 changed_any = True
-        elif args.write:
+        elif args.write and path != "-":
             if changed:
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(formatted)
                 print(f"reformatted {path}")
         else:
+            # stdin (or no --write): emit the formatted source to stdout.
             print(formatted, end="")
     if rc:
         return rc
@@ -1440,6 +1440,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except SourceReadError as exc:
+        # A file-taking command pointed at something unreadable (missing file, a
+        # directory, no permission, non-UTF-8): a clean one-liner + exit 2, never
+        # a traceback — the same exit convention as a fatal input error below.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except SystemExit as exc:
         # A command signalling a fatal input error (e.g. an unresolvable
         # --profile) raises SystemExit(code); surface it as an int return so

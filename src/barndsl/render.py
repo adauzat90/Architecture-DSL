@@ -1212,6 +1212,58 @@ class _Renderer:
     #: overall dimension line (28/34 px out), so the two rows read as one family.
     _CHAIN_OFFSET = 15.0
     _CHAIN_TICK = 4.0
+    #: A jamb break is only worth drawing when it leaves a segment at least this
+    #: wide (ft) on either side — a jamb hard against a room corner (or another
+    #: jamb) collapses into its neighbour rather than crowd the chain with a
+    #: sliver too narrow to label.
+    _MIN_JAMB_SEG_FT = 1.0
+
+    def _opening_jambs(
+        self, side: str, rooms: list, offset: float, lo: float, hi: float,
+        tol: float = 1e-6,
+    ) -> list[float]:
+        """Near/far jamb coordinates of exterior openings on this run.
+
+        An exterior window or door on ``side`` whose host room's matching wall
+        lies on the run ``offset`` contributes its two jambs (projected onto the
+        chain axis, clamped to ``[lo, hi]``). These are the breaks that make the
+        outermost chain read wall-segment / opening-width / wall-segment."""
+        want = {
+            "S": Direction.SOUTH, "N": Direction.NORTH,
+            "W": Direction.WEST, "E": Direction.EAST,
+        }[side]
+        room_by_id = {r.id: r for r in rooms}
+        coords: list[float] = []
+        openings = [(w.room, w.wall, w.offset, w.width) for w in self.plan.windows]
+        openings += [
+            (d.room, d.wall, d.offset, d.width) for d in self.plan.exterior_doors
+        ]
+        for rid, wall, off, width in openings:
+            if wall != want:
+                continue
+            room = room_by_id.get(rid)
+            if room is None:
+                continue
+            edge_coord = {"S": room.y, "N": room.y2, "W": room.x, "E": room.x2}[side]
+            if abs(edge_coord - offset) > tol:
+                continue
+            x1, y1, x2, y2 = opening_endpoints(room, wall, off, width)
+            near, far = (x1, x2) if side in ("S", "N") else (y1, y2)
+            for c in (near, far):
+                if lo - tol <= c <= hi + tol:
+                    coords.append(min(max(c, lo), hi))
+        return coords
+
+    def _with_jambs(self, pts: list[float], jambs: list[float]) -> list[float]:
+        """Fold opening ``jambs`` into the room-edge break ``pts``, keeping the
+        room edges and dropping any jamb that would leave a segment narrower than
+        :data:`_MIN_JAMB_SEG_FT` (it collapses into the neighbouring break)."""
+        out = list(pts)
+        for j in sorted(jambs):
+            if all(abs(j - p) >= self._MIN_JAMB_SEG_FT for p in out):
+                out.append(j)
+        out.sort()
+        return out
 
     def _chain_breaks(
         self,
@@ -1257,13 +1309,16 @@ class _Renderer:
         fx0, fy0, fx1, fy1 = self.plan.bounds()
         if not self.plan.wings:
             pts, _, _ = self._chain_breaks("N", rooms, fx0, fy0, fx1, fy1)
+            pts = self._with_jambs(pts, self._opening_jambs("N", rooms, fy1, fx0, fx1))
             return len(pts) > 2
         # Wing plans: only a chain on the top-most north run (offset == max_y)
         # rides in the title band — an inset wing run sits in the notch, clear.
         for offset, lo, hi in self._exterior_runs("N"):
-            if abs(offset - fy1) <= 1e-6 and len(self._run_breaks(
-                "N", rooms, offset, lo, hi
-            )) > 2:
+            breaks = self._with_jambs(
+                self._run_breaks("N", rooms, offset, lo, hi),
+                self._opening_jambs("N", rooms, offset, lo, hi),
+            )
+            if abs(offset - fy1) <= 1e-6 and len(breaks) > 2:
                 return True
         return False
 
@@ -1370,8 +1425,11 @@ class _Renderer:
     def _draw_chain_dims(self, level: int | None = None) -> None:
         """Draw a chained dimension string along each exterior side that has an
         interior break — a run of tick-to-tick segments between the wall and the
-        overall dimension line. Sides with no interior break are left to the
-        overall dimension (no duplicated single-segment string)."""
+        overall dimension line. The breaks are the interior room boundaries that
+        meet the wall AND the jambs of any exterior opening on it, so the chain
+        reads wall-segment / opening-width / wall-segment. A side with no room
+        boundary *and* no opening is left to the overall dimension (no duplicated
+        single-segment string)."""
         fx0, fy0, fx1, fy1 = self.plan.bounds()
         rooms = [r for r in self.plan.rooms if level is None or r.level == level]
         if self.plan.wings:
@@ -1379,16 +1437,22 @@ class _Renderer:
             # wall offset, not the rectangular bounds.
             for side in ("S", "N", "W", "E"):
                 for offset, lo, hi in self._exterior_runs(side):
-                    pts = self._run_breaks(side, rooms, offset, lo, hi)
+                    pts = self._with_jambs(
+                        self._run_breaks(side, rooms, offset, lo, hi),
+                        self._opening_jambs(side, rooms, offset, lo, hi),
+                    )
                     if len(pts) <= 2:
                         continue
                     self._chain_string(side, pts, offset)
             return
         for side in ("S", "N", "W", "E"):
             pts, _, _ = self._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
-            if len(pts) <= 2:
-                continue  # no interior break — the overall dim already covers it
             wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
+            pts = self._with_jambs(pts, self._opening_jambs(side, rooms, wall, fx0, fx1)
+                                   if side in ("S", "N") else
+                                   self._opening_jambs(side, rooms, wall, fy0, fy1))
+            if len(pts) <= 2:
+                continue  # no interior break and no opening — overall dim covers it
             self._chain_string(side, pts, wall)
 
     def _chain_string(self, side: str, pts: list[float], wall_coord: float) -> None:
