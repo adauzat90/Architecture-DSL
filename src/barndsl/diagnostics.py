@@ -441,13 +441,34 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("WINDOW_TEMPERED", W, "Window needs safety glazing",
            "A window sits in an IRC R308.4 hazard location — within 24 in of a "
            "door in the same wall plane (R308.4.1), within 60 in of a tub/shower "
-           "in a wet room (R308.4.5), or within 36 in of a stair flight "
-           "(R308.4.6/.7, simplified) — where human impact is likely, so its glass "
-           "must be tempered/safety glazing. The rule is derived from geometry "
-           "(there is no `tempered` attribute yet), and it also fills the window "
-           "schedule's Glazing column. Specify tempered glass on the schedule."),
+           "in a wet room (R308.4.5), within 36 in of a stair flight "
+           "(R308.4.6/.7, simplified), or a large glazing panel over 9 sq ft whose "
+           "bottom edge is below 18 in and top edge above 36 in above the floor, "
+           "anywhere (R308.4.3) — where human impact is likely, so its glass must "
+           "be tempered/safety glazing. The rule is derived from geometry, honours "
+           "a declared `tempered` attribute (the R308.4 escape hatch), and also "
+           "fills the window schedule's Glazing column. Specify tempered glass on "
+           "the schedule."),
+        _c("WINDOW_FALL", W, "Operable window needs fall protection",
+           "An operable window has a sill below 24 in on an upper storey. IRC "
+           "R312.2 requires window fall protection (an opening-control device or "
+           "fall guard, ASTM F2090) where an operable sash sits below 24 in and "
+           "more than 72 in above the grade below. The model carries no grade "
+           "elevation, so an upper level (>= 1) is the proxy for 'well above "
+           "grade'. Fit an opening-control device that limits the sash to a 4 in "
+           "clear opening yet still releases for escape — do not raise the sill, "
+           "which would fight the R310 egress-window rule. A fixed sash is exempt."),
         _c("ENTRY_INTERIOR", E, "Entry on an interior wall",
            "An exterior door is on a wall that doesn't face outside."),
+        _c("DOOR_THRESHOLD", I, "Threshold-to-landing drop at the egress door",
+           "A reminder-class info (the model has no vertical threshold data, so it "
+           "teaches rather than measures): at the required egress door the exterior "
+           "landing may be no more than 1.5 in below the top of the threshold — "
+           "7.75 in only where the door does not swing out over the landing (IRC "
+           "R311.3.1). Nudged once, on the primary entry, and only before a "
+           "porch/landing is modelled (mirroring DOOR_NO_LANDING's single info); "
+           "once landings are drawn, the CD set carries the detail. Confirm the "
+           "landing-to-threshold drop on the construction documents."),
         _c("DOOR_NO_LANDING", W, "Exterior door has no landing",
            "An exterior people-door (`entry`) opens onto no landing — IRC R311.3 "
            "requires a floor/landing on each side of an exterior door, at least as "
@@ -484,6 +505,16 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A stair's footprint is too short for a floor opening (stairwell) that "
            "keeps 6 ft 8 in of headroom under the upper floor (IRC R311.7.2). "
            "Lengthen the run/opening or reduce the floor-to-floor height."),
+        _c("STAIR_LANDING", I, "Flight too tall — needs an intermediate landing",
+           "A single straight flight climbs more than 12 ft 7 in (151 in) of "
+           "vertical rise. IRC R311.7.3 limits a flight to that rise between floor "
+           "levels or landings, so a taller run needs an intermediate landing (a "
+           "switchback or L-turn). Risers are computed the same way as STAIR_RUN "
+           "(rise / max riser), so a gentler profile riser is reflected in the "
+           "quoted count. A normal one-storey flight stays well under, so this only "
+           "speaks up on a tall or multi-level run. INFO — the DSL models one "
+           "straight flight, so note the mid-run landing on the construction "
+           "documents."),
         # --- guards & life safety -------------------------------------------
         _c("LOFT_GUARD", I, "Open loft edge needs a guard",
            "An upper-level room only partially covers a room below, so it "
@@ -527,6 +558,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "one (i.e. one at least every 12 ft of wall run, measured around "
            "corners). Add an `outlet` in the worst gap. Only rooms that declare an "
            "outlet are checked (drawing the electrical layer is opt-in)."),
+        _c("RECEPTACLE_COUNTER", W, "Kitchen counter needs a small-appliance receptacle",
+           "A kitchen counter run (a `fixture counter ... along` run at least 12 in "
+           "wide) leaves a point on the counter wall more than 24 in from a "
+           "receptacle. IRC E3901.4 requires small-appliance receptacles spaced so "
+           "no point along a counter is more than 24 in from one (receptacles at "
+           "most 48 in apart, and one on every counter >= 12 in wide). Add an "
+           "`outlet` on the counter wall in the gap. Only checked once a plan draws "
+           "its electrical layer (an outlet/switch/light), like OUTLET_SPACING."),
         _c("OUTLET_GFCI", W, "Receptacle needs GFCI protection",
            "A receptacle in a kitchen, bathroom, laundry or utility (a wet/damp "
            "location) isn't marked `gfci`. IRC E3902 requires ground-fault "
@@ -728,9 +767,17 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "habitable space above keeps reminding."),
         _c("GARAGE_DOOR", I, "Garage/dwelling door must be self-closing & rated",
            "A door between a garage or shop and the dwelling must be self-closing "
-           "and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood door) per "
-           "IRC R302.5.1. A door into a sleeping room is barred outright "
-           "(GARAGE_BEDROOM)."),
+           "and 20-minute fire-rated (or a solid-core/solid-wood door at least "
+           "1-3/8 in thick) per IRC R302.5.1. The reminder anchors on the `door` "
+           "statement itself — the opening that has to carry the rated leaf. A door "
+           "into a sleeping room is barred outright (GARAGE_BEDROOM)."),
+        _c("CLOSET_DOOR_SWING", I, "Swing door fills a shallow closet",
+           "A swing door serves a closet shallower than the door is wide, so the "
+           "leaf can't fully open inside it. There is no IRC rule here — it's a "
+           "usability nudge. Make it a bypass/sliding or bifold door so the leaf "
+           "doesn't fill the closet. Only a leaf swinging into the closet (or an "
+           "unspecified side) is judged; one explicitly swinging into the room is "
+           "fine."),
         _c("PROGRAM_MISMATCH", W, "Plan doesn't match its program",
            "The rooms placed don't match the declared `program`: exact bed/bath "
            "counts, an at-least requirement for another room type (e.g. "

@@ -1054,8 +1054,10 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_doors(plan, add)
     _validate_openings(plan, add)
     _validate_safety_glazing(plan, add)
+    _validate_window_fall(plan, add)
     _validate_stairs(plan, add, profile)
     _validate_landings(plan, add)
+    _validate_door_threshold(plan, add)
     _validate_water_heater(plan, add)
     _validate_guards(plan, add)
     _validate_life_safety(plan, add)
@@ -2372,6 +2374,14 @@ def _rect_seg_distance(
 _TEMPERED_WET_SILL = 5.0    # 60 in bottom-edge exemption (R308.4.5)
 _TEMPERED_STAIR_SILL = 3.0  # 36 in bottom-edge exemption (R308.4.6/.7)
 
+#: R308.4.3 "large glazing panel" hazard — a pane over 9 sq ft whose bottom edge
+#: sits below 18 in and whose top edge rises above 36 in above the floor is a
+#: walk-into hazard *anywhere* (not just beside a door/tub/stair), so it needs
+#: safety glazing. Fixed IRC figures (not jurisdiction-variable).
+_TEMPERED_PANEL_AREA = 9.0        # sq ft — the "exposed area of an individual pane"
+_TEMPERED_PANEL_BOTTOM = 18.0 / 12.0  # 18 in — bottom (sill) edge below this
+_TEMPERED_PANEL_TOP = 36.0 / 12.0     # 36 in — top (head) edge above this
+
 
 def _room_door_segments(
     plan: Barndominium, room: Room
@@ -2457,6 +2467,21 @@ def window_tempered_reason(plan: Barndominium, window) -> str | None:
         for s in plan.stairs:
             if _rect_seg_distance(s.x, s.y, s.width, s.length, wx1, wy1, wx2, wy2) < _TEMPERED_STAIR:
                 return "within 36 in of a stair flight — R308.4.6 (simplified)"
+    # (d) large glazing panel near the walking surface (R308.4.3), anywhere: an
+    #     individual pane over 9 sq ft whose bottom edge is below 18 in and top
+    #     edge above 36 in above the floor — a full-height sash a person can walk
+    #     into. Uses the same head/sill the schedule reads, so no new geometry.
+    head = getattr(window, "head_height", sill)
+    pane = window.width * max(0.0, head - sill)
+    if (
+        sill < _TEMPERED_PANEL_BOTTOM
+        and head > _TEMPERED_PANEL_TOP
+        and pane > _TEMPERED_PANEL_AREA
+    ):
+        return (
+            "a glazed panel over 9 sq ft with its bottom edge below 18 in and top "
+            "above 36 in above the floor — R308.4.3"
+        )
     return None
 
 
@@ -2488,6 +2513,55 @@ def _validate_safety_glazing(plan: Barndominium, add) -> None:
         )
 
 
+#: IRC R312.2 window fall protection: an operable window whose sill is below this
+#: height needs an opening-control device or fall guard where it sits more than
+#: 72 in above the exterior grade below. The model carries no grade elevation, so
+#: "on an upper level" (level >= 1) is the stand-in for "far enough above grade".
+#: A fixed IRC figure (not jurisdiction-variable).
+_WINDOW_FALL_SILL = 24.0 / 12.0  # 24 in
+
+
+def _validate_window_fall(plan: Barndominium, add) -> None:
+    """Flag an operable low-silled window on an upper level for fall protection.
+
+    IRC R312.2 requires an opening-control device (or a fall-prevention guard) at
+    an operable window whose sill is below 24 in *and* more than 72 in above the
+    grade below. The DSL has no grade elevation, so this uses an upper storey
+    (``level >= 1``) as the proxy for "well above grade" — stated plainly in the
+    message. A ``fixed`` sash can't open, so it is exempt (R312.2 covers operable
+    windows only). The hint points at an opening-control device rather than
+    raising the sill, because a bedroom's escape window *wants* a low sill (IRC
+    R310) — the two rules are reconciled by an ASTM F2090 device, not by geometry.
+    """
+    by_id = {r.id: r for r in plan.rooms}
+    for w in plan.windows:
+        if not getattr(w, "openable", True):
+            continue  # a fixed sash doesn't open — no fall path
+        room = by_id.get(w.room)
+        if room is None or getattr(room, "level", 0) < 1:
+            continue
+        sill = getattr(w, "sill_height", 3.0)
+        if sill + EPSILON >= _WINDOW_FALL_SILL:
+            continue
+        add(
+            Issue(
+                Severity.WARNING,
+                "WINDOW_FALL",
+                f"The operable window in '{w.room}' has a {sill * 12:.0f} in sill on "
+                f"level {room.level}; IRC R312.2 wants window fall protection where an "
+                "operable sash sits below 24 in and more than 72 in above the grade "
+                "below. The model has no grade elevation, so an upper storey stands in "
+                "for 'well above grade'.",
+                room=w.room,
+                hint="Fit a window opening-control device or fall guard (ASTM F2090) "
+                "that limits the sash to a 4 in clear opening yet still releases for "
+                "escape — don't raise the sill, which would fight the egress-window "
+                "rule (IRC R310).",
+                **_door_loc(w),
+            )
+        )
+
+
 def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
     """Rooms on ``level`` whose footprint the stair lands in."""
     return [
@@ -2495,6 +2569,12 @@ def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
         for r in plan.rooms
         if r.level == level and stair.overlaps_rect(r.x, r.y, r.x2, r.y2)
     ]
+
+
+#: IRC R311.7.3 — the maximum vertical rise of a single flight between floor
+#: levels or landings (12 ft 7 in). The task brief cites ~12 ft 3 in; the adopted
+#: IRC figure is 151 in, used here. A fixed code value, not jurisdiction-variable.
+_STAIR_MAX_FLIGHT_RISE = 151.0 / 12.0
 
 
 def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
@@ -2581,6 +2661,26 @@ def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> Non
             rise = plan.ceiling_height * abs(s.to_level - s.from_level)
             risers = max(1, math.ceil(rise / max_riser))
             run_needed = max(1, risers - 1) * min_tread
+            # STAIR_LANDING (R311.7.3): a single flight may rise at most 12 ft 7 in
+            # (151 in) between floor levels or landings. Past that a switchback or
+            # mid-run landing is required. Risers use the same rise/max_riser math as
+            # the run-fit check, so a gentler profile riser (more risers per foot) is
+            # reflected in the "~N risers" the message quotes. A normal one-storey
+            # flight (~9 ft) stays well under, so this only speaks up on a tall or
+            # multi-level run.
+            if rise > _STAIR_MAX_FLIGHT_RISE + EPSILON:
+                max_flight_risers = max(1, math.floor(_STAIR_MAX_FLIGHT_RISE / max_riser))
+                add(Issue(
+                    Severity.INFO, "STAIR_LANDING",
+                    f"Stair '{s.id}' climbs {_f(rise)} ft (~{risers} risers) in one "
+                    f"flight; IRC R311.7.3 limits a flight to {_f(_STAIR_MAX_FLIGHT_RISE)} "
+                    f"ft (12 ft 7 in, ~{max_flight_risers} risers) of vertical rise "
+                    "between landings, so it needs an intermediate landing.",
+                    room=s.id,
+                    hint="Break the run with a landing (a switchback or an L-turn), or "
+                    "split it across levels — the DSL models one straight flight, so "
+                    "note the mid-run landing on the construction documents.",
+                    line=s.line, col=s.col, end_col=s.end_col))
             long_dim, short_dim = max(s.width, s.length), min(s.width, s.length)
             could_switchback = short_dim + EPSILON >= 2 * min_width
             needed = run_needed / 2 if could_switchback else run_needed
@@ -3770,9 +3870,12 @@ def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
 
 def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
     # 10c. IRC R302.5.1: a door between a private garage and the dwelling must be
-    #      self-closing and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood
-    #      door). A door into a sleeping room is barred outright (GARAGE_BEDROOM),
-    #      so this reminder covers the other garage-to-dwelling doors.
+    #      self-closing and 20-minute fire-rated (or a solid-core/solid-wood door
+    #      at least 1-3/8 in thick). A door into a sleeping room is barred outright
+    #      (GARAGE_BEDROOM), so this reminder covers the other garage-to-dwelling
+    #      doors. It anchors on the actual `door` statement — the opening that has
+    #      to carry the rated leaf — rather than on the garage room, so the caret
+    #      lands on the line the author edits.
     seen: set[tuple[str, str]] = set()
     for d in plan.interior_doors:
         a, b = by_id.get(d.room_a), by_id.get(d.room_b)
@@ -3789,13 +3892,62 @@ def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
                 Severity.INFO,
                 "GARAGE_DOOR",
                 f"The door from {gar.type.value} '{gar.id}' into '{other.id}' must be "
-                "a self-closing, 20-minute fire-rated (or 1⅜ in solid-core / "
-                "solid-wood) door (IRC R302.5.1).",
+                "a self-closing, 20-minute fire-rated (or solid-core / solid-wood, at "
+                "least 1-3/8 in thick) door (IRC R302.5.1).",
                 room=gar.id,
-                hint="Spec a self-closing 20-min / solid-core door on the "
+                hint="Spec a self-closing 20-min / >= 1-3/8 in solid-core door on the "
                 "garage-to-dwelling opening.",
+                line=getattr(d, "line", None),
+                col=getattr(d, "col", None),
+                end_col=getattr(d, "end_col", None),
             )
         )
+
+
+def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
+    # 10d. A swing door into a shallow closet: the leaf (as wide as the door) can't
+    #      fully open because the closet isn't as deep as the door is wide, so the
+    #      swing fills the closet. A bypass/sliding or bifold door clears the space.
+    #      Doors here are author-declared (kinds aren't seeded), so this is an INFO
+    #      nudge — not a re-seed. Only a leaf that actually swings *into* the closet
+    #      (or an unspecified side the renderer might pick) is judged; one explicitly
+    #      swinging into the other room doesn't fill the closet.
+    from .geometry import shared_edge
+
+    for d in plan.interior_doors:
+        if getattr(d, "kind", "swing") != "swing":
+            continue  # a sliding/pocket/bifold/cased leaf already clears the closet
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None:
+            continue
+        if (a.type is RoomType.CLOSET) == (b.type is RoomType.CLOSET):
+            continue  # need exactly one closet side
+        closet, other = (a, b) if a.type is RoomType.CLOSET else (b, a)
+        if d.swing_into is not None and d.swing_into != closet.id:
+            continue  # swings into the room, not the closet — the closet depth is moot
+        edge = shared_edge(closet, other)
+        if edge is None:
+            continue
+        leaf = min(d.width, edge.length)
+        # Closet depth = the closet's extent perpendicular to the shared wall.
+        depth = closet.width if edge.orientation == "v" else closet.length
+        if depth + EPSILON < leaf:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "CLOSET_DOOR_SWING",
+                    f"The swing door into closet '{closet.id}' is {_f(leaf)} ft wide "
+                    f"but the closet is only {_f(depth)} ft deep, so the leaf can't "
+                    "fully open inside it.",
+                    room=closet.id,
+                    line=d.line,
+                    col=d.col,
+                    end_col=d.end_col,
+                    hint="Make it a bypass/sliding or bifold door so the leaf doesn't "
+                    f"fill the closet, e.g. `door {d.room_a} - {d.room_b} sliding "
+                    f"width {_f(d.width)}`.",
+                )
+            )
 
 
 def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
@@ -3902,6 +4054,7 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_garage_no_entry,
     _dq_garage_separation,
     _dq_garage_door,
+    _dq_closet_door_swing,
     _dq_hall_deadend,
 )
 
@@ -4683,6 +4836,25 @@ def _validate_electrical_plan(plan: Barndominium, add) -> None:
     )
 
 
+#: IRC E3901.4 kitchen counter receptacles: any counter run at least 12 in wide
+#: needs a small-appliance receptacle, spaced so no point along the counter wall
+#: line is more than 24 in from one. Fixed IRC figures (not jurisdiction-variable).
+_COUNTER_MIN_WIDTH = 12.0 / 12.0   # 12 in — the narrowest run that needs a receptacle
+_COUNTER_MAX_REACH = 24.0 / 12.0   # 24 in — max horizontal reach to a receptacle
+
+
+def _counter_run_span(room: Room, f) -> tuple[float, float, "Direction"]:
+    """A kitchen counter fixture's along-wall interval ``(lo, hi)`` in world feet
+    plus the :class:`Direction` of the wall it backs to."""
+    if f.wall == "S":
+        return f.x, f.x + f.width, Direction.SOUTH
+    if f.wall == "N":
+        return f.x, f.x + f.width, Direction.NORTH
+    if f.wall == "E":
+        return f.y, f.y + f.length, Direction.EAST
+    return f.y, f.y + f.length, Direction.WEST
+
+
 def _receptacle_reach(room: Room, outlets: list) -> float:
     """The worst-case distance (ft) from any point on ``room``'s wall line to the
     nearest receptacle, walking the perimeter as a closed loop (so an outlet near
@@ -4774,6 +4946,59 @@ def _validate_electrical(plan: Barndominium, add) -> None:
                     "more than 6 ft from one.",
                 )
             )
+
+    # RECEPTACLE_COUNTER — IRC E3901.4 kitchen small-appliance receptacles. Along
+    # each kitchen counter run (>= 12 in wide), no point on the counter wall line
+    # may be more than 24 in from a receptacle. Gated the same way as OUTLET_SPACING
+    # (only a plan that draws its electrical layer is judged), so a seed-only kitchen
+    # is never nagged. Uses the resolved counter runs, so a `fixture counter ... along`
+    # run is what's measured.
+    from .fixtures import resolve_room_fixtures
+
+    for room in plan.rooms:
+        if room.type is not RoomType.KITCHEN:
+            continue
+        counters = [
+            f
+            for f in resolve_room_fixtures(plan, room)
+            if f.kind == "counter" and f.wall in ("S", "N", "E", "W")
+        ]
+        if not counters:
+            continue
+        room_outlets = outlets_by.get(room.id, [])
+        for c in counters:
+            lo, hi, wall_dir = _counter_run_span(room, c)
+            width = hi - lo
+            if width + 1e-9 < _COUNTER_MIN_WIDTH:
+                continue  # a run under 12 in takes no receptacle (E3901.4.3(1))
+            base = room.x if wall_dir in (Direction.SOUTH, Direction.NORTH) else room.y
+            pts = sorted(
+                base + o.offset
+                for o in room_outlets
+                if o.wall is wall_dir and lo - 1e-6 <= base + o.offset <= hi + 1e-6
+            )
+            if not pts:
+                gap = width  # the whole run is unserved
+            else:
+                gaps = [pts[0] - lo, hi - pts[-1]]
+                gaps += [(pts[i + 1] - pts[i]) / 2.0 for i in range(len(pts) - 1)]
+                gap = max(gaps)
+            if gap > _COUNTER_MAX_REACH + 1e-6:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "RECEPTACLE_COUNTER",
+                        f"The {fmt_ft_in(width)} kitchen counter run in "
+                        f"'{room.id}' (on its {c.wall} wall) leaves a point "
+                        f"{fmt_ft_in(gap)} from the nearest receptacle — IRC E3901.4 "
+                        "wants a small-appliance receptacle within 24 in of every "
+                        "point along a counter (and one on any counter >= 12 in wide).",
+                        room=room.id,
+                        hint="Add a receptacle on the counter wall in the gap, e.g. "
+                        f"`outlet in {room.id} wall {c.wall} offset <ft>` — no point "
+                        "along the counter should be more than 24 in from one.",
+                    )
+                )
 
     # Lighting outlet — a habitable room with power but nothing to switch on.
     for rid in sorted(powered):
@@ -5135,6 +5360,35 @@ def _validate_landings(plan: Barndominium, add) -> None:
             f"(>= {LANDING_MIN_DEPTH:g} ft deep), swing the door where a porch "
             "already reaches, or note the landing on the construction documents.",
             **_door_loc(d)))
+
+
+def _validate_door_threshold(plan: Barndominium, add) -> None:
+    """Remind, once, about the threshold-to-landing drop at the required egress door.
+
+    IRC R311.3.1: at the required egress door the exterior landing may be no more
+    than 1.5 in below the top of the threshold (7.75 in is allowed only where the
+    door does not swing out over the landing). The model carries no vertical
+    threshold data, so this is a reminder-class INFO like BATH_VENT — it teaches,
+    it doesn't measure. It nudges once, on the primary entry, and only *before* a
+    porch/landing is modelled (mirroring DOOR_NO_LANDING's single info): once the
+    plan draws its landings, DOOR_NO_LANDING's per-door pass and the CD set carry
+    the detail, so a second always-on reminder would just be noise.
+    """
+    if plan.porches:
+        return
+    primary = _primary_entry(plan)
+    if primary is None:
+        return
+    add(Issue(
+        Severity.INFO, "DOOR_THRESHOLD",
+        f"At the required egress door in '{primary.room}', keep the exterior landing "
+        "no more than 1.5 in below the threshold (7.75 in only where the door doesn't "
+        "swing out over it) — IRC R311.3.1.",
+        room=primary.room,
+        hint="The model has no vertical threshold data — confirm the landing-to-"
+        "threshold drop on the construction documents. Nudged once, on the primary "
+        "entry.",
+        **_door_loc(primary)))
 
 
 def _validate_water_heater(plan: Barndominium, add) -> None:

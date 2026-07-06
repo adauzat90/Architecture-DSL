@@ -531,8 +531,20 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `STAIR_GEOMETRY` / `STAIR_OOB` / `STAIR_LEVELS` (errors), `STAIR_RUN` /
   `STAIR_FLOAT` — a stair with bad geometry, too short a run, or landing in no room.
 - `WINDOW_TEMPERED` — a window in an IRC R308.4 hazard location (beside a door,
-  near a tub/shower, near a stair) needs safety glazing. Declare `tempered` to
-  silence it (the schedule then reads "tempered (declared)").
+  near a tub/shower, near a stair, or a large glazing panel over 9 sq ft with its
+  bottom edge below 18 in and top above 36 in — R308.4.3, *anywhere*) needs safety
+  glazing. Declare `tempered` to silence it (the schedule then reads "tempered
+  (declared)").
+- `WINDOW_FALL` — an **operable** window with a sill below 24 in on an upper
+  storey needs window fall protection (an opening-control device / fall guard,
+  ASTM F2090 — IRC R312.2). The model has no grade elevation, so `level >= 1`
+  stands in for "more than 72 in above grade". Fit a control device that limits
+  the sash to a 4 in opening but still releases for escape — don't raise the sill
+  (that fights the R310 egress-window rule). A `fixed` sash is exempt.
+- `RECEPTACLE_COUNTER` — a kitchen counter run (a `fixture counter ... along` run
+  ≥ 12 in wide) has a point more than 24 in from a small-appliance receptacle
+  (IRC E3901.4). Add an `outlet` on the counter wall in the gap. Only checked once
+  the plan draws its electrical layer, like `OUTLET_SPACING`.
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
   `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
   — it's a contract check, not a code error — so it's a warning.
@@ -545,6 +557,19 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `STAIR_HANDRAIL` — a stair flight of 4+ risers needs a handrail (IRC R311.7.8);
   the DSL can't draw one, so it's a one-per-plan checklist reminder on the first
   qualifying stair (carry it onto the construction documents).
+- `STAIR_LANDING` — a single straight flight climbs more than 12 ft 7 in (151 in)
+  of vertical rise; IRC R311.7.3 wants an intermediate landing (a switchback or
+  L-turn) at that point. A normal one-storey flight stays well under, so this only
+  speaks up on a tall or multi-level run. Note the mid-run landing on the CDs.
+- `DOOR_THRESHOLD` — a once-per-plan reminder (before any `porch` is drawn) that
+  the exterior landing at the required egress door may be no more than 1.5 in below
+  the threshold — 7.75 in only where the door doesn't swing out over it (IRC
+  R311.3.1). The model has no vertical threshold data; confirm the drop on the CDs.
+- `GARAGE_DOOR` — a door between a `garage`/`shop` and the dwelling must be
+  self-closing and 20-minute fire-rated (or solid-core / solid-wood ≥ 1-3/8 in
+  thick — IRC R302.5.1). Anchored on the `door` statement itself.
+- `CLOSET_DOOR_SWING` — a swing door serving a `closet` shallower than the door is
+  wide, so the leaf can't fully open; make it a bypass/sliding or bifold door.
 - `WATER_HEATER_PLACEMENT` — a `water_heater` fixture in a garage/shop (ignition
   elevation, M1307.3) or on level 1+ over habitable space (drain pan, P2801.6).
 - `KITCHEN_FLOW` — open the kitchen to dining/living.

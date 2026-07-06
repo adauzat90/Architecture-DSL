@@ -157,9 +157,29 @@ _BACKING_FLOAT = 0.5
 _ROOM_FIXTURES: dict[RoomType, list[str]] = {
     RoomType.BATHROOM: ["toilet", "lavatory", "tub"],
     RoomType.HALF_BATH: ["toilet", "lavatory"],
-    RoomType.KITCHEN: ["refrigerator", "range", "sink"],
+    # Kitchen: the range leads its wall (clear of a centred window, where a cooktop
+    # doesn't belong), then a landing to the sink, then the tall refrigerator in a
+    # bay of its own — never butted straight against the cooktop. See
+    # _KITCHEN_SEED_GAPS for the spread.
+    RoomType.KITCHEN: ["range", "sink", "refrigerator"],
     RoomType.LAUNDRY: ["washer", "dryer"],
 }
+
+#: Landing gaps (ft) the kitchen seed leaves *before* each appliance, so the three
+#: spread with working counter between them rather than stacking in a butted row
+#: (an "un-buildable" layout an architect flagged). The range→sink gap stays inside
+#: a cook's landing reach so RANGE_LANDING still sees a landing beside the cooktop;
+#: the refrigerator gets a wider bay of its own, well clear of the range. The range
+#: leads (no gap) so it sits at the working end rather than under a centred window.
+#: Deterministic, keyed by the fixture the gap precedes; non-kitchens keep the
+#: tight butted seed.
+_KITCHEN_SEED_GAPS: dict[str, float] = {"sink": 0.75, "refrigerator": 1.5}
+
+
+def _seed_gaps(room_type: RoomType) -> dict[str, float] | None:
+    """The per-appliance lead gaps the perimeter placer uses for ``room_type`` (a
+    kitchen spreads its appliances; every other room butts its seeds)."""
+    return _KITCHEN_SEED_GAPS if room_type is RoomType.KITCHEN else None
 
 
 def fixtures_for(room_type: RoomType) -> list[str]:
@@ -417,19 +437,25 @@ def _wc_clearances(f: "Fixture", room: Room, others: list) -> tuple[float, float
 def _place_perimeter(
     x0: float, y0: float, cw: float, cl: float, kinds: list[str],
     keepouts: tuple = (),
+    gaps: dict[str, float] | None = None,
 ) -> list[Fixture]:
     """Lay ``kinds`` along the clear-box perimeter (longer wall first), wrapping to
     the next wall when the current one runs out — the deterministic seed layout.
 
     ``keepouts`` are ``(x, y, w, l)`` door-swing rectangles a fixture must stay
     clear of; a blocked spot slides the fixture along the wall until it clears (or
-    wraps to the next wall), so the placer never parks a fixture in a door's arc."""
+    wraps to the next wall), so the placer never parks a fixture in a door's arc.
+    ``gaps`` maps a kind to a landing gap (ft) left *before* it on the same wall —
+    how the kitchen seed spreads its appliances (a wrap to a new wall drops the
+    gap, so a fixture still starts at the corner)."""
     walls = _walls(cw, cl)
     placed: list[Fixture] = []
     wi = 0
     cursor = 0.0
     for kind in kinds:
         spec = FIXTURES[kind]
+        if gaps:
+            cursor += gaps.get(kind, 0.0)  # a landing gap before this fixture
         # Advance to a wall with room for this fixture's width (leave the corner),
         # nudging past any spot a door swings through.
         wall = fx = fy = fw = fl = None
@@ -472,7 +498,7 @@ def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = Tr
     if cw <= 0 or cl <= 0:
         return []
     keepouts = tuple(_door_swing_rects(plan, room)) if avoid_doors else ()
-    return _place_perimeter(x0, y0, cw, cl, kinds, keepouts)
+    return _place_perimeter(x0, y0, cw, cl, kinds, keepouts, _seed_gaps(room.type))
 
 
 def _quarter_turns(rotation: float) -> int:
@@ -583,7 +609,7 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
 
     explicit_kinds = {pf.kind for pf in explicit}
     surviving = [k for k in fixtures_for(room.type) if k not in explicit_kinds]
-    placed = _place_perimeter(x0, y0, cw, cl, surviving)
+    placed = _place_perimeter(x0, y0, cw, cl, surviving, gaps=_seed_gaps(room.type))
 
     occupied = [(f.x, f.y, f.width, f.length) for f in placed]
     for pf in explicit:
