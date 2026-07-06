@@ -1074,6 +1074,22 @@ Every porch carries a **slab** line in `barndsl cost`; a `covered` porch adds a
   then prints an **exclusions** footer (site work, well/septic, permits, HVAC
   unless itemized, GC overhead & profit). Every unit cost is overridable with
   `--costs FILE.json`.
+  - **Openings are priced by size, not a flat per-each** (so a picture window
+    costs more than a bathroom awning and a 16 ft garage door costs more than a
+    9 ft one):
+    - **Windows** — a per-window base **`window_each`** (frame + flashing +
+      install, default `$300`) **plus** **`window_glazed_sqft`** per sq ft of
+      glazed (sill-to-head) area (default `$40`). A typical 3×4 window (12 sqft
+      glazed) lands at `300 + 40×12 = $780`, the old flat casement price.
+    - **Exterior (people) doors** — **`door_exterior`** (default `$1,500`) is a
+      per-leaf rate **width-weighted over 3 ft**: each door counts as
+      `max(1, width/3)` standard leaves, so a 6 ft double/french pair prices at
+      2× a 3 ft single (~`$3,000`, near the old `$2,800` pair).
+    - **Overhead (garage) doors** — **`garage_door_lf`** per linear ft of width
+      (default `$178`): a 9 ft single ≈ `$1,602` (near the old `$1,600` flat), a
+      16 ft double ≈ `$2,848` (~1.8×).
+
+    All four keys are overridable via `--costs`.
 - **`barndsl compare A B`** buckets diagnostics by how their count moved:
   `resolved` (gone entirely in B), `introduced` (new in B), `fewer` (dropped but
   still firing, `CODE (5 → 4)`) and `more` (rose). When both sides compile

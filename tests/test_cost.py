@@ -66,9 +66,65 @@ def test_fixtures_and_openings_are_counted():
     assert _line(est, "fixture_toilet")["quantity"] == 1
     assert _line(est, "fixture_tub")["quantity"] == 1
     assert _line(est, "fixture_sink")["quantity"] == 1
-    assert _line(est, "window_casement")["quantity"] == 3
+    # Windows are now two size-aware lines: a per-window base count and a total
+    # glazed-area line. SRC has 3 windows (widths 6, 4, 4; default 3.67 ft glass).
+    assert _line(est, "window_each")["quantity"] == 3
+    glazed = round((6 + 4 + 4) * (6.67 - 3.0), 2)
+    assert _line(est, "window_glazed_sqft")["quantity"] == glazed
+    # One 3 ft entry door → width factor 1.0; three interior singles.
     assert _line(est, "door_exterior")["quantity"] == 1
     assert _line(est, "door_interior")["quantity"] == 3
+
+
+def test_windows_priced_by_glazed_area_not_flat_per_each():
+    # A picture window and a small awning of the same kind must not cost the same
+    # any more — the size-aware model is the whole point.
+    base = """\
+plan "Glazing"
+envelope 40 x 30
+ceiling 9
+room living: living at 0,0 size 40 x 30
+entry living south width 3 offset 8
+"""
+    big = estimate_cost(compile_source(base + "window living south width 10 offset 2\n"))
+    small = estimate_cost(compile_source(base + "window living south width 3 offset 2\n"))
+    # Same per-window base (1 each × window_each), different glazing cost.
+    assert _line(big, "window_each")["quantity"] == 1
+    assert _line(small, "window_each")["quantity"] == 1
+    # 10 ft wide vs 3 ft wide, both 3.67 ft of glass → glazing scales with width.
+    assert _line(big, "window_glazed_sqft")["quantity"] == round(10 * 3.67, 2)
+    assert _line(small, "window_glazed_sqft")["quantity"] == round(3 * 3.67, 2)
+    assert _line(big, "window_glazed_sqft")["cost"] > _line(small, "window_glazed_sqft")["cost"]
+    # A typical 3×4 window (12 sqft glazed) lands at the old flat casement price:
+    # window_each 300 + window_glazed_sqft 40 × 12 = $780.
+    assert DEFAULT_UNIT_COSTS["window_each"] + DEFAULT_UNIT_COSTS["window_glazed_sqft"] * 12 == 780
+
+
+def test_exterior_doors_width_weighted_and_garage_by_linear_ft():
+    src = """\
+plan "Doors"
+envelope 50 x 30
+ceiling 9
+room shop: shop at 0,0 size 50 x 30
+entry shop south width 3 offset 2
+entry shop south double width 6 offset 10
+door shop south overhead width 16 offset 20
+door shop north overhead width 9 offset 2
+"""
+    est = estimate_cost(compile_source(src))
+    # People doors: a 3 ft single (factor 1.0) + a 6 ft pair (factor 2.0) = 3.0
+    # standard leaves at the base $1,500 → $4,500.
+    doors = _line(est, "door_exterior")
+    assert doors["quantity"] == 3.0
+    assert doors["cost"] == round(3.0 * DEFAULT_UNIT_COSTS["door_exterior"], 2)
+    # Overhead doors by width: 16 + 9 = 25 lf × garage_door_lf.
+    garage = _line(est, "garage_door_lf")
+    assert garage["quantity"] == 25
+    assert garage["cost"] == round(25 * DEFAULT_UNIT_COSTS["garage_door_lf"], 2)
+    # A 16 ft overhead door now costs ~1.8× a 9 ft one (was flat/equal before).
+    assert 1.7 < (16 * DEFAULT_UNIT_COSTS["garage_door_lf"]) / (9 * DEFAULT_UNIT_COSTS["garage_door_lf"]) < 1.9
+    # Continuity: a 9 ft single overhead ≈ the old $1,600 flat price.
+    assert abs(9 * DEFAULT_UNIT_COSTS["garage_door_lf"] - 1600) < 30
 
 
 def test_overrides_replace_only_the_named_unit_cost():

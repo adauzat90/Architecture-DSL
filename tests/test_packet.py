@@ -133,6 +133,41 @@ def test_multiplier_and_overrides_flow_into_the_cost_section():
     assert "$1,998" in html  # effective rate: 999 override x 2 multiplier
 
 
+# The Electrical Plan sheet has three states, keyed on what the plan declares.
+_ELEC_BASE = """\
+plan "Elec"
+envelope 24 x 20
+ceiling 9
+room living: living at 0,0 size 24 x 20
+entry living south width 3 offset 8
+"""
+
+
+def test_electrical_sheet_omitted_when_no_devices_and_no_alarms():
+    # Zero outlets/switches/lights AND zero alarms → no sheet at all (an
+    # examiner would bounce a 0/0/0 device table).
+    html = build_packet(compile_source(_ELEC_BASE))
+    assert "<h2>Electrical Plan</h2>" not in html
+
+
+def test_electrical_sheet_full_when_devices_declared():
+    src = _ELEC_BASE + "outlet in living wall S offset 3\nlight in living at 12,10\n"
+    html = build_packet(compile_source(src))
+    assert "<h2>Electrical Plan</h2>" in html
+    assert "Receptacles (outlets)" in html
+    # A real layout is present, so no "alarms only" caveat.
+    assert "alarms only" not in html
+
+
+def test_electrical_sheet_alarms_only_keeps_sheet_with_note():
+    src = _ELEC_BASE + "alarm smoke in living\nalarm co in living\n"
+    html = build_packet(compile_source(src))
+    # Alarms must be shown, so the sheet stays…
+    assert "<h2>Electrical Plan</h2>" in html
+    # …but it declares itself an alarms-only sheet rather than a device layout.
+    assert "No receptacle/switch/lighting layout declared — alarms only." in html
+
+
 def test_build_packet_rejects_planless_result():
     result = compile_source("not a plan at all\n")
     try:

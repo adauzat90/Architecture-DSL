@@ -13,7 +13,12 @@ import pytest
 
 from barndsl import Direction as D, compile_source
 from barndsl.views import (
+    DOORLEAF,
+    MUNTIN,
     OPENING,
+    OVERHEAD,
+    PORCHPOST,
+    PORCHROOF,
     _roof_geom,
     _top_profile,
     elevation_svg,
@@ -108,6 +113,78 @@ window loft north width 6 offset 10
     assert g["eave"] == pytest.approx(19.0)
     _wellformed(elevation_svg(plan, "south"))
     _wellformed(section_svg(plan))
+
+
+def test_door_reads_as_a_door_not_glazing():
+    # The south wall has a hinged entry door and a casement window. The door must
+    # be drawn in the wood leaf colour (not glazing blue), with a knob (circle) and
+    # a two-panel inset — unmistakably a door.
+    plan = compile_source(_PLAN).plan
+    south = elevation_svg(plan, "south")
+    assert DOORLEAF in south          # wood leaf, distinct from OPENING glazing
+    assert "<circle" in south         # the door knob
+    assert OPENING in south           # the window is still glazing
+
+
+def test_windows_carry_muntins_for_divided_lites_but_not_fixed():
+    # A default (casement) window gets a 2×2 divided-lite cross → muntin bars;
+    # a fixed window is a single clean pane → no muntins.
+    plan = compile_source(_PLAN).plan
+    assert MUNTIN in elevation_svg(plan, "south")
+    fixed = _PLAN.replace("window great south width 6 offset 2",
+                          "window great south width 6 offset 2 kind fixed")
+    fplan = compile_source(fixed).plan
+    # South now has only the fixed window (no casement) → no muntin bars on it.
+    assert MUNTIN not in elevation_svg(fplan, "south")
+
+
+def test_overhead_door_gets_sectional_panel_lines():
+    src = _PLAN + "\ndoor kitchen north overhead width 9 offset 4\n"
+    plan = compile_source(src).plan
+    north = elevation_svg(plan, "north")
+    assert OVERHEAD in north  # sectional garage-door panel fill
+
+
+def test_pitch_tag_prints_rise_over_twelve():
+    # The default gable pitch is 4:12 → the tag carries "12" and the rise "4".
+    plan = compile_source(_PLAN).plan
+    east = elevation_svg(plan, "east")  # a gable end → a visible sloped roof
+    assert ">12<" in east
+    assert ">4<" in east
+
+
+def test_grade_line_has_repeating_hatch_ticks():
+    # The grade is a heavy line PLUS several diagonal earth-hatch ticks (more than
+    # one grade-coloured stroke), so the building sits on something.
+    from barndsl.views import GRADE
+
+    south = elevation_svg(compile_source(_PLAN).plan, "south")
+    assert south.count(f'stroke="{GRADE}"') > 3
+
+
+def test_covered_porch_draws_roof_and_posts_on_its_face():
+    src = _PLAN + "\nporch front at 0,-8 size 30 x 8 covered\n"
+    plan = compile_source(src).plan
+    south = elevation_svg(plan, "south")  # porch projects south of the building
+    assert PORCHPOST in south
+    assert PORCHROOF in south
+    # A face the porch does NOT front carries neither.
+    east = elevation_svg(plan, "east")
+    assert PORCHPOST not in east
+
+
+def test_section_draws_assemblies_not_a_bare_outline():
+    plan = compile_source(_PLAN).plan
+    svg = section_svg(plan)
+    from barndsl.views import WALLFILL
+
+    # Two exterior wall-thickness bands (the eave walls the cut passes through).
+    assert svg.count(f'fill="{WALLFILL}"') >= 2
+    # Slab band + rafter underside pair + a ceiling-height dimension.
+    assert 'fill="#EDE9E2"' in svg          # slab
+    assert "<polyline" in svg               # rafter/roof underside line
+    assert "clg" in svg                     # ceiling-height dimension label
+    assert ">12<" in svg                    # pitch tag on the section roof
 
 
 def test_shed_roof_slopes():

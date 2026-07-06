@@ -390,6 +390,7 @@ class _Renderer:
             self._draw_notes()
             self._draw_chain_dims()
             self._draw_dimensions()
+            self._draw_post_dims()
             self._draw_panel()
 
         if self.c.scale_bar:
@@ -1219,6 +1220,64 @@ class _Renderer:
         self._dim_line(
             x, self.sy(fy0), x, self.sy(fy1), fmt_ft_in(fy1 - fy0), horizontal=False
         )
+
+    def _draw_post_dims(self) -> None:
+        """When the plan carries a placed frame, print ONE dimension string along
+        the frame's primary (bay) axis giving the post spacing on centre — the
+        defining barndo measurement. Placed on a farther offset tier just beyond
+        the overall dimension it runs parallel to (which itself sits outside the
+        wall chains), so it never collides with the existing dimension rows."""
+        posts = [p for p in self.plan.posts if getattr(p, "level", 0) == 0]
+        if len(posts) < 2:
+            return
+        tol = 1e-4
+        xs = sorted({round(p.x, 4) for p in posts})
+        ys = sorted({round(p.y, 4) for p in posts})
+
+        def dedupe(vals: list[float]) -> list[float]:
+            out: list[float] = []
+            for v in vals:
+                if not out or v - out[-1] > tol:
+                    out.append(v)
+            return out
+
+        xs, ys = dedupe(xs), dedupe(ys)
+        # The bay axis is the one the posts march along (the most centres).
+        axis, coords = ("x", xs) if len(xs) >= len(ys) else ("y", ys)
+        if len(coords) < 2:
+            return
+        if axis == "x":
+            # Below the plan, one tier beyond the overall width dimension (which is
+            # itself outside the south wall chain) — a clean farther row.
+            y = self.top + self.content_h + 48.0
+            px = [self.sx(c) for c in coords]
+            self._line(px[0], y, px[-1], y, DIM_COLOR, 1.0)
+            for xp in px:
+                self._line(xp, y - 4, xp, y + 4, DIM_COLOR, 1.0)
+            for a, b, xa, xb in zip(coords, coords[1:], px, px[1:]):
+                label = fmt_ft_in(b - a)
+                if (xb - xa) >= self._label_min_px(label):
+                    self._text((xa + xb) / 2, y - 5, label, size=9, fill=DIM_COLOR)
+            self._text(px[-1] + 8, y + 3, "POSTS o.c.", size=8, anchor="start",
+                       fill=DIM_COLOR, weight="bold")
+        else:
+            # Left of the plan (west), one tier beyond the overall length dimension.
+            x = self.c.margin_left - 54.0
+            py = [self.sy(c) for c in coords]
+            self._line(x, py[0], x, py[-1], DIM_COLOR, 1.0)
+            for yp in py:
+                self._line(x - 4, yp, x + 4, yp, DIM_COLOR, 1.0)
+            for a, b, ya, yb in zip(coords, coords[1:], py, py[1:]):
+                label = fmt_ft_in(b - a)
+                if abs(yb - ya) >= self._label_min_px(label):
+                    cy = (ya + yb) / 2
+                    self.parts.append(
+                        f'<text x="{x - 4:.1f}" y="{cy:.1f}" font-family="{self.c.font}" '
+                        f'font-size="9" fill="{DIM_COLOR}" text-anchor="middle" '
+                        f'transform="rotate(-90 {x - 4:.1f} {cy:.1f})">{escape(label)}</text>'
+                    )
+            self._text(x, py[-1] - 8, "POSTS o.c.", size=8, anchor="middle",
+                       fill=DIM_COLOR, weight="bold")
 
     def _dim_line(self, x1, y1, x2, y2, label, horizontal):
         self._line(x1, y1, x2, y2, DIM_COLOR, 1.0)

@@ -164,11 +164,22 @@ def _floor_plan(plan: Any, sheet: str = "Letter") -> str:
 """
 
 
+def _has_devices(plan: Any) -> bool:
+    """True when the plan declares any receptacle / switch / light layout."""
+    return bool(plan.outlets or plan.switches or plan.lights)
+
+
+def _has_alarms(plan: Any) -> bool:
+    return bool(getattr(plan, "alarms", None))
+
+
 def _has_electrical(plan: Any) -> bool:
-    return bool(
-        plan.outlets or plan.switches or plan.lights
-        or getattr(plan, "alarms", None)
-    )
+    """Whether an Electrical Plan sheet should be produced at all.
+
+    Three states drive the sheet (see :func:`_electrical_plan`): a device layout
+    (full sheet), alarms only (sheet + an "alarms only" note), or nothing at all
+    (no sheet — never a 0/0/0 device table an examiner would bounce)."""
+    return _has_devices(plan) or _has_alarms(plan)
 
 
 def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
@@ -201,11 +212,22 @@ def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
         "<span class='badge'>⊙ receptacle · ⊙ GFCI = ground-fault · "
         "S = switch · ⊗ = ceiling light · SD/CO = smoke/CO alarm</span>"
     )
+    # Alarms-only: a plan that declares smoke/CO alarms but no receptacle/switch/
+    # lighting layout still earns a sheet (the alarms must be shown), but the sheet
+    # says so plainly rather than pretending a 0/0/0 device table is the design.
+    alarms_only = not _has_devices(plan)
+    alarms_note = (
+        '<p class="note">No receptacle/switch/lighting layout declared — alarms '
+        "only.</p>"
+        if alarms_only
+        else ""
+    )
     return f"""
 <section class="page">
   <h2>Electrical Plan</h2>
   <p class="sub">{_tag(statement)} · devices shown in violet. {legend}</p>
   <div class="svgwrap scaled" style="width:{css_w:.2f}in; max-width:100%;">{svg}</div>
+  {alarms_note}
   <h3>Device count</h3>
   <table class="metrics">{count_rows}</table>
   <p class="note">Schematic device layout — verify circuiting, GFCI/AFCI
