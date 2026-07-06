@@ -12,8 +12,10 @@ import math
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
+from .constants import EXTERIOR_WALL_THICKNESS
 from .elements import Barndominium, Direction, RoomType
 from .geometry import opening_endpoints, shared_edge
+from .wallbodies import wall_bands
 
 # US architectural feet-and-inches glyphs: prime (feet) and double-prime (inches).
 _FT = "′"  # ′
@@ -126,6 +128,13 @@ ROOM_COLORS: dict[RoomType, str] = {
 }
 
 WALL = "#2b2b2b"
+# Wall poché — the solid dark mass of a wall cut in plan (the fill between its two
+# faces, double-line construction). A deep charcoal a touch lighter than the WALL
+# ink so a band reads as built mass, not a black void, yet stays clearly distinct
+# from the light room tints beneath it. Opaque, so overlapping bands at corners and
+# partition T-junctions show no seam or double-dark artifact.
+POCHE_FILL = "#3a3a3a"
+POCHE_STROKE = "#242424"  # thin outline defining the wall faces at high zoom
 WINDOW_COLOR = "#2F6FB0"
 DIM_COLOR = "#888888"
 TEXT_COLOR = "#222222"
@@ -370,8 +379,8 @@ class _Renderer:
         else:
             self._draw_street()
             self._draw_porches()
-            self._draw_envelope()
             self._draw_rooms()
+            self._draw_wall_bands()
             self._draw_fixtures()
             if self.c.show_electrical:
                 self._draw_electrical()
@@ -401,8 +410,8 @@ class _Renderer:
         if lvl == 0:
             self._draw_street()
             self._draw_porches()
-        self._draw_envelope()
         self._draw_rooms(level=lvl)
+        self._draw_wall_bands(level=lvl)
         self._draw_fixtures(level=lvl)
         if self.c.show_electrical:
             self._draw_electrical(level=lvl)
@@ -490,23 +499,33 @@ class _Renderer:
         label = f"{fmt_ft_in(fx1 - fx0)} × {fmt_ft_in(fy1 - fy0)}"
         return label + " (L/T/U)" if self.plan.wings else label
 
-    def _draw_envelope(self):
-        if not self.plan.wings:  # plain rectangle — one stroke
-            x = self.sx(0)
-            y = self.sy(self.plan.envelope_length)
-            self._rect(
-                x, y, self.plan.envelope_width * self.c.scale,
-                self.plan.envelope_length * self.c.scale,
-                fill="none", stroke=WALL, sw=3.0,
-            )
-            return
-        # Rectilinear (L/T/U) footprint: stroke the outline of the section union.
-        from .geometry import footprint_boundary
+    def _draw_wall_bands(self, level: int = 0):
+        """Draw the wall bodies as filled poché rectangles — the real double-line
+        construction. The band geometry (exterior shell + interior partitions,
+        corners squared, openings cut at the jambs) comes from the shared
+        :mod:`barndsl.wallbodies` module, so a wall drawn here and the same wall in
+        the DXF export are the identical rectangle.
 
-        for (x1, y1), (x2, y2) in footprint_boundary(self.plan.footprint_sections()):
-            self._line(
-                self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2), stroke=WALL, sw=3.0
-            )
+        Bands sit ON TOP of the room tints (so they read as solid mass over the
+        room fill) but the window/door glyphs, fixtures, dims and labels draw over
+        them. The layer is ``pointer-events:none`` — a passive overlay like the
+        dimensions — so it never intercepts a click or drag in the playground.
+
+        Overlapping same-colour bands at exterior corners and partition T-junctions
+        show no seam (opaque fill), which is how the corner squaring and the
+        partition-meets-shell joint read solid.
+        """
+        bands = wall_bands(self.plan, level)
+        if not bands:
+            return
+        self.parts.append('<g data-layer="walls" pointer-events="none">')
+        for b in bands:
+            x = self.sx(min(b.x0, b.x1))
+            y = self.sy(max(b.y0, b.y1))  # screen top-left = the NW (max-y) corner
+            w = abs(b.x1 - b.x0) * self.c.scale
+            h = abs(b.y1 - b.y0) * self.c.scale
+            self._rect(x, y, w, h, fill=POCHE_FILL, stroke=POCHE_STROKE, sw=0.5)
+        self.parts.append("</g>")
 
     def _draw_porches(self):
         for p in self.plan.porches:
@@ -531,8 +550,12 @@ class _Renderer:
             h = r.length * self.c.scale
             # data-room lets the playground link a click on the plan back to the
             # room's source line (an inert attribute — no effect on the drawing).
+            # No boundary stroke: the wall bands (drawn next, over the fill) supply
+            # every wall line now, so a stroke here would only redraw a zero-width
+            # centreline that the band already covers — and would bridge the gaps
+            # the bands leave at openings.
             self._rect(
-                x, y, w, h, fill=ROOM_COLORS.get(r.type, "#f0f0f0"), stroke=WALL, sw=1.5,
+                x, y, w, h, fill=ROOM_COLORS.get(r.type, "#f0f0f0"), stroke="none",
                 extra=f'data-room="{escape(r.id)}"',
             )
             cx = self.sx(r.center[0])
@@ -893,14 +916,25 @@ class _Renderer:
             if level is not None and room.level != level:
                 continue
             x1, y1, x2, y2 = opening_endpoints(room, win.wall, win.offset, win.width)
-            sx1, sy1, sx2, sy2 = self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2)
-            # Double line straddling the wall for a window symbol.
+            # The window fills the gap the wall band leaves: sill and head lines on
+            # the two band faces, the glazing line down the centre, and a jamb line
+            # closing each end — the same symbol the DXF draws, spanning the full
+            # wall thickness (windows sit on the exterior shell).
+            half = EXTERIOR_WALL_THICKNESS / 2.0
             if win.wall in (Direction.NORTH, Direction.SOUTH):
-                self._line(sx1, sy1 - 2, sx2, sy2 - 2, WINDOW_COLOR, 1.4)
-                self._line(sx1, sy1 + 2, sx2, sy2 + 2, WINDOW_COLOR, 1.4)
+                cy = y1
+                a, b = min(x1, x2), max(x1, x2)
+                for yy in (cy - half, cy, cy + half):  # outer face / glazing / inner
+                    self._line(self.sx(a), self.sy(yy), self.sx(b), self.sy(yy), WINDOW_COLOR, 1.2)
+                for xx in (a, b):  # jambs across the band
+                    self._line(self.sx(xx), self.sy(cy - half), self.sx(xx), self.sy(cy + half), WINDOW_COLOR, 1.2)
             else:
-                self._line(sx1 - 2, sy1, sx2 - 2, sy2, WINDOW_COLOR, 1.4)
-                self._line(sx1 + 2, sy1, sx2 + 2, sy2, WINDOW_COLOR, 1.4)
+                cx = x1
+                a, b = min(y1, y2), max(y1, y2)
+                for xx in (cx - half, cx, cx + half):
+                    self._line(self.sx(xx), self.sy(a), self.sx(xx), self.sy(b), WINDOW_COLOR, 1.2)
+                for yy in (a, b):
+                    self._line(self.sx(cx - half), self.sy(yy), self.sx(cx + half), self.sy(yy), WINDOW_COLOR, 1.2)
 
     def _draw_doors(self, level: int | None = None):
         for door in self.plan.interior_doors:
@@ -1016,8 +1050,8 @@ class _Renderer:
         lx, ly = self.sx(latch[0]), self.sy(latch[1])
         tx, ty = self.sx(tip[0]), self.sy(tip[1])
 
-        # White out the wall under the opening, draw the leaf, then the arc.
-        self._line(hx, hy, lx, ly, "#ffffff", 4.0)
+        # The wall band already leaves a clean gap under the opening, so draw only
+        # the leaf and then the swing arc into it — no white-out needed.
         self._line(hx, hy, tx, ty, WALL, 1.2)
         r = w * self.c.scale
         # Pick the sweep flag that centres the arc on the hinge, so the swing
@@ -1056,10 +1090,8 @@ class _Renderer:
         else:  # wall runs in +x
             ends = ((ox, oy), (ox + w, oy))
 
-        (ax, ay), (bx, by) = ends
-        # White out the wall under the opening.
-        self._line(self.sx(ax), self.sy(ay), self.sx(bx), self.sy(by), "#ffffff", 4.0)
-        # A short jamb tick perpendicular to the wall at each end.
+        # A cased opening is a plain gap in the wall band; mark the two jambs with a
+        # short tick perpendicular to the wall so the passage reads as framed.
         t = 3.5
         for px, py in ends:
             sx0, sy0 = self.sx(px), self.sy(py)
@@ -1072,13 +1104,12 @@ class _Renderer:
         """Draw a pocket/sliding door: the gap plus a slab line parallel to the
         wall, set just inside one room (no swing arc)."""
         d = 0.35  # how far the panel sits off the wall, ft
+        # The band already leaves the gap; draw only the slab line just inside a room.
         if orientation == "v":  # wall runs in +y at x=ox
             s = d if (ox + d) <= self.max_x else -d
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox), self.sy(oy + w), "#ffffff", 4.0)
             self._line(self.sx(ox + s), self.sy(oy), self.sx(ox + s), self.sy(oy + w), WALL, 1.6)
         else:  # wall runs in +x at y=oy
             s = d if (oy + d) <= self.max_y else -d
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
             self._line(self.sx(ox), self.sy(oy + s), self.sx(ox + w), self.sy(oy + s), WALL, 1.6)
 
     def _overhead_symbol(self, ox: float, oy: float, orientation: str, w: float, sgn: float):
@@ -1086,14 +1117,13 @@ class _Renderer:
         line set just inside the room (the segmented panel riding its tracks —
         no leaf, no swing arc). ``sgn`` points into the room (+x/+y is +1)."""
         d = 0.5 * sgn  # how far the track line sits inside the room, ft
+        # The band already leaves the gap; draw only the dashed track line inside.
         if orientation == "v":  # wall runs in +y at x=ox
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox), self.sy(oy + w), "#ffffff", 4.0)
             self._line(
                 self.sx(ox + d), self.sy(oy), self.sx(ox + d), self.sy(oy + w),
                 WALL, 1.6, dash="5 3",
             )
         else:  # wall runs in +x at y=oy
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
             self._line(
                 self.sx(ox), self.sy(oy + d), self.sx(ox + w), self.sy(oy + d),
                 WALL, 1.6, dash="5 3",

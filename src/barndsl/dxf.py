@@ -38,14 +38,11 @@ from __future__ import annotations
 
 import math
 
-from .constants import (
-    EXTERIOR_WALL_THICKNESS,
-    INTERIOR_WALL_THICKNESS,
-    PLUMBING_WALL_THICKNESS,
-)
+from .constants import EXTERIOR_WALL_THICKNESS
 from .elements import Barndominium, Direction, Room
-from .geometry import opening_endpoints, shared_edge, wall_segment
+from .geometry import opening_endpoints, shared_edge
 from .render import RenderConfig, _Renderer, fmt_ft_in
+from .wallbodies import wall_bands
 
 #: Layer name → AutoCAD Color Index. AIA CAD Layer Guidelines discipline
 #: prefixes: ``A-`` architectural, ``S-`` structural. A drafter opening the file
@@ -76,7 +73,6 @@ _ROOM_AREA_H = 0.5
 _DIM_H = 0.45
 _FIXT_H = 0.3
 _NOTE_H = 0.4
-_TOL = 1e-6
 
 
 def _dim_label(feet: float) -> str:
@@ -93,28 +89,6 @@ def _num(v: float) -> str:
     if s.startswith("-") and float(s) == 0.0:
         s = s[1:]
     return s
-
-
-def _solid_runs(
-    lo: float, hi: float, openings: list[tuple[float, float]]
-) -> list[tuple[float, float]]:
-    """Sub-intervals of ``[lo, hi]`` left solid after cutting ``openings`` out.
-
-    Used to split a wall band at the jambs of the doors/windows on it, so each
-    surviving piece is a closed wall polygon that stops cleanly at the opening.
-    """
-    cuts = sorted(
-        (max(lo, a), min(hi, b)) for a, b in openings if b > lo + _TOL and a < hi - _TOL
-    )
-    runs: list[tuple[float, float]] = []
-    cur = lo
-    for a, b in cuts:
-        if a > cur + _TOL:
-            runs.append((cur, a))
-        cur = max(cur, b)
-    if hi > cur + _TOL:
-        runs.append((cur, hi))
-    return runs
 
 
 class _DxfWriter:
@@ -425,7 +399,7 @@ class _DxfWriter:
     def _draw_level(self, level: int) -> None:
         sfx = self._suffix(level)
         rooms = [r for r in self.plan.rooms if r.level == level]
-        self._walls(level, rooms, sfx)
+        self._walls(level, sfx)
         self._windows(level, sfx)
         self._doors(level, rooms, sfx)
         self._fixtures(rooms, sfx)
@@ -438,82 +412,15 @@ class _DxfWriter:
 
     # -- wall bodies -------------------------------------------------------
 
-    def _walls(self, level: int, rooms: list[Room], sfx: str) -> None:
+    def _walls(self, level: int, sfx: str) -> None:
+        # The wall bodies — exterior shell + interior partitions, corners squared
+        # and openings cut at the jambs — come from the shared geometry module, so
+        # this export and the SVG floor plan draw byte-for-byte the same walls. The
+        # band corner order is what :meth:`rect` consumes, keeping the file
+        # reproducible.
         layer = "A-WALL" + sfx
-        t = EXTERIOR_WALL_THICKNESS
-        half = t / 2.0
-        # Exterior shell: one band per room exterior wall, corners squared off by
-        # a half-thickness overrun, openings (windows + ext doors) cut out.
-        for room in rooms:
-            for wall in _exterior_walls(self.plan, room):
-                x1, y1, x2, y2 = wall_segment(room, wall)
-                opens = self._exterior_openings(room, wall)
-                if wall in (Direction.SOUTH, Direction.NORTH):
-                    cy = y1
-                    lo, hi = min(x1, x2) - half, max(x1, x2) + half
-                    for a, b in _solid_runs(lo, hi, opens):
-                        self.rect(a, cy - half, b, cy + half, layer)
-                else:
-                    cx = x1
-                    lo, hi = min(y1, y2) - half, max(y1, y2) + half
-                    for a, b in _solid_runs(lo, hi, opens):
-                        self.rect(cx - half, a, cx + half, b, layer)
-        # Interior partitions: one band centred on each shared edge, cut by the
-        # interior doors between the pair.
-        for i, ra in enumerate(rooms):
-            for rb in rooms[i + 1:]:
-                edge = shared_edge(ra, rb)
-                if edge is None:
-                    continue
-                pt = self._partition_thickness(ra, rb)
-                ph = pt / 2.0
-                opens = self._interior_openings(ra, rb, edge)
-                if edge.orientation == "v":
-                    for a, b in _solid_runs(edge.lo, edge.hi, opens):
-                        self.rect(edge.pos - ph, a, edge.pos + ph, b, layer)
-                else:
-                    for a, b in _solid_runs(edge.lo, edge.hi, opens):
-                        self.rect(a, edge.pos - ph, b, edge.pos + ph, layer)
-
-    def _exterior_openings(
-        self, room: Room, wall: Direction
-    ) -> list[tuple[float, float]]:
-        out: list[tuple[float, float]] = []
-        for w in self.plan.windows:
-            if w.room == room.id and w.wall == wall:
-                out.append(self._axis_interval(room, wall, w.offset, w.width))
-        for d in self.plan.exterior_doors:
-            if d.room == room.id and d.wall == wall:
-                out.append(self._axis_interval(room, wall, d.offset, d.width))
-        return out
-
-    @staticmethod
-    def _axis_interval(
-        room: Room, wall: Direction, offset: float, width: float
-    ) -> tuple[float, float]:
-        x1, y1, x2, y2 = opening_endpoints(room, wall, offset, width)
-        if wall in (Direction.SOUTH, Direction.NORTH):
-            return min(x1, x2), max(x1, x2)
-        return min(y1, y2), max(y1, y2)
-
-    def _partition_thickness(self, ra: Room, rb: Room) -> float:
-        for ws in getattr(self.plan, "wall_specs", None) or []:
-            if "plumbing" in ws.attributes and {ws.room_a, ws.room_b} == {ra.id, rb.id}:
-                return PLUMBING_WALL_THICKNESS
-        return INTERIOR_WALL_THICKNESS
-
-    def _interior_openings(self, ra: Room, rb: Room, edge) -> list[tuple[float, float]]:
-        out: list[tuple[float, float]] = []
-        for d in self.plan.interior_doors:
-            if {d.room_a, d.room_b} != {ra.id, rb.id}:
-                continue
-            w = min(d.width, edge.length)
-            if d.offset is None:
-                start = edge.mid - w / 2.0
-            else:
-                start = edge.lo + max(0.0, min(d.offset, edge.length - w))
-            out.append((start, start + w))
-        return out
+        for band in wall_bands(self.plan, level):
+            self.rect(band.x0, band.y0, band.x1, band.y1, layer)
 
     # -- windows -----------------------------------------------------------
 
@@ -810,12 +717,6 @@ class _DxfWriter:
     def _tick(self, x: float, y: float, layer: str) -> None:
         """A 45° architectural dimension tick centred on (x, y)."""
         self.line(x - _TICK, y - _TICK, x + _TICK, y + _TICK, layer)
-
-
-def _exterior_walls(plan: Barndominium, room: Room):
-    from .validation import exterior_walls
-
-    return exterior_walls(plan, room)
 
 
 def to_dxf(plan: Barndominium) -> str:

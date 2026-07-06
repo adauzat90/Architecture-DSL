@@ -77,6 +77,15 @@ nominal figure `program area` does. Requirements never block a compile.
 - An **exterior wall** is one that lies on the envelope edge (`x=0`, `y=0`,
   `x=envelope_width`, or `y=envelope_length`). Windows and entries only "count"
   on exterior walls — see the rules below.
+- **Rooms tile on wall centrelines**, so those `x,y,W,L` coordinates are the
+  *nominal* room lines, not built wall faces. The floor plan draws walls as real
+  bodies (poché bands at nominal thickness, straddling each centreline) and the
+  DXF export matches them exactly, but **every dimension still measures to the
+  nominal room lines** — the centreline of an interior partition and the outside
+  face of the nominal envelope — because that is the model's coordinate truth. A
+  room's *clear* (built) interior is its nominal rectangle minus half of each
+  bounding wall; that reduction drives the clear-dimension checks, but the drawn
+  dimension strings report the nominal grid.
 
 ## Statements
 
