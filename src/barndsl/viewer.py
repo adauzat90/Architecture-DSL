@@ -9,6 +9,13 @@ roughness/metallic specular, procedural surface textures, and a layer-toggle pan
 (walls, roof, frame, floors, porches, openings, stairs — the roof toggle lets you
 look inside). No external dependencies.
 
+A **first-person walk mode** is layered over the orbit camera: a "Walk" pill (or
+the Enter key) drops you inside at a 5.5 ft eye height, WASD + mouse look, sliding
+along the walls and ramping up the stairs. It reads a small ``walk`` block
+(:func:`_walk_block`) computed from the Revit exchange — wall collision segments
+with door gaps punched out, per-level slab footprints, stair ramps and a spawn
+point — not from the triangles, so collision is exact plan feet.
+
 Each surface carries a material from :mod:`barndsl.materials` — base colour,
 roughness/metallic, and a procedural ``pattern`` (ribbed metal, board-and-batten,
 shingle courses, plank flooring, tile, concrete speckle). The renderer draws one
@@ -39,6 +46,7 @@ The embedded geometry is in the same glTF y-up frame the exporter uses (plan
 from __future__ import annotations
 
 import json
+import math
 
 from .elements import Barndominium
 from .gltf import Scene, _to_gltf, build_scene, effective_linear
@@ -56,6 +64,199 @@ _LAYER_LABELS = {
 }
 
 
+#: Player circle radius (ft) and eye height (ft) for the first-person walk mode —
+#: the JS renderer reads ``eyeHeight`` from the walk block so this stays the one
+#: authority. 5.5 ft puts the camera at a typical standing eye level.
+WALK_EYE_HEIGHT = 5.5
+
+
+def _subtract_intervals(
+    lo: float, hi: float, gaps: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """``[lo, hi]`` with each ``gap`` span cut out — the surviving solid pieces.
+
+    Used to punch **door-type openings** out of a wall run's collision span: a
+    door (or a doorless cased passage) is a walkable gap, so removing it leaves the
+    two solid piers either side. Windows are *not* passed as gaps — you can't walk
+    through a window — so a run with only windows stays one segment.
+    """
+    segs = [(lo, hi)]
+    for ga, gb in sorted(gaps):
+        out: list[tuple[float, float]] = []
+        for a, b in segs:
+            if gb <= a + 1e-9 or ga >= b - 1e-9:
+                out.append((a, b))  # gap misses this piece
+                continue
+            if ga > a:
+                out.append((a, min(ga, b)))
+            if gb < b:
+                out.append((max(gb, a), b))
+        segs = out
+    return [(a, b) for a, b in segs if b - a > 1e-6]
+
+
+def _walk_block(scene: Scene) -> dict:
+    """Walk-support data derived from the **exchange**, not from triangles.
+
+    A first-person walkthrough needs three things the mesh soup doesn't hand it
+    cheaply: where the walls are (to slide along), where the floor is at each
+    level (to set eye height), and where the stairs ramp between levels (to climb).
+    We read them straight off the Revit-shaped :class:`~barndsl.revit.RevitModel`
+    (deduplicated wall runs, per-level slabs, planned stair runs) so the numbers
+    are exact plan feet and deterministic — the same order every call.
+
+    The block is all in **plan** coordinates (``x`` east, ``y`` north, ``z`` up);
+    the JS maps a plan point ``(x, y)`` to the viewer's glTF frame ``(x, z, -y)``
+    at draw time, so movement and collision stay in the simple 2D plan space.
+
+    Keys:
+
+    * ``segments`` — 2D wall collision segments ``{x0, y0, x1, y1, level,
+      elevation}``. Each wall run contributes its centreline minus every hosted
+      **door / cased-opening** span (walkable gaps); windows stay solid. ``elevation``
+      is the run's level floor elevation, so the JS collides only with walls near
+      the player's current storey.
+    * ``floors`` — per level ``{level, elevation, rects}`` (the slab footprint
+      rectangles), so the JS knows where floor exists and how high the eye sits.
+    * ``stairs`` — per stair run ``{x, y, w, l, fromLevel, toLevel, fromElevation,
+      toElevation, dir}`` — the footprint, the two floor elevations and an uphill
+      unit direction, enough for the JS to lerp eye height across the footprint so
+      you can walk up.
+    * ``spawn`` — ``{x, y, elevation, face}`` a start point just inside the main
+      entry door (facing into the house) if one exists, else the centroid of the
+      largest ground-floor room.
+    * ``eyeHeight`` — the standing eye height (ft) above the current floor.
+    """
+    model = scene.model
+    elev = {lvl.index: lvl.elevation for lvl in model.levels}
+
+    # --- collision segments: wall runs minus door/cased gaps ------------------
+    hosted: dict[str, list] = {}
+    for o in model.openings:
+        if o.host_wall is not None:
+            hosted.setdefault(o.host_wall, []).append(o)
+    segments: list[dict] = []
+    for w in model.walls:
+        vertical = w.orientation == "v"
+        c = w.const_coord
+        lo, hi = w.span
+        gaps: list[tuple[float, float]] = []
+        for o in hosted.get(w.id, []):
+            # A door or a doorless cased opening is a walkable gap; a window is not.
+            if o.category not in ("door", "cased_opening"):
+                continue
+            along = o.location[1] if vertical else o.location[0]
+            a = max(lo, along - o.width / 2.0)
+            b = min(hi, along + o.width / 2.0)
+            if b > a:
+                gaps.append((a, b))
+        z = elev.get(w.level, 0.0)
+        for a, b in _subtract_intervals(lo, hi, gaps):
+            if vertical:
+                seg = {"x0": c, "y0": a, "x1": c, "y1": b}
+            else:
+                seg = {"x0": a, "y0": c, "x1": b, "y1": c}
+            seg.update({"level": w.level, "elevation": round(z, 4)})
+            segments.append({k: (round(v, 4) if isinstance(v, float) else v)
+                             for k, v in seg.items()})
+
+    # --- floors: slab footprints per level ------------------------------------
+    rects_by_level: dict[int, list[list[float]]] = {}
+    for s in model.slabs:
+        rects_by_level.setdefault(s.level, []).append(
+            [round(s.x, 4), round(s.y, 4), round(s.width, 4), round(s.length, 4)]
+        )
+    floors = [
+        {"level": lvl, "elevation": round(elev.get(lvl, 0.0), 4), "rects": rects_by_level[lvl]}
+        for lvl in sorted(rects_by_level)
+    ]
+
+    # --- stairs: footprint, the two floor elevations, an uphill direction -----
+    stairs: list[dict] = []
+    for a in model.areas:
+        if a.kind != "stair":
+            continue
+        from_level = int(a.meta.get("from_level", a.level))
+        to_level = int(a.meta.get("to_level", from_level + 1))
+        # Uphill direction = the footprint's long axis, signed by the first run's
+        # travel (its start sits at the bottom). Straight runs get exact ramps;
+        # a switchback is approximated as one ramp across the long axis (you can
+        # still walk up), which is fine for a schematic walkthrough.
+        long_axis = (0.0, 1.0) if a.length >= a.width else (1.0, 0.0)
+        runs = (a.meta.get("plan") or {}).get("runs") or []
+        sign = 1.0
+        if runs:
+            (sx, sy), (ex, ey) = runs[0]["start"], runs[0]["end"]
+            if (ex - sx) * long_axis[0] + (ey - sy) * long_axis[1] < 0:
+                sign = -1.0
+        stairs.append(
+            {
+                "x": round(a.x, 4), "y": round(a.y, 4),
+                "w": round(a.width, 4), "l": round(a.length, 4),
+                "fromLevel": from_level, "toLevel": to_level,
+                "fromElevation": round(elev.get(from_level, 0.0), 4),
+                "toElevation": round(elev.get(to_level, 0.0), 4),
+                "dir": [long_axis[0] * sign, long_axis[1] * sign],
+            }
+        )
+
+    return {
+        "eyeHeight": WALK_EYE_HEIGHT,
+        "spawn": _walk_spawn(model, elev),
+        "segments": segments,
+        "floors": floors,
+        "stairs": stairs,
+    }
+
+
+def _walk_spawn(model, elev: dict) -> dict:
+    """A sensible first-person start point, facing into the house.
+
+    Prefers a spot two feet inside the **main entry** — the first ground-floor
+    exterior door (an egress door wins the tie), stepped in toward the room it
+    serves so the camera opens on the interior, not the door leaf. With no exterior
+    door it falls back to the centroid of the largest ground-floor room. ``face``
+    is a plan unit vector the JS turns into the initial look yaw.
+    """
+    rooms0 = [r for r in model.rooms if r.level == 0]
+    room_pt = {r.id: r.point for r in model.rooms}
+
+    def norm2(dx: float, dy: float) -> list[float]:
+        m = math.hypot(dx, dy) or 1.0
+        return [round(dx / m, 4), round(dy / m, 4)]
+
+    doors = [o for o in model.openings
+             if o.category == "door" and o.exterior and o.level == 0]
+    doors.sort(key=lambda o: (not o.egress, o.id))  # an egress entry first
+    for o in doors:
+        rid = o.rooms[0] if o.rooms else None
+        centre = room_pt.get(rid)
+        if centre is None:
+            continue
+        lx, ly = o.location
+        inward = norm2(centre[0] - lx, centre[1] - ly)
+        return {
+            "x": round(lx + inward[0] * 2.0, 4),
+            "y": round(ly + inward[1] * 2.0, 4),
+            "elevation": round(elev.get(0, 0.0), 4),
+            "face": inward,
+        }
+
+    if rooms0:
+        r = max(rooms0, key=lambda r: r.area)
+        # Face toward the ground-floor centroid so the opening view looks across
+        # the plan rather than into the nearest wall.
+        cx = sum(rr.point[0] for rr in rooms0) / len(rooms0)
+        cy = sum(rr.point[1] for rr in rooms0) / len(rooms0)
+        face = norm2(cx - r.point[0], cy - r.point[1])
+        if face == [0.0, 0.0]:
+            face = [0.0, 1.0]
+        return {"x": round(r.point[0], 4), "y": round(r.point[1], 4),
+                "elevation": round(elev.get(0, 0.0), 4), "face": face}
+
+    return {"x": 0.0, "y": 0.0, "elevation": round(elev.get(0, 0.0), 4), "face": [0.0, 1.0]}
+
+
 def scene_json(scene: Scene) -> dict:
     """The scene as inline-renderable JSON: one entry per non-empty node.
 
@@ -63,9 +264,11 @@ def scene_json(scene: Scene) -> dict:
     colours are linear-space RGB so the shader can light them directly. Each node
     also carries its material's ``roughness``/``metallic`` factors and a procedural
     ``pattern`` (with ``patternScale`` in feet) the shared renderer turns into a
-    triplanar-mapped texture. This is the exact blob the viewer embeds and the
-    playground returns, so the shared :data:`RENDERER_JS` renderer draws both from
-    one code path.
+    triplanar-mapped texture. A ``walk`` block (see :func:`_walk_block`) rides
+    alongside the nodes so the shared renderer's first-person mode has wall
+    collision, per-level floors and stairs without re-deriving them from triangles.
+    This is the exact blob the viewer embeds and the playground returns, so the
+    shared :data:`RENDERER_JS` renderer draws both from one code path.
     """
     nodes = []
     for n in scene.nodes:
@@ -93,7 +296,7 @@ def scene_json(scene: Scene) -> dict:
             }
         )
     layers = [ly for ly in Scene.LAYERS if any(nd["layer"] == ly for nd in nodes)]
-    return {"nodes": nodes, "layers": layers}
+    return {"nodes": nodes, "layers": layers, "walk": _walk_block(scene)}
 
 
 #: Back-compat/internal alias — :func:`scene_json` was ``_scene_json``.
@@ -302,6 +505,26 @@ function mountScene(canvas, labels, togglesEl) {
   const hidden = {};
   let hasScene = false, framed = false;
 
+  // --- first-person walk state ---------------------------------------------
+  // An *additional* camera mode layered over the orbit camera: WASD + mouse look
+  // at a 5.5 ft eye height, sliding along the wall segments and ramping up stairs.
+  // All movement/collision math is in plan coords (x east, y north); the draw
+  // step maps to the glTF frame (x, z, -y). Entering saves the orbit camera so
+  // exiting restores it exactly. `walk` is the block scene_json() ships.
+  let walk = null;                 // the walk-support data (segments/floors/stairs/spawn)
+  let walkSegs = [];               // [x0,y0,x1,y1,elevation] collision segments (flat, fast)
+  let walkFF = 10;                 // floor-to-floor (ft) — filters walls to the current storey
+  let walkEye = 5.5, walkSpeed = 4;
+  let walking = false;
+  const wpos = [0, 0];             // player plan position (x, y)
+  let wElev = 0;                   // current floor elevation (eased for smooth steps)
+  let wYaw = 0, wPitch = 0;        // look angles (radians)
+  const keys = {};                 // held movement keys {f,b,l,r,run}
+  let walkRAF = null, walkLast = 0;
+  let usePointerLock = false, walkDrag = false, wpx = 0, wpy = 0;
+  let savedCam = null;             // orbit camera snapshot to restore on exit
+  const WALK_R = 0.75;             // player collision radius (ft)
+
   function setScene(scene) {
     for (const nd of nodes) {
       gl.deleteBuffer(nd.pb); gl.deleteBuffer(nd.nb); gl.deleteBuffer(nd.ib);
@@ -334,6 +557,19 @@ function mountScene(canvas, labels, togglesEl) {
       dist = radius * 2.6; framed = true;
     }
     hasScene = true;
+    // Prime the walk data (flatten segments, derive floor-to-floor) so entering
+    // walk mode is instant. Exits any in-progress walk since geometry changed.
+    if (walking) exitWalk();
+    walk = scene.walk || null;
+    if (walk) {
+      walkSegs = (walk.segments || []).map(s => [s.x0, s.y0, s.x1, s.y1, s.elevation]);
+      const evs = (walk.floors || []).map(f => f.elevation).sort((a, b) => a - b);
+      walkFF = 10;
+      for (let i = 1; i < evs.length; i++) { const g = evs[i] - evs[i - 1];
+        if (g > 0.5) { walkFF = g; break; } }
+      walkEye = walk.eyeHeight || 5.5;
+    }
+    updateWalkUI();
     buildToggles(scene.layers || []);
     resize(); draw();
   }
@@ -352,12 +588,25 @@ function mountScene(canvas, labels, togglesEl) {
 
   // --- interaction ----------------------------------------------------------
   let dragging = false, panning = false, px = 0, py = 0;
-  canvas.addEventListener('pointerdown', e => { dragging = true;
+  canvas.addEventListener('pointerdown', e => {
+    if (walking) {  // walk mode: drag looks around when pointer lock isn't held
+      if (!usePointerLock) { walkDrag = true; wpx = e.clientX; wpy = e.clientY;
+        canvas.setPointerCapture(e.pointerId); }
+      return;
+    }
+    dragging = true;
     panning = e.button === 2 || e.shiftKey; px = e.clientX; py = e.clientY;
     canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener('pointerup', () => { dragging = false; });
+  canvas.addEventListener('pointerup', () => { if (walking) { walkDrag = false; return; }
+    dragging = false; });
   canvas.addEventListener('contextmenu', e => e.preventDefault());
-  canvas.addEventListener('pointermove', e => { if (!dragging) return;
+  canvas.addEventListener('pointermove', e => {
+    if (walking) {  // drag-look fallback (pointer lock uses a document mousemove)
+      if (walkDrag && !usePointerLock) {
+        applyLook(e.clientX - wpx, e.clientY - wpy); wpx = e.clientX; wpy = e.clientY; draw(); }
+      return;
+    }
+    if (!dragging) return;
     const dx = e.clientX - px, dy = e.clientY - py; px = e.clientX; py = e.clientY;
     if (panning) { const s = dist * 0.0016;
       const cy = Math.cos(yaw), sy = Math.sin(yaw);
@@ -365,6 +614,7 @@ function mountScene(canvas, labels, togglesEl) {
     } else { yaw -= dx * 0.008; pitch = Math.max(-1.5, Math.min(1.5, pitch - dy * 0.008)); }
     draw(); });
   canvas.addEventListener('wheel', e => { e.preventDefault();
+    if (walking) return;  // no zoom in walk mode — you move with the keys
     dist = Math.max(radius * 0.3, Math.min(radius * 12, dist * (1 + Math.sign(e.deltaY) * 0.1)));
     draw(); }, { passive: false });
   window.addEventListener('resize', () => { resize(); draw(); });
@@ -379,16 +629,38 @@ function mountScene(canvas, labels, togglesEl) {
     if (!hasScene) return;
     resize();
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    const eye = [
+    const aspect = canvas.width / Math.max(1, canvas.height);
+    let eye, view, proj;
+    if (walking) {
+      // First-person: eye at plan (x, y) lifted to the eased floor + eye height;
+      // glTF frame is (x, up, -y). Near plane 0.1 ft so interiors don't clip, a
+      // ~60° FOV that reads naturally standing in a room.
+      const fx = Math.sin(wYaw), fy = Math.cos(wYaw), cp = Math.cos(wPitch);
+      eye = [wpos[0], wElev + walkEye, -wpos[1]];
+      const dir = [cp * fx, Math.sin(wPitch), -cp * fy];
+      const tgt = [eye[0] + dir[0], eye[1] + dir[1], eye[2] + dir[2]];
+      proj = perspective(1.05, aspect, 0.1, Math.max(radius * 40, 300));
+      view = lookAt(eye, tgt, [0, 1, 0]);
+      gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
+      gl.uniform3fv(uEye, new Float32Array(eye));
+      drawNodes();
+      return;
+    }
+    eye = [
       target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
       target[1] + dist * Math.sin(pitch),
       target[2] + dist * Math.cos(pitch) * Math.cos(yaw)];
-    const proj = perspective(0.9, canvas.width / Math.max(1, canvas.height),
-      radius * 0.05, radius * 40);
-    const view = lookAt(eye, target, [0, 1, 0]);
-    const vp = mul(proj, view);
-    gl.uniformMatrix4fv(uMVP, false, new Float32Array(vp));
+    proj = perspective(0.9, aspect, radius * 0.05, radius * 40);
+    view = lookAt(eye, target, [0, 1, 0]);
+    gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
     gl.uniform3fv(uEye, new Float32Array(eye));
+    drawNodes();
+  }
+
+  // The layer-respecting node draw, shared by the orbit and walk cameras (the
+  // MVP/eye uniforms are set by the caller). Hidden layers (e.g. the roof toggled
+  // off to look inside) are skipped in walk mode too.
+  function drawNodes() {
     for (const nd of nodes) {
       if (hidden[nd.layer]) continue;
       gl.uniform3fv(uColor, nd.color);
@@ -408,7 +680,224 @@ function mountScene(canvas, labels, togglesEl) {
     }
   }
 
-  return { setScene, resize, draw };
+  // === first-person walk mode ==============================================
+  // A "Walk" pill overlays the canvas; Enter (when the view is visible) or a click
+  // toggles it, Esc exits. Entering requests pointer lock; if that's denied we fall
+  // back to click-drag look. Everything here is scoped to walk mode — the key/mouse
+  // listeners are added on enter and removed on exit, so nothing leaks into the
+  // host page's own shortcuts.
+  const host = canvas.parentNode || document.body;
+  const walkBtn = document.createElement('button');
+  walkBtn.type = 'button';
+  walkBtn.textContent = 'Walk';
+  walkBtn.title = 'First-person walkthrough (Enter). Esc to exit.';
+  walkBtn.style.cssText = 'position:absolute;bottom:12px;right:14px;z-index:6;'
+    + 'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;'
+    + 'padding:7px 15px;border-radius:20px;border:1px solid rgba(0,0,0,.14);'
+    + 'background:rgba(255,255,255,.88);color:#1d2530;cursor:pointer;'
+    + 'box-shadow:0 2px 10px rgba(20,30,50,.18);-webkit-backdrop-filter:blur(6px);'
+    + 'backdrop-filter:blur(6px);display:none;';
+  walkBtn.addEventListener('click', () => { walking ? exitWalk() : enterWalk(); });
+  const walkHint = document.createElement('div');
+  walkHint.style.cssText = 'position:absolute;bottom:54px;left:50%;'
+    + 'transform:translateX(-50%);z-index:6;pointer-events:none;opacity:0;'
+    + 'transition:opacity .3s;font:600 12px -apple-system,BlinkMacSystemFont,'
+    + '"Segoe UI",Helvetica,Arial,sans-serif;padding:7px 15px;border-radius:20px;'
+    + 'background:rgba(20,24,30,.84);color:#eef1f4;white-space:nowrap;';
+  walkHint.textContent = 'WASD move · mouse look · Shift run · Esc exit';
+  if (host.style && getComputedStyle(host).position === 'static') host.style.position = 'relative';
+  host.appendChild(walkBtn); host.appendChild(walkHint);
+  let hintTimer = null;
+
+  function updateWalkUI() { walkBtn.style.display = (walk && walk.spawn) ? '' : 'none'; }
+
+  function applyLook(dx, dy) {
+    wYaw += dx * 0.0025;                                     // drag right → turn right
+    const lim = 85 * Math.PI / 180;
+    wPitch = Math.max(-lim, Math.min(lim, wPitch - dy * 0.0025));
+  }
+
+  function enterWalk() {
+    if (!walk || !walk.spawn || !hasScene || walking) return;
+    walking = true;
+    savedCam = { yaw, pitch, dist, target: target.slice() };  // restore orbit on exit
+    const sp = walk.spawn;
+    wpos[0] = sp.x; wpos[1] = sp.y;
+    wElev = sp.elevation || 0;
+    const f = sp.face || [0, 1];
+    wYaw = Math.atan2(f[0], f[1]);                            // face into the house
+    wPitch = 0;
+    for (const k in keys) delete keys[k];
+    walkBtn.textContent = 'Exit';
+    showWalkHint();
+    document.addEventListener('keydown', onWalkKey, true);
+    document.addEventListener('keyup', onWalkKeyUp, true);
+    document.addEventListener('mousemove', onLockMouse);
+    document.addEventListener('pointerlockchange', onPLChange);
+    if (canvas.requestPointerLock) { try { canvas.requestPointerLock(); } catch (e) {} }
+    walkLast = (window.performance || Date).now();
+    walkRAF = requestAnimationFrame(walkStep);
+  }
+
+  function exitWalk() {
+    if (!walking) return;
+    walking = false;
+    if (walkRAF) { cancelAnimationFrame(walkRAF); walkRAF = null; }
+    document.removeEventListener('keydown', onWalkKey, true);
+    document.removeEventListener('keyup', onWalkKeyUp, true);
+    document.removeEventListener('mousemove', onLockMouse);
+    document.removeEventListener('pointerlockchange', onPLChange);
+    if (document.pointerLockElement === canvas && document.exitPointerLock)
+      document.exitPointerLock();
+    usePointerLock = false; walkDrag = false;
+    for (const k in keys) delete keys[k];
+    walkBtn.textContent = 'Walk';
+    hideWalkHint();
+    if (savedCam) { yaw = savedCam.yaw; pitch = savedCam.pitch; dist = savedCam.dist;
+      target[0] = savedCam.target[0]; target[1] = savedCam.target[1];
+      target[2] = savedCam.target[2]; }
+    draw();
+  }
+
+  function onPLChange() {
+    if (document.pointerLockElement === canvas) { usePointerLock = true; }
+    else if (walking && usePointerLock) { usePointerLock = false; exitWalk(); }
+  }
+  function onLockMouse(e) { if (walking && usePointerLock)
+    applyLook(e.movementX || 0, e.movementY || 0); }
+
+  const WALK_KEYS = { KeyW: 'f', ArrowUp: 'f', KeyS: 'b', ArrowDown: 'b',
+    KeyA: 'l', ArrowLeft: 'l', KeyD: 'r', ArrowRight: 'r' };
+  function onWalkKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); exitWalk(); return; }
+    const m = WALK_KEYS[e.code];
+    if (m) { keys[m] = true; e.preventDefault(); }
+    if (e.key === 'Shift') keys.run = true;
+  }
+  function onWalkKeyUp(e) {
+    const m = WALK_KEYS[e.code];
+    if (m) keys[m] = false;
+    if (e.key === 'Shift') keys.run = false;
+  }
+
+  function showWalkHint() { walkHint.style.opacity = '1';
+    if (hintTimer) clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => { walkHint.style.opacity = '0'; }, 2600); }
+  function hideWalkHint() { walkHint.style.opacity = '0';
+    if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; } }
+
+  function walkStep(now) {
+    if (!walking) return;
+    const dt = Math.min(0.05, (now - walkLast) / 1000) || 0; walkLast = now;
+    updateMove(dt);
+    draw();
+    walkRAF = requestAnimationFrame(walkStep);
+  }
+
+  // One movement tick: WASD relative to the look yaw, slide off walls, then ease
+  // the floor height under the (possibly stair-ramped) position.
+  function updateMove(dt) {
+    const fx = Math.sin(wYaw), fy = Math.cos(wYaw);  // forward (plan)
+    const rx = fy, ry = -fx;                          // right (plan)
+    let mx = 0, my = 0;
+    if (keys.f) { mx += fx; my += fy; } if (keys.b) { mx -= fx; my -= fy; }
+    if (keys.r) { mx += rx; my += ry; } if (keys.l) { mx -= rx; my -= ry; }
+    const ml = Math.hypot(mx, my);
+    if (ml > 1e-6) {
+      const spd = walkSpeed * (keys.run ? 2.5 : 1);
+      let nx = wpos[0] + (mx / ml) * spd * dt, ny = wpos[1] + (my / ml) * spd * dt;
+      const slid = collide(nx, ny); nx = slid[0]; ny = slid[1];
+      // Don't let a player walk off the slab into the void upstairs; grade
+      // (elevation ~0) is open so you can step out an exterior door onto a porch.
+      const ft = floorTarget(nx, ny);
+      if (ft == null && wElev > 0.08) { /* blocked: keep current position */ }
+      else { wpos[0] = nx; wpos[1] = ny; }
+    }
+    let te = floorTarget(wpos[0], wpos[1]);
+    if (te == null) te = (wElev <= 0.08) ? 0 : wElev;
+    wElev += (te - wElev) * Math.min(1, dt * 12);   // smooth the step/stair transition
+  }
+
+  // Slide a circle (radius WALK_R) out of every nearby wall segment. Two passes so
+  // an inside corner resolves cleanly; only walls near the current storey count.
+  function collide(x, y) {
+    for (let pass = 0; pass < 2; pass++) {
+      for (const s of walkSegs) {
+        if (Math.abs(s[4] - wElev) > walkFF * 0.75) continue;
+        const ax = s[0], ay = s[1], ex = s[2] - ax, ey = s[3] - ay;
+        const el = ex * ex + ey * ey || 1;
+        let t = ((x - ax) * ex + (y - ay) * ey) / el; t = Math.max(0, Math.min(1, t));
+        const cx = ax + ex * t, cy = ay + ey * t;
+        let dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy);
+        if (d < WALK_R) { if (d < 1e-6) { dx = 1; dy = 0; d = 1; }
+          x = cx + dx / d * WALK_R; y = cy + dy / d * WALK_R; }
+      }
+    }
+    return [x, y];
+  }
+
+  // The floor elevation under a plan point: a stair ramp if over one, else the
+  // containing slab whose level is nearest the current eye (so you stay on your
+  // storey where floors stack). null ⇒ off every slab (the void / grade).
+  function floorTarget(x, y) {
+    if (walk) {
+      for (const s of walk.stairs) {
+        if (x >= s.x - 0.5 && x <= s.x + s.w + 0.5 && y >= s.y - 0.5 && y <= s.y + s.l + 0.5) {
+          const t = stairT(s, x, y);
+          return s.fromElevation + (s.toElevation - s.fromElevation) * t;
+        }
+      }
+      let best = null;
+      for (const f of walk.floors) for (const r of f.rects) {
+        if (x >= r[0] - 0.1 && x <= r[0] + r[2] + 0.1 && y >= r[1] - 0.1 && y <= r[1] + r[3] + 0.1) {
+          if (best == null || Math.abs(f.elevation - wElev) < Math.abs(best - wElev))
+            best = f.elevation;
+        }
+      }
+      return best;
+    }
+    return null;
+  }
+
+  // How far up a stair footprint the point is (0 at the bottom level, 1 at the
+  // top), measured along the stair's uphill direction.
+  function stairT(s, x, y) {
+    const dx = s.dir[0], dy = s.dir[1];
+    let lo = 1e9, hi = -1e9;
+    const cs = [[s.x, s.y], [s.x + s.w, s.y], [s.x, s.y + s.l], [s.x + s.w, s.y + s.l]];
+    for (const c of cs) { const p = c[0] * dx + c[1] * dy; if (p < lo) lo = p; if (p > hi) hi = p; }
+    const pp = x * dx + y * dy;
+    return hi > lo ? Math.max(0, Math.min(1, (pp - lo) / (hi - lo))) : 0;
+  }
+
+  // Enter toggles walk mode when the 3D view is on screen and the user isn't
+  // typing — a light, guarded global that never swallows the host's shortcuts.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.ctrlKey || e.metaKey || e.altKey || walking) return;
+    if (!walk || !walk.spawn) return;
+    const a = document.activeElement, tag = a && a.tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+    if (canvas.offsetParent === null) return;   // 3D pane not visible
+    e.preventDefault(); enterWalk();
+  });
+
+  // `walkState` lets a test (or a host without pointer lock) read/verify the
+  // camera; `enterWalk`/`exitWalk` drive it. `walkTeleport` jumps the player to a
+  // plan point (and optional yaw) with the floor resolved instantly — handy for a
+  // host that wants to drop you in a chosen room, and for headless driving.
+  function walkState() {
+    return { walking, x: wpos[0], y: wpos[1], elevation: wElev,
+      yaw: wYaw, pitch: wPitch, eye: wElev + walkEye };
+  }
+  function walkTeleport(x, y, yaw) {
+    if (!walking) return;
+    wpos[0] = x; wpos[1] = y;
+    if (yaw != null) wYaw = yaw;
+    let te = floorTarget(x, y); if (te == null) te = (wElev <= 0.08) ? 0 : wElev;
+    wElev = te; draw();
+  }
+
+  return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport };
 }
 """
 
@@ -463,7 +952,7 @@ _TEMPLATE = """<!doctype html>
 <canvas id="canvas"></canvas>
 <header><h1>{title}</h1><div class="stats">{stats}</div></header>
 <div id="panel"><div class="hd">Layers</div><div id="toggles"></div></div>
-<div id="hint">drag to orbit &middot; right-drag / shift-drag to pan &middot; scroll to zoom</div>
+<div id="hint">drag to orbit &middot; right-drag / shift-drag to pan &middot; scroll to zoom &middot; Walk (or Enter) to step inside</div>
 <script id="scene" type="application/json">{payload}</script>
 <script>{renderer}</script>
 <script>

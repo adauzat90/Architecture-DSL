@@ -378,7 +378,9 @@ class _Builder:
         person = s.add("IFCPERSON", None, "barndsl", None, None, None, None, None, None)
         org = s.add("IFCORGANIZATION", None, "barndsl", None, None, None)
         p_and_o = s.add("IFCPERSONANDORGANIZATION", person, org, None)
-        app = s.add("IFCAPPLICATION", org, "0.1.0", "barndsl", "barndsl")
+        from . import __version__  # lazy: barndsl.__init__ imports this module
+
+        app = s.add("IFCAPPLICATION", org, __version__, "barndsl", "barndsl")
         # A fixed creation date (epoch 0) keeps the file byte-reproducible.
         return s.add("IFCOWNERHISTORY", p_and_o, app, None, Enum("ADDED"), 0, p_and_o, app, 0)
 

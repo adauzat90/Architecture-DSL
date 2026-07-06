@@ -374,6 +374,19 @@ def _add_openings(
             continue
         _glaze_to_ratio(plan, room, exterior_walls(plan, room), notes)
 
+    # 4. Declare safety glazing wherever geometry lands a window in an R308.4
+    #    hazard location. The auto-layout can't avoid every hazard window — a
+    #    daylight window beside the front door, a bath window near the tub — so it
+    #    specifies those tempered up front (using the SAME predicate the
+    #    WINDOW_TEMPERED check uses, the single source of truth). The emitted plan
+    #    then compiles clean instead of carrying a safety-glazing warning it can't
+    #    act on.
+    from .validation import window_tempered_reason
+
+    for w in plan.windows:
+        if window_tempered_reason(plan, w) is not None:
+            w.tempered = True
+
 
 def _pick_entry_room(plan: Barndominium, brief: LayoutBrief) -> str | None:
     from .validation import exterior_walls

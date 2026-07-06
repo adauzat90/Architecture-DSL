@@ -1,0 +1,39 @@
+plan "Cedar Ridge v2 (composed)"
+envelope 64 x 27
+ceiling 10
+
+# --- Phase 20 composition v2 showcase -----------------------------------------
+# `with k=v` sizes a PARAMETRIC part; a part may itself `use` a NESTED part; and a
+# MULTI-LEVEL part carries its own `level 1` rooms + a stair. Stamped ids namespace
+# as <alias>.<id> (and one level deeper as <alias>.<inner>.<id>).
+# Each `use` accepts its own intentional, audited composition trade-offs (so the
+# packet records them). Part-internal + instance findings anchor to the use line.
+
+# A PARAMETRIC bath, sized at the use site (default is 8 x 6). Interior core:
+# barndsl: accept BATH_VENT "interior bath core — mechanical ventilation"
+use "parts/flex_bath.barn" as fb at 28,0 with width=12, depth=7
+# A NESTED part — guest_wing composes flex_bath one level deeper (g.gb.bath):
+# barndsl: accept BATH_VENT "nested interior bath core — mechanical ventilation"
+# barndsl: accept BED_PRIVACY "guest suite opens off the great room in this plan"
+use "parts/guest_wing.barn" as g  at 0,7
+# A MULTI-LEVEL part — a shop with a loft above it + a connecting stair:
+# barndsl: accept LOFT_GUARD "open loft over the shop — guard the edge in the field"
+# barndsl: accept GARAGE_SEPARATION "shop-below-loft — 5/8 in gyp ceiling per R302.6"
+# barndsl: accept GARAGE_DOOR "shop-to-house door is a self-closing 20-min assembly"
+use "parts/shop_loft.barn"  as sl at 40,0 with loft_depth=16
+
+# --- the host's own rooms -----------------------------------------------------
+room great: living at 12,7 size 28 x 20
+
+# --- circulation reaches into the stamped parts by their namespaced ids --------
+door great - fb.bath width 2.5 into fb.bath hinge near
+door great - g.bed width 3 offset 2 into g.bed hinge near
+door great - sl.shop width 3 into sl.shop hinge near
+
+# --- the building entrance (+ landing) + daylight -----------------------------
+entry great north width 3 offset 12
+porch stoop at 23,27 size 5 x 4 covered
+window great north width 8 offset 2 tempered
+window great north width 6 offset 18 tempered
+
+alarm smoke in great

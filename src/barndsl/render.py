@@ -12,8 +12,108 @@ import math
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
+from .constants import EPSILON, EXTERIOR_WALL_THICKNESS, INTERIOR_WALL_THICKNESS
 from .elements import Barndominium, Direction, RoomType
 from .geometry import opening_endpoints, shared_edge
+from .wallbodies import WallBand, wall_bands
+
+# US architectural feet-and-inches glyphs: prime (feet) and double-prime (inches).
+_FT = "′"  # ′
+_IN = "″"  # ″
+
+
+#: Eighth-inch remainders → the vulgar-fraction glyph an architect writes.
+_EIGHTHS = {1: "⅛", 2: "¼", 3: "⅜", 4: "½", 5: "⅝", 6: "¾", 7: "⅞"}
+
+
+def fmt_ft_in(feet: float) -> str:
+    """Format a decimal-feet length as US feet-and-inches, to the nearest 1/8 in.
+
+    Whole feet drop the inch part (``18′``, never ``18′-0″``); a whole-inch value
+    reads ``18′-6″``; a sub-foot value reads as inches alone (``9″``); zero is
+    ``0′``. A sub-inch remainder adds the architectural vulgar fraction —
+    ``11′-7½″``, ``4½″``, ``3¼″`` — which the face-of-stud dimension convention
+    (Phase 18) needs (half an interior partition is 2¼″, an exterior wall 3¼″).
+    Nominal dimensions land on whole inches, so their labels are unchanged.
+    Negatives shouldn't occur in a plan, but are formatted from their magnitude
+    with a leading ``-`` rather than crashing.
+    """
+    neg = feet < 0
+    total_eighths = round(abs(feet) * 96.0)
+    whole_inches, eighths = divmod(total_eighths, 8)
+    ft, inch = divmod(whole_inches, 12)
+    frac = _EIGHTHS.get(eighths, "")
+    if inch == 0 and not frac:
+        s = f"{ft}{_FT}"
+    elif ft == 0:
+        s = f"{inch}{frac}{_IN}" if inch else f"{frac}{_IN}"
+    else:
+        s = f"{ft}{_FT}-{inch}{frac}{_IN}"
+    return f"-{s}" if neg else s
+
+#: Standard US architectural plan scales, as (inches-of-paper per foot, label),
+#: largest first — the set an architect steps through to fit a plan on a sheet.
+ARCH_SCALES: tuple[tuple[float, str], ...] = (
+    (1 / 4, '1/4"'),
+    (3 / 16, '3/16"'),
+    (1 / 8, '1/8"'),
+    (3 / 32, '3/32"'),
+    (1 / 16, '1/16"'),
+)
+
+#: Print sheets we size to, as (short, long) inches. Letter and Tabloid (a.k.a.
+#: 11×17 / ARCH B) cover the common permit submittals.
+SHEETS: dict[str, tuple[float, float]] = {
+    "Letter": (8.5, 11.0),
+    "Tabloid": (11.0, 17.0),
+}
+
+#: Printable margin (in) reserved on every edge when fitting a plan to a sheet.
+SHEET_MARGIN = 0.5
+
+
+def fit_scale(
+    svg_w_ft: float, svg_h_ft: float, sheet: str = "Letter"
+) -> tuple[float, str]:
+    """Largest standard architectural scale at which a plan fits a sheet.
+
+    ``svg_w_ft``/``svg_h_ft`` are the drawing's extents in **feet** (the SVG's
+    px size divided by its px-per-foot). Returns ``(inches_per_foot, label)`` —
+    the biggest of :data:`ARCH_SCALES` at which the drawing fits inside the
+    sheet's printable area in *either* orientation (portrait or landscape,
+    whichever admits the bigger scale). Falls back to the smallest scale if even
+    that overruns (a very large plan on a small sheet).
+    """
+    sw, sl = SHEETS.get(sheet, SHEETS["Letter"])
+    a = sw - 2 * SHEET_MARGIN
+    b = sl - 2 * SHEET_MARGIN
+    orientations = ((a, b), (b, a))  # portrait, landscape
+    for ipf, label in ARCH_SCALES:
+        for aw, ah in orientations:
+            if svg_w_ft * ipf <= aw + 1e-9 and svg_h_ft * ipf <= ah + 1e-9:
+                return ipf, label
+    return ARCH_SCALES[-1]
+
+
+def sheet_scale(
+    plan: Barndominium, config: "RenderConfig | None" = None, sheet: str = "Letter"
+) -> tuple[float, str, float]:
+    """Pick the print scale for ``plan`` and return ``(ipf, label, css_width_in)``.
+
+    ``ipf`` is inches-of-paper per foot and ``label`` its architectural name
+    (e.g. ``1/4"``); ``css_width_in`` is the physical width to give the embedded
+    SVG so its px-per-foot renders at exactly that scale — the number both print
+    paths set as the SVG's CSS ``width``. The plan drawing is then at true scale;
+    the fixed-pixel title/panel bands just ride along proportionally.
+    """
+    config = config or RenderConfig()
+    r = _Renderer(plan, config)
+    ppf = config.scale  # px per foot
+    svg_w_ft = r.width / ppf
+    svg_h_ft = r.height / ppf
+    ipf, label = fit_scale(svg_w_ft, svg_h_ft, sheet)
+    return ipf, label, svg_w_ft * ipf
+
 
 # Fill colours per room type (soft, print-friendly).
 ROOM_COLORS: dict[RoomType, str] = {
@@ -38,13 +138,36 @@ ROOM_COLORS: dict[RoomType, str] = {
 }
 
 WALL = "#2b2b2b"
+# Wall poché — the solid dark mass of a wall cut in plan (the fill between its two
+# faces, double-line construction). A deep charcoal a touch lighter than the WALL
+# ink so a band reads as built mass, not a black void, yet stays clearly distinct
+# from the light room tints beneath it. Opaque, so overlapping bands at corners and
+# partition T-junctions show no seam or double-dark artifact.
+POCHE_FILL = "#3a3a3a"
+POCHE_STROKE = "#242424"  # thin outline defining the wall faces at high zoom
 WINDOW_COLOR = "#2F6FB0"
 DIM_COLOR = "#888888"
 TEXT_COLOR = "#222222"
+# Positioned annotations (leader-line notes): a muted, print-friendly accent —
+# distinct from the dimension grey and the room ink, in the drafting-note family.
+NOTE_COLOR = "#7A6A55"
+# Opening mark tags (D1/W1 bubbles) — a slate-ink annotation accent, distinct
+# from the window blue and the dimension grey so a bubble reads as a schedule
+# reference, not a construction line.
+TAG_COLOR = "#334E68"
+#: Mark-bubble radius (px). The world-feet inset that places the bubble on the
+#: room side lives in :data:`barndsl.schedule.TAG_INSET_FT` (shared with the DXF).
+TAG_RADIUS_PX = 7.5
 # Fixtures/furniture: thin dark outlines, drafting style — subtle so the plan
 # stays readable (no fill, or a whisper of one).
 FIXTURE_COLOR = "#5a5a5a"
 FIXTURE_FILL = "#00000008"
+# Loft/balcony guard rail (IRC R312) drawn along an open edge over a
+# double-height void — a thin double line, in the structural-safety accent.
+GUARD_COLOR = "#8a3a3a"
+# Electrical overlay (outlets / switches / lights) — a muted violet, distinct
+# from the fixture grey and the structural rust so the layer reads as its own.
+ELEC_COLOR = "#8A5FB0"
 # Structural overlay (post-and-beam frame).
 BEAM_COLOR = "#B5651D"  # frame/bent beams — a steel/timber rust tone
 RIDGE_COLOR = "#8A4B12"  # ridge member, slightly darker
@@ -63,6 +186,33 @@ class RenderConfig:
     #: Print each room's W×L dimensions under its label (skipped for rooms too
     #: small to fit the extra line legibly).
     show_room_dims: bool = True
+    #: Draw a graphic scale bar (bottom-left, under the plan) — set by the print
+    #: and permit-packet paths so a printed sheet carries a bar that survives any
+    #: reprographic resize. Off for the screen render so the view stays uncluttered.
+    scale_bar: bool = False
+    #: Optional scale statement drawn beside the bar (e.g. ``SCALE: 1/4" = 1'-0"
+    #: (Letter)``). ``None`` draws the bar alone. Only used when ``scale_bar``.
+    scale_note: str | None = None
+    #: Draw the electrical layer (outlets, switches, ceiling lights) over the
+    #: plan. Off by default so the screen/permit floor plan stays uncluttered;
+    #: the playground's ⚡ toggle and the packet's Electrical Plan sheet turn it on.
+    show_electrical: bool = False
+    #: Dimension convention. ``"nominal"`` (default) measures every chain and
+    #: overall dimension to the model's coordinate truth — interior-partition
+    #: centrelines and the nominal envelope face. ``"faces"`` is the professional
+    #: face-of-stud convention: overall dims run outside-face to outside-face
+    #: (nominal + one exterior thickness per axis) and each interior room break
+    #: becomes the two faces of the wall crossing there (a clear-width segment
+    #: flanked by thin wall-thickness segments), sourced pixel-exact from the
+    #: shared :mod:`barndsl.wallbodies` band geometry. Opening jambs are already
+    #: face-of-opening and stay put. ``"nominal"`` output is byte-for-byte the
+    #: historical drawing; only ``"faces"`` shifts the ticks.
+    dim_mode: str = "nominal"
+    #: Draw the D1…/W1… mark bubbles beside each door/window glyph — the same
+    #: marks the door/window schedules assign (shared numbering, see
+    #: :func:`barndsl.schedule.door_marks`). On by default so the plan, the
+    #: schedules and the DXF agree; the packet inherits it.
+    opening_tags: bool = True
 
 
 def render_svg(plan: Barndominium, config: RenderConfig | None = None) -> str:
@@ -123,6 +273,8 @@ class _Renderer:
         self.plan = plan
         self.c = config
         self.parts: list[str] = []
+        #: Per-level wall-body band cache for the faces dim mode (lazy).
+        self._dim_band_cache: dict[int, list[WallBand]] = {}
 
         # World bounding box (whole footprint — incl. wings — plus out-of-envelope
         # porches).
@@ -145,20 +297,67 @@ class _Renderer:
         # Multi-story: draw one floor-plan block per level, stacked vertically.
         self.levels = plan.levels()
         self.multi = len(self.levels) > 1
+        # Effective top margin. A single-level plan whose north wall carries a
+        # chain dimension needs that extra row to clear the title block, so grow
+        # the top band minimally when one is present (multi-level plans reserve
+        # the north row inside ``label_gap`` below).
+        self.top = config.margin_top
+        if not self.multi and self._level_has_north_chain(0):
+            self.top += 12.0
         self.label_gap = 28.0  # space above each level's envelope for its label
+        # A north-side chain dimension sits in the band above each level's
+        # envelope, sharing it with the "LEVEL n" caption. When any level draws
+        # one, deepen that band so the chain clears the caption below it.
+        if self.multi and any(
+            self._level_has_north_chain(lvl) for lvl in self.levels
+        ):
+            self.label_gap = 46.0
         self.block_stride = self.label_gap + self.content_h + 34.0
-        self._block_top = config.margin_top  # set per level when rendering
+        self._block_top = self.top  # set per level when rendering
         if self.multi:
             n = len(self.levels)
             self.height = (
-                config.margin_top + self.label_gap + self.content_h
+                self.top + self.label_gap + self.content_h
                 + (n - 1) * self.block_stride + config.margin_bottom
             )
         else:
-            self.height = config.margin_top + self.content_h + config.margin_bottom
+            self.height = self.top + self.content_h + config.margin_bottom
+
+        # The PROJECT SUMMARY panel (summary rows + legend) can be taller than the
+        # plan drawing — a plan with many room types overruns the canvas otherwise.
+        # Grow the SVG to enclose the panel's real content height so nothing clips;
+        # plans whose panel already fits keep their height unchanged (max()).
+        self._panel_ph = self._panel_content_height()
+        panel_py = self.top + (self.label_gap if self.multi else 0.0)
+        self.height = max(self.height, panel_py + self._panel_ph + 16.0)
+
+        # A print scale bar rides in an extra band at the very bottom of the sheet.
+        self._scale_bar_y = 0.0
+        if self.c.scale_bar:
+            self._scale_bar_y = self.height + 8.0
+            self.height += 44.0
+
+    def _panel_content_height(self) -> float:
+        """Pixel height the summary panel needs, from its top to below the last
+        legend row — mirrors the y-cursor walk in :meth:`_draw_panel`."""
+        n_rows = 3  # footprint, interior, habitable
+        if self.multi:
+            n_rows += len(self.plan.area_by_level())
+        n_rows += 7  # bedrooms, bathrooms, ceiling, perimeter, wall, roof, foundation
+        if self.plan.frame_spec is not None or self.plan.posts:
+            n_rows += 3  # frames, posts, beam length
+            if self.plan.frame_spec is not None:
+                n_rows += 1  # bay spacing
+        present: list[RoomType] = []
+        for r in self.plan.rooms:
+            if r.type not in present:
+                present.append(r.type)
+        # title (26) + gap (10) + 20/summary-row + legend header (30)
+        # + 18/legend-row + a bottom pad clearing the last row off the border.
+        return 26 + 10 + 20 * n_rows + 30 + 18 * len(present) + 14
 
     def _env_top(self, i: int) -> float:
-        return self.c.margin_top + self.label_gap + i * self.block_stride
+        return self.top + self.label_gap + i * self.block_stride
 
     # -- coordinate transform ---------------------------------------------
 
@@ -209,8 +408,7 @@ class _Renderer:
         self.parts.append(f'<rect width="{self.width:.0f}" height="{self.height:.0f}" fill="#ffffff" />')
 
         self._draw_title()
-        if self.plan.orientation is not None:
-            self._draw_compass()
+        self._draw_compass()
         if self.multi:
             for i, lvl in enumerate(self.levels):
                 self._block_top = self._env_top(i)
@@ -219,35 +417,54 @@ class _Renderer:
         else:
             self._draw_street()
             self._draw_porches()
-            self._draw_envelope()
             self._draw_rooms()
+            self._draw_wall_bands()
             self._draw_fixtures()
+            if self.c.show_electrical:
+                self._draw_electrical()
             self._draw_structure()
             self._draw_windows()
             self._draw_doors()
+            if self.c.opening_tags:
+                self._draw_opening_tags()
+            self._draw_notes()
+            self._draw_chain_dims()
             self._draw_dimensions()
+            self._draw_post_dims()
             self._draw_panel()
 
+        if self.c.scale_bar:
+            self._draw_scale_bar()
         self.parts.append("</svg>")
         return "\n".join(self.parts)
 
     def _draw_level_block(self, lvl: int) -> None:
         label = f"LEVEL {lvl}" + (" — GROUND" if lvl == 0 else "")
         label += f"   ({self._extent_label()})"
+        # With a reserved north-chain row (deepened ``label_gap``) the caption
+        # rides at the top of the band so the chain sits below it, clear.
+        cap_dy = (self.label_gap - 18) if self.label_gap > 28 else 12
         self._text(
-            self.c.margin_left, self._block_top - 12, label,
+            self.c.margin_left, self._block_top - cap_dy, label,
             size=13, anchor="start", weight="bold", fill="#333333",
         )
         if lvl == 0:
             self._draw_street()
             self._draw_porches()
-        self._draw_envelope()
         self._draw_rooms(level=lvl)
+        self._draw_wall_bands(level=lvl)
         self._draw_fixtures(level=lvl)
+        if self.c.show_electrical:
+            self._draw_electrical(level=lvl)
         self._draw_structure(level=lvl)
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
+        if self.c.opening_tags:
+            self._draw_opening_tags(level=lvl)
+        self._draw_notes(level=lvl)
         self._draw_stairs(lvl)
+        self._draw_guards(level=lvl)
+        self._draw_chain_dims(level=lvl)
 
     def _draw_street(self):
         """Mark the street/approach edge (a thick grey line + label) on the side the
@@ -279,7 +496,9 @@ class _Renderer:
         points to compass azimuth ``orientation``, so true north is that many
         degrees counter-clockwise of up: a direction ``(-sinθ, -cosθ)`` in screen
         space (x right, y down). At ``orientation 0`` the arrow points straight up.
-        Drawn only when the plan is sited, so unoriented plans render unchanged.
+        An unsited plan (no ``orientation``) still gets the arrow — walls are
+        compass-named, so north-up is the drawing's convention either way — but
+        its caption says ``plan north`` rather than claiming a true azimuth.
         """
         theta = math.radians(self.plan.orientation or 0.0)
         cx, cy, r = self.width - 46.0, 48.0, 22.0
@@ -300,12 +519,14 @@ class _Renderer:
             f'{bx + px * hw:.1f},{by + py * hw:.1f} '
             f'{bx - px * hw:.1f},{by - py * hw:.1f}" fill="{WALL}" />'
         )
-        # "N" just beyond the tip, and the declared azimuth beneath the rosette.
+        # "N" just beyond the tip, and the declared azimuth beneath the rosette
+        # (or the plan-north disclaimer when the plan carries no orientation).
         self._text(cx + dx * (r + 9), cy + dy * (r + 9) + 3, "N", size=11, weight="bold")
-        self._text(
-            cx, cy + r + 14, f"true N · {self.plan.orientation or 0.0:g}°",
-            size=9, fill="#888888",
+        caption = (
+            "plan north" if self.plan.orientation is None
+            else f"true N · {self.plan.orientation:g}°"
         )
+        self._text(cx, cy + r + 14, caption, size=9, fill="#888888")
 
     def _draw_title(self):
         self._text(self.c.margin_left, 34, self.plan.name, size=22, anchor="start", weight="bold")
@@ -319,26 +540,36 @@ class _Renderer:
 
     def _extent_label(self) -> str:
         fx0, fy0, fx1, fy1 = self.plan.bounds()
-        label = f"{fx1 - fx0:.0f}′ × {fy1 - fy0:.0f}′"
+        label = f"{fmt_ft_in(fx1 - fx0)} × {fmt_ft_in(fy1 - fy0)}"
         return label + " (L/T/U)" if self.plan.wings else label
 
-    def _draw_envelope(self):
-        if not self.plan.wings:  # plain rectangle — one stroke
-            x = self.sx(0)
-            y = self.sy(self.plan.envelope_length)
-            self._rect(
-                x, y, self.plan.envelope_width * self.c.scale,
-                self.plan.envelope_length * self.c.scale,
-                fill="none", stroke=WALL, sw=3.0,
-            )
-            return
-        # Rectilinear (L/T/U) footprint: stroke the outline of the section union.
-        from .geometry import footprint_boundary
+    def _draw_wall_bands(self, level: int = 0):
+        """Draw the wall bodies as filled poché rectangles — the real double-line
+        construction. The band geometry (exterior shell + interior partitions,
+        corners squared, openings cut at the jambs) comes from the shared
+        :mod:`barndsl.wallbodies` module, so a wall drawn here and the same wall in
+        the DXF export are the identical rectangle.
 
-        for (x1, y1), (x2, y2) in footprint_boundary(self.plan.footprint_sections()):
-            self._line(
-                self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2), stroke=WALL, sw=3.0
-            )
+        Bands sit ON TOP of the room tints (so they read as solid mass over the
+        room fill) but the window/door glyphs, fixtures, dims and labels draw over
+        them. The layer is ``pointer-events:none`` — a passive overlay like the
+        dimensions — so it never intercepts a click or drag in the playground.
+
+        Overlapping same-colour bands at exterior corners and partition T-junctions
+        show no seam (opaque fill), which is how the corner squaring and the
+        partition-meets-shell joint read solid.
+        """
+        bands = wall_bands(self.plan, level)
+        if not bands:
+            return
+        self.parts.append('<g data-layer="walls" pointer-events="none">')
+        for b in bands:
+            x = self.sx(min(b.x0, b.x1))
+            y = self.sy(max(b.y0, b.y1))  # screen top-left = the NW (max-y) corner
+            w = abs(b.x1 - b.x0) * self.c.scale
+            h = abs(b.y1 - b.y0) * self.c.scale
+            self._rect(x, y, w, h, fill=POCHE_FILL, stroke=POCHE_STROKE, sw=0.5)
+        self.parts.append("</g>")
 
     def _draw_porches(self):
         for p in self.plan.porches:
@@ -363,8 +594,12 @@ class _Renderer:
             h = r.length * self.c.scale
             # data-room lets the playground link a click on the plan back to the
             # room's source line (an inert attribute — no effect on the drawing).
+            # No boundary stroke: the wall bands (drawn next, over the fill) supply
+            # every wall line now, so a stroke here would only redraw a zero-width
+            # centreline that the band already covers — and would bridge the gaps
+            # the bands leave at openings.
             self._rect(
-                x, y, w, h, fill=ROOM_COLORS.get(r.type, "#f0f0f0"), stroke=WALL, sw=1.5,
+                x, y, w, h, fill=ROOM_COLORS.get(r.type, "#f0f0f0"), stroke="none",
                 extra=f'data-room="{escape(r.id)}"',
             )
             cx = self.sx(r.center[0])
@@ -374,7 +609,9 @@ class _Renderer:
             if dims:
                 self._text(cx, cy - 11, r.display_name, size=12, weight="bold")
                 self._text(
-                    cx, cy + 3, f"{r.width:g}′ × {r.length:g}′", size=9, fill="#777777"
+                    cx, cy + 3,
+                    f"{fmt_ft_in(r.width)} × {fmt_ft_in(r.length)}",
+                    size=9, fill="#777777",
                 )
                 self._text(cx, cy + 16, f"{r.area:.0f} sq ft", size=10, fill="#555555")
             else:
@@ -393,8 +630,78 @@ class _Renderer:
         for r in self.plan.rooms:
             if level is not None and r.level != level:
                 continue
-            for f in resolve_room_fixtures(self.plan, r):
-                self._fixture_glyph(f)
+            fixtures = resolve_room_fixtures(self.plan, r)
+            counters = [f for f in fixtures if f.kind == "counter"]
+            trimmed, miters = self._miter_counters(r, counters)
+            # Counters draw FIRST (z-under), the drafting convention: a sink or
+            # range set into a run then draws cleanly over the countertop. Runs
+            # meeting in a mitred corner are drawn trimmed to abut, with the 45°
+            # joint line across the corner square — one continuous surface, not
+            # two crossing boxes.
+            for f in trimmed:
+                if f.width > 0.05 and f.length > 0.05:
+                    self._fixture_glyph(f)
+            for x1, y1, x2, y2 in miters:
+                self.parts.append(
+                    f'<line x1="{self.sx(x1):.1f}" y1="{self.sy(y1):.1f}" '
+                    f'x2="{self.sx(x2):.1f}" y2="{self.sy(y2):.1f}" '
+                    f'stroke="{FIXTURE_COLOR}" stroke-width="0.6" '
+                    'data-joint="miter" />'
+                )
+            for f in fixtures:
+                if f.kind != "counter":
+                    self._fixture_glyph(f)
+
+    def _miter_counters(self, room, counters):
+        """Resolve mitred counter corners for drawing: for each L/U join, trim the
+        later run back to abut the earlier one along its run axis, and return the
+        45° miter diagonal across the corner square (from the square's outer
+        corner — farthest from the room's centre — to its inner one). The model
+        keeps the full overlapping rectangles (the takeoff counts the corner in
+        both runs, documented); only the drawing is trimmed."""
+        from dataclasses import replace
+
+        from .fixtures import _is_mitred_corner, _rect_intersection
+
+        adjusted = list(counters)
+        miters: list[tuple[float, float, float, float]] = []
+        rcx, rcy = room.x + room.width / 2.0, room.y + room.length / 2.0
+        for i in range(len(adjusted)):
+            for j in range(i + 1, len(adjusted)):
+                a, b = adjusted[i], adjusted[j]
+                if not _is_mitred_corner(a, b):
+                    continue
+                inter = _rect_intersection(
+                    (a.x, a.y, a.width, a.length), (b.x, b.y, b.width, b.length)
+                )
+                if inter is None:
+                    continue
+                ix, iy, iw, il = inter
+                # Trim b away from the joint along its run axis (its wall's axis;
+                # a free-standing run falls back to its longer side).
+                axis = (
+                    "x" if b.wall in ("S", "N")
+                    else "y" if b.wall in ("W", "E")
+                    else ("x" if b.width >= b.length else "y")
+                )
+                if axis == "x":
+                    if (ix - b.x) <= (b.x + b.width) - (ix + iw):  # joint at low-x end
+                        nb = replace(b, x=ix + iw, width=b.width - iw)
+                    else:
+                        nb = replace(b, width=b.width - iw)
+                else:
+                    if (iy - b.y) <= (b.y + b.length) - (iy + il):  # joint at low-y end
+                        nb = replace(b, y=iy + il, length=b.length - il)
+                    else:
+                        nb = replace(b, length=b.length - il)
+                adjusted[j] = nb
+                # Miter diagonal: outer corner = the square's corner farthest from
+                # the room centre (the walls' meeting corner), to its opposite.
+                corners = [(ix, iy), (ix + iw, iy), (ix, iy + il), (ix + iw, iy + il)]
+                outer = max(corners, key=lambda c: (c[0] - rcx) ** 2 + (c[1] - rcy) ** 2)
+                inner = (ix + iw - (outer[0] - ix), iy + il - (outer[1] - iy))
+                miters.append((outer[0], outer[1], inner[0], inner[1]))
+        return adjusted, miters
 
     def _fx_ellipse(self, cx, cy, rx, ry, sw=0.8, fill="none"):
         self.parts.append(
@@ -486,10 +793,137 @@ class _Renderer:
             self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9, rx=rr)
             bx, by, bw, bh = band(0.24)  # back cushion band
             self._rect(bx, by, bw, bh, "none", FIXTURE_COLOR, 0.7)
+        elif kind == "counter":
+            # A countertop run: a plain casework rectangle plus a subtle second edge
+            # line on the room-facing LONG edge — the bullnose — so a run reads as a
+            # counter, not a box. The room-facing edge is opposite the wall (`back`).
+            self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9)
+            inset = min(w, h) * 0.16
+            if back == "bottom":  # backs S, faces N (screen top) → line near top
+                self._line(x, y + inset, x + w, y + inset, FIXTURE_COLOR, 0.6)
+            elif back == "top":  # faces screen bottom
+                self._line(x, y + h - inset, x + w, y + h - inset, FIXTURE_COLOR, 0.6)
+            elif back == "left":  # faces screen right
+                self._line(x + w - inset, y, x + w - inset, y + h, FIXTURE_COLOR, 0.6)
+            else:  # back == right, faces screen left
+                self._line(x + inset, y, x + inset, y + h, FIXTURE_COLOR, 0.6)
         else:
             # tables / desk / dresser / wardrobe / counter / island / other:
             # a plain rounded rectangle reads as casework.
             self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9, rx=rr)
+
+    # -- electrical layer --------------------------------------------------
+
+    def _wall_point(self, r, wall: Direction, offset: float) -> tuple[float, float, tuple[float, float]]:
+        """World point of a device at ``offset`` along ``wall`` of room ``r``, plus
+        the screen-space unit vector pointing *into* the room (for the ticks)."""
+        off = min(max(offset, 0.0), r.width if wall in (Direction.SOUTH, Direction.NORTH) else r.length)
+        if wall is Direction.SOUTH:
+            return r.x + off, r.y, (0.0, -1.0)  # into room = screen up
+        if wall is Direction.NORTH:
+            return r.x + off, r.y + r.length, (0.0, 1.0)
+        if wall is Direction.WEST:
+            return r.x, r.y + off, (1.0, 0.0)
+        return r.x + r.width, r.y + off, (-1.0, 0.0)  # east
+
+    def _draw_electrical(self, level: int | None = None) -> None:
+        """Draw the electrical layer — receptacles (duplex symbol, "GFCI" tag when
+        ground-fault), wall switches ("S"), and ceiling lights (circled-X, with a
+        kind variant) — over the plan in a muted ``data-layer="electrical"`` group.
+        Devices carry no level of their own; they inherit their room's."""
+        if not (
+            self.plan.outlets or self.plan.switches or self.plan.lights
+            or getattr(self.plan, "alarms", None)
+        ):
+            return
+        by_id = {r.id: r for r in self.plan.rooms}
+        self.parts.append('<g data-layer="electrical">')
+        for o in self.plan.outlets:
+            r = by_id.get(o.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            wx, wy, into = self._wall_point(r, o.wall, o.offset)
+            self._outlet_symbol(self.sx(wx), self.sy(wy), into, o.gfci)
+        for s in self.plan.switches:
+            r = by_id.get(s.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            wx, wy, into = self._wall_point(r, s.wall, s.offset)
+            self._switch_symbol(self.sx(wx), self.sy(wy), into)
+        for lt in self.plan.lights:
+            r = by_id.get(lt.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            self._light_symbol(self.sx(r.x + lt.x), self.sy(r.y + lt.y), lt.kind)
+        for al in getattr(self.plan, "alarms", None) or []:
+            r = by_id.get(al.room)
+            if r is None or (level is not None and r.level != level):
+                continue
+            ax = r.x + (al.x if al.x is not None else r.width / 2.0)
+            ay = r.y + (al.y if al.y is not None else r.length / 2.0)
+            self._alarm_symbol(self.sx(ax), self.sy(ay), al.kind)
+        self.parts.append("</g>")
+
+    def _elec_circle(self, cx, cy, rad, fill="#ffffff", sw=1.0):
+        self.parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rad:.1f}" fill="{fill}" '
+            f'stroke="{ELEC_COLOR}" stroke-width="{sw}" />'
+        )
+
+    def _outlet_symbol(self, px, py, into, gfci: bool) -> None:
+        """A duplex receptacle: a small circle set just inside the wall with two
+        ticks perpendicular to it (the classic NEC symbol). GFCI adds a tiny tag."""
+        ix, iy = into  # inward unit (screen)
+        rad = 3.4
+        cx, cy = px + ix * (rad + 1.0), py + iy * (rad + 1.0)
+        self._line(px, py, cx, cy, ELEC_COLOR, sw=0.9)  # stem to the wall
+        self._elec_circle(cx, cy, rad)
+        # Two ticks across the circle, perpendicular to the inward stem (the two
+        # receptacle slots): the along-wall direction is (-iy, ix).
+        ax, ay = -iy, ix
+        for s in (-1.0, 1.0):
+            ox, oy = ax * 1.5 * s, ay * 1.5 * s
+            self._line(cx + ox - ix * 2.2, cy + oy - iy * 2.2,
+                       cx + ox + ix * 2.2, cy + oy + iy * 2.2, ELEC_COLOR, sw=0.9)
+        if gfci:
+            self._text(cx + ix * 6.5, cy + iy * 6.5 + 3, "GFCI", size=6,
+                       fill=ELEC_COLOR, weight="bold")
+
+    def _switch_symbol(self, px, py, into) -> None:
+        """A wall switch: an "S" set just inside the wall, with a short stem."""
+        ix, iy = into
+        cx, cy = px + ix * 6.0, py + iy * 6.0
+        self._line(px, py, px + ix * 2.5, py + iy * 2.5, ELEC_COLOR, sw=0.9)
+        self._text(cx, cy + 3.0, "S", size=9, fill=ELEC_COLOR, weight="bold")
+
+    def _light_symbol(self, cx, cy, kind: str) -> None:
+        """A ceiling luminaire: a circled-X. Kind variants keep it simple — a
+        pendant gets a centre dot, a recessed can a second ring, a fan two blades."""
+        rad = 4.2
+        self._elec_circle(cx, cy, rad)
+        d = rad * 0.7
+        self._line(cx - d, cy - d, cx + d, cy + d, ELEC_COLOR, sw=0.9)
+        self._line(cx + d, cy - d, cx - d, cy + d, ELEC_COLOR, sw=0.9)
+        if kind == "recessed":
+            self._elec_circle(cx, cy, rad + 1.8, fill="none", sw=0.7)
+        elif kind == "pendant":
+            self.parts.append(
+                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="1.3" fill="{ELEC_COLOR}" />'
+            )
+        elif kind == "fan":
+            self._line(cx - rad * 1.6, cy, cx + rad * 1.6, cy, ELEC_COLOR, sw=0.7)
+            self._line(cx, cy - rad * 1.6, cx, cy + rad * 1.6, ELEC_COLOR, sw=0.7)
+
+    #: The label a smoke/CO alarm draws in its circle, by kind.
+    _ALARM_LABELS = {"smoke": "SD", "co": "CO", "smoke_co": "SD/CO"}
+
+    def _alarm_symbol(self, cx, cy, kind: str) -> None:
+        """A ceiling smoke/CO alarm: a small circle with "SD" (smoke), "CO" (carbon
+        monoxide) or "SD/CO" (a combination unit) centred in it."""
+        label = self._ALARM_LABELS.get(kind, "SD")
+        rad = 6.2 if kind == "smoke_co" else 4.6
+        self._elec_circle(cx, cy, rad)
+        self._text(cx, cy + 2.2, label, size=6, fill=ELEC_COLOR, weight="bold")
 
     def _draw_structure(self, level: int = 0):
         """Overlay the post-and-beam frame: beam centrelines + solid posts.
@@ -526,14 +960,25 @@ class _Renderer:
             if level is not None and room.level != level:
                 continue
             x1, y1, x2, y2 = opening_endpoints(room, win.wall, win.offset, win.width)
-            sx1, sy1, sx2, sy2 = self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2)
-            # Double line straddling the wall for a window symbol.
+            # The window fills the gap the wall band leaves: sill and head lines on
+            # the two band faces, the glazing line down the centre, and a jamb line
+            # closing each end — the same symbol the DXF draws, spanning the full
+            # wall thickness (windows sit on the exterior shell).
+            half = EXTERIOR_WALL_THICKNESS / 2.0
             if win.wall in (Direction.NORTH, Direction.SOUTH):
-                self._line(sx1, sy1 - 2, sx2, sy2 - 2, WINDOW_COLOR, 1.4)
-                self._line(sx1, sy1 + 2, sx2, sy2 + 2, WINDOW_COLOR, 1.4)
+                cy = y1
+                a, b = min(x1, x2), max(x1, x2)
+                for yy in (cy - half, cy, cy + half):  # outer face / glazing / inner
+                    self._line(self.sx(a), self.sy(yy), self.sx(b), self.sy(yy), WINDOW_COLOR, 1.2)
+                for xx in (a, b):  # jambs across the band
+                    self._line(self.sx(xx), self.sy(cy - half), self.sx(xx), self.sy(cy + half), WINDOW_COLOR, 1.2)
             else:
-                self._line(sx1 - 2, sy1, sx2 - 2, sy2, WINDOW_COLOR, 1.4)
-                self._line(sx1 + 2, sy1, sx2 + 2, sy2, WINDOW_COLOR, 1.4)
+                cx = x1
+                a, b = min(y1, y2), max(y1, y2)
+                for xx in (cx - half, cx, cx + half):
+                    self._line(self.sx(xx), self.sy(a), self.sx(xx), self.sy(b), WINDOW_COLOR, 1.2)
+                for yy in (a, b):
+                    self._line(self.sx(cx - half), self.sy(yy), self.sx(cx + half), self.sy(yy), WINDOW_COLOR, 1.2)
 
     def _draw_doors(self, level: int | None = None):
         for door in self.plan.interior_doors:
@@ -604,6 +1049,32 @@ class _Renderer:
                 else:
                     self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
 
+    def _draw_opening_tags(self, level: int | None = None) -> None:
+        """Draw a D1…/W1… mark bubble on the room side of each door/window glyph.
+        The marks and their world positions come from the SAME shared helper the
+        schedules use (:func:`barndsl.schedule.opening_tag_points`), so a plan tag
+        and its schedule row — and the DXF tag — can never disagree. On the
+        annotation layer, inside the room, clear of the exterior dim chains."""
+        from .schedule import opening_tag_points
+
+        self.parts.append('<g data-layer="opening-tags" pointer-events="none">')
+        for mark, wx, wy in opening_tag_points(self.plan, level):
+            self._mark_bubble(mark, wx, wy)
+        self.parts.append("</g>")
+
+    def _mark_bubble(self, mark: str, wx: float, wy: float) -> None:
+        """A small hollow tag bubble with the mark text, centred at world ``(wx, wy)``."""
+        cx, cy = self.sx(wx), self.sy(wy)
+        r = TAG_RADIUS_PX
+        self.parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="#ffffff" '
+            f'fill-opacity="0.85" stroke="{TAG_COLOR}" stroke-width="0.8" />'
+        )
+        self._text(
+            cx, cy + r * 0.36, mark, size=r * 1.15, anchor="middle",
+            fill=TAG_COLOR, weight="bold",
+        )
+
     @staticmethod
     def _swing_sgn(door, a, b, edge) -> float | None:
         """+1/-1 for the side the leaf swings into, or None to let the symbol
@@ -649,8 +1120,8 @@ class _Renderer:
         lx, ly = self.sx(latch[0]), self.sy(latch[1])
         tx, ty = self.sx(tip[0]), self.sy(tip[1])
 
-        # White out the wall under the opening, draw the leaf, then the arc.
-        self._line(hx, hy, lx, ly, "#ffffff", 4.0)
+        # The wall band already leaves a clean gap under the opening, so draw only
+        # the leaf and then the swing arc into it — no white-out needed.
         self._line(hx, hy, tx, ty, WALL, 1.2)
         r = w * self.c.scale
         # Pick the sweep flag that centres the arc on the hinge, so the swing
@@ -689,10 +1160,8 @@ class _Renderer:
         else:  # wall runs in +x
             ends = ((ox, oy), (ox + w, oy))
 
-        (ax, ay), (bx, by) = ends
-        # White out the wall under the opening.
-        self._line(self.sx(ax), self.sy(ay), self.sx(bx), self.sy(by), "#ffffff", 4.0)
-        # A short jamb tick perpendicular to the wall at each end.
+        # A cased opening is a plain gap in the wall band; mark the two jambs with a
+        # short tick perpendicular to the wall so the passage reads as framed.
         t = 3.5
         for px, py in ends:
             sx0, sy0 = self.sx(px), self.sy(py)
@@ -705,13 +1174,12 @@ class _Renderer:
         """Draw a pocket/sliding door: the gap plus a slab line parallel to the
         wall, set just inside one room (no swing arc)."""
         d = 0.35  # how far the panel sits off the wall, ft
+        # The band already leaves the gap; draw only the slab line just inside a room.
         if orientation == "v":  # wall runs in +y at x=ox
             s = d if (ox + d) <= self.max_x else -d
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox), self.sy(oy + w), "#ffffff", 4.0)
             self._line(self.sx(ox + s), self.sy(oy), self.sx(ox + s), self.sy(oy + w), WALL, 1.6)
         else:  # wall runs in +x at y=oy
             s = d if (oy + d) <= self.max_y else -d
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
             self._line(self.sx(ox), self.sy(oy + s), self.sx(ox + w), self.sy(oy + s), WALL, 1.6)
 
     def _overhead_symbol(self, ox: float, oy: float, orientation: str, w: float, sgn: float):
@@ -719,14 +1187,13 @@ class _Renderer:
         line set just inside the room (the segmented panel riding its tracks —
         no leaf, no swing arc). ``sgn`` points into the room (+x/+y is +1)."""
         d = 0.5 * sgn  # how far the track line sits inside the room, ft
+        # The band already leaves the gap; draw only the dashed track line inside.
         if orientation == "v":  # wall runs in +y at x=ox
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox), self.sy(oy + w), "#ffffff", 4.0)
             self._line(
                 self.sx(ox + d), self.sy(oy), self.sx(ox + d), self.sy(oy + w),
                 WALL, 1.6, dash="5 3",
             )
         else:  # wall runs in +x at y=oy
-            self._line(self.sx(ox), self.sy(oy), self.sx(ox + w), self.sy(oy), "#ffffff", 4.0)
             self._line(
                 self.sx(ox), self.sy(oy + d), self.sx(ox + w), self.sy(oy + d),
                 WALL, 1.6, dash="5 3",
@@ -757,20 +1224,166 @@ class _Renderer:
             else:
                 self._text(cx, cy, f"{s.display_name} ↓{s.from_level}", size=9, fill="#8a7f63")
 
+    def _draw_guards(self, level: int):
+        """Draw a guard rail along each open loft edge on ``level`` — the
+        double-height edges the ``LOFT_GUARD`` check flags (IRC R312).
+
+        A guard reads as a thin double line (two parallel strokes a hair apart,
+        the rail and its balusters) sitting just inside the loft floor, on the
+        void side. Segments come from :func:`barndsl.validation.loft_guard_edges`,
+        the same computation the check uses, so a drawn rail and a flagged edge
+        never disagree."""
+        from .validation import loft_guard_edges
+
+        off = 1.6  # px gap between the doubled rail strokes
+        for lvl, x1, y1, x2, y2 in loft_guard_edges(self.plan):
+            if lvl != level:
+                continue
+            sx1, sy1, sx2, sy2 = self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2)
+            if abs(sx1 - sx2) < abs(sy1 - sy2):  # vertical edge → offset in x
+                self._line(sx1 - off, sy1, sx2 - off, sy2, GUARD_COLOR, 0.8)
+                self._line(sx1 + off, sy1, sx2 + off, sy2, GUARD_COLOR, 0.8)
+            else:                                 # horizontal edge → offset in y
+                self._line(sx1, sy1 - off, sx2, sy2 - off, GUARD_COLOR, 0.8)
+                self._line(sx1, sy1 + off, sx2, sy2 + off, GUARD_COLOR, 0.8)
+
+    def _draw_notes(self, level: int = 0):
+        """Draw positioned notes on ``level`` as small italic leader callouts.
+
+        Each note is a filled dot at its world anchor, a 45° leader up-and-right
+        (NE) to the text, and the text set in a muted note colour. No collision
+        avoidance this pass — the offset is fixed, professional and unobtrusive."""
+        for nm in getattr(self.plan, "note_marks", None) or []:
+            if getattr(nm, "level", 0) != level:
+                continue
+            ax, ay = self.sx(nm.x), self.sy(nm.y)
+            # Leader: a short 45° run to the NE (screen +x, −y), then the text.
+            lead = 16.0
+            tx, ty = ax + lead, ay - lead
+            self.parts.append(
+                f'<circle cx="{ax:.1f}" cy="{ay:.1f}" r="2.4" fill="{NOTE_COLOR}" />'
+            )
+            self._line(ax, ay, tx, ty, NOTE_COLOR, 1.0)
+            self.parts.append(
+                f'<text x="{tx + 3:.1f}" y="{ty - 1:.1f}" font-family="{self.c.font}" '
+                f'font-size="10" fill="{NOTE_COLOR}" text-anchor="start" '
+                f'font-style="italic">{escape(nm.text)}</text>'
+            )
+
+    def _draw_scale_bar(self):
+        """Draw the graphic scale bar (bottom-left) + optional scale statement.
+
+        Alternating filled/empty 5 ft segments over a 10 ft run, labelled 0/5/10,
+        drawn in plan px (``scale`` px/ft) so it scales exactly with the drawing —
+        the mark that survives any reprographic resize of the printed sheet."""
+        x0 = self.c.margin_left
+        y0 = self._scale_bar_y
+        ppf = self.c.scale
+        seg_ft, n_seg = 5.0, 2
+        bar_h = 5.0
+        if self.c.scale_note:
+            self._text(
+                x0, y0 - 4, self.c.scale_note, size=10, anchor="start",
+                weight="bold", fill=TEXT_COLOR,
+            )
+        for i in range(n_seg):
+            sx = x0 + i * seg_ft * ppf
+            fill = NOTE_COLOR if i % 2 == 0 else "#ffffff"
+            self._rect(sx, y0, seg_ft * ppf, bar_h, fill=fill, stroke=WALL, sw=0.8)
+        for i in range(n_seg + 1):
+            sx = x0 + i * seg_ft * ppf
+            self._text(sx, y0 + bar_h + 11, f"{int(i * seg_ft)}", size=8, fill=TEXT_COLOR)
+        self._text(
+            x0 + n_seg * seg_ft * ppf + 16, y0 + bar_h, "FEET",
+            size=8, anchor="start", fill=TEXT_COLOR,
+        )
+
     def _draw_dimensions(self):
         # Overall dimensions span the whole footprint (incl. wings), not just the
         # primary envelope block.
         fx0, fy0, fx1, fy1 = self.plan.bounds()
+        # In faces mode the overall runs outside-face to outside-face (nominal +
+        # one exterior thickness per axis); nominal mode leaves the span untouched.
+        wx0, wx1 = self._overall_span(fx0, fx1)
+        wy0, wy1 = self._overall_span(fy0, fy1)
         # Overall width dimension below the plan.
-        y = self.c.margin_top + self.content_h + 28
+        y = self.top + self.content_h + 28
         self._dim_line(
-            self.sx(fx0), y, self.sx(fx1), y, f"{fx1 - fx0:.0f}′", horizontal=True
+            self.sx(wx0), y, self.sx(wx1), y, fmt_ft_in(wx1 - wx0), horizontal=True
         )
         # Overall length dimension left of the plan.
         x = self.c.margin_left - 34
         self._dim_line(
-            x, self.sy(fy0), x, self.sy(fy1), f"{fy1 - fy0:.0f}′", horizontal=False
+            x, self.sy(wy0), x, self.sy(wy1), fmt_ft_in(wy1 - wy0), horizontal=False
         )
+
+    def _overall_span(self, lo: float, hi: float) -> tuple[float, float]:
+        """The overall-dimension endpoints for the active dim mode. Nominal keeps
+        the bounds (byte-identical); faces pushes each end out by half an exterior
+        wall so the string reads outside face to outside face — matching the drawn
+        poché, which straddles the same nominal envelope line by the same half."""
+        if self.c.dim_mode == "faces":
+            ext = EXTERIOR_WALL_THICKNESS / 2.0
+            return lo - ext, hi + ext
+        return lo, hi
+
+    def _draw_post_dims(self) -> None:
+        """When the plan carries a placed frame, print ONE dimension string along
+        the frame's primary (bay) axis giving the post spacing on centre — the
+        defining barndo measurement. Placed on a farther offset tier just beyond
+        the overall dimension it runs parallel to (which itself sits outside the
+        wall chains), so it never collides with the existing dimension rows."""
+        posts = [p for p in self.plan.posts if getattr(p, "level", 0) == 0]
+        if len(posts) < 2:
+            return
+        tol = 1e-4
+        xs = sorted({round(p.x, 4) for p in posts})
+        ys = sorted({round(p.y, 4) for p in posts})
+
+        def dedupe(vals: list[float]) -> list[float]:
+            out: list[float] = []
+            for v in vals:
+                if not out or v - out[-1] > tol:
+                    out.append(v)
+            return out
+
+        xs, ys = dedupe(xs), dedupe(ys)
+        # The bay axis is the one the posts march along (the most centres).
+        axis, coords = ("x", xs) if len(xs) >= len(ys) else ("y", ys)
+        if len(coords) < 2:
+            return
+        if axis == "x":
+            # Below the plan, one tier beyond the overall width dimension (which is
+            # itself outside the south wall chain) — a clean farther row.
+            y = self.top + self.content_h + 48.0
+            px = [self.sx(c) for c in coords]
+            self._line(px[0], y, px[-1], y, DIM_COLOR, 1.0)
+            for xp in px:
+                self._line(xp, y - 4, xp, y + 4, DIM_COLOR, 1.0)
+            for a, b, xa, xb in zip(coords, coords[1:], px, px[1:]):
+                label = fmt_ft_in(b - a)
+                if (xb - xa) >= self._label_min_px(label):
+                    self._text((xa + xb) / 2, y - 5, label, size=9, fill=DIM_COLOR)
+            self._text(px[-1] + 8, y + 3, "POSTS o.c.", size=8, anchor="start",
+                       fill=DIM_COLOR, weight="bold")
+        else:
+            # Left of the plan (west), one tier beyond the overall length dimension.
+            x = self.c.margin_left - 54.0
+            py = [self.sy(c) for c in coords]
+            self._line(x, py[0], x, py[-1], DIM_COLOR, 1.0)
+            for yp in py:
+                self._line(x - 4, yp, x + 4, yp, DIM_COLOR, 1.0)
+            for a, b, ya, yb in zip(coords, coords[1:], py, py[1:]):
+                label = fmt_ft_in(b - a)
+                if abs(yb - ya) >= self._label_min_px(label):
+                    cy = (ya + yb) / 2
+                    self.parts.append(
+                        f'<text x="{x - 4:.1f}" y="{cy:.1f}" font-family="{self.c.font}" '
+                        f'font-size="9" fill="{DIM_COLOR}" text-anchor="middle" '
+                        f'transform="rotate(-90 {x - 4:.1f} {cy:.1f})">{escape(label)}</text>'
+                    )
+            self._text(x, py[-1] - 8, "POSTS o.c.", size=8, anchor="middle",
+                       fill=DIM_COLOR, weight="bold")
 
     def _dim_line(self, x1, y1, x2, y2, label, horizontal):
         self._line(x1, y1, x2, y2, DIM_COLOR, 1.0)
@@ -788,14 +1401,392 @@ class _Renderer:
                 f'transform="rotate(-90 {x1 - 6:.1f} {(y1 + y2) / 2:.1f})">{escape(label)}</text>'
             )
 
+    # -- chained per-side exterior dimension strings -----------------------
+
+    #: Offset (px) of a chain dimension line from its exterior wall — inside the
+    #: overall dimension line (28/34 px out), so the two rows read as one family.
+    _CHAIN_OFFSET = 15.0
+    _CHAIN_TICK = 4.0
+    #: A jamb break is only worth drawing when it leaves a segment at least this
+    #: wide (ft) on either side — a jamb hard against a room corner (or another
+    #: jamb) collapses into its neighbour rather than crowd the chain with a
+    #: sliver too narrow to label.
+    _MIN_JAMB_SEG_FT = 1.0
+
+    def _opening_jambs(
+        self, side: str, rooms: list, offset: float, lo: float, hi: float,
+        tol: float = 1e-6,
+    ) -> list[float]:
+        """Near/far jamb coordinates of exterior openings on this run.
+
+        An exterior window or door on ``side`` whose host room's matching wall
+        lies on the run ``offset`` contributes its two jambs (projected onto the
+        chain axis, clamped to ``[lo, hi]``). These are the breaks that make the
+        outermost chain read wall-segment / opening-width / wall-segment."""
+        want = {
+            "S": Direction.SOUTH, "N": Direction.NORTH,
+            "W": Direction.WEST, "E": Direction.EAST,
+        }[side]
+        room_by_id = {r.id: r for r in rooms}
+        coords: list[float] = []
+        openings = [(w.room, w.wall, w.offset, w.width) for w in self.plan.windows]
+        openings += [
+            (d.room, d.wall, d.offset, d.width) for d in self.plan.exterior_doors
+        ]
+        for rid, wall, off, width in openings:
+            if wall != want:
+                continue
+            room = room_by_id.get(rid)
+            if room is None:
+                continue
+            edge_coord = {"S": room.y, "N": room.y2, "W": room.x, "E": room.x2}[side]
+            if abs(edge_coord - offset) > tol:
+                continue
+            x1, y1, x2, y2 = opening_endpoints(room, wall, off, width)
+            near, far = (x1, x2) if side in ("S", "N") else (y1, y2)
+            for c in (near, far):
+                if lo - tol <= c <= hi + tol:
+                    coords.append(min(max(c, lo), hi))
+        return coords
+
+    def _with_jambs(self, pts: list[float], jambs: list[float]) -> list[float]:
+        """Fold opening ``jambs`` into the room-edge break ``pts``, keeping the
+        room edges and dropping any jamb that would leave a segment narrower than
+        :data:`_MIN_JAMB_SEG_FT` (it collapses into the neighbouring break)."""
+        out = list(pts)
+        for j in sorted(jambs):
+            if all(abs(j - p) >= self._MIN_JAMB_SEG_FT for p in out):
+                out.append(j)
+        out.sort()
+        return out
+
+    def _chain_breaks(
+        self,
+        side: str,
+        rooms: list,
+        fx0: float,
+        fy0: float,
+        fx1: float,
+        fy1: float,
+        tol: float = 1e-6,
+    ) -> tuple[list[float], float, float]:
+        """Break points partitioning one exterior ``side`` (N/S/E/W).
+
+        Collect where the edges of rooms *touching* that exterior wall project
+        onto it, add the envelope span ends, then sort, clamp and dedupe. Rooms
+        inset from the wall contribute nothing (their edges aren't on it), so a
+        side no room reaches back onto degrades to the bare span (one segment).
+        Returns ``(points, span_lo, span_hi)``.
+        """
+        if side in ("S", "N"):
+            lo, hi = fx0, fx1
+            if side == "S":
+                touch = [r for r in rooms if abs(r.y - fy0) <= tol]
+            else:
+                touch = [r for r in rooms if abs(r.y2 - fy1) <= tol]
+            raw = [c for r in touch for c in (r.x, r.x2)]
+        else:
+            lo, hi = fy0, fy1
+            if side == "W":
+                touch = [r for r in rooms if abs(r.x - fx0) <= tol]
+            else:
+                touch = [r for r in rooms if abs(r.x2 - fx1) <= tol]
+            raw = [c for r in touch for c in (r.y, r.y2)]
+        pts: list[float] = []
+        for c in sorted([lo, hi, *raw]):
+            c = min(max(c, lo), hi)
+            if not pts or c - pts[-1] > tol:
+                pts.append(c)
+        return pts, lo, hi
+
+    def _level_has_north_chain(self, level: int) -> bool:
+        rooms = [r for r in self.plan.rooms if r.level == level]
+        fx0, fy0, fx1, fy1 = self.plan.bounds()
+        if not self.plan.wings:
+            pts, _, _ = self._chain_breaks("N", rooms, fx0, fy0, fx1, fy1)
+            pts = self._with_jambs(pts, self._opening_jambs("N", rooms, fy1, fx0, fx1))
+            return len(pts) > 2
+        # Wing plans: only a chain on the top-most north run (offset == max_y)
+        # rides in the title band — an inset wing run sits in the notch, clear.
+        for offset, lo, hi in self._exterior_runs("N"):
+            breaks = self._with_jambs(
+                self._run_breaks("N", rooms, offset, lo, hi),
+                self._opening_jambs("N", rooms, offset, lo, hi),
+            )
+            if abs(offset - fy1) <= 1e-6 and len(breaks) > 2:
+                return True
+        return False
+
+    def _exterior_runs(self, side: str) -> list[tuple[float, float, float]]:
+        """Distinct colinear exterior wall runs facing ``side`` (S/N/W/E).
+
+        Each run is ``(offset, lo, hi)``: its wall coordinate (y for S/N, x for
+        W/E) and the span it covers on the perpendicular axis. A plain rectangle
+        yields exactly one run per side (the bounds edge), so wing-free plans keep
+        the old single-chain-per-side behaviour; an L/T/U footprint yields one run
+        per notched face, each at its own wall offset.
+        """
+        from .geometry import footprint_boundary, point_in_footprint
+
+        sections = self.plan.footprint_sections()
+        eps = 1e-3
+        intervals: dict[float, list[tuple[float, float]]] = {}
+        for (x1, y1), (x2, y2) in footprint_boundary(sections):
+            if side in ("S", "N"):
+                if abs(y1 - y2) > 1e-9:
+                    continue  # want a horizontal edge
+                offset = y1
+                mid = (x1 + x2) / 2.0
+                inside_hi = point_in_footprint(sections, mid, offset + eps)
+                inside_lo = point_in_footprint(sections, mid, offset - eps)
+                faces = (
+                    "S" if inside_hi and not inside_lo
+                    else "N" if inside_lo and not inside_hi else None
+                )
+                a, b = sorted((x1, x2))
+            else:
+                if abs(x1 - x2) > 1e-9:
+                    continue  # want a vertical edge
+                offset = x1
+                mid = (y1 + y2) / 2.0
+                inside_hi = point_in_footprint(sections, offset + eps, mid)
+                inside_lo = point_in_footprint(sections, offset - eps, mid)
+                faces = (
+                    "W" if inside_hi and not inside_lo
+                    else "E" if inside_lo and not inside_hi else None
+                )
+                a, b = sorted((y1, y2))
+            if faces != side:
+                continue
+            intervals.setdefault(offset, []).append((a, b))
+        runs: list[tuple[float, float, float]] = []
+        for offset, ivs in intervals.items():
+            ivs.sort()
+            cur_lo, cur_hi = ivs[0]
+            for lo, hi in ivs[1:]:
+                if lo <= cur_hi + 1e-9:
+                    cur_hi = max(cur_hi, hi)
+                else:
+                    runs.append((offset, cur_lo, cur_hi))
+                    cur_lo, cur_hi = lo, hi
+            runs.append((offset, cur_lo, cur_hi))
+        runs.sort()
+        return runs
+
+    def _run_breaks(
+        self,
+        side: str,
+        rooms: list,
+        offset: float,
+        lo: float,
+        hi: float,
+        tol: float = 1e-6,
+    ) -> list[float]:
+        """Break points partitioning one exterior run (``offset``, span ``[lo,hi]``).
+
+        Like :meth:`_chain_breaks` but keyed to a specific wall run: a room
+        contributes only when its wall lies on this run's ``offset`` *and* its
+        extent overlaps ``[lo, hi]`` — so a wing's north run collects only the
+        rooms backing that wing, not rooms on the deeper main-block wall.
+        """
+        if side in ("S", "N"):
+            edge = (lambda r: r.y) if side == "S" else (lambda r: r.y2)
+            touch = [
+                r for r in rooms
+                if abs(edge(r) - offset) <= tol
+                and min(r.x2, hi) - max(r.x, lo) > tol
+            ]
+            raw = [c for r in touch for c in (r.x, r.x2)]
+        else:
+            edge = (lambda r: r.x) if side == "W" else (lambda r: r.x2)
+            touch = [
+                r for r in rooms
+                if abs(edge(r) - offset) <= tol
+                and min(r.y2, hi) - max(r.y, lo) > tol
+            ]
+            raw = [c for r in touch for c in (r.y, r.y2)]
+        pts: list[float] = []
+        for c in sorted([lo, hi, *raw]):
+            c = min(max(c, lo), hi)
+            if not pts or c - pts[-1] > tol:
+                pts.append(c)
+        return pts
+
+    @staticmethod
+    def _label_min_px(label: str) -> float:
+        """Rough pixel run a size-9 segment label needs (skip it below this)."""
+        return len(label) * 5.5
+
+    # -- face-of-stud dimension convention (Phase 18) ----------------------
+
+    def _dim_bands(self, level: int) -> list[WallBand]:
+        """The shared wall-body bands for ``level``, cached — the same rectangles
+        the poché and DXF draw, so a face tick lands pixel-exact on a band edge."""
+        if level not in self._dim_band_cache:
+            self._dim_band_cache[level] = wall_bands(self.plan, level)
+        return self._dim_band_cache[level]
+
+    def _wall_faces(
+        self, side: str, coord: float, bands: list[WallBand], tol: float = 1e-6,
+    ) -> tuple[float, float]:
+        """The two face coordinates (on the chain axis) of the wall crossing the
+        chain at nominal interior break ``coord``.
+
+        The crossing wall is perpendicular to the chain, so a S/N chain reads a
+        vertical band's ``x`` faces and a W/E chain a horizontal band's ``y``
+        faces — straight off the shared :mod:`barndsl.wallbodies` geometry, which
+        already carries the real class thickness (a plumbing wall is the thicker
+        2x6). An interior partition is preferred over an exterior return that
+        happens to align. Falls back to ±half an ordinary partition when no band
+        sits on the line (a break with no framed wall — rare)."""
+        want = "v" if side in ("S", "N") else "h"
+        best: tuple[float, float] | None = None
+        best_interior = False
+        for b in bands:
+            if b.orientation != want:
+                continue
+            f0, f1 = (b.x0, b.x1) if want == "v" else (b.y0, b.y1)
+            if abs((f0 + f1) / 2.0 - coord) > tol:
+                continue
+            interior = b.kind == "interior"
+            if best is None or (interior and not best_interior):
+                best = (min(f0, f1), max(f0, f1))
+                best_interior = interior
+                if interior:
+                    break
+        if best is not None:
+            return best
+        half = INTERIOR_WALL_THICKNESS / 2.0
+        return (coord - half, coord + half)
+
+    def _chain_ticks(
+        self,
+        side: str,
+        room_pts: list[float],
+        jamb_pts: list[float],
+        lo: float,
+        hi: float,
+        level: int = 0,
+        tol: float = 1e-6,
+    ) -> list[float]:
+        """Final chain tick coordinates for the active dim mode.
+
+        ``room_pts`` are the nominal room-edge breaks including the two span
+        endpoints (``room_pts[0] == lo``, ``room_pts[-1] == hi``); ``jamb_pts``
+        the opening jambs. In ``"nominal"`` mode this is exactly the historical
+        ``_with_jambs(room_pts, jamb_pts)`` — byte-identical.
+
+        In ``"faces"`` mode the two span ends move OUT to the outside envelope
+        face (± half an exterior wall), each interior room break becomes the TWO
+        faces of the wall crossing there (a thin wall-thickness segment), and the
+        opening jambs stay exactly where they are (already face-of-opening). The
+        ticks partition ``[lo-ext, hi+ext]``, so the segments always sum to the
+        faces-mode overall."""
+        if self.c.dim_mode != "faces":
+            return self._with_jambs(room_pts, jamb_pts)
+        ext = EXTERIOR_WALL_THICKNESS / 2.0
+        bands = self._dim_bands(level)
+        ticks: list[float] = []
+        for p in room_pts:
+            if abs(p - lo) <= tol:
+                ticks.append(lo - ext)  # outside face, low end
+            elif abs(p - hi) <= tol:
+                ticks.append(hi + ext)  # outside face, high end
+            else:
+                near, far = self._wall_faces(side, p, bands)
+                ticks.append(near)
+                ticks.append(far)
+        # Jambs stay put; drop only those that would collapse against a room break
+        # (same rule the nominal chain uses so the two modes agree on which slivers
+        # are worth a tick).
+        for j in sorted(jamb_pts):
+            if all(abs(j - p) >= self._MIN_JAMB_SEG_FT for p in room_pts):
+                ticks.append(j)
+        ticks.sort()
+        out: list[float] = []
+        for c in ticks:
+            if not out or c - out[-1] > tol:
+                out.append(c)
+        return out
+
+    def _draw_chain_dims(self, level: int | None = None) -> None:
+        """Draw a chained dimension string along each exterior side that has an
+        interior break — a run of tick-to-tick segments between the wall and the
+        overall dimension line. The breaks are the interior room boundaries that
+        meet the wall AND the jambs of any exterior opening on it, so the chain
+        reads wall-segment / opening-width / wall-segment. A side with no room
+        boundary *and* no opening is left to the overall dimension (no duplicated
+        single-segment string)."""
+        fx0, fy0, fx1, fy1 = self.plan.bounds()
+        lvl = level or 0
+        rooms = [r for r in self.plan.rooms if level is None or r.level == level]
+        if self.plan.wings:
+            # L/T/U footprint: chain along each notched exterior run at its own
+            # wall offset, not the rectangular bounds.
+            for side in ("S", "N", "W", "E"):
+                for offset, lo, hi in self._exterior_runs(side):
+                    room_pts = self._run_breaks(side, rooms, offset, lo, hi)
+                    jambs = self._opening_jambs(side, rooms, offset, lo, hi)
+                    pts = self._chain_ticks(side, room_pts, jambs, lo, hi, lvl)
+                    if len(pts) <= 2:
+                        continue
+                    self._chain_string(side, pts, offset)
+            return
+        for side in ("S", "N", "W", "E"):
+            room_pts, lo, hi = self._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
+            wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
+            jambs = (self._opening_jambs(side, rooms, wall, fx0, fx1)
+                     if side in ("S", "N") else
+                     self._opening_jambs(side, rooms, wall, fy0, fy1))
+            pts = self._chain_ticks(side, room_pts, jambs, lo, hi, lvl)
+            if len(pts) <= 2:
+                continue  # no interior break and no opening — overall dim covers it
+            self._chain_string(side, pts, wall)
+
+    def _chain_string(self, side: str, pts: list[float], wall_coord: float) -> None:
+        off, tick = self._CHAIN_OFFSET, self._CHAIN_TICK
+        if side in ("S", "N"):
+            wy = self.sy(wall_coord)
+            ly = wy + off if side == "S" else wy - off
+            xs = [self.sx(p) for p in pts]
+            self._line(xs[0], ly, xs[-1], ly, DIM_COLOR, 1.0)
+            for x in xs:
+                self._line(x, ly - tick, x, ly + tick, DIM_COLOR, 1.0)
+            for a, b, xa, xb in zip(pts, pts[1:], xs, xs[1:]):
+                label = fmt_ft_in(b - a)
+                if (xb - xa) < self._label_min_px(label):
+                    continue
+                ty = ly - 3 if side == "S" else ly + 10
+                self._text((xa + xb) / 2, ty, label, size=9, fill=DIM_COLOR)
+        else:
+            wx = self.sx(wall_coord)
+            lx = wx - off if side == "W" else wx + off
+            ys = [self.sy(p) for p in pts]
+            self._line(lx, ys[0], lx, ys[-1], DIM_COLOR, 1.0)
+            for y in ys:
+                self._line(lx - tick, y, lx + tick, y, DIM_COLOR, 1.0)
+            for a, b, ya, yb in zip(pts, pts[1:], ys, ys[1:]):
+                label = fmt_ft_in(b - a)
+                if abs(yb - ya) < self._label_min_px(label):
+                    continue
+                cy = (ya + yb) / 2
+                tx = lx + 4 if side == "W" else lx - 4
+                self.parts.append(
+                    f'<text x="{tx:.1f}" y="{cy:.1f}" font-family="{self.c.font}" '
+                    f'font-size="9" fill="{DIM_COLOR}" text-anchor="middle" '
+                    f'transform="rotate(-90 {tx:.1f} {cy:.1f})">{escape(label)}</text>'
+                )
+
     def _draw_panel(self, multi: bool = False):
         px = self.c.margin_left + self.content_w + self.c.gutter
         if multi:
-            py = self.c.margin_top + self.label_gap
+            py = self.top + self.label_gap
             ph = (len(self.levels) - 1) * self.block_stride + self.content_h
         else:
-            py = self.c.margin_top
+            py = self.top
             ph = self.content_h
+        # Grow the panel rect to enclose its content when the legend runs long.
+        ph = max(ph, self._panel_ph)
         pw = self.c.panel_width
         m = self.plan.metrics()
 
@@ -816,7 +1807,7 @@ class _Renderer:
         rows += [
             ("Bedrooms", f"{int(m['bedroom_count'])}"),
             ("Bathrooms", f"{m['bathroom_count']:.1f}"),
-            ("Ceiling", f'{self.plan.ceiling_height:.1f}′'),
+            ("Ceiling", fmt_ft_in(self.plan.ceiling_height)),
             ("Ext. perimeter", f"{m['exterior_perimeter_ft']:.0f} ft"),
             ("Ext. wall area", f"{m['exterior_wall_area_sqft']:.0f} sq ft"),
             ("Roof area (≈)", f"{m['roof_area_sqft']:.0f} sq ft"),
@@ -847,3 +1838,340 @@ class _Renderer:
             y += 18
             self._rect(cx, y - 9, 12, 12, fill=ROOM_COLORS.get(t, "#f0f0f0"), stroke=WALL, sw=0.8)
             self._text(cx + 18, y, t.value.replace("_", " ").title(), size=10, anchor="start", fill="#444444")
+
+
+def _site_legend_rows(plan: Barndominium, ss) -> list[tuple[str, str]]:
+    """``(marker, label)`` rows for the site legend — one per feature kind present
+    (plus grade). Empty when the plan declares no site-plan v2 feature, so a plain
+    ``site``/``setback`` drawing gets no legend block."""
+    rows: list[tuple[str, str]] = []
+    surfaces = sorted({d.surface for d in ss.drives})
+    if ss.drives:
+        rows.append(("▭", "Driveway — " + ", ".join(surfaces)))
+    if ss.walks:
+        rows.append(("—", "Walkway to a door"))
+    if ss.wells:
+        rows.append(("Ⓦ", "Water well"))
+    if ss.septics:
+        rows.append(("▤", "Septic tank + drain field"))
+    for sv in ss.services:
+        rows.append(("→", f"Service: {sv.utility} from {sv.side.value}"))
+    if plan.grade is not None:
+        rows.append(("↥", f"Finish floor {fmt_ft_in(plan.grade)} above grade"))
+    return rows
+
+
+def render_site_svg(plan: Barndominium) -> str:
+    """Render a site plan: the lot boundary, the required setback lines, and the
+    building footprint placed on the lot, with a north arrow, the street side, and
+    lot/setback dimensions in feet-and-inches.
+
+    Requires a declared ``site`` (lot dimensions); returns a small placeholder
+    otherwise. The building is drawn at its declared ``building at <x>,<y>``
+    position, or centred on the lot when none is given (the setback check makes
+    the same choice explicit). This is a lightweight standalone drawing — it does
+    not use the floor-plan renderer's panel/scale machinery."""
+    ss = plan.site_spec
+    if ss is None or not ss.has_dims:
+        return (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60" '
+            'viewBox="0 0 240 60"><rect width="240" height="60" fill="#ffffff" />'
+            f'<text x="120" y="34" font-family="{RenderConfig().font}" font-size="12" '
+            'fill="#888888" text-anchor="middle">No site declared — add `site '
+            '&lt;W&gt; x &lt;L&gt;`.</text></svg>'
+        )
+    assert ss.width is not None and ss.length is not None  # has_dims guaranteed both
+    lot_w = float(ss.width)
+    lot_l = float(ss.length)
+
+    # Footprint bounding box in plan coordinates (building + wings + porches).
+    minx, miny, maxx, maxy = plan.bounds()
+    for p in plan.porches:
+        minx = min(minx, p.x)
+        miny = min(miny, p.y)
+        maxx = max(maxx, p.x + p.width)
+        maxy = max(maxy, p.y + p.length)
+    fp_w = maxx - minx
+    fp_l = maxy - miny
+    if ss.has_building:
+        bx = float(ss.building_x or 0.0)
+        by = float(ss.building_y or 0.0)
+    else:  # centre the footprint's bbox on the lot
+        bx = (lot_w - fp_w) / 2.0 - minx
+        by = (lot_l - fp_l) / 2.0 - miny
+
+    font = RenderConfig().font
+    margin = 84.0
+    top = 66.0
+    avail = 520.0
+    scale = avail / max(lot_w, lot_l) if max(lot_w, lot_l) > 0 else 1.0
+    draw_w = lot_w * scale
+    draw_h = lot_l * scale
+    # A site-plan v2 legend of the features present (drive/walk/well/septic/service/
+    # grade). Built now because its row count sets the drawing's extra height.
+    legend_rows = _site_legend_rows(plan, ss)
+    legend_h = (len(legend_rows) * 15.0 + 22.0) if legend_rows else 0.0
+    width = margin * 2 + draw_w
+    height = top + draw_h + 66.0 + legend_h
+    parts: list[str] = []
+
+    def sx(x: float) -> float:
+        return margin + x * scale
+
+    def sy(y: float) -> float:
+        return top + (lot_l - y) * scale
+
+    def line(x1, y1, x2, y2, stroke, sw=1.0, dash=None):
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        parts.append(
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="{stroke}" stroke-width="{sw}"{d} />'
+        )
+
+    def text(x, y, s, size=11, anchor="middle", fill=TEXT_COLOR, weight="normal"):
+        parts.append(
+            f'<text x="{x:.1f}" y="{y:.1f}" font-family="{font}" font-size="{size}" '
+            f'fill="{fill}" text-anchor="{anchor}" font-weight="{weight}">{escape(s)}</text>'
+        )
+
+    parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0f}" '
+        f'height="{height:.0f}" viewBox="0 0 {width:.0f} {height:.0f}">'
+    )
+    parts.append(f'<rect width="{width:.0f}" height="{height:.0f}" fill="#ffffff" />')
+    text(margin, 32, f"Site Plan — {plan.name}", size=20, anchor="start", weight="bold")
+    text(margin, 52, f"Lot {fmt_ft_in(lot_w)} × {fmt_ft_in(lot_l)}", size=12,
+         anchor="start", fill="#666666")
+
+    # Lot boundary (heavy line).
+    parts.append(
+        f'<rect x="{sx(0):.1f}" y="{sy(lot_l):.1f}" width="{draw_w:.1f}" '
+        f'height="{draw_h:.1f}" fill="#fafaf6" stroke="{WALL}" stroke-width="2.6" />'
+    )
+
+    # Setback lines (dashed, labelled), only for declared edges. front = south.
+    def setback_edge(value, label, orient, at):
+        if value is None:
+            return
+        if orient == "h":  # horizontal line at lot-y = at
+            y = sy(at)
+            line(sx(0), y, sx(lot_w), y, "#B23A48", sw=1.2, dash="6 4")
+            ty = y - 4 if label.startswith("rear") else y + 13
+            text(sx(lot_w) - 6, ty, f"{fmt_ft_in(value)} {label} setback", size=9,
+                 anchor="end", fill="#B23A48")
+        else:  # vertical line at lot-x = at
+            x = sx(at)
+            line(x, sy(lot_l), x, sy(0), "#B23A48", sw=1.2, dash="6 4")
+            text(x + 3, sy(lot_l) + 26, f"{fmt_ft_in(value)} {label}", size=9,
+                 anchor="start", fill="#B23A48")
+
+    setback_edge(ss.front, "front", "h", ss.front or 0.0)
+    setback_edge(ss.rear, "rear", "h", lot_l - (ss.rear or 0.0))
+    setback_edge(ss.side, "W side", "v", ss.side or 0.0)
+    setback_edge(ss.side, "E side", "v", lot_w - (ss.side or 0.0))
+
+    # Building footprint on the lot (filled outline at the correct position).
+    hatch = "site-hatch"
+    parts.append(
+        f'<defs><pattern id="{hatch}" width="7" height="7" patternUnits="userSpaceOnUse" '
+        f'patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="7" '
+        f'stroke="#9a8a63" stroke-width="0.8" /></pattern></defs>'
+    )
+    for (sxf, syf, sw_, sl_) in plan.footprint_sections():
+        lx = bx + sxf
+        ly = by + syf
+        parts.append(
+            f'<rect x="{sx(lx):.1f}" y="{sy(ly + sl_):.1f}" width="{sw_ * scale:.1f}" '
+            f'height="{sl_ * scale:.1f}" fill="url(#{hatch})" stroke="{WALL}" '
+            f'stroke-width="1.6" />'
+        )
+    # Porches (open outline, no hatch) so the projecting footprint reads.
+    for p in plan.porches:
+        parts.append(
+            f'<rect x="{sx(bx + p.x):.1f}" y="{sy(by + p.y + p.length):.1f}" '
+            f'width="{p.width * scale:.1f}" height="{p.length * scale:.1f}" '
+            f'fill="none" stroke="{WALL}" stroke-width="1.0" stroke-dasharray="3 3" />'
+        )
+    # Building label at the footprint centre.
+    text(sx(bx + (minx + maxx) / 2.0), sy(by + (miny + maxy) / 2.0) + 4, "BUILDING",
+         size=11, weight="bold", fill="#5A3210")
+
+    # --- Site-plan v2 features (drive / walk / well / septic / service) --------
+    _DRIVE_FILL = {"gravel": "#e7e0cd", "concrete": "#e2e2e2", "asphalt": "#c8c8ce"}
+
+    def _rect(x, y, w, l, fill, stroke, sw=1.2, dash=None):
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        parts.append(
+            f'<rect x="{sx(x):.1f}" y="{sy(y + l):.1f}" width="{w * scale:.1f}" '
+            f'height="{l * scale:.1f}" fill="{fill}" stroke="{stroke}" '
+            f'stroke-width="{sw}"{d} />'
+        )
+
+    for d in ss.drives:
+        _rect(d.x, d.y, d.width, d.length, _DRIVE_FILL.get(d.surface, "#e7e0cd"),
+              "#8a8a80", sw=1.2)
+        text(sx(d.x + d.width / 2.0), sy(d.y + d.length / 2.0) + 3,
+             f"DRIVE ({d.surface})", size=9, fill="#6b6b5e")
+
+    # Walkways: a strip from a room's exterior door to the nearest drive edge.
+    for wk, p0, target, _wlen in plan.walk_paths():
+        parts.append(
+            f'<line x1="{sx(p0[0]):.1f}" y1="{sy(p0[1]):.1f}" x2="{sx(target[0]):.1f}" '
+            f'y2="{sy(target[1]):.1f}" stroke="#cfc7b0" '
+            f'stroke-width="{max(3.0, wk.width * scale):.1f}" stroke-linecap="round" />'
+        )
+        parts.append(
+            f'<line x1="{sx(p0[0]):.1f}" y1="{sy(p0[1]):.1f}" x2="{sx(target[0]):.1f}" '
+            f'y2="{sy(target[1]):.1f}" stroke="#a89f82" stroke-width="0.7" '
+            f'stroke-dasharray="2 3" />'
+        )
+
+    # Wells: a circle with a W.
+    for wl in ss.wells:
+        parts.append(
+            f'<circle cx="{sx(wl.x):.1f}" cy="{sy(wl.y):.1f}" r="9" fill="#ffffff" '
+            f'stroke="#2b6cb0" stroke-width="1.6" />'
+        )
+        text(sx(wl.x), sy(wl.y) + 4, "W", size=11, weight="bold", fill="#2b6cb0")
+
+    # Septic: a tank rectangle + a drain-field lattice (parallel drain lines).
+    for sp in ss.septics:
+        rects = sp.rects()
+        tx1, ty1, tx2, ty2 = rects[0]
+        _rect(tx1, ty1, tx2 - tx1, ty2 - ty1, "#dfe7df", "#4a7a4a", sw=1.4)
+        text(sx((tx1 + tx2) / 2.0), sy((ty1 + ty2) / 2.0) + 3, "S", size=10,
+             weight="bold", fill="#4a7a4a")
+        if sp.has_field:
+            fx1, fy1, fx2, fy2 = rects[1]
+            _rect(fx1, fy1, fx2 - fx1, fy2 - fy1, "none", "#4a7a4a", sw=1.0, dash="4 3")
+            # A lattice of drain lines running the field's long axis.
+            n = max(2, int((fy2 - fy1) / 6.0))
+            for i in range(1, n):
+                yy = fy1 + (fy2 - fy1) * i / n
+                line(sx(fx1) + 2, sy(yy), sx(fx2) - 2, sy(yy), "#7aa47a", sw=0.7)
+            text(sx((fx1 + fx2) / 2.0), sy(fy2) - 5, "DRAIN FIELD", size=8,
+                 fill="#4a7a4a")
+
+    # Service drops: a labelled arrow entering from the named lot side.
+    _SVC_COLOR = {"electric": "#c05621", "water": "#2b6cb0", "gas": "#975a16"}
+    _svc_stack: dict[str, int] = {}
+    for sv in ss.services:
+        key = sv.side.value
+        idx = _svc_stack.get(key, 0)
+        _svc_stack[key] = idx + 1
+        col = _SVC_COLOR.get(sv.utility, "#555555")
+        off = idx * 16.0
+        if sv.side is Direction.NORTH:
+            ax, ay0, ay1 = sx(lot_w * 0.5) + off, sy(lot_l) - 4, sy(lot_l) + 26
+        elif sv.side is Direction.SOUTH:
+            ax, ay0, ay1 = sx(lot_w * 0.5) + off, sy(0) + 4, sy(0) - 26
+        elif sv.side is Direction.WEST:
+            ay, ax0, ax1 = sy(lot_l * 0.5) + off, sx(0) - 26, sx(0) + 4
+        else:
+            ay, ax0, ax1 = sy(lot_l * 0.5) + off, sx(lot_w) + 26, sx(lot_w) - 4
+        if sv.side in (Direction.NORTH, Direction.SOUTH):
+            line(ax, ay0, ax, ay1, col, sw=1.6)
+            parts.append(
+                f'<circle cx="{ax:.1f}" cy="{ay1:.1f}" r="2.4" fill="{col}" />'
+            )
+            text(ax + 4, (ay0 + ay1) / 2.0, sv.utility, size=8, anchor="start", fill=col)
+        else:
+            line(ax0, ay, ax1, ay, col, sw=1.6)
+            parts.append(
+                f'<circle cx="{ax1:.1f}" cy="{ay:.1f}" r="2.4" fill="{col}" />'
+            )
+            text((ax0 + ax1) / 2.0, ay - 4, sv.utility, size=8, fill=col)
+
+    # --- Actual building-to-lot-line clearances (dimensioned) -----------------
+    # Today only the *required* setback lines draw; here we dimension the building's
+    # real distance to each lot line so a plans desk can read the yards.
+    dimc = DIM_COLOR
+    bcx = bx + (minx + maxx) / 2.0
+    bcy = by + (miny + maxy) / 2.0
+
+    def _vdim(y_lo, y_hi, x_at, val):
+        if val <= EPSILON:
+            return
+        xx = sx(x_at)
+        line(xx, sy(y_lo), xx, sy(y_hi), dimc, sw=0.7)
+        line(xx - 3, sy(y_lo), xx + 3, sy(y_lo), dimc, sw=0.7)
+        line(xx - 3, sy(y_hi), xx + 3, sy(y_hi), dimc, sw=0.7)
+        text(xx + 3, (sy(y_lo) + sy(y_hi)) / 2.0 + 3, fmt_ft_in(val), size=8,
+             anchor="start", fill=dimc)
+
+    def _hdim(x_lo, x_hi, y_at, val):
+        if val <= EPSILON:
+            return
+        yy = sy(y_at)
+        line(sx(x_lo), yy, sx(x_hi), yy, dimc, sw=0.7)
+        line(sx(x_lo), yy - 3, sx(x_lo), yy + 3, dimc, sw=0.7)
+        line(sx(x_hi), yy - 3, sx(x_hi), yy + 3, dimc, sw=0.7)
+        text((sx(x_lo) + sx(x_hi)) / 2.0, yy - 3, fmt_ft_in(val), size=8, fill=dimc)
+
+    _vdim(0.0, by + miny, bcx, by + miny)                    # front (south) yard
+    _vdim(by + maxy, lot_l, bcx, lot_l - (by + maxy))        # rear (north) yard
+    _hdim(0.0, bx + minx, bcy, bx + minx)                    # west side yard
+    _hdim(bx + maxx, lot_w, bcy, lot_w - (bx + maxx))        # east side yard
+
+    # Street side marker (reuse the `street` directive; front = south edge).
+    st = plan.street
+    if st is not None:
+        col = "#8A8F98"
+        if st in (Direction.SOUTH, Direction.NORTH):
+            y = sy(0) if st is Direction.SOUTH else sy(lot_l)
+            line(sx(0), y, sx(lot_w), y, col, sw=4.0)
+            text(sx(lot_w / 2.0), y + (16 if st is Direction.SOUTH else -7), "STREET",
+                 size=10, fill=col)
+        else:
+            x = sx(0) if st is Direction.WEST else sx(lot_w)
+            line(x, sy(0), x, sy(lot_l), col, sw=4.0)
+            text(x, sy(lot_l) - 6, "STREET", size=10, fill=col,
+                 anchor="start" if st is Direction.WEST else "end")
+
+    # North arrow (top-right of the drawing).
+    theta = math.radians(plan.orientation or 0.0)
+    cx, cy, r = width - 46.0, top + 4.0, 20.0
+    dx, dy = -math.sin(theta), -math.cos(theta)
+    px, py = -dy, dx
+    parts.append(
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="#ffffff" '
+        f'stroke="#bbbbbb" stroke-width="1" />'
+    )
+    tipx, tipy = cx + dx * r, cy + dy * r
+    line(cx - dx * r * 0.7, cy - dy * r * 0.7, tipx, tipy, WALL, sw=1.6)
+    hbx, hby = tipx - dx * 7.0, tipy - dy * 7.0
+    parts.append(
+        f'<polygon points="{tipx:.1f},{tipy:.1f} {hbx + px * 4:.1f},{hby + py * 4:.1f} '
+        f'{hbx - px * 4:.1f},{hby - py * 4:.1f}" fill="{WALL}" />'
+    )
+    text(cx + dx * (r + 9), cy + dy * (r + 9) + 3, "N", size=11, weight="bold")
+
+    # Overall lot dimensions (bottom = width, left = length).
+    dimcol = DIM_COLOR
+    by_dim = sy(0) + 40
+    line(sx(0), by_dim, sx(lot_w), by_dim, dimcol, sw=0.8)
+    line(sx(0), by_dim - 4, sx(0), by_dim + 4, dimcol, sw=0.8)
+    line(sx(lot_w), by_dim - 4, sx(lot_w), by_dim + 4, dimcol, sw=0.8)
+    text(sx(lot_w / 2.0), by_dim - 5, fmt_ft_in(lot_w), size=10, fill=dimcol)
+    lx_dim = sx(0) - 46
+    line(lx_dim, sy(0), lx_dim, sy(lot_l), dimcol, sw=0.8)
+    line(lx_dim - 4, sy(0), lx_dim + 4, sy(0), dimcol, sw=0.8)
+    line(lx_dim - 4, sy(lot_l), lx_dim + 4, sy(lot_l), dimcol, sw=0.8)
+    parts.append(
+        f'<text x="{lx_dim - 6:.1f}" y="{(sy(0) + sy(lot_l)) / 2:.1f}" '
+        f'font-family="{font}" font-size="10" fill="{dimcol}" text-anchor="middle" '
+        f'transform="rotate(-90 {lx_dim - 6:.1f} {(sy(0) + sy(lot_l)) / 2:.1f})">'
+        f'{escape(fmt_ft_in(lot_l))}</text>'
+    )
+
+    # Site legend (only when the plan declares site-plan v2 features).
+    if legend_rows:
+        ly0 = top + draw_h + 54.0
+        text(margin, ly0, "Legend", size=11, anchor="start", weight="bold")
+        for i, (marker, label) in enumerate(legend_rows):
+            ry = ly0 + 15.0 * (i + 1)
+            text(margin, ry, f"{marker}  {label}", size=10, anchor="start",
+                 fill="#555555")
+
+    parts.append("</svg>")
+    return "\n".join(parts)

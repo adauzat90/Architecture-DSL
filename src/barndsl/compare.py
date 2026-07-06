@@ -17,6 +17,7 @@ from collections import Counter
 from typing import Any
 
 from .compiler import CompileResult
+from .cost import estimate_cost
 from .score import design_score
 
 #: The takeoff lines worth comparing side by side (present-in-metrics only).
@@ -31,6 +32,7 @@ _METRIC_KEYS = (
     "roof_area_sqft",
     "beam_linear_ft",
     "post_count",
+    "counter_linear_ft",
 )
 
 
@@ -51,32 +53,131 @@ def _side(name: str, result: CompileResult) -> dict[str, Any]:
     return out
 
 
+def _cost_expected(result: CompileResult) -> float | None:
+    """The expected total cost for a *cleanly* compiled side, or ``None``.
+
+    A side that failed to compile — no plan, or any error-severity diagnostic —
+    has no trustworthy takeoff, so the comparison omits the cost line rather than
+    quote a number built on a half-parsed plan."""
+    if not result.ok:
+        return None
+    try:
+        return float(estimate_cost(result.plan)["total"]["expected"])
+    except (ValueError, KeyError):
+        return None
+
+
 def compare_plans(
     a: CompileResult, b: CompileResult, names: tuple[str, str] = ("a", "b")
 ) -> dict[str, Any]:
     """A deterministic side-by-side of two compiles.
 
-    ``resolved`` are diagnostic codes present in A but gone (or rarer) in B;
-    ``introduced`` the reverse — each mapping code → how many. ``deltas``
-    carry B − A for the score and every shared metric.
+    Diagnostic codes are bucketed by how their *count* moved A → B:
+
+    * ``resolved`` — present in A, **gone entirely** (count 0) in B.
+    * ``introduced`` — brand new in B (absent from A).
+    * ``fewer`` — present in both, count **dropped but still fires** (``[a, b]``).
+    * ``more`` — present in both, count **rose** (``[a, b]``).
+
+    ``resolved``/``introduced`` map code → count; ``fewer``/``more`` map code →
+    ``[count_a, count_b]``. ``deltas`` carry B − A for the score and every shared
+    metric. ``cost`` carries ``{a, b, delta}`` expected totals when *both* sides
+    compiled cleanly (omitted otherwise — see :func:`_cost_expected`).
     """
     side_a, side_b = _side(names[0], a), _side(names[1], b)
     codes_a = Counter(d.code for d in a.diagnostics)
     codes_b = Counter(d.code for d in b.diagnostics)
-    resolved = {c: n for c, n in sorted((codes_a - codes_b).items())}
-    introduced = {c: n for c, n in sorted((codes_b - codes_a).items())}
+    resolved = {c: n for c, n in sorted(codes_a.items()) if codes_b[c] == 0}
+    introduced = {c: n for c, n in sorted(codes_b.items()) if codes_a[c] == 0}
+    fewer = {
+        c: [na, codes_b[c]]
+        for c, na in sorted(codes_a.items())
+        if 0 < codes_b[c] < na
+    }
+    more = {
+        c: [codes_a[c], nb]
+        for c, nb in sorted(codes_b.items())
+        if codes_a[c] > 0 and nb > codes_a[c]
+    }
     metric_deltas = {
         k: round(side_b["metrics"][k] - side_a["metrics"][k], 2)
         for k in _METRIC_KEYS
         if k in side_a["metrics"] and k in side_b["metrics"]
     }
-    return {
+    out: dict[str, Any] = {
         "a": side_a,
         "b": side_b,
         "deltas": {"score": round(side_b["score"] - side_a["score"], 1), **metric_deltas},
         "resolved": resolved,
         "introduced": introduced,
+        "fewer": fewer,
+        "more": more,
     }
+    cost_a, cost_b = _cost_expected(a), _cost_expected(b)
+    if cost_a is not None and cost_b is not None:
+        out["cost"] = {"a": cost_a, "b": cost_b, "delta": round(cost_b - cost_a, 2)}
+    return out
+
+
+def compare_series(
+    results: list[CompileResult], names: list[str]
+) -> dict[str, Any]:
+    """An N-way change-order comparison over 3+ plans: A → B → C → …
+
+    Renders as consecutive pairwise steps (A→B, B→C, …) — each step is exactly a
+    :func:`compare_plans` dict, so nothing about the two-file shape changes — plus
+    an ``overall`` head-to-tail roll-up (score and, when the first and last both
+    compiled cleanly, cost from A to the final plan)::
+
+        {"steps": [<compare_plans A→B>, <compare_plans B→C>, …], "overall": {…}}
+
+    ``overall`` always carries ``names`` (``[first, last]``) and ``score``
+    (``{first, last, delta}``); it carries ``cost`` (same triple) only when both
+    ends priced cleanly — the same honesty rule as a single pairwise ``cost``.
+    """
+    if len(results) < 2:
+        raise ValueError("compare_series needs at least two plans")
+    steps = [
+        compare_plans(results[i], results[i + 1], (names[i], names[i + 1]))
+        for i in range(len(results) - 1)
+    ]
+    first, last = _side(names[0], results[0]), _side(names[-1], results[-1])
+    overall: dict[str, Any] = {
+        "names": [names[0], names[-1]],
+        "score": {
+            "first": first["score"],
+            "last": last["score"],
+            "delta": round(last["score"] - first["score"], 1),
+        },
+    }
+    cost_first, cost_last = _cost_expected(results[0]), _cost_expected(results[-1])
+    if cost_first is not None and cost_last is not None:
+        overall["cost"] = {
+            "first": cost_first,
+            "last": cost_last,
+            "delta": round(cost_last - cost_first, 2),
+        }
+    return {"steps": steps, "overall": overall}
+
+
+def series_text(series: dict[str, Any]) -> str:
+    """Human rendering of a :func:`compare_series` roll-up: each pairwise step
+    under an ``A → B`` header, then a compact head-to-tail summary line."""
+    blocks: list[str] = []
+    for step in series["steps"]:
+        header = f"=== {step['a']['name']} → {step['b']['name']} ==="
+        blocks.append(header + "\n" + comparison_text(step))
+    o = series["overall"]
+    sc = o["score"]
+    summary = (
+        f"Overall {o['names'][0]} → {o['names'][1]}: "
+        f"score {sc['first']:g} → {sc['last']:g} ({sc['delta']:+g})"
+    )
+    if "cost" in o:
+        c = o["cost"]
+        summary += f", cost {_money(c['first'])} → {_money(c['last'])} ({_signed_money(c['delta'])})"
+    blocks.append(summary)
+    return "\n\n".join(blocks)
 
 
 def comparison_text(cmp: dict[str, Any]) -> str:
@@ -100,6 +201,11 @@ def comparison_text(cmp: dict[str, Any]) -> str:
                     f"  {k:<24} {a['metrics'][k]:g} vs {b['metrics'][k]:g}"
                     + (f"  ({d:+g})" if d else "")
                 )
+    if "cost" in cmp:
+        c = cmp["cost"]
+        lines.append(
+            f"Cost: {_money(c['a'])} → {_money(c['b'])} ({_signed_money(c['delta'])})"
+        )
     if cmp["resolved"]:
         lines.append(
             "Resolved in %s: %s"
@@ -110,6 +216,24 @@ def comparison_text(cmp: dict[str, Any]) -> str:
             "Introduced in %s: %s"
             % (b["name"], ", ".join(f"{c} x{n}" if n > 1 else c for c, n in cmp["introduced"].items()))
         )
-    if not cmp["resolved"] and not cmp["introduced"]:
+    if cmp.get("fewer"):
+        lines.append(
+            "Fewer in %s: %s"
+            % (b["name"], ", ".join(f"{c} ({na} → {nb})" for c, (na, nb) in cmp["fewer"].items()))
+        )
+    if cmp.get("more"):
+        lines.append(
+            "More in %s: %s"
+            % (b["name"], ", ".join(f"{c} ({na} → {nb})" for c, (na, nb) in cmp["more"].items()))
+        )
+    if not any(cmp.get(k) for k in ("resolved", "introduced", "fewer", "more")):
         lines.append("Diagnostics: identical code sets.")
     return "\n".join(lines)
+
+
+def _money(v: float) -> str:
+    return f"${v:,.0f}"
+
+
+def _signed_money(v: float) -> str:
+    return f"{'+' if v >= 0 else '-'}${abs(v):,.0f}"

@@ -352,6 +352,9 @@ def test_oakline_example_compiles_clean():
     out = solve_layout2(parse_brief2(open(path).read()))
     result = compile_source(emit_dsl(out.plan), name=out.plan.name)
     assert not result.errors, result.report()
+    # The auto-layout now DECLARES `tempered` on the windows it places in R308.4
+    # hazard locations (via the shared predicate), so no WINDOW_TEMPERED warning
+    # survives — the plan is strictly clean of warnings.
     assert not result.warnings, result.report()
     assert out.unsatisfied == []
 

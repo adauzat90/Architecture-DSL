@@ -838,3 +838,110 @@ def test_design_explicit_none_target_score_still_disables_the_gate(monkeypatch):
     # CLEAN compiles and the critic is satisfied; with the gate disabled the loop
     # finishes on round 1 instead of grinding to the env's target of 100.
     assert result.iterations == 1
+
+
+# -- prompting for compat-gateway models (the DeepSeek pass) -------------------
+
+
+def test_the_embedded_example_plan_compiles_perfect():
+    """The few-shot in the system prompt must never rot against the grammar."""
+    from barndsl.agent import _EXAMPLE_PLAN
+    from barndsl.score import design_score
+
+    result = compile_source(_EXAMPLE_PLAN)
+    assert result.plan is not None
+    assert not result.diagnostics, [d.code for d in result.diagnostics]
+    assert design_score(result).total == 100.0
+
+
+def test_generate_system_teaches_the_anchor_rule_and_shows_the_example():
+    from barndsl.agent import _EXAMPLE_PLAN, _GENERATE_SYSTEM
+
+    assert "ANCHOR RULE" in _GENERATE_SYSTEM
+    assert "TILE, THEN CONNECT" in _GENERATE_SYSTEM
+    assert _EXAMPLE_PLAN in _GENERATE_SYSTEM
+    # The strict output contract: exactly one fenced block, complete source.
+    assert "exactly ONE ```barn code block" in _GENERATE_SYSTEM
+
+
+def test_extract_source_trims_prose_around_unfenced_dsl():
+    """A gateway model that ignores the fence still yields compilable source."""
+    from barndsl.agent import _extract_source
+
+    reply = (
+        "Here is the plan you asked for:\n"
+        "\n"
+        'plan "Test"\n'
+        "envelope 30 x 20\n"
+        "room living: living at 0,0 size 30 x 20\n"
+        "\n"
+        "This design provides an open living space with good flow.\n"
+    )
+    src = _extract_source(reply)
+    assert src.startswith('plan "Test"')
+    assert "good flow" not in src
+
+
+def test_extract_source_still_prefers_the_fence_and_whole_text_fallback():
+    from barndsl.agent import _extract_source
+
+    fenced = "prose\n```barn\nplan \"A\"\nenvelope 30 x 20\n```\nmore prose"
+    assert _extract_source(fenced) == 'plan "A"\nenvelope 30 x 20\n'
+    # No fence, no statement keyword anywhere: the old whole-text behaviour.
+    assert _extract_source("nothing at all") == "nothing at all\n"
+
+
+def test_write_source_retries_once_on_an_empty_reply_then_raises():
+    import pytest
+
+    class EmptyClient:
+        def __init__(self, texts):
+            self._texts = list(texts)
+            self.calls = 0
+            self.messages = self
+
+        def stream(self, **kwargs):
+            self.calls += 1
+            return _FakeStream(self._texts.pop(0))
+
+    # Empty then a real reply: the retry rescues the round.
+    client = EmptyClient(["", "```barn\nplan \"B\"\nenvelope 30 x 20\n```"])
+    agent = BarndoAgent(client=client)
+    src = agent.write_source("a cabin")
+    assert client.calls == 2
+    assert 'plan "B"' in src
+
+    # Empty twice: fail loudly with the gateway hint, not a blank plan.
+    client = EmptyClient(["", "  "])
+    agent = BarndoAgent(client=client)
+    with pytest.raises(RuntimeError, match="BARNDSL_MODEL"):
+        agent.write_source("a cabin")
+    assert client.calls == 2
+
+
+def test_fold_critique_caps_suggestions_at_five():
+    from barndsl.agent import _fold_critique
+
+    result = compile_source('plan "T"\nenvelope 30 x 20\n')
+    before = len(result.diagnostics)
+    crit = _unsatisfied(*[f"suggestion {i}" for i in range(12)])
+    _fold_critique(result, crit)
+    design = [d for d in result.diagnostics if d.code == "DESIGN"]
+    assert len(design) == 5
+    assert len(result.diagnostics) == before + 5
+
+
+def test_critique_prompt_asks_for_at_most_five_suggestions():
+    from barndsl.agent import _CRITIQUE_JSON
+
+    assert "AT MOST 5" in _CRITIQUE_JSON
+
+
+def test_revision_prompt_pins_smallest_change_and_full_source():
+    client = FakeClient(
+        sources=[BROKEN, CLEAN], critiques=[_satisfied()]
+    )
+    _agent(client).design("a cottage", max_iterations=2, target_score=None)
+    revision = client.stream_prompts[1]
+    assert "COMPLETE revised source" in revision
+    assert "smallest revision" in revision

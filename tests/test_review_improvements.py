@@ -320,7 +320,8 @@ def test_compile_result_to_dict_is_machine_readable():
     # Every diagnostic exposes the stable field set.
     for d in data["diagnostics"]:
         assert set(d) == {
-            "code", "severity", "line", "col", "end_col", "room", "message", "hint"
+            "code", "severity", "line", "col", "end_col", "room", "message", "hint",
+            "accepted", "accept_reason", "file", "part",
         }
 
 

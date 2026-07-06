@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from barndsl import compile_file, compile_source, emit_dsl
+from barndsl.validation import Severity
 
 GALLERY = Path(__file__).resolve().parent.parent / "examples" / "gallery"
 PLANS = sorted(GALLERY.glob("*.barn"))
@@ -25,12 +26,17 @@ def test_gallery_is_non_empty():
 
 @pytest.mark.parametrize("path", PLANS, ids=lambda p: p.stem)
 def test_gallery_plan_is_pristine(path: Path):
-    """Every gallery plan compiles with zero diagnostics of any severity."""
+    """Every gallery plan compiles with zero *unaccepted* diagnostics of any
+    severity. A plan may carry a documented `# barndsl: accept CODE` pragma for a
+    non-suppressible checklist reminder (two_story's STAIR_HANDRAIL — a rail the
+    DSL can't draw); an accepted diagnostic is a deliberate, audited clean choice,
+    so it doesn't count against pristineness."""
     result = compile_file(str(path))
     assert result.plan is not None, result.report(path.name)
-    assert not result.errors, result.report(path.name)
-    assert not result.warnings, result.report(path.name)
-    assert not result.infos, result.report(path.name)
+    active = [d for d in result.diagnostics if not getattr(d, "accepted", False)]
+    assert not [d for d in active if d.severity is Severity.ERROR], result.report(path.name)
+    assert not [d for d in active if d.severity is Severity.WARNING], result.report(path.name)
+    assert not [d for d in active if d.severity is Severity.INFO], result.report(path.name)
 
 
 @pytest.mark.parametrize("path", PLANS, ids=lambda p: p.stem)

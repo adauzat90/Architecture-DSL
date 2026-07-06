@@ -129,6 +129,33 @@ def test_builder_frame_matches_the_compiler():
     assert len(built.posts) == len(compiled.posts)
 
 
+# --- post-grid dimension string (render) -------------------------------------
+
+
+def test_render_prints_a_post_spacing_dimension_when_a_frame_is_placed():
+    from barndsl.render import render_svg
+
+    p = _plan().plan  # 60×40, bays ≤ 12 ft along the 60 ft (x) length
+    svg = render_svg(p)
+    # The defining barndo measurement — post spacing on centre — is printed.
+    assert "POSTS o.c." in svg
+    # Six posts along the 60 ft length at 12 ft o.c. → 5 bay segments labelled 12′.
+    assert svg.count(">12′<") >= 5
+
+
+def test_no_post_dimension_without_a_frame():
+    from barndsl.render import render_svg
+
+    src = """\
+plan "Plain"
+envelope 40 x 30
+ceiling 9
+room living: living at 0,0 size 40 x 30
+entry living south width 3 offset 8
+"""
+    assert "POSTS o.c." not in render_svg(compile_source(src).plan)
+
+
 # --- diagnostics -------------------------------------------------------------
 
 

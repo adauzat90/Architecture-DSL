@@ -63,7 +63,7 @@ from .gltf import build_scene, to_glb, to_gltf, write_gltf
 from .ifc import to_ifc, write_ifc
 from .viewer import viewer_html, write_viewer
 from .playground import compile_payload, make_server, run as serve
-from .render import RenderConfig, render_svg, save_render, save_svg
+from .render import RenderConfig, render_site_svg, render_svg, save_render, save_svg
 from .views import (
     elevation_svg,
     save_elevation,
@@ -90,7 +90,7 @@ from .revit import (
     to_revit_model,
 )
 from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
-from .compare import compare_plans, comparison_text
+from .compare import compare_plans, compare_series, comparison_text, series_text
 from .revitdiff import diff_plans, diff_text
 from .cost import cost_text, estimate_cost
 from .packet import build_packet, save_packet
@@ -160,7 +160,9 @@ __all__ = [
     # resolved-geometry introspection (the geometry pack behind `barndsl inspect`)
     "buildlog_issues",
     "compare_plans",
+    "compare_series",
     "comparison_text",
+    "series_text",
     # revit-diff: drift between a Revit model export and the authored plan
     "diff_plans",
     "diff_text",
@@ -179,6 +181,7 @@ __all__ = [
     "plan_room_fixtures",
     # rendering
     "render_svg",
+    "render_site_svg",
     "save_svg",
     "save_render",
     "RenderConfig",
@@ -225,4 +228,4 @@ __all__ = [
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

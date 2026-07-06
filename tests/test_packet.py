@@ -67,6 +67,29 @@ def test_multi_level_plan_renders_a_block_per_level():
     assert "LEVEL 1" in html
 
 
+def test_floor_plan_states_the_architectural_scale_and_draws_a_scale_bar():
+    html = _html()
+    # The permit sheet is drawn to a real scale, stated in the title area…
+    assert "SCALE:" in html
+    assert "= 1′-0″ (Letter)" in html
+    # …and carries a graphic scale bar (the reprographic-safe backup).
+    assert "FEET" in html
+    # The embedded SVG is sized in physical inches so it prints at true scale.
+    assert "in; max-width:100%" in html
+    # The scaled wrapper forces the SVG to fill it (width:100%) — max-width
+    # alone shrinks but never grows, which would print below the stated scale
+    # whenever the chosen scale exceeds the drawing's natural CSS size.
+    assert 'class="svgwrap scaled"' in html
+    assert ".svgwrap.scaled svg { width: 100%;" in html
+
+
+def test_packet_sheet_selector_supports_tabloid():
+    letter = build_packet(compile_source(SRC), sheet="Letter")
+    tabloid = build_packet(compile_source(SRC), sheet="Tabloid")
+    assert "(Letter)" in letter
+    assert "(Tabloid)" in tabloid
+
+
 def test_schedules_section_has_rows():
     html = _html()
     assert "Room Schedule" in html
@@ -108,6 +131,41 @@ def test_multiplier_and_overrides_flow_into_the_cost_section():
     html = build_packet(compile_source(SRC), costs={"slab_sqft": 999.0}, multiplier=2.0)
     assert "regional multiplier x2" in html
     assert "$1,998" in html  # effective rate: 999 override x 2 multiplier
+
+
+# The Electrical Plan sheet has three states, keyed on what the plan declares.
+_ELEC_BASE = """\
+plan "Elec"
+envelope 24 x 20
+ceiling 9
+room living: living at 0,0 size 24 x 20
+entry living south width 3 offset 8
+"""
+
+
+def test_electrical_sheet_omitted_when_no_devices_and_no_alarms():
+    # Zero outlets/switches/lights AND zero alarms → no sheet at all (an
+    # examiner would bounce a 0/0/0 device table).
+    html = build_packet(compile_source(_ELEC_BASE))
+    assert "<h2>Electrical Plan</h2>" not in html
+
+
+def test_electrical_sheet_full_when_devices_declared():
+    src = _ELEC_BASE + "outlet in living wall S offset 3\nlight in living at 12,10\n"
+    html = build_packet(compile_source(src))
+    assert "<h2>Electrical Plan</h2>" in html
+    assert "Receptacles (outlets)" in html
+    # A real layout is present, so no "alarms only" caveat.
+    assert "alarms only" not in html
+
+
+def test_electrical_sheet_alarms_only_keeps_sheet_with_note():
+    src = _ELEC_BASE + "alarm smoke in living\nalarm co in living\n"
+    html = build_packet(compile_source(src))
+    # Alarms must be shown, so the sheet stays…
+    assert "<h2>Electrical Plan</h2>" in html
+    # …but it declares itself an alarms-only sheet rather than a device layout.
+    assert "No receptacle/switch/lighting layout declared — alarms only." in html
 
 
 def test_build_packet_rejects_planless_result():

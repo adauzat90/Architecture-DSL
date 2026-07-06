@@ -115,6 +115,38 @@ def test_small_bedroom_is_an_error():
     assert any(i.code in ("BEDROOM_AREA", "BEDROOM_DIM") for i in report.errors)
 
 
+def test_small_habitable_room_warns_r304():
+    # A tiny office (den) is habitable but below R304's 70 sq ft / 7 ft — a
+    # WARNING (not the bedroom's hard error), and never on a bedroom/kitchen.
+    plan = (
+        barndominium("Den")
+        .envelope(width=40, length=30)
+        .add_room("living", T.LIVING, x=0, y=0, width=34, length=30)
+        .add_room("den", T.OFFICE, x=34, y=0, width=6, length=8)
+        .entrance("living", D.SOUTH, width=3, offset=2)
+    )
+    report = validate(plan)
+    hab = [i for i in report.warnings if i.code == "ROOM_HABITABLE"]
+    assert hab and any(i.room == "den" for i in hab)
+    # It's a warning, not an error.
+    assert not any(i.code == "ROOM_HABITABLE" for i in report.errors)
+
+
+def test_kitchen_is_exempt_from_r304_and_bedrooms_do_not_double_fire():
+    plan = (
+        barndominium("Exempt")
+        .envelope(width=40, length=30)
+        .add_room("living", T.LIVING, x=0, y=0, width=28, length=30)
+        .add_room("kit", T.KITCHEN, x=28, y=0, width=6, length=8)     # < 70 sqft
+        .add_room("bed", T.BEDROOM, x=28, y=8, width=6, length=8)     # < 70 sqft
+        .entrance("living", D.SOUTH, width=3, offset=2)
+    )
+    report = validate(plan)
+    hab = [i for i in report.issues if i.code == "ROOM_HABITABLE"]
+    # Kitchen exempt (R304.2); bedroom carries BEDROOM_AREA/DIM, not ROOM_HABITABLE.
+    assert not any(i.room in ("kit", "bed") for i in hab)
+
+
 def test_render_produces_svg():
     svg = render_svg(_example())
     assert svg.startswith("<svg")

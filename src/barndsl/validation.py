@@ -13,7 +13,7 @@ review by the authority having jurisdiction.
 from __future__ import annotations
 
 import math
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -39,6 +39,8 @@ from .constants import (
     SOLAR_SOUTH_SHADE_GLAZING,
     SOLAR_WEST_MAX_GLAZING,
     STAIR_HEADROOM,
+    DRIVE_DOOR_REACH,
+    WELL_SEPTIC_MIN_SEPARATION,
 )
 from .profiles import DEFAULT, Profile
 from .elements import (
@@ -60,6 +62,7 @@ from .geometry import (
 )
 from .solar import compass_label, true_azimuth, wall_sector
 from .energy import WWR_CEILING, describe_targets
+from .spatial import room_index
 
 
 class _WallOpening(Protocol):
@@ -125,6 +128,14 @@ ACCESSIBLE_TURN = 5.0  # 60 in wheelchair turning circle (A117.1 §304)
 # NATURAL_LIGHT_RATIO and the stair constants below live in constants.py (the
 # single source of truth) and are imported above; re-stated here in prose only.
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
+#: Habitable rooms subject to the R304 area/dimension minimums as a WARNING
+#: (ROOM_HABITABLE). Bedrooms are excluded — they carry the same rule as a hard
+#: ERROR (BEDROOM_AREA/BEDROOM_DIM) and must not double-fire. Kitchens are
+#: excluded — R304.2 exempts them from both the area floor and the 7 ft dimension.
+R304_HABITABLE_TYPES: frozenset[RoomType] = HABITABLE_TYPES - {
+    RoomType.BEDROOM,
+    RoomType.KITCHEN,
+}
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
 #: Minimum plan overlap (sq ft) between an upper-floor wet room and a wet room
@@ -156,6 +167,12 @@ WINDOW_WALL_CLEAR = 0.5
 BUILD_MODULE = 3.0
 #: Two door swings overlapping by less than this (ft) are treated as just grazing.
 SWING_CLASH_EPS = 0.02
+#: Natural-ventilation floor (IRC R303.1): openable window area >= 4% of a
+#: habitable room's floor — half the 8% daylight floor (NATURAL_LIGHT_RATIO).
+NATURAL_VENT_RATIO = 0.04
+#: A landing (R311.3) must reach at least this far (ft) out from an exterior
+#: door's face — a porch shallower than this doesn't count as a landing.
+LANDING_MIN_DEPTH = 3.0
 
 # The emergency-escape opening minimums (IRC R310) are imported from constants;
 # the modelled clear opening is width × (head − sill), generous for a single-hung
@@ -181,6 +198,22 @@ class Issue:
     col: int | None = None
     end_col: int | None = None  # 1-based, exclusive — for column-accurate carets
     hint: str | None = None
+    #: Set by an ``# barndsl: accept <CODE>`` pragma (see :mod:`barndsl.pragma`).
+    #: An accepted diagnostic has been DOWNGRADED to an INFO — its ``severity`` is
+    #: already ``INFO`` — but the flag records that it was a deliberate,
+    #: documented deviation so the score stops deducting for it and the audit
+    #: trail survives. ``accept_reason`` carries the quoted justification (if any).
+    accepted: bool = False
+    accept_reason: str | None = None
+    #: Cross-file composition (the ``use`` statement). A *part-internal* diagnostic
+    #: — one that fires inside a used part file regardless of where it's placed —
+    #: carries ``file`` (the resolved part path) and ``part`` (the relative path as
+    #: written in the ``use`` line). Its ``line`` anchors to the ``use`` statement in
+    #: the host buffer (the nearest thing there), while the message names the part's
+    #: own ``file:line``. ``None`` on an ordinary host diagnostic. See
+    #: :mod:`barndsl.compose`.
+    file: str | None = None
+    part: str | None = None
 
     def __str__(self) -> str:
         loc = f"line {self.line}: " if self.line else ""
@@ -340,15 +373,108 @@ def clear_box(plan: Barndominium, room: Room) -> tuple[float, float, float, floa
 
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
     """Ids of rooms that share a wall segment with ``room_id``."""
-    r = plan.room(room_id)
-    if r is None:
+    rooms = plan.rooms
+    index = room_index(plan)
+    i = index.first_index(room_id)
+    if i is None:
         return []
-    return [o.id for o in plan.rooms if o.id != room_id and shared_edge(r, o)]
+    r = rooms[i]
+    # A room can only share a wall with one whose bounding box touches it, so ask
+    # the spatial index for those few candidates (in room-list order) instead of
+    # rescanning every room — same result, no O(n²) full sweep.
+    return [
+        rooms[j].id
+        for j in index.candidates_near(r)
+        if rooms[j].id != room_id and shared_edge(r, rooms[j])
+    ]
 
 
 def _f(value: float) -> str:
     """Format a measurement: drop a trailing .0 (so 28.0 -> '28')."""
     return f"{value:g}"
+
+
+#: The largest plausible plan dimension, in feet. No barndominium envelope side,
+#: room, or wing runs anywhere near 1000 ft (three football fields end to end); a
+#: value beyond it is a typo or an overflow that would poison every area product
+#: with ``inf``. Sides past this are rejected (DIM_IMPLAUSIBLE) and clamped so the
+#: rest of the takeoff/summary stays finite.
+MAX_PLAN_DIMENSION = 1000.0
+
+
+def _dim_desc(value: float) -> str:
+    """A dimension for a diagnostic message — never the literal ``inf``/``nan``
+    (which would itself leak an ``inf`` into the output)."""
+    return _f(value) if math.isfinite(value) else "non-finite"
+
+
+def _implausible_dim(value: float) -> bool:
+    return not math.isfinite(value) or value > MAX_PLAN_DIMENSION
+
+
+def _check_dimensions(plan: Barndominium, add) -> None:
+    """Reject non-finite or absurdly large envelope/room/wing sides.
+
+    A finite-but-enormous side (``envelope 1e308 x 1e308``) sails past the
+    positive-dimension checks yet overflows every area product to ``inf``,
+    leaking ``inf sq ft`` into the takeoff. Flag it (DIM_IMPLAUSIBLE, error) and
+    clamp the offending value to :data:`MAX_PLAN_DIMENSION` so the rest of the
+    report stays finite and readable — the plan is already unbuildable, the clamp
+    is cosmetic. Runs first in :func:`validate`, so every later check and the
+    metrics takeoff see finite numbers."""
+    clamp = MAX_PLAN_DIMENSION
+
+    if _implausible_dim(plan.envelope_width) or _implausible_dim(plan.envelope_length):
+        add(
+            Issue(
+                Severity.ERROR,
+                "DIM_IMPLAUSIBLE",
+                f"Envelope {_dim_desc(plan.envelope_width)} x "
+                f"{_dim_desc(plan.envelope_length)} ft is implausible — each side "
+                f"must be finite and <= {MAX_PLAN_DIMENSION:.0f} ft.",
+                hint=f"Use a realistic footprint in feet (each side <= "
+                f"{MAX_PLAN_DIMENSION:.0f}).",
+            )
+        )
+        if _implausible_dim(plan.envelope_width):
+            plan.envelope_width = clamp
+        if _implausible_dim(plan.envelope_length):
+            plan.envelope_length = clamp
+    for room in plan.rooms:
+        if _implausible_dim(room.width) or _implausible_dim(room.length):
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "DIM_IMPLAUSIBLE",
+                    f"Room size {_dim_desc(room.width)} x {_dim_desc(room.length)} ft "
+                    f"is implausible — each side must be finite and <= "
+                    f"{MAX_PLAN_DIMENSION:.0f} ft.",
+                    room=room.id,
+                    hint=f"Use a realistic room size in feet (each side <= "
+                    f"{MAX_PLAN_DIMENSION:.0f}).",
+                )
+            )
+            if _implausible_dim(room.width):
+                room.width = clamp
+            if _implausible_dim(room.length):
+                room.length = clamp
+    for i, w in enumerate(plan.wings, start=1):
+        if _implausible_dim(w.width) or _implausible_dim(w.length):
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "DIM_IMPLAUSIBLE",
+                    f"Wing #{i} size {_dim_desc(w.width)} x {_dim_desc(w.length)} ft "
+                    f"is implausible — each side must be finite and <= "
+                    f"{MAX_PLAN_DIMENSION:.0f} ft.",
+                    hint=f"Use a realistic wing size in feet (each side <= "
+                    f"{MAX_PLAN_DIMENSION:.0f}).",
+                )
+            )
+            if _implausible_dim(w.width):
+                w.width = clamp
+            if _implausible_dim(w.length):
+                w.length = clamp
 
 
 def _amended(profile: Profile, field: str) -> bool:
@@ -875,13 +1001,17 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     issues: list[Issue] = []
     add = issues.append
 
+    # Reject + clamp non-finite/absurd dimensions FIRST, so no later check or the
+    # metrics takeoff ever sees an `inf`-poisoned value (see _check_dimensions).
+    _check_dimensions(plan, add)
+
     if plan.envelope_width <= 0 or plan.envelope_length <= 0:
         add(
             Issue(
                 Severity.ERROR,
                 "ENVELOPE",
                 "Envelope must have positive dimensions.",
-                hint="Declare the footprint, e.g. `envelope 60 x 40`.",
+                hint="Declare the footprint: `envelope 60 x 40`.",
             )
         )
     _check_wings(plan, add)
@@ -913,6 +1043,8 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
             )
 
     _validate_site(plan, add)
+    _validate_site_features(plan, add, profile)
+    _validate_porch_guards(plan, add)
 
     if not plan.rooms:
         add(
@@ -920,13 +1052,14 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
                 Severity.ERROR,
                 "EMPTY",
                 "Plan has no rooms.",
-                hint="Add rooms, e.g. `room living: living at 0,0 size 20 x 16`.",
+                hint="Add rooms: `room living: living at 0,0 size 20 x 16`.",
             )
         )
         return ValidationReport(issues)
 
-    ids = [r.id for r in plan.rooms]
-    for d in sorted({i for i in ids if ids.count(i) > 1}):
+    # Counter is O(n); the old ``ids.count(i)`` per id was O(n²) on big plans.
+    id_counts = Counter(r.id for r in plan.rooms)
+    for d in sorted({i for i, c in id_counts.items() if c > 1}):
         add(
             Issue(
                 Severity.ERROR,
@@ -944,12 +1077,18 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_storage(plan, add)
     _validate_doors(plan, add)
     _validate_openings(plan, add)
+    _validate_safety_glazing(plan, add)
+    _validate_window_fall(plan, add)
     _validate_stairs(plan, add, profile)
+    _validate_landings(plan, add)
+    _validate_door_threshold(plan, add)
+    _validate_water_heater(plan, add)
     _validate_guards(plan, add)
     _validate_life_safety(plan, add)
     _validate_load_path(plan, add)
     _validate_plumbing_stack(plan, add)
     _validate_electrical_plan(plan, add)
+    _validate_electrical(plan, add)
     _validate_solar(plan, add)
     _validate_approach(plan, add)
     _validate_energy(plan, add)
@@ -963,6 +1102,7 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
     _validate_suites_zones(plan, add)
     _validate_structure(plan, add)
     _validate_finishes(plan, add)
+    _validate_notes(plan, add)
     # Local import: fixtures.py imports clear_box from this module.
     from .fixtures import validate_fixtures
 
@@ -979,6 +1119,35 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
         )
 
     return ValidationReport(issues)
+
+
+def _validate_notes(plan: Barndominium, add) -> None:
+    """Gently flag a positioned ``note`` anchored outside the footprint (INFO).
+
+    Architects legitimately annotate the site, a setback, or a future addition
+    outside the walls, so this never blocks — it just points out a callout that
+    may have meant to land on the plan (see NOTE_OUTSIDE)."""
+    marks = getattr(plan, "note_marks", None)
+    if not marks:
+        return
+    secs = plan.footprint_sections()
+    for nm in marks:
+        if point_in_footprint(secs, nm.x, nm.y):
+            continue
+        snippet = nm.text if len(nm.text) <= 40 else nm.text[:37] + "…"
+        add(
+            Issue(
+                Severity.INFO,
+                "NOTE_OUTSIDE",
+                f"Note “{snippet}” is anchored outside the footprint at "
+                f"{_f(nm.x)},{_f(nm.y)}.",
+                line=nm.line,
+                col=nm.col,
+                end_col=nm.end_col,
+                hint="If the callout belongs on the plan, move its `at` point inside "
+                "the walls; annotating the site on purpose is fine.",
+            )
+        )
 
 
 def _validate_finishes(plan: Barndominium, add) -> None:
@@ -1052,6 +1221,20 @@ def _validate_site(plan: Barndominium, add) -> None:
                     **loc,
                 )
             )
+        if ss.has_features:
+            # A drive/walk/well/septic/service places itself in lot feet, so it
+            # needs the lot dimensions to sit on. One error per orphaned feature.
+            for feat, what in _orphan_site_features(ss):
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "SITE_REQUIRED",
+                        f"A `{what}` was declared but there is no `site` to place it on.",
+                        line=feat.line, col=feat.col, end_col=feat.end_col,
+                        hint="Add the lot dimensions with `site <W> x <L>` (feet) so "
+                        "the feature has a lot to sit on.",
+                    )
+                )
         return
     # A degenerate lot is an authoring error whether or not setbacks follow —
     # mirror the ENVELOPE check's stance on non-positive/non-finite dims.
@@ -1080,6 +1263,13 @@ def _validate_site(plan: Barndominium, add) -> None:
             )
         )
         return
+    if ss.has_building:
+        # The building is pinned on the lot, so measure each side's real yard and
+        # name the violated side + encroachment (ft-in) — stricter and clearer than
+        # the dimension-only fit below.
+        _validate_site_placed(plan, ss, add)
+        return
+
     if not ss.has_setback:
         return  # a `site` on its own imposes no check
 
@@ -1121,6 +1311,266 @@ def _validate_site(plan: Barndominium, add) -> None:
                 "`setback` — the footprint's bounding box (building + porches) "
                 "must fit inside the lot minus its setbacks.",
                 **loc,
+            )
+        )
+
+
+def _validate_site_placed(plan: Barndominium, ss, add) -> None:
+    """Setback check for a building pinned on the lot (``building at <x>,<y>``).
+
+    Measures the real clear yard on each lot edge — building (envelope + wings +
+    porches) to lot line — and reports each edge whose yard is short of its
+    required ``setback`` (or where the building crosses the lot line entirely),
+    naming the side and the encroachment in ft-in. A ``SETBACK`` error, like the
+    dimension-only check it supersedes."""
+    from .render import fmt_ft_in
+
+    minx, miny, maxx, maxy = _site_footprint_bounds(plan)
+    bx = ss.building_x or 0.0
+    by = ss.building_y or 0.0
+    lot_w = ss.width
+    lot_l = ss.length
+    front = ss.front or 0.0
+    rear = ss.rear or 0.0
+    side = ss.side or 0.0
+    # (label, clear yard on that edge, required setback there). front = south by
+    # convention; `side` applies to both the east and west yards.
+    checks = [
+        ("front (south)", by + miny, front),
+        ("rear (north)", lot_l - (by + maxy), rear),
+        ("west side", bx + minx, side),
+        ("east side", lot_w - (bx + maxx), side),
+    ]
+    problems: list[str] = []
+    for label, clear, req in checks:
+        if clear < req - EPSILON:
+            over = req - clear
+            if req > EPSILON:
+                problems.append(
+                    f"the {label} yard is {fmt_ft_in(max(0.0, clear))} but the "
+                    f"setback needs {_f(req)} ft — {fmt_ft_in(over)} short"
+                )
+            else:
+                problems.append(
+                    f"the building crosses the {label} lot line by {fmt_ft_in(over)}"
+                )
+    if problems:
+        add(
+            Issue(
+                Severity.ERROR,
+                "SETBACK",
+                "The building footprint violates the setbacks: "
+                + "; ".join(problems) + ".",
+                line=ss.setback_line or ss.building_line or ss.line,
+                col=ss.setback_col or ss.building_col or ss.col,
+                end_col=ss.setback_end_col or ss.building_end_col or ss.end_col,
+                hint="Move the building (`building at <x>,<y>`), shrink the "
+                "footprint, enlarge the `site`, or reduce the `setback`.",
+            )
+        )
+
+
+def _orphan_site_features(ss):
+    """``(feature, keyword)`` pairs for every site feature on a ``SiteSpec`` with
+    no lot dimensions — the SITE_REQUIRED offenders, in source order."""
+    out = []
+    for d in ss.drives:
+        out.append((d, "drive"))
+    for w in ss.walks:
+        out.append((w, "walk"))
+    for w in ss.wells:
+        out.append((w, "well"))
+    for s in ss.septics:
+        out.append((s, "septic"))
+    for s in ss.services:
+        out.append((s, "service"))
+    out.sort(key=lambda t: (t[0].line or 0, t[0].col or 0))
+    return out
+
+
+def _pt_rect_dist(px: float, py: float, rect: tuple[float, float, float, float]) -> float:
+    """Distance from point ``(px, py)`` to axis-aligned rect ``(x1, y1, x2, y2)``
+    (0 if the point is inside)."""
+    x1, y1, x2, y2 = rect
+    dx = max(x1 - px, 0.0, px - x2)
+    dy = max(y1 - py, 0.0, py - y2)
+    return math.hypot(dx, dy)
+
+
+def _door_lot_point(room, door, bx: float, by: float) -> tuple[float, float]:
+    """The midpoint of an exterior door, in lot feet (building origin at bx,by)."""
+    mid = door.offset + door.width / 2.0
+    if door.wall is Direction.SOUTH:
+        mx, my = room.x + mid, room.y
+    elif door.wall is Direction.NORTH:
+        mx, my = room.x + mid, room.y2
+    elif door.wall is Direction.WEST:
+        mx, my = room.x, room.y + mid
+    else:  # EAST
+        mx, my = room.x2, room.y + mid
+    return (bx + mx, by + my)
+
+
+def _exterior_door_points(plan: Barndominium, bx: float, by: float):
+    """``(room_id, (lot_x, lot_y))`` for every people (non-overhead) exterior door."""
+    rooms = {r.id: r for r in plan.rooms}
+    out = []
+    for d in plan.exterior_doors:
+        if getattr(d, "overhead", False):
+            continue
+        room = rooms.get(d.room)
+        if room is not None:
+            out.append((d.room, _door_lot_point(room, d, bx, by)))
+    return out
+
+
+def _validate_site_features(plan: Barndominium, add, profile) -> None:
+    """The site-plan v2 checks: well/septic separation, drive-to-door access, and
+    septic-in-setback. All silent unless the plan declares the relevant features,
+    so a plan with no site features gets zero of these diagnostics."""
+    ss = getattr(plan, "site_spec", None)
+    if ss is None or not ss.has_dims or not ss.has_features:
+        return
+    origin = plan.building_origin_on_lot()
+    if origin is None:
+        return
+    bx, by = origin
+    room_ids = {r.id for r in plan.rooms}
+
+    # A walk must name a real room (a dangling reference is an authoring error).
+    for wk in ss.walks:
+        if wk.room not in room_ids:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "SITE_REF",
+                    f"`walk` names unknown room '{wk.room}'.",
+                    line=wk.line, col=wk.col, end_col=wk.end_col,
+                    hint="Name a room that exists and has an exterior door, e.g. "
+                    "`walk from mud to drive`.",
+                )
+            )
+
+    # WELL_SEPTIC_CLEAR — the common 100 ft well-to-septic health rule.
+    sep = WELL_SEPTIC_MIN_SEPARATION
+    for wl in ss.wells:
+        for sp in ss.septics:
+            dist = min(_pt_rect_dist(wl.x, wl.y, rect) for rect in sp.rects())
+            if dist < sep - EPSILON:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "WELL_SEPTIC_CLEAR",
+                        f"The well is {_f(dist)} ft from the septic "
+                        f"{'field/tank' if sp.has_field else 'tank'} — the common "
+                        f"health-department rule wants at least {_f(sep)} ft between a "
+                        "private well and a septic system.",
+                        line=wl.line, col=wl.col, end_col=wl.end_col,
+                        hint=f"Move the well or septic so they are >= {_f(sep)} ft "
+                        "apart (confirm the exact separation with your county health "
+                        "department — it varies).",
+                    )
+                )
+
+    # DRIVE_DOOR — a drive but no path (walk, or a near-enough drive edge) to a door.
+    if ss.drives:
+        door_pts = _exterior_door_points(plan, bx, by)
+        drive_rects = [(d.x, d.y, d.x2, d.y2) for d in ss.drives]
+        served = bool(ss.walks) or any(
+            min(_pt_rect_dist(px, py, r) for r in drive_rects) <= DRIVE_DOOR_REACH + EPSILON
+            for _, (px, py) in door_pts
+        )
+        if door_pts and not served:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "DRIVE_DOOR",
+                    "The plan has a drive but no walk or drive edge reaches an "
+                    "exterior door — guests arrive at the drive and have no path to a "
+                    "door.",
+                    hint="Add `walk from <room> to drive` from an entry room, or "
+                    "extend the drive to within a few feet of a door.",
+                )
+            )
+
+    # SITE_OVERLAP — two declared drives that overlap on the lot. The cost takeoff
+    # sums each drive's area independently, so an overlap double-counts the shared
+    # paving; the warning is the honest fix (we don't silently subtract it). Only
+    # drive-drive is checked: a walk is auto-routed to meet a drive (overlap by
+    # design) and two thin auto-routed walks aren't a meaningful double-count.
+    for i, d1 in enumerate(ss.drives):
+        for d2 in ss.drives[i + 1:]:
+            ox = min(d1.x2, d2.x2) - max(d1.x, d2.x)
+            oy = min(d1.y2, d2.y2) - max(d1.y, d2.y)
+            if ox > EPSILON and oy > EPSILON:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "SITE_OVERLAP",
+                        f"Two driveways overlap by {_f(ox * oy)} sqft "
+                        f"({d1.surface} & {d2.surface}); the cost estimate "
+                        "double-counts the shared paving.",
+                        line=d2.line, col=d2.col, end_col=d2.end_col,
+                        hint="Merge the drives into one rectangle, or move them "
+                        "apart so each patch of paving is declared once.",
+                    )
+                )
+
+    # SEPTIC_SETBACK — a septic tank/field inside a required setback band.
+    lot_w, lot_l = ss.width, ss.length
+    front, rear, side = ss.front or 0.0, ss.rear or 0.0, ss.side or 0.0
+    bands = []  # (label, x1, y1, x2, y2)
+    if front > 0:
+        bands.append(("front", 0.0, 0.0, lot_w, front))
+    if rear > 0:
+        bands.append(("rear", 0.0, lot_l - rear, lot_w, lot_l))
+    if side > 0:
+        bands.append(("west side", 0.0, 0.0, side, lot_l))
+        bands.append(("east side", lot_w - side, 0.0, lot_w, lot_l))
+    for sp in ss.septics:
+        hit = None
+        for rx1, ry1, rx2, ry2 in sp.rects():
+            for label, bx1, by1, bx2, by2 in bands:
+                if (min(rx2, bx2) - max(rx1, bx1) > EPSILON
+                        and min(ry2, by2) - max(ry1, by1) > EPSILON):
+                    hit = label
+                    break
+            if hit:
+                break
+        if hit:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "SEPTIC_SETBACK",
+                    f"The septic system sits inside the {hit} setback band — septic "
+                    "tanks and drain fields are usually held out of the required "
+                    "yards too.",
+                    line=sp.line, col=sp.col, end_col=sp.end_col,
+                    hint="Move the septic clear of the setback, or confirm the "
+                    "allowed septic setback with your county health department.",
+                )
+            )
+
+
+def _validate_porch_guards(plan: Barndominium, add) -> None:
+    """IRC R312.1 — when the finish floor sits more than 30 in above finished
+    grade, every porch is a walking surface that needs a guard. Fires once per
+    porch; silent when no ``grade`` is declared or grade <= 30 in (so an at-grade
+    or shallow-grade plan is never nagged). This resolves the Phase 13 skip:
+    R312.1 exterior guards were unexpressible without a grade elevation."""
+    grade = getattr(plan, "grade", None)
+    if grade is None or grade <= GUARD_DROP_TRIGGER + EPSILON:
+        return
+    for p in plan.porches:
+        add(
+            Issue(
+                Severity.WARNING,
+                "PORCH_GUARD",
+                f"Porch '{p.display_name}' sits {_f(grade)} ft above grade "
+                f"(> {GUARD_DROP_TRIGGER * 12:.0f} in), so it needs a "
+                f"{GUARD_HEIGHT * 12:.0f} in guard (IRC R312.1).",
+                hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard along the porch's open "
+                "edges (balusters blocking a 4 in sphere) and note it on the drawings.",
             )
         )
 
@@ -1215,43 +1665,48 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                 )
             )
 
-    for i, a in enumerate(plan.rooms):
-        for b in plan.rooms[i + 1 :]:
-            if a.level != b.level:
-                continue  # different floors may share a footprint (e.g. a loft)
-            ov = a.overlaps(b)
-            if ov > 0.5:  # ignore hairline floating-point overlaps
-                # Prefer a fix that keeps 'b' inside the envelope.
-                east_fits = a.x2 + b.width <= plan.envelope_width + EPSILON
-                north_fits = a.y2 + b.length <= plan.envelope_length + EPSILON
-                ox = min(a.x2, b.x2) - max(a.x, b.x)
-                oy = min(a.y2, b.y2) - max(a.y, b.y)
-                prefer_east = (ox <= oy and east_fits) or (not north_fits and east_fits)
-                if prefer_east:
-                    sug = f"move '{b.id}' to x={_f(a.x2)} (east of '{a.id}')"
-                elif north_fits:
-                    sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
-                else:
-                    sug = "shrink one of them or enlarge the envelope"
-                # A collision is often a relative-anchor chain pushing a room onto
-                # one already placed — surface that so the fix is re-anchoring, not
-                # guessing at a shrink.
-                placed = next((r for r in (b, a) if r.placement is not None), None)
-                note = (
-                    f" ('{placed.id}' is placed `{placed.placement}` — re-anchor it "
-                    "one room deep off a spine, or pin it with `at x,y`)"
-                    if placed is not None
-                    else ""
+    # Only rooms whose bounding boxes intersect can overlap, so walk the index's
+    # candidate pairs (in the same ascending (i, j) order the old nested loop
+    # visited) rather than all n²/2 pairs.
+    rooms = plan.rooms
+    index = room_index(plan)
+    for i, j in index.candidate_pairs():
+        a, b = rooms[i], rooms[j]
+        if a.level != b.level:
+            continue  # different floors may share a footprint (e.g. a loft)
+        ov = a.overlaps(b)
+        if ov > 0.5:  # ignore hairline floating-point overlaps
+            # Prefer a fix that keeps 'b' inside the envelope.
+            east_fits = a.x2 + b.width <= plan.envelope_width + EPSILON
+            north_fits = a.y2 + b.length <= plan.envelope_length + EPSILON
+            ox = min(a.x2, b.x2) - max(a.x, b.x)
+            oy = min(a.y2, b.y2) - max(a.y, b.y)
+            prefer_east = (ox <= oy and east_fits) or (not north_fits and east_fits)
+            if prefer_east:
+                sug = f"move '{b.id}' to x={_f(a.x2)} (east of '{a.id}')"
+            elif north_fits:
+                sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
+            else:
+                sug = "shrink one of them or enlarge the envelope"
+            # A collision is often a relative-anchor chain pushing a room onto
+            # one already placed — surface that so the fix is re-anchoring, not
+            # guessing at a shrink.
+            placed = next((r for r in (b, a) if r.placement is not None), None)
+            note = (
+                f" ('{placed.id}' is placed `{placed.placement}` — re-anchor it "
+                "one room deep off a spine, or pin it with `at x,y`)"
+                if placed is not None
+                else ""
+            )
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OVERLAP",
+                    f"Rooms '{a.id}' and '{b.id}' overlap by {_f(ov)} sq ft.",
+                    room=a.id,
+                    hint=f"Reposition so they don't intersect — e.g. {sug}.{note}",
                 )
-                add(
-                    Issue(
-                        Severity.ERROR,
-                        "OVERLAP",
-                        f"Rooms '{a.id}' and '{b.id}' overlap by {_f(ov)} sq ft.",
-                        room=a.id,
-                        hint=f"Reposition so they don't intersect — e.g. {sug}.{note}",
-                    )
-                )
+            )
 
     # Footprint coverage is a ground-floor (level 0) concept; lofts sit above.
     used = sum(r.area for r in plan.rooms if r.level == 0)
@@ -1538,6 +1993,42 @@ def _validate_room_programs(plan: Barndominium, add, profile: Profile = DEFAULT)
                         hint=f"Make both dimensions >= {bed_dim:g} ft.",
                     )
                 )
+        elif room.type in R304_HABITABLE_TYPES:
+            # R304 habitable-room minimums (WARNING): 70 sq ft floor + 7 ft in
+            # every horizontal dimension. Bedrooms are handled above as errors and
+            # kitchens are exempt (R304.2), so neither reaches here.
+            kind = room.type.value.replace("_", " ").capitalize()
+            if room.area < bed_area:
+                need_len = _suggest_int(bed_area / max(room.width, EPSILON))
+                sizing = (
+                    f" e.g. `size {_f(room.width)} x {need_len}`"
+                    if need_len is not None else ""
+                )
+                tag = _profile_tag(profile, "min_bedroom_area", f"{MIN_BEDROOM_AREA:.0f} sq ft")
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "ROOM_HABITABLE",
+                        f"{kind} '{room.id}' is {_f(room.area)} sq ft; the R304 "
+                        f"minimum habitable area is {bed_area:g} sq ft{tag}.",
+                        room=room.id,
+                        hint=f"Enlarge it to >= {bed_area:g} sq ft{sizing}.",
+                    )
+                )
+            if room.min_dimension < bed_dim:
+                tag = _profile_tag(
+                    profile, "min_bedroom_dimension", f"{MIN_BEDROOM_DIMENSION:.0f} ft"
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "ROOM_HABITABLE",
+                        f"{kind} '{room.id}' is {_f(room.min_dimension)} ft on its "
+                        f"smallest dimension; the R304 minimum is {bed_dim:g} ft{tag}.",
+                        room=room.id,
+                        hint=f"Make both dimensions >= {bed_dim:g} ft.",
+                    )
+                )
         if room.type is RoomType.HALLWAY and room.min_dimension < hall_w:
             tag = _profile_tag(profile, "min_hallway_width", f"{MIN_HALLWAY_WIDTH:.0f} ft")
             add(
@@ -1670,6 +2161,19 @@ def _validate_doors(plan: Barndominium, add) -> None:
     room_ids = {r.id for r in plan.rooms}
     for door in plan.interior_doors:
         loc = _door_loc(door)
+        if door.width <= 0:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OPENING_SIZE",
+                    f"Interior door between '{door.room_a}' and '{door.room_b}' has "
+                    f"non-positive width ({_f(door.width)} ft).",
+                    room=door.room_a,
+                    hint="Give it a positive width, e.g. `width 3`.",
+                    **loc,
+                )
+            )
+            continue
         if door.room_a == door.room_b:
             add(
                 Issue(
@@ -1918,6 +2422,20 @@ def _validate_doors(plan: Barndominium, add) -> None:
                 )
             )
             continue
+        if xdoor.width <= 0:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OPENING_SIZE",
+                    f"Exterior door on '{xdoor.room}' has non-positive width "
+                    f"({_f(xdoor.width)} ft).",
+                    room=xdoor.room,
+                    hint="Give it a positive width, e.g. `width 3` (or `width 9` "
+                    "for an overhead door).",
+                    **_door_loc(xdoor),
+                )
+            )
+            continue
         room = plan.room(xdoor.room)
         if xdoor.overhead:
             _check_overhead_door(xdoor, room, add)
@@ -2016,6 +2534,18 @@ def _validate_openings(plan: Barndominium, add) -> None:
             continue
         room = plan.room(w.room)
         assert room is not None  # guaranteed: w.room was checked against room_ids
+        if w.width <= 0:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OPENING_SIZE",
+                    f"Window on '{w.room}' has non-positive width ({_f(w.width)} ft).",
+                    room=w.room,
+                    hint="Give it a positive width, e.g. `width 3`.",
+                    **_door_loc(w),
+                )
+            )
+            continue
         if w.head_height <= w.sill_height + EPSILON:
             add(
                 Issue(
@@ -2119,6 +2649,242 @@ def _validate_openings(plan: Barndominium, add) -> None:
                 )
 
 
+# --- safety glazing (IRC R308.4) --------------------------------------------
+#
+# A single predicate, shared by the WINDOW_TEMPERED check below AND the window
+# schedule's "Glazing" column (schedule.py imports it), so the schedule can never
+# disagree with the diagnostic about which windows are hazard locations.
+
+#: Hazard-location proximities requiring tempered/safety glazing (IRC R308.4), ft.
+_TEMPERED_DOOR = 2.0    # 24 in of a door edge in the same wall plane (R308.4.1)
+_TEMPERED_WET = 5.0     # 60 in of a tub/shower in a wet room (R308.4.5)
+_TEMPERED_STAIR = 3.0   # 36 in of a stair flight (R308.4.6/.7, simplified)
+
+
+def _seg_axis(x1: float, y1: float, x2: float, y2: float) -> tuple[str, float, float, float]:
+    """An axis-aligned opening segment as ``(orientation, fixed, lo, hi)`` — ``'h'``
+    (runs in x at a fixed y) or ``'v'`` (runs in y at a fixed x)."""
+    if abs(y1 - y2) <= abs(x1 - x2):
+        return "h", (y1 + y2) / 2.0, min(x1, x2), max(x1, x2)
+    return "v", (x1 + x2) / 2.0, min(y1, y2), max(y1, y2)
+
+
+def _interval_gap(a_lo: float, a_hi: float, b_lo: float, b_hi: float) -> float:
+    """The gap between two 1-D intervals (``0`` when they overlap/touch)."""
+    if a_hi < b_lo:
+        return b_lo - a_hi
+    if b_hi < a_lo:
+        return a_lo - b_hi
+    return 0.0
+
+
+def _rect_seg_distance(
+    rx: float, ry: float, rw: float, rl: float,
+    x1: float, y1: float, x2: float, y2: float,
+) -> float:
+    """Minimum plan distance from the axis-aligned rect ``(rx,ry,rw,rl)`` to the
+    axis-aligned segment ``(x1,y1)-(x2,y2)``."""
+    dx = _interval_gap(rx, rx + rw, min(x1, x2), max(x1, x2))
+    dy = _interval_gap(ry, ry + rl, min(y1, y2), max(y1, y2))
+    return math.hypot(dx, dy)
+
+
+#: R308.4 exempts glazing whose bottom (sill) edge is high above the walking/
+#: standing surface — a person can't fall into it. R308.4.5 (wet) uses 60 in;
+#: R308.4.6/.7 (stairs) uses 36 in. These sill floors keep an ordinary high
+#: privacy window out of the hazard set (and are the built-in "escape hatch"
+#: until a `tempered` attribute exists).
+_TEMPERED_WET_SILL = 5.0    # 60 in bottom-edge exemption (R308.4.5)
+_TEMPERED_STAIR_SILL = 3.0  # 36 in bottom-edge exemption (R308.4.6/.7)
+
+#: R308.4.3 "large glazing panel" hazard — a pane over 9 sq ft whose bottom edge
+#: sits below 18 in and whose top edge rises above 36 in above the floor is a
+#: walk-into hazard *anywhere* (not just beside a door/tub/stair), so it needs
+#: safety glazing. Fixed IRC figures (not jurisdiction-variable).
+_TEMPERED_PANEL_AREA = 9.0        # sq ft — the "exposed area of an individual pane"
+_TEMPERED_PANEL_BOTTOM = 18.0 / 12.0  # 18 in — bottom (sill) edge below this
+_TEMPERED_PANEL_TOP = 36.0 / 12.0     # 36 in — top (head) edge above this
+
+
+def _room_door_segments(
+    plan: Barndominium, room: Room
+) -> list[tuple[float, float, float, float]]:
+    """World-space opening segments of every HINGED door that belongs to ``room``
+    — an exterior entry/double/french on one of its walls, or an interior swing/
+    double/french on a wall it shares. Overhead, cased, pocket and sliding doors
+    have no hinged leaf, so R308.4.1 doesn't count them. Scoping to the window's
+    OWN room keeps a door between two *other* rooms that merely lines up with the
+    wall from counting."""
+    by_id = {r.id: r for r in plan.rooms}
+    segs: list[tuple[float, float, float, float]] = []
+    for xd in plan.exterior_doors:
+        if xd.overhead or xd.room != room.id:
+            continue
+        segs.append(opening_endpoints(room, xd.wall, xd.offset, xd.width))
+    for d in plan.interior_doors:
+        if getattr(d, "kind", "swing") not in ("swing", "double", "french"):
+            continue
+        if room.id not in (d.room_a, d.room_b):
+            continue
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None:
+            continue
+        edge = shared_edge(a, b)
+        if edge is None:
+            continue
+        w = min(d.width, edge.length)
+        offset = getattr(d, "offset", None)
+        if offset is None:
+            start = edge.mid - w / 2.0
+        else:
+            start = edge.lo + max(0.0, min(offset, edge.length - w))
+        if edge.orientation == "v":
+            segs.append((edge.pos, start, edge.pos, start + w))
+        else:
+            segs.append((start, edge.pos, start + w, edge.pos))
+    return segs
+
+
+def window_tempered_reason(plan: Barndominium, window) -> str | None:
+    """Why ``window`` is a safety-glazing hazard location (IRC R308.4), or ``None``.
+
+    The single rule behind both the WINDOW_TEMPERED warning and the window
+    schedule's Glazing column. Three simplified hazard locations, checked in order:
+
+    (a) within 24 in horizontally of either edge of a hinged door in the **same
+        wall plane** of the SAME room (a door sidelite) — R308.4.1;
+    (b) a low window (sill < 60 in) in a wet room whose wall segment lies within
+        60 in of a tub/shower footprint — R308.4.5;
+    (c) a low window (sill < 36 in) within 36 in of a stair flight footprint —
+        R308.4.6/.7 (simplified to a plan-distance-to-footprint test).
+
+    The sill floors are R308.4's own bottom-edge exemptions, and they double as the
+    built-in escape hatch (a high privacy window is not a hazard) until a
+    ``tempered`` override attribute exists.
+    """
+    by_id = {r.id: r for r in plan.rooms}
+    room = by_id.get(window.room)
+    if room is None:
+        return None
+    wx1, wy1, wx2, wy2 = opening_endpoints(room, window.wall, window.offset, window.width)
+    w_or, w_fixed, w_lo, w_hi = _seg_axis(wx1, wy1, wx2, wy2)
+    sill = getattr(window, "sill_height", 3.0)
+    # (a) door sidelite — a hinged door of the SAME room, coplanar, gap < 24 in.
+    for dx1, dy1, dx2, dy2 in _room_door_segments(plan, room):
+        d_or, d_fixed, d_lo, d_hi = _seg_axis(dx1, dy1, dx2, dy2)
+        if d_or != w_or or abs(d_fixed - w_fixed) > 0.1:
+            continue
+        if _interval_gap(w_lo, w_hi, d_lo, d_hi) < _TEMPERED_DOOR:
+            return "within 24 in of a door opening in the same wall — R308.4.1"
+    # (b) wet-zone tub/shower proximity (uses the resolved fixtures — seeds too).
+    if room.type in WET_TYPES and sill < _TEMPERED_WET_SILL:
+        from .fixtures import resolve_room_fixtures
+
+        for f in resolve_room_fixtures(plan, room):
+            if f.kind not in ("tub", "shower"):
+                continue
+            if _rect_seg_distance(f.x, f.y, f.width, f.length, wx1, wy1, wx2, wy2) < _TEMPERED_WET:
+                return "within 60 in of a tub/shower in a wet room — R308.4.5"
+    # (c) stair proximity (simplified footprint distance).
+    if sill < _TEMPERED_STAIR_SILL:
+        for s in plan.stairs:
+            if _rect_seg_distance(s.x, s.y, s.width, s.length, wx1, wy1, wx2, wy2) < _TEMPERED_STAIR:
+                return "within 36 in of a stair flight — R308.4.6 (simplified)"
+    # (d) large glazing panel near the walking surface (R308.4.3), anywhere: an
+    #     individual pane over 9 sq ft whose bottom edge is below 18 in and top
+    #     edge above 36 in above the floor — a full-height sash a person can walk
+    #     into. Uses the same head/sill the schedule reads, so no new geometry.
+    head = getattr(window, "head_height", sill)
+    pane = window.width * max(0.0, head - sill)
+    if (
+        sill < _TEMPERED_PANEL_BOTTOM
+        and head > _TEMPERED_PANEL_TOP
+        and pane > _TEMPERED_PANEL_AREA
+    ):
+        return (
+            "a glazed panel over 9 sq ft with its bottom edge below 18 in and top "
+            "above 36 in above the floor — R308.4.3"
+        )
+    return None
+
+
+def _validate_safety_glazing(plan: Barndominium, add) -> None:
+    """Flag each window in an IRC R308.4 hazard location as needing tempered glass.
+
+    One WINDOW_TEMPERED warning per offending window, naming the trigger. A window
+    that already declares ``tempered`` (the R308.4 escape hatch) is skipped — it is
+    specified as safety glass, so there is nothing to warn about (the schedule
+    still records it as "tempered (declared)")."""
+    for w in plan.windows:
+        if getattr(w, "tempered", False):
+            continue
+        reason = window_tempered_reason(plan, w)
+        if reason is None:
+            continue
+        add(
+            Issue(
+                Severity.WARNING,
+                "WINDOW_TEMPERED",
+                f"The window in '{w.room}' is a hazard location ({reason}), so it "
+                "needs safety (tempered) glazing.",
+                room=w.room,
+                hint="Specify tempered/safety glazing for this window on the window "
+                "schedule (human glazing in this location must resist impact, IRC "
+                "R308.4).",
+                **_door_loc(w),
+            )
+        )
+
+
+#: IRC R312.2 window fall protection: an operable window whose sill is below this
+#: height needs an opening-control device or fall guard where it sits more than
+#: 72 in above the exterior grade below. The model carries no grade elevation, so
+#: "on an upper level" (level >= 1) is the stand-in for "far enough above grade".
+#: A fixed IRC figure (not jurisdiction-variable).
+_WINDOW_FALL_SILL = 24.0 / 12.0  # 24 in
+
+
+def _validate_window_fall(plan: Barndominium, add) -> None:
+    """Flag an operable low-silled window on an upper level for fall protection.
+
+    IRC R312.2 requires an opening-control device (or a fall-prevention guard) at
+    an operable window whose sill is below 24 in *and* more than 72 in above the
+    grade below. The DSL has no grade elevation, so this uses an upper storey
+    (``level >= 1``) as the proxy for "well above grade" — stated plainly in the
+    message. A ``fixed`` sash can't open, so it is exempt (R312.2 covers operable
+    windows only). The hint points at an opening-control device rather than
+    raising the sill, because a bedroom's escape window *wants* a low sill (IRC
+    R310) — the two rules are reconciled by an ASTM F2090 device, not by geometry.
+    """
+    by_id = {r.id: r for r in plan.rooms}
+    for w in plan.windows:
+        if not getattr(w, "openable", True):
+            continue  # a fixed sash doesn't open — no fall path
+        room = by_id.get(w.room)
+        if room is None or getattr(room, "level", 0) < 1:
+            continue
+        sill = getattr(w, "sill_height", 3.0)
+        if sill + EPSILON >= _WINDOW_FALL_SILL:
+            continue
+        add(
+            Issue(
+                Severity.WARNING,
+                "WINDOW_FALL",
+                f"The operable window in '{w.room}' has a {sill * 12:.0f} in sill on "
+                f"level {room.level}; IRC R312.2 wants window fall protection where an "
+                "operable sash sits below 24 in and more than 72 in above the grade "
+                "below. The model has no grade elevation, so an upper storey stands in "
+                "for 'well above grade'.",
+                room=w.room,
+                hint="Fit a window opening-control device or fall guard (ASTM F2090) "
+                "that limits the sash to a 4 in clear opening yet still releases for "
+                "escape — don't raise the sill, which would fight the egress-window "
+                "rule (IRC R310).",
+                **_door_loc(w),
+            )
+        )
+
+
 def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
     """Rooms on ``level`` whose footprint the stair lands in."""
     return [
@@ -2128,13 +2894,45 @@ def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
     ]
 
 
+#: IRC R311.7.3 — the maximum vertical rise of a single flight between floor
+#: levels or landings (12 ft 7 in). The task brief cites ~12 ft 3 in; the adopted
+#: IRC figure is 151 in, used here. A fixed code value, not jurisdiction-variable.
+_STAIR_MAX_FLIGHT_RISE = 151.0 / 12.0
+
+
 def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
+    handrail_noted = False  # STAIR_HANDRAIL is one per plan (first qualifying flight)
     for s in plan.stairs:
         if not all(math.isfinite(v) for v in (s.x, s.y, s.width, s.length)):
             add(Issue(Severity.ERROR, "STAIR_GEOMETRY",
                       f"Stair '{s.id}' has non-finite coordinates or size.", room=s.id,
                       hint="Use finite measurements in feet (no nan/inf)."))
             continue
+        # Handrail (R311.7.8): four or more risers on a flight need a handrail.
+        # The DSL can't place a rail, so this is a one-per-plan checklist INFO on
+        # the first qualifying stair — computed from the same rise/riser math the
+        # geometry-fit checks below use.
+        if (
+            not handrail_noted
+            and plan.ceiling_height > 0
+            and s.from_level != s.to_level
+            and s.from_level >= 0
+            and s.to_level >= 0
+        ):
+            rise0 = plan.ceiling_height * abs(s.to_level - s.from_level)
+            risers0 = max(1, math.ceil(rise0 / profile.max_riser_height))
+            if risers0 >= 4:
+                handrail_noted = True
+                add(Issue(
+                    Severity.INFO, "STAIR_HANDRAIL",
+                    f"Stair '{s.id}' climbs {_f(rise0)} ft in ~{risers0} risers, so "
+                    "it needs at least one handrail (34–38 in above the nosings, "
+                    "graspable the full length, IRC R311.7.8).",
+                    room=s.id,
+                    hint="The DSL can't draw a rail — carry the handrail (both sides "
+                    "if the flight is wider than 44 in) onto the construction "
+                    "documents.",
+                    line=s.line, col=s.col, end_col=s.end_col))
         if s.width <= 0 or s.length <= 0:
             add(Issue(Severity.ERROR, "STAIR_SIZE",
                       f"Stair '{s.id}' has non-positive size.", room=s.id,
@@ -2186,6 +2984,26 @@ def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> Non
             rise = plan.ceiling_height * abs(s.to_level - s.from_level)
             risers = max(1, math.ceil(rise / max_riser))
             run_needed = max(1, risers - 1) * min_tread
+            # STAIR_LANDING (R311.7.3): a single flight may rise at most 12 ft 7 in
+            # (151 in) between floor levels or landings. Past that a switchback or
+            # mid-run landing is required. Risers use the same rise/max_riser math as
+            # the run-fit check, so a gentler profile riser (more risers per foot) is
+            # reflected in the "~N risers" the message quotes. A normal one-storey
+            # flight (~9 ft) stays well under, so this only speaks up on a tall or
+            # multi-level run.
+            if rise > _STAIR_MAX_FLIGHT_RISE + EPSILON:
+                max_flight_risers = max(1, math.floor(_STAIR_MAX_FLIGHT_RISE / max_riser))
+                add(Issue(
+                    Severity.INFO, "STAIR_LANDING",
+                    f"Stair '{s.id}' climbs {_f(rise)} ft (~{risers} risers) in one "
+                    f"flight; IRC R311.7.3 limits a flight to {_f(_STAIR_MAX_FLIGHT_RISE)} "
+                    f"ft (12 ft 7 in, ~{max_flight_risers} risers) of vertical rise "
+                    "between landings, so it needs an intermediate landing.",
+                    room=s.id,
+                    hint="Break the run with a landing (a switchback or an L-turn), or "
+                    "split it across levels — the DSL models one straight flight, so "
+                    "note the mid-run landing on the construction documents.",
+                    line=s.line, col=s.col, end_col=s.end_col))
             long_dim, short_dim = max(s.width, s.length), min(s.width, s.length)
             could_switchback = short_dim + EPSILON >= 2 * min_width
             needed = run_needed / 2 if could_switchback else run_needed
@@ -2236,16 +3054,16 @@ def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> Non
                       hint="Position it so its footprint overlaps a room on each level."))
 
 
-def _validate_guards(plan: Barndominium, add) -> None:
-    """Flag an open loft/balcony edge that overlooks a double-height space and
-    needs a guard (IRC R312).
+def loft_guard_pairs(plan: Barndominium):
+    """Yield ``(upper, lower)`` room pairs where ``upper``'s floor only *partially*
+    covers ``lower`` a storey below, leaving the uncovered remainder of ``lower``
+    open to ``upper``'s floor — a double-height void whose loft edge needs a guard
+    (IRC R312).
 
-    An upper-level room that only *partially* covers a room below leaves the
-    uncovered part of that lower room open to the floor above — a double-height
-    void. The upper room's edge along that void is a walking surface more than a
-    storey up, so it needs a 36 in guard. (An upper room that fully covers the one
-    below has a solid floor to its edge — no void — so it isn't flagged; that's
-    why a loft sized to its great room below doesn't nag.)
+    This is the single source of truth for "which loft edge is open": the
+    ``LOFT_GUARD`` check and the drawing exports (SVG/DXF guard lines) both consume
+    it, so a plan is never flagged without a guard line drawn, or vice versa. One
+    pair per ``upper`` (the first lower it overlooks), mirroring the check.
     """
     if len(plan.levels()) < 2:
         return
@@ -2266,47 +3084,195 @@ def _validate_guards(plan: Barndominium, add) -> None:
                 continue  # not above this room at all
             # Partially above it → the rest of `lower` is open to `upper`'s floor.
             if cov + 0.5 < lower.area:
-                add(
-                    Issue(
-                        Severity.INFO,
-                        "LOFT_GUARD",
-                        f"'{upper.id}' (level {upper.level}) overlooks the "
-                        f"double-height space of '{lower.id}' below; its open edge is "
-                        f"~{_f(drop)} ft up and needs a {GUARD_HEIGHT * 12:.0f} in guard "
-                        "(IRC R312).",
-                        room=upper.id,
-                        hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard/railing along the "
-                        "open edge (with balusters spaced so a 4 in sphere can't pass).",
-                    )
-                )
                 flagged.add(upper.id)
+                yield upper, lower
                 break
 
 
-def _validate_life_safety(plan: Barndominium, add) -> None:
-    """Smoke/CO-alarm reminders the geometry can't place but code requires.
+def loft_guard_edges(plan: Barndominium) -> list[tuple[int, float, float, float, float]]:
+    """Guard-line segments ``(level, x1, y1, x2, y2)`` along every open loft edge
+    :func:`loft_guard_pairs` flags — drawn on the loft's own level.
 
-    Kept conditional so it doesn't nag every plan: a carbon-monoxide alarm (IRC
-    R315) is required where a fuel-fired appliance or an **attached garage** is
-    present — a barndominium's attached garage/shop is the classic trigger — and
-    the same reminder carries the smoke-alarm placement (R314). Fires once when the
-    plan has an attached garage/shop.
+    The open edge is the boundary of the loft's floor (its overlap with the room
+    below) that lies strictly *inside* that lower room: where a segment of the
+    overlap rectangle's perimeter is interior to ``lower``, the lower room keeps
+    going past it as open void, so the loft floor ends there over a drop. Edges
+    that coincide with ``lower``'s own wall have no void beyond them and are
+    skipped."""
+    tol = 1e-6
+    segs: list[tuple[int, float, float, float, float]] = []
+    for upper, lower in loft_guard_pairs(plan):
+        ix0, iy0 = max(upper.x, lower.x), max(upper.y, lower.y)
+        ix1, iy1 = min(upper.x2, lower.x2), min(upper.y2, lower.y2)
+        lvl = upper.level
+        if ix0 > lower.x + tol:              # void to the west
+            segs.append((lvl, ix0, iy0, ix0, iy1))
+        if ix1 < lower.x2 - tol:             # void to the east
+            segs.append((lvl, ix1, iy0, ix1, iy1))
+        if iy0 > lower.y + tol:              # void to the south
+            segs.append((lvl, ix0, iy0, ix1, iy0))
+        if iy1 < lower.y2 - tol:             # void to the north
+            segs.append((lvl, ix0, iy1, ix1, iy1))
+    return segs
+
+
+def _validate_guards(plan: Barndominium, add) -> None:
+    """Flag an open loft/balcony edge that overlooks a double-height space and
+    needs a guard (IRC R312).
+
+    An upper-level room that only *partially* covers a room below leaves the
+    uncovered part of that lower room open to the floor above — a double-height
+    void. The upper room's edge along that void is a walking surface more than a
+    storey up, so it needs a 36 in guard. (An upper room that fully covers the one
+    below has a solid floor to its edge — no void — so it isn't flagged; that's
+    why a loft sized to its great room below doesn't nag.)
     """
-    garage = next((r for r in plan.rooms if r.type in GARAGE_TYPES), None)
-    if garage is None:
-        return
-    add(
-        Issue(
-            Severity.INFO,
-            "ALARM_CO",
-            f"The plan has an attached garage/shop ('{garage.id}'), so a "
-            "carbon-monoxide alarm is required outside each sleeping area (IRC "
-            "R315), along with smoke alarms in each bedroom, outside each sleeping "
-            "area, and on every level (IRC R314).",
-            hint="Provide interconnected smoke/CO alarms — the DSL can't place them, "
-            "so confirm them on the electrical plan.",
+    for upper, lower in loft_guard_pairs(plan):
+        drop = plan.level_elevation(upper.level) - plan.level_elevation(upper.level - 1)
+        add(
+            Issue(
+                Severity.INFO,
+                "LOFT_GUARD",
+                f"'{upper.id}' (level {upper.level}) overlooks the "
+                f"double-height space of '{lower.id}' below; its open edge is "
+                f"~{_f(drop)} ft up and needs a {GUARD_HEIGHT * 12:.0f} in guard "
+                "(IRC R312).",
+                room=upper.id,
+                hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard/railing along the "
+                "open edge (with balusters spaced so a 4 in sphere can't pass).",
+            )
         )
-    )
+
+
+def _validate_life_safety(plan: Barndominium, add) -> None:
+    """Smoke/CO-alarm coverage (IRC R314/R315).
+
+    Two modes, chosen by whether the plan **declares** any ``alarm``:
+
+    * No alarms declared — a single teaching reminder (info) on a plan that has
+      bedrooms, pointing at the ``alarm`` statement so the sharper checks below
+      can take over. A plan with no sleeping rooms isn't nagged.
+    * Alarms declared — the real placement checks: a smoke alarm in each bedroom
+      (ALARM_BEDROOM), a smoke alarm in a room adjacent to each bedroom
+      (ALARM_HALL, an approximation of "outside each sleeping area"), a smoke
+      alarm on every level (ALARM_LEVEL), and — where bedrooms coexist with an
+      attached garage/shop — a CO alarm outside the sleeping areas (ALARM_CO).
+    """
+    by_id = {r.id: r for r in plan.rooms}
+    bedrooms = [r for r in plan.rooms if r.type is RoomType.BEDROOM]
+    alarms = plan.alarms
+
+    if not alarms:
+        # Nothing declared. Teach the statement once, and only where sleeping
+        # rooms make it matter — an alarm-free shop building isn't nagged.
+        if bedrooms:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ALARM_CO",
+                    "This plan has bedrooms but declares no smoke/CO alarms. IRC "
+                    "R314 wants a smoke alarm in each bedroom, outside each "
+                    "sleeping area, and on every level; R315 wants a "
+                    "carbon-monoxide alarm outside sleeping areas where fuel "
+                    "appliances or an attached garage are present.",
+                    hint="Declare them so the placement checks can verify coverage — "
+                    "e.g. `alarm smoke in <bed>`, `alarm smoke in <hall>`, "
+                    "`alarm co in <hall>` (or `alarm smoke_co` for a combination "
+                    "unit).",
+                )
+            )
+        return
+
+    # Alarms are declared -> verify placement.
+    smoke_rooms = {a.room for a in alarms if a.is_smoke}
+    # Rooms adjacent through an interior door (the "outside the door" graph).
+    adj: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
+    for d in plan.interior_doors:
+        if d.room_a in adj and d.room_b in adj:
+            adj[d.room_a].add(d.room_b)
+            adj[d.room_b].add(d.room_a)
+
+    # ALARM_BEDROOM — a smoke (or combo) alarm inside every bedroom (R314.3).
+    for b in bedrooms:
+        if b.id not in smoke_rooms:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ALARM_BEDROOM",
+                    f"Bedroom '{b.id}' has no smoke alarm. IRC R314.3 requires a "
+                    "smoke alarm in each sleeping room.",
+                    room=b.id,
+                    hint=f"Add `alarm smoke in {b.id}` (or `alarm smoke_co in "
+                    f"{b.id}` for a combination unit).",
+                )
+            )
+
+    # ALARM_HALL — a smoke alarm just outside each sleeping area (R314.3(2)).
+    # Approximation: a room ADJACENT to the bedroom (a hall preferred, else any
+    # room reachable through a door) must carry a smoke alarm.
+    for b in bedrooms:
+        neighbours = adj.get(b.id, set())
+        if not any(n in smoke_rooms for n in neighbours):
+            # sorted() so the suggested room is stable across PYTHONHASHSEED —
+            # a set's iteration order must never leak into the hint text.
+            ordered_nb = sorted(neighbours)
+            hall = next(
+                (n for n in ordered_nb if by_id.get(n) and by_id[n].type is RoomType.HALLWAY),
+                None,
+            )
+            target = hall or (next(iter(ordered_nb), None))
+            where = f" (e.g. `alarm smoke in {target}`)" if target else ""
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ALARM_HALL",
+                    f"No smoke alarm is outside the sleeping area of bedroom "
+                    f"'{b.id}': no room adjacent to it carries one (IRC R314.3 "
+                    "wants an alarm outside each sleeping area).",
+                    room=b.id,
+                    hint="Approximated as 'a room sharing a door with the bedroom' "
+                    "(a hallway if there is one, else any adjacent room)" + where + ".",
+                )
+            )
+
+    # ALARM_LEVEL — a smoke alarm on every level (R314.3(3)).
+    smoke_levels = {
+        by_id[a.room].level for a in alarms if a.is_smoke and a.room in by_id
+    }
+    for lvl in sorted({getattr(r, "level", 0) for r in plan.rooms}):
+        if lvl not in smoke_levels:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ALARM_LEVEL",
+                    f"Level {lvl} has no smoke alarm. IRC R314.3(3) requires at "
+                    "least one on every storey of the dwelling.",
+                    hint=f"Place `alarm smoke in <room on level {lvl}>`.",
+                )
+            )
+
+    # ALARM_CO — a CO alarm outside the sleeping areas where bedrooms coexist with
+    # an attached garage/shop (R315). INFO, not a warning: fuel-fired appliances
+    # aren't modelled, so the trigger is only the attached garage/shop we can see.
+    garage = next((r for r in plan.rooms if r.type in GARAGE_TYPES), None)
+    if bedrooms and garage is not None:
+        co_outside = any(
+            a.is_co and a.room in by_id and by_id[a.room].type is not RoomType.BEDROOM
+            for a in alarms
+        )
+        if not co_outside:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ALARM_CO",
+                    f"The plan has bedrooms and an attached garage/shop "
+                    f"('{garage.id}'), so a carbon-monoxide alarm is required "
+                    "outside the sleeping areas (IRC R315), but none is declared.",
+                    hint="Add `alarm co in <hall>` (or `alarm smoke_co`) outside the "
+                    "bedrooms. INFO only — fuel-fired appliances aren't modelled, so "
+                    "this is triggered by the attached garage/shop alone.",
+                )
+            )
 
 
 def _validate_access(plan: Barndominium, add) -> None:
@@ -2366,8 +3332,12 @@ def _validate_access(plan: Barndominium, add) -> None:
         reached.add(cur)
         queue.extend(n for n in adjacency[cur] if n not in reached)
 
+    # O(1) id lookup instead of ``plan.room``'s linear scan — this runs once per
+    # unreachable room, so the scan would be O(n²) on a large disconnected plan.
+    index = room_index(plan)
     for rid in sorted(interior_rooms - reached):
-        room = plan.room(rid)
+        idx = index.first_index(rid)
+        room = plan.rooms[idx] if idx is not None else None
         # A loft reaches the floor by stairs, which aren't modelled yet, so an
         # unreachable loft is a warning, not a hard error (like closets/pantries).
         sev = (
@@ -2428,7 +3398,9 @@ def _dq_bed_privacy(plan: Barndominium, graph, by_id, add) -> None:
             # `_same_suite` filter is a no-op, so behaviour is unchanged.
             public_nb = [
                 n
-                for n in graph.get(room.id, ())
+                # sorted() so the named neighbour is stable — a set's iteration
+                # order varies with PYTHONHASHSEED and must never leak into text.
+                for n in sorted(graph.get(room.id, ()))
                 if n in by_id and by_id[n].type in PUBLIC_TYPES
                 and not _same_suite(plan, room.id, n)
             ]
@@ -2494,8 +3466,10 @@ def _dq_private_passthrough(plan: Barndominium, graph, by_id, add) -> None:
             if suite_exempt and all(by_id[r].type in suite_exempt for r in comp):
                 continue
             for rid in sorted(comp):
+                # sorted() so the named gateway room is stable across
+                # PYTHONHASHSEED (a set's iteration order otherwise leaks in).
                 gate = next(
-                    (n for n in graph.get(rid, ()) if n in gate_ids), None
+                    (n for n in sorted(graph.get(rid, ())) if n in gate_ids), None
                 )
                 if gate is None:
                     continue  # separated, but not directly off this gateway kind
@@ -2806,7 +3780,9 @@ def _dq_bath_oversize(plan: Barndominium, graph, by_id, add) -> None:
     #     it serves — that's a sign the suite is mis-proportioned. Only judged for
     #     a true ensuite (a bath reached only through this bedroom, closets aside).
     for bed in (r for r in plan.rooms if r.type is RoomType.BEDROOM):
-        for n in graph.get(bed.id, ()):
+        # sorted() so multiple ensuites off one bedroom emit in a stable order
+        # (set iteration otherwise varies the issue order with PYTHONHASHSEED).
+        for n in sorted(graph.get(bed.id, ())):
             bath = by_id.get(n)
             if bath is None or bath.type is not RoomType.BATHROOM:
                 continue
@@ -3159,7 +4135,9 @@ def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
     garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
         label = g.type.value
-        for n in graph.get(g.id, ()):
+        # sorted() so multiple bedrooms off one garage emit in a stable order
+        # (set iteration otherwise varies the issue order with PYTHONHASHSEED).
+        for n in sorted(graph.get(g.id, ())):
             if n in by_id and by_id[n].type is RoomType.BEDROOM:
                 add(
                     Issue(
@@ -3273,9 +4251,12 @@ def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
 
 def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
     # 10c. IRC R302.5.1: a door between a private garage and the dwelling must be
-    #      self-closing and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood
-    #      door). A door into a sleeping room is barred outright (GARAGE_BEDROOM),
-    #      so this reminder covers the other garage-to-dwelling doors.
+    #      self-closing and 20-minute fire-rated (or a solid-core/solid-wood door
+    #      at least 1-3/8 in thick). A door into a sleeping room is barred outright
+    #      (GARAGE_BEDROOM), so this reminder covers the other garage-to-dwelling
+    #      doors. It anchors on the actual `door` statement — the opening that has
+    #      to carry the rated leaf — rather than on the garage room, so the caret
+    #      lands on the line the author edits.
     seen: set[tuple[str, str]] = set()
     for d in plan.interior_doors:
         a, b = by_id.get(d.room_a), by_id.get(d.room_b)
@@ -3292,13 +4273,62 @@ def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
                 Severity.INFO,
                 "GARAGE_DOOR",
                 f"The door from {gar.type.value} '{gar.id}' into '{other.id}' must be "
-                "a self-closing, 20-minute fire-rated (or 1⅜ in solid-core / "
-                "solid-wood) door (IRC R302.5.1).",
+                "a self-closing, 20-minute fire-rated (or solid-core / solid-wood, at "
+                "least 1-3/8 in thick) door (IRC R302.5.1).",
                 room=gar.id,
-                hint="Spec a self-closing 20-min / solid-core door on the "
+                hint="Spec a self-closing 20-min / >= 1-3/8 in solid-core door on the "
                 "garage-to-dwelling opening.",
+                line=getattr(d, "line", None),
+                col=getattr(d, "col", None),
+                end_col=getattr(d, "end_col", None),
             )
         )
+
+
+def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
+    # 10d. A swing door into a shallow closet: the leaf (as wide as the door) can't
+    #      fully open because the closet isn't as deep as the door is wide, so the
+    #      swing fills the closet. A bypass/sliding or bifold door clears the space.
+    #      Doors here are author-declared (kinds aren't seeded), so this is an INFO
+    #      nudge — not a re-seed. Only a leaf that actually swings *into* the closet
+    #      (or an unspecified side the renderer might pick) is judged; one explicitly
+    #      swinging into the other room doesn't fill the closet.
+    from .geometry import shared_edge
+
+    for d in plan.interior_doors:
+        if getattr(d, "kind", "swing") != "swing":
+            continue  # a sliding/pocket/bifold/cased leaf already clears the closet
+        a, b = by_id.get(d.room_a), by_id.get(d.room_b)
+        if a is None or b is None:
+            continue
+        if (a.type is RoomType.CLOSET) == (b.type is RoomType.CLOSET):
+            continue  # need exactly one closet side
+        closet, other = (a, b) if a.type is RoomType.CLOSET else (b, a)
+        if d.swing_into is not None and d.swing_into != closet.id:
+            continue  # swings into the room, not the closet — the closet depth is moot
+        edge = shared_edge(closet, other)
+        if edge is None:
+            continue
+        leaf = min(d.width, edge.length)
+        # Closet depth = the closet's extent perpendicular to the shared wall.
+        depth = closet.width if edge.orientation == "v" else closet.length
+        if depth + EPSILON < leaf:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "CLOSET_DOOR_SWING",
+                    f"The swing door into closet '{closet.id}' is {_f(leaf)} ft wide "
+                    f"but the closet is only {_f(depth)} ft deep, so the leaf can't "
+                    "fully open inside it.",
+                    room=closet.id,
+                    line=d.line,
+                    col=d.col,
+                    end_col=d.end_col,
+                    hint="Make it a bypass/sliding or bifold door so the leaf doesn't "
+                    f"fill the closet, e.g. `door {d.room_a} - {d.room_b} sliding "
+                    f"width {_f(d.width)}`.",
+                )
+            )
 
 
 def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
@@ -3405,6 +4435,7 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_garage_no_entry,
     _dq_garage_separation,
     _dq_garage_door,
+    _dq_closet_door_swing,
     _dq_hall_deadend,
 )
 
@@ -4153,6 +5184,11 @@ def _validate_electrical_plan(plan: Barndominium, add) -> None:
     """
     if not getattr(plan, "electrical", False):
         return
+    # Once the plan actually draws its electrical layer, the sharper per-room
+    # checks (OUTLET_SPACING / OUTLET_GFCI / ROOM_NO_LIGHT) take over — the
+    # generic checklist would just be noise next to them.
+    if plan.outlets or plan.switches or plan.lights:
+        return
     parts = [
         "space receptacles so no point along any wall is more than 6 ft from one "
         "(IRC E3901.2), with GFCI protection at kitchens, baths, laundry and "
@@ -4179,6 +5215,190 @@ def _validate_electrical_plan(plan: Barndominium, add) -> None:
             "site plans.",
         )
     )
+
+
+#: IRC E3901.4 kitchen counter receptacles: any counter run at least 12 in wide
+#: needs a small-appliance receptacle, spaced so no point along the counter wall
+#: line is more than 24 in from one. Fixed IRC figures (not jurisdiction-variable).
+_COUNTER_MIN_WIDTH = 12.0 / 12.0   # 12 in — the narrowest run that needs a receptacle
+_COUNTER_MAX_REACH = 24.0 / 12.0   # 24 in — max horizontal reach to a receptacle
+
+
+def _counter_run_span(room: Room, f) -> tuple[float, float, "Direction"]:
+    """A kitchen counter fixture's along-wall interval ``(lo, hi)`` in world feet
+    plus the :class:`Direction` of the wall it backs to."""
+    if f.wall == "S":
+        return f.x, f.x + f.width, Direction.SOUTH
+    if f.wall == "N":
+        return f.x, f.x + f.width, Direction.NORTH
+    if f.wall == "E":
+        return f.y, f.y + f.length, Direction.EAST
+    return f.y, f.y + f.length, Direction.WEST
+
+
+def _receptacle_reach(room: Room, outlets: list) -> float:
+    """The worst-case distance (ft) from any point on ``room``'s wall line to the
+    nearest receptacle, walking the perimeter as a closed loop (so an outlet near
+    a corner covers the adjacent wall too). ``max_gap / 2`` — the midpoint of the
+    widest run between two receptacles — is the figure IRC E3901.2 caps at 6 ft.
+    Doorways (which reset wall space) aren't modelled, so this is a slightly
+    conservative wall-line measure."""
+    w, length = room.width, room.length
+    perim = 2.0 * (w + length)
+    if perim <= 0 or not outlets:
+        return perim  # nothing to reach
+    arcs: list[float] = []
+    for o in outlets:
+        if o.wall is Direction.SOUTH:
+            a = min(max(o.offset, 0.0), w)
+        elif o.wall is Direction.EAST:
+            a = w + min(max(o.offset, 0.0), length)
+        elif o.wall is Direction.NORTH:
+            a = w + length + (w - min(max(o.offset, 0.0), w))
+        else:  # WEST
+            a = 2.0 * w + length + (length - min(max(o.offset, 0.0), length))
+        arcs.append(a % perim)
+    arcs.sort()
+    gaps = [arcs[i + 1] - arcs[i] for i in range(len(arcs) - 1)]
+    gaps.append(perim - arcs[-1] + arcs[0])  # wrap-around gap (whole loop if n==1)
+    return max(gaps) / 2.0
+
+
+def _validate_electrical(plan: Barndominium, add) -> None:
+    """Per-room electrical checks — active for any room that draws its electrical
+    layer (declares an `outlet`/`switch`/`light`), independent of the `electrical`
+    directive. Rooms that draw nothing are never nagged (the layer is opt-in).
+
+    Checks: receptacle spacing (OUTLET_SPACING, IRC E3901.2 — no wall point > 6 ft
+    from a receptacle, in habitable rooms with outlets); GFCI protection
+    (OUTLET_GFCI, IRC E3902 — a wet-room receptacle not marked `gfci`); and a
+    lighting outlet (ROOM_NO_LIGHT, IRC E3903 — a habitable room with power but no
+    `light`)."""
+    if not (plan.outlets or plan.switches or plan.lights):
+        return
+    from .render import fmt_ft_in
+
+    by_id = {r.id: r for r in plan.rooms}
+    outlets_by: dict[str, list] = {}
+    for o in plan.outlets:
+        outlets_by.setdefault(o.room, []).append(o)
+    powered: set[str] = set(outlets_by)
+    for sw in plan.switches:
+        powered.add(sw.room)
+    lit = {lt.room for lt in plan.lights}
+
+    # GFCI — a receptacle in a wet/damp room that isn't ground-fault protected.
+    for o in plan.outlets:
+        room = by_id.get(o.room)
+        if room is not None and room.type in WET_TYPES and not o.gfci:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "OUTLET_GFCI",
+                    f"A receptacle in the {room.display_name.lower()} "
+                    f"({room.type.value.replace('_', ' ')}) isn't marked `gfci` — "
+                    "IRC E3902 requires ground-fault protection there.",
+                    room=o.room,
+                    line=o.line,
+                    col=o.col,
+                    end_col=o.end_col,
+                    hint="Add `gfci` to the outlet, or protect the circuit at the "
+                    "panel and note it on the electrical plan.",
+                )
+            )
+
+    # Receptacle spacing — only habitable rooms that opted in by drawing an outlet.
+    for rid, outs in outlets_by.items():
+        room = by_id.get(rid)
+        if room is None or room.type not in HABITABLE_TYPES:
+            continue
+        reach = _receptacle_reach(room, outs)
+        if reach > 6.0 + 1e-6:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "OUTLET_SPACING",
+                    f"In {room.display_name}, a point on the wall is up to "
+                    f"{fmt_ft_in(reach)} from the nearest receptacle — IRC E3901.2 "
+                    "allows no more than 6 ft (a receptacle at least every 12 ft of "
+                    "wall run).",
+                    room=rid,
+                    hint="Add an `outlet` in the widest gap so no wall point is "
+                    "more than 6 ft from one.",
+                )
+            )
+
+    # RECEPTACLE_COUNTER — IRC E3901.4 kitchen small-appliance receptacles. Along
+    # each kitchen counter run (>= 12 in wide), no point on the counter wall line
+    # may be more than 24 in from a receptacle. Gated the same way as OUTLET_SPACING
+    # (only a plan that draws its electrical layer is judged), so a seed-only kitchen
+    # is never nagged. Uses the resolved counter runs, so a `fixture counter ... along`
+    # run is what's measured.
+    from .fixtures import resolve_room_fixtures
+
+    for room in plan.rooms:
+        if room.type is not RoomType.KITCHEN:
+            continue
+        counters = [
+            f
+            for f in resolve_room_fixtures(plan, room)
+            if f.kind == "counter" and f.wall in ("S", "N", "E", "W")
+        ]
+        if not counters:
+            continue
+        room_outlets = outlets_by.get(room.id, [])
+        for c in counters:
+            lo, hi, wall_dir = _counter_run_span(room, c)
+            width = hi - lo
+            if width + 1e-9 < _COUNTER_MIN_WIDTH:
+                continue  # a run under 12 in takes no receptacle (E3901.4.3(1))
+            base = room.x if wall_dir in (Direction.SOUTH, Direction.NORTH) else room.y
+            pts = sorted(
+                base + o.offset
+                for o in room_outlets
+                if o.wall is wall_dir and lo - 1e-6 <= base + o.offset <= hi + 1e-6
+            )
+            if not pts:
+                gap = width  # the whole run is unserved
+            else:
+                gaps = [pts[0] - lo, hi - pts[-1]]
+                gaps += [(pts[i + 1] - pts[i]) / 2.0 for i in range(len(pts) - 1)]
+                gap = max(gaps)
+            if gap > _COUNTER_MAX_REACH + 1e-6:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "RECEPTACLE_COUNTER",
+                        f"The {fmt_ft_in(width)} kitchen counter run in "
+                        f"'{room.id}' (on its {c.wall} wall) leaves a point "
+                        f"{fmt_ft_in(gap)} from the nearest receptacle — IRC E3901.4 "
+                        "wants a small-appliance receptacle within 24 in of every "
+                        "point along a counter (and one on any counter >= 12 in wide).",
+                        room=room.id,
+                        hint="Add a receptacle on the counter wall in the gap, e.g. "
+                        f"`outlet in {room.id} wall {c.wall} offset <ft>` — no point "
+                        "along the counter should be more than 24 in from one.",
+                    )
+                )
+
+    # Lighting outlet — a habitable room with power but nothing to switch on.
+    for rid in sorted(powered):
+        room = by_id.get(rid)
+        if room is None or room.type not in HABITABLE_TYPES:
+            continue
+        if rid not in lit:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "ROOM_NO_LIGHT",
+                    f"{room.display_name} draws receptacles/switches but no "
+                    "lighting outlet — IRC E3903 wants a wall-switch-controlled "
+                    "light in every habitable room.",
+                    room=rid,
+                    hint="Add a `light in " + rid + " at <x>,<y>` (or note a "
+                    "switched receptacle).",
+                )
+            )
 
 
 #: The rooms where lack of winter sun (a north-only aspect) most hurts comfort.
@@ -4425,6 +5645,177 @@ def _validate_energy(plan: Barndominium, add) -> None:
         )
 
 
+def _porch_lands_door(plan: Barndominium, room: Room, wall: Direction,
+                      seg_lo: float, seg_hi: float, tol: float = 0.05) -> bool:
+    """True if a porch platforms an exterior door: its footprint abuts ``wall``
+    from outside, spans the door opening (``[seg_lo, seg_hi]`` along the wall),
+    and reaches at least :data:`LANDING_MIN_DEPTH` outward from the wall."""
+    for p in plan.porches:
+        px2, py2 = p.x + p.width, p.y + p.length
+        if wall is Direction.SOUTH:
+            abut, depth = py2 >= room.y - 0.75, room.y - p.y
+            span = p.x <= seg_lo + tol and px2 >= seg_hi - tol
+        elif wall is Direction.NORTH:
+            abut, depth = p.y <= room.y2 + 0.75, py2 - room.y2
+            span = p.x <= seg_lo + tol and px2 >= seg_hi - tol
+        elif wall is Direction.WEST:
+            abut, depth = px2 >= room.x - 0.75, room.x - p.x
+            span = p.y <= seg_lo + tol and py2 >= seg_hi - tol
+        else:  # EAST
+            abut, depth = p.x <= room.x2 + 0.75, px2 - room.x2
+            span = p.y <= seg_lo + tol and py2 >= seg_hi - tol
+        if abut and span and depth + tol >= LANDING_MIN_DEPTH:
+            return True
+    return False
+
+
+def _primary_entry(plan: Barndominium):
+    """The plan's primary people-entrance: prefer an egress door on an exterior
+    wall, front (street side if declared, else south) first, else the first
+    entry. Returns ``None`` if the plan has no people-door."""
+    entries = [d for d in plan.exterior_doors if not d.overhead]
+    if not entries:
+        return None
+    by_id = {r.id: r for r in plan.rooms}
+
+    def on_exterior(d) -> bool:
+        r = by_id.get(d.room)
+        return r is not None and d.wall in exterior_walls(plan, r)
+
+    front = plan.street if plan.street is not None else Direction.SOUTH
+    ext = [d for d in entries if on_exterior(d)]
+    pool = ext or entries
+
+    def rank(d) -> tuple:
+        return (0 if d.egress else 1, 0 if d.wall is front else 1)
+
+    return min(pool, key=rank)
+
+
+def _validate_landings(plan: Barndominium, add) -> None:
+    """Flag an exterior people-door with no landing (IRC R311.3).
+
+    A porch whose footprint covers the door's exterior face (its full width, at
+    least a door-depth out) is the landing. Only entries are checked — an overhead
+    garage door needs none. Severity is context-aware: with porches modelled
+    anywhere, every uncovered entry warns; on a plan with NO porches at all it's a
+    single INFO nudge on the primary entry (the plan just hasn't drawn porches
+    yet — don't spam every door)."""
+    entries = [d for d in plan.exterior_doors if not d.overhead]
+    if not entries:
+        return
+    if not plan.porches:
+        primary = _primary_entry(plan)
+        if primary is not None:
+            add(Issue(
+                Severity.INFO, "DOOR_NO_LANDING",
+                f"Exterior door in '{primary.room}' needs a landing on the outside "
+                "(IRC R311.3) — the plan draws no porch yet.",
+                room=primary.room,
+                hint="Add a `porch` at the door (covering its width, >= "
+                f"{LANDING_MIN_DEPTH:g} ft deep), or note the landing on the "
+                "construction documents. Nudged once, on the primary entry.",
+                **_door_loc(primary)))
+        return
+    by_id = {r.id: r for r in plan.rooms}
+    for d in entries:
+        room = by_id.get(d.room)
+        if room is None:
+            continue  # DOOR_REF handles a bad ref
+        if d.wall not in exterior_walls(plan, room):
+            continue  # an entry on an interior wall is ENTRY_INTERIOR's problem
+        x1, y1, x2, y2 = opening_endpoints(room, d.wall, d.offset, d.width)
+        if d.wall in (Direction.SOUTH, Direction.NORTH):
+            seg_lo, seg_hi = min(x1, x2), max(x1, x2)
+        else:
+            seg_lo, seg_hi = min(y1, y2), max(y1, y2)
+        if _porch_lands_door(plan, room, d.wall, seg_lo, seg_hi):
+            continue
+        add(Issue(
+            Severity.WARNING, "DOOR_NO_LANDING",
+            f"Exterior door in '{d.room}' (on the {d.wall.value} wall) opens onto "
+            "no landing — IRC R311.3 wants a porch/landing spanning the door, at "
+            f"least {LANDING_MIN_DEPTH:g} ft deep.",
+            room=d.room,
+            hint=f"Add a `porch` at the door covering its {_f(d.width)} ft width "
+            f"(>= {LANDING_MIN_DEPTH:g} ft deep), swing the door where a porch "
+            "already reaches, or note the landing on the construction documents.",
+            **_door_loc(d)))
+
+
+def _validate_door_threshold(plan: Barndominium, add) -> None:
+    """Remind, once, about the threshold-to-landing drop at the required egress door.
+
+    IRC R311.3.1: at the required egress door the exterior landing may be no more
+    than 1.5 in below the top of the threshold (7.75 in is allowed only where the
+    door does not swing out over the landing). The model carries no vertical
+    threshold data, so this is a reminder-class INFO like BATH_VENT — it teaches,
+    it doesn't measure. It nudges once, on the primary entry, and only *before* a
+    porch/landing is modelled (mirroring DOOR_NO_LANDING's single info): once the
+    plan draws its landings, DOOR_NO_LANDING's per-door pass and the CD set carry
+    the detail, so a second always-on reminder would just be noise.
+    """
+    if plan.porches:
+        return
+    primary = _primary_entry(plan)
+    if primary is None:
+        return
+    add(Issue(
+        Severity.INFO, "DOOR_THRESHOLD",
+        f"At the required egress door in '{primary.room}', keep the exterior landing "
+        "no more than 1.5 in below the threshold (7.75 in only where the door doesn't "
+        "swing out over it) — IRC R311.3.1.",
+        room=primary.room,
+        hint="The model has no vertical threshold data — confirm the landing-to-"
+        "threshold drop on the construction documents. Nudged once, on the primary "
+        "entry.",
+        **_door_loc(primary)))
+
+
+def _validate_water_heater(plan: Barndominium, add) -> None:
+    """Flag a water_heater fixture whose placement needs extra protection.
+
+    Two cases (either, or both): in a garage/shop its ignition source must be
+    elevated 18 in / be a listed FVIR unit (IRC M1307.3); on an upper floor over
+    habitable space it needs a drain pan piped to a drain (IRC P2801.6). One INFO
+    per heater, naming which case(s) apply."""
+    by_id = {r.id: r for r in plan.rooms}
+    for f in plan.fixtures:
+        if f.kind != "water_heater":
+            continue
+        room = by_id.get(f.room)
+        if room is None:
+            continue  # FIXTURE_ROOM handles a bad ref
+        cases: list[str] = []
+        if room.type in GARAGE_TYPES:
+            cases.append(
+                "in a garage/shop, so its ignition source must be elevated 18 in "
+                "above the floor or be a listed flammable-vapour-ignition-resistant "
+                "unit (IRC M1307.3)"
+            )
+        if room.level >= 1:
+            below = [
+                r for r in plan.rooms
+                if r.level == room.level - 1
+                and r.type in HABITABLE_TYPES
+                and min(room.x2, r.x2) - max(room.x, r.x) > EPSILON
+                and min(room.y2, r.y2) - max(room.y, r.y) > EPSILON
+            ]
+            if below:
+                cases.append(
+                    f"on level {room.level} over habitable space, so it needs a "
+                    "drain pan piped to an approved drain (IRC P2801.6)"
+                )
+        if not cases:
+            continue
+        add(Issue(
+            Severity.INFO, "WATER_HEATER_PLACEMENT",
+            f"The water heater in '{f.room}' is " + " and ".join(cases) + ".",
+            room=f.room,
+            hint="The DSL can't draw the pan/elevation — carry the detail onto the "
+            "plumbing/mechanical documents."))
+
+
 def _door_clear_width(door) -> float:
     """An exterior door's egress **clear** width: a double/french pair provides
     its required clear opening through ONE leaf (IRC R311.2), so it counts half
@@ -4636,5 +6027,52 @@ def _validate_egress_and_light(plan: Barndominium, add, profile: Profile = DEFAU
                         + ".",
                         room=room.id,
                         hint=hint,
+                    )
+                )
+
+            # Natural ventilation (IRC R303.1): a habitable room needs OPENABLE
+            # window area >= 4% of its floor. Fixed glass daylights (counted above)
+            # but opens nothing, so it's excluded here — the gap NAT_LIGHT can't
+            # see. Existing plans (default casement windows) keep passing: any room
+            # that clears the 8% daylight floor with openable glass clears this 4%
+            # floor too.
+            openable = sum(
+                w.glazed_area
+                for w in plan.windows_for(room.id)
+                if w.wall in walls and getattr(w, "openable", w.kind != "fixed")
+            )
+            vent_required = room.area * NATURAL_VENT_RATIO
+            if openable + EPSILON < vent_required:
+                fixed_here = any(
+                    w.wall in walls and not getattr(w, "openable", w.kind != "fixed")
+                    for w in plan.windows_for(room.id)
+                )
+                if not walls:
+                    vhint = (
+                        f"'{room.id}' has no exterior wall — open it to an adjacent "
+                        "room or move it to the perimeter so it can be ventilated."
+                    )
+                elif fixed_here:
+                    vhint = (
+                        "A `fixed` window opens nothing — make one operable "
+                        f"(casement/slider/double-hung), e.g. `window {room.id} "
+                        f"{walls[0].value} width 4 offset 2`, or confirm mechanical "
+                        "ventilation."
+                    )
+                else:
+                    vhint = (
+                        f"Add openable window area on an exterior wall, e.g. "
+                        f"`window {room.id} {walls[0].value} width 4 offset 2`, or "
+                        "confirm mechanical ventilation."
+                    )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "VENT_AREA",
+                        f"Openable window area {_f(openable)} sq ft is below the "
+                        f"natural-ventilation minimum of {_f(vent_required)} sq ft "
+                        f"({NATURAL_VENT_RATIO * 100:.0f}% of floor area, IRC R303.1).",
+                        room=room.id,
+                        hint=vhint,
                     )
                 )

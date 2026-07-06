@@ -49,11 +49,22 @@ door master - mcloset width 2.5 offset 10.5 into master
 
 entry living south width 3 offset 20
 entry dining east width 3 offset 6
+
+# Covered landings at both exterior doors — a floor to step onto (IRC R311.3).
+porch front at 18,-6 size 7 x 6 covered
+porch back at 69,4 size 6 x 7 covered
 window living south width 10 offset 2
 window kitchen south width 8 offset 6
 window dining south width 8 offset 6
 window bed1 north width 5 offset 4
 window bed2 north width 5 offset 4
 window master north width 6 offset 6
-window bath1 north width 3 offset 2
-window mbath north width 3 offset 1
+window bath1 north width 3 offset 2 sill 5
+window mbath north width 3 offset 1 sill 5
+
+# Smoke alarms: one in every bedroom plus the hall outside the sleeping rooms
+# (IRC R314); the bath windows are high privacy transoms clear of the tubs.
+alarm smoke in bed1
+alarm smoke in bed2
+alarm smoke in master
+alarm smoke in hall

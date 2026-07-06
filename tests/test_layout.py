@@ -215,4 +215,8 @@ def test_birch_run_example_compiles_clean():
     out = solve_layout(parse_brief(open(path).read()))
     result = compile_source(emit_dsl(out.plan), name=out.plan.name)
     assert not result.errors, result.report()
+    # The auto-layout now DECLARES `tempered` on the windows it lands in R308.4
+    # hazard locations (a daylight window beside the entry, a bath window near the
+    # tub) via the shared predicate, so no WINDOW_TEMPERED warning survives — the
+    # plan is strictly clean of warnings.
     assert not result.warnings, result.report()

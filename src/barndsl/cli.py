@@ -56,6 +56,14 @@
         a chat pane lights up on the left: a brief in, the Claude compile-critique
         -revise loop streamed live, the best-scoring plan landed in the editor.
 
+    barndsl lsp [--check]
+        Run the stdlib Language Server over stdio (JSON-RPC 2.0, zero
+        dependencies): live diagnostics, hover docs, id-aware completions,
+        go-to-definition across `use` boundaries, format-on-save and the
+        playground's quick-fixes, for any LSP editor (VS Code, Neovim, Helix,
+        Zed). `--check` prints the negotiated capabilities and exits. See
+        docs/EDITORS.md for editor wiring.
+
     barndsl revit FILE.barn [--out FILE.json] [--frame]
         Compile, then lower the plan to the `barndsl.revit/1` exchange JSON
         (levels, deduplicated walls, hosted doors/windows, room seeds, structural
@@ -77,9 +85,10 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Any
 
 from . import __version__
-from .compiler import compile_file, compile_source
+from .compiler import SourceReadError, compile_file, compile_source, read_source_file
 from .render import save_svg
 
 
@@ -170,6 +179,19 @@ def _add_profile_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dims_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dims",
+        choices=("nominal", "faces"),
+        default="nominal",
+        help="dimension convention: 'nominal' (default) measures to the model's "
+        "room lines — interior-partition centrelines and the nominal envelope "
+        "face; 'faces' is the professional face-of-stud convention (overall dims "
+        "outside-face to outside-face, interior breaks double-ticked at the wall "
+        "faces). Default output is unchanged.",
+    )
+
+
 def _cmd_profiles(args: argparse.Namespace) -> int:
     """List the built-in jurisdiction profiles and their thresholds."""
     from .profiles import profiles_text
@@ -194,6 +216,11 @@ def _print_metrics(plan) -> None:
     print(f"  Ext. wall area:   {m['exterior_wall_area_sqft']:.0f} sq ft")
     print(f"  Roof area (≈):    {m['roof_area_sqft']:.0f} sq ft")
     print(f"  Foundation (≈):   {m['foundation_concrete_yd3']:.1f} cu yd concrete")
+    if m.get("counter_linear_ft", 0.0) > 0:
+        print(
+            f"  Countertops:      {m['counter_linear_ft']:.0f} lf / "
+            f"{m['counter_area_sqft']:.0f} sq ft"
+        )
     if plan.frame_spec is not None or plan.posts:
         print(
             f"  Frame:            {int(m['frame_count'])} bents / "
@@ -227,6 +254,12 @@ def _print_coords(plan) -> None:
 
 def _cmd_compile(args: argparse.Namespace) -> int:
     result = compile_file(args.file, profile=_resolve_profile(args))
+    if getattr(args, "quiet", False):
+        # Makefile contract: nothing on success, the diagnostic report to stderr
+        # on failure, exit code unchanged. (JSON/summary/metrics are suppressed.)
+        if not result.ok:
+            print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return _strict_rc(result, args, quiet=True)
     if getattr(args, "json", False):
         import json
 
@@ -247,30 +280,35 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     return _strict_rc(result, args)
 
 
-def _strict_rc(result, args) -> int:
+def _strict_rc(result, args, quiet: bool = False) -> int:
     """Exit code honouring --strict / --strict-info (warnings/infos → failure).
 
     A hard error always fails. With ``--strict`` a clean-but-warned plan also
     fails (CI gate: "this plan must stay warning-free"); ``--strict-info`` extends
-    that to the design-quality info nudges too.
+    that to the design-quality info nudges too. ``quiet`` suppresses the
+    explanatory stdout line (the exit code still carries the signal).
     """
     if not result.ok:
         return 1
     strict = getattr(args, "strict", False)
     strict_info = getattr(args, "strict_info", False)
     if strict_info and (result.warnings or result.infos):
-        print("\nstrict: failing on warning/info diagnostics (--strict-info).")
+        if not quiet:
+            print("\nstrict: failing on warning/info diagnostics (--strict-info).")
         return 1
     if strict and result.warnings:
-        print("\nstrict: failing on warning diagnostics (--strict).")
+        if not quiet:
+            print("\nstrict: failing on warning diagnostics (--strict).")
         return 1
     return 0
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
-    from .render import save_render
+    from .render import RenderConfig, save_render
 
     profile = _resolve_profile(args)
+    dim_mode = getattr(args, "dims", "nominal")
+    render_cfg = RenderConfig(dim_mode=dim_mode)
     result = compile_file(args.file, profile=profile)
     if result.plan is not None and getattr(args, "frame", False) and result.plan.frame_spec is None:
         # `--frame` auto-places a default post-and-beam frame even when the source
@@ -298,7 +336,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 payload["render_error"] = "parse-error recovery: partial plan not rendered"
             else:
                 try:
-                    save_render(result.plan, out, fmt)
+                    save_render(result.plan, out, fmt, render_cfg)
                     payload["out"] = out
                 except (ImportError, ValueError) as exc:
                     payload["out"] = None
@@ -314,7 +352,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     print()
     _print_metrics(result.plan)
     try:
-        save_render(result.plan, out, fmt)
+        save_render(result.plan, out, fmt, render_cfg)
     except (ImportError, ValueError) as exc:
         print(f"\nerror: {exc}", file=sys.stderr)
         return 2
@@ -327,6 +365,12 @@ def _cmd_score(args: argparse.Namespace) -> int:
 
     result = compile_file(args.file, profile=_resolve_profile(args))
     report = design_score(result)
+    if getattr(args, "quiet", False):
+        # Makefile contract: nothing on success; the report to stderr when there
+        # is no plan at all (score's only failure), exit code unchanged.
+        if result.plan is None:
+            print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 0 if result.plan is not None else 1
     if getattr(args, "json", False):
         import json
 
@@ -435,13 +479,22 @@ def _cmd_layout(args: argparse.Namespace) -> int:
 
 
 def _cmd_design(args: argparse.Namespace) -> int:
-    from .agent import (
-        BarndoAgent,
-        agent_availability,
-        resolve_max_iterations,
-        resolve_model,
-        resolve_target_score,
-    )
+    try:
+        from .agent import (
+            BarndoAgent,
+            agent_availability,
+            resolve_max_iterations,
+            resolve_model,
+            resolve_target_score,
+        )
+    except ImportError:
+        # The base install is dependency-free; the design agent's libraries
+        # (anthropic/pydantic) live in the `agent` extra.
+        print(
+            'error: the design agent needs the agent extra — pip install "barndsl[agent]"',
+            file=sys.stderr,
+        )
+        return 2
 
     available, reason = agent_availability()
     if not available:
@@ -575,32 +628,43 @@ def _cmd_revit_import(args: argparse.Namespace) -> int:
 
 
 def _cmd_fmt(args: argparse.Namespace) -> int:
-    """Canonically reformat .barn files via the compile → emit_dsl round-trip."""
-    from .emit import emit_dsl
+    """Canonically reformat .barn files with the comment-preserving normalizer.
 
+    Unlike an emit round-trip, `fmt` keeps every comment (teaching notes and
+    suppression pragmas) — it re-renders each statement line from its own tokens
+    and normalizes only spacing/number formatting/keyword case. It refuses to
+    touch a file that doesn't compile without parse errors, so it can't mask
+    breakage."""
+    from .fmt import format_source
+
+    quiet = getattr(args, "quiet", False)
     rc = 0
     changed_any = False
     for path in args.files:
-        with open(path, encoding="utf-8") as fh:
-            original = fh.read()
+        original, _ = read_source_file(path)  # `-` reads stdin; clean I/O errors
+        # Refuse to format a file with parse errors — fmt must never mask breakage.
         result = compile_source(original)
-        if result.plan is None:
-            print(f"{path}: cannot format — fix compile errors first", file=sys.stderr)
+        if result.plan is None or result.recovered:
+            # Errors go to stderr regardless of --quiet.
+            print(f"{path}: cannot format — fix parse errors first", file=sys.stderr)
             print(result.report(os.path.basename(path)), file=sys.stderr)
             rc = 2
             continue
-        formatted = emit_dsl(result.plan)
+        formatted = format_source(original)
         changed = formatted != original
         if args.check:
             if changed:
-                print(f"would reformat {path}")
+                if not quiet:
+                    print(f"would reformat {path}")
                 changed_any = True
-        elif args.write:
+        elif args.write and path != "-":
             if changed:
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(formatted)
-                print(f"reformatted {path}")
-        else:
+                if not quiet:
+                    print(f"reformatted {path}")
+        elif not quiet:
+            # stdin (or no --write): emit the formatted source to stdout.
             print(formatted, end="")
     if rc:
         return rc
@@ -665,7 +729,10 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
     print(result.report(os.path.basename(args.file)))
     if result.plan is None or result.recovered:
         return 1
-    save_dxf(result.plan, args.out)
+    save_dxf(
+        result.plan, args.out, dim_mode=getattr(args, "dims", "nominal"),
+        dims=getattr(args, "dxf_dims", "geometry"),
+    )
     n_open = len(result.plan.windows) + len(result.plan.exterior_doors)
     print(f"\nDXF: {len(result.plan.rooms)} room(s), {n_open} opening(s)")
     print(f"Wrote {args.out}")
@@ -730,11 +797,21 @@ def _cmd_view3d(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _cmd_lsp(args: argparse.Namespace) -> int:
+    """Run the stdlib Language Server over stdio (or print capabilities)."""
+    from .lsp import check, run_stdio
+
+    if getattr(args, "check", False):
+        return check()
+    return run_stdio()
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     """Start the local web playground (editor + live diagnostics + 2D/3D views)."""
     from .playground import run
 
     source = None
+    base_dir = None
     if getattr(args, "file", None):
         try:
             with open(args.file, encoding="utf-8") as fh:
@@ -742,9 +819,12 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"error: cannot read {args.file}: {exc.strerror or exc}", file=sys.stderr)
             return 2
+        # The served file's directory is the resolution root for `use` (cross-file
+        # composition); a scratch buffer (no file) leaves parts unresolvable.
+        base_dir = os.path.dirname(os.path.abspath(args.file))
     return run(
         initial_source=source, port=args.port, open_browser=getattr(args, "open", False),
-        from_file=source is not None,
+        from_file=source is not None, base_dir=base_dir,
     )
 
 
@@ -814,24 +894,33 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
-    """Side-by-side of two plans: score, takeoff, resolved/introduced codes."""
-    from .compare import compare_plans, comparison_text
+    """Side-by-side of two plans — or a change-order history over 3+ (A→B→C…):
+    score, takeoff, resolved/introduced codes."""
+    from .compare import compare_plans, compare_series, comparison_text, series_text
 
+    files = [args.file_a, args.file_b, *args.files]
     try:
-        result_a = compile_file(args.file_a)
-        result_b = compile_file(args.file_b)
+        results = [compile_file(f) for f in files]
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    names = (os.path.basename(args.file_a), os.path.basename(args.file_b))
-    cmp = compare_plans(result_a, result_b, names)
-    if getattr(args, "json", False):
+    names = [os.path.basename(f) for f in files]
+    want_json = getattr(args, "json", False)
+    payload: dict[str, Any]
+    if len(files) == 2:
+        # Two files keep the EXACT flat pairwise shape (no regression for scripts).
+        payload = compare_plans(results[0], results[1], (names[0], names[1]))
+        text = comparison_text(payload)
+    else:
+        payload = compare_series(results, names)
+        text = series_text(payload)
+    if want_json:
         import json
 
-        print(json.dumps(cmp, indent=2))
+        print(json.dumps(payload, indent=2))
     else:
-        print(comparison_text(cmp))
-    return 0 if result_a.plan is not None and result_b.plan is not None else 1
+        print(text)
+    return 0 if all(r.plan is not None for r in results) else 1
 
 
 def _cmd_revit_diff(args: argparse.Namespace) -> int:
@@ -877,7 +966,27 @@ def _cmd_revit_diff(args: argparse.Namespace) -> int:
 
 def _cmd_cost(args: argparse.Namespace) -> int:
     """Assembly-based construction cost estimate from the plan's takeoff."""
-    from .cost import cost_text, estimate_cost
+    from .cost import (
+        cost_text,
+        estimate_cost,
+        unit_cost_key_rows,
+        unit_cost_key_table,
+    )
+
+    # `--print-keys` is a reference dump, not an estimate — it needs no plan, so
+    # the positional file is optional when it's set. `--json` gives a machine
+    # shape [{key, default, unit, meaning}, ...]; otherwise the text table.
+    if getattr(args, "print_keys", False):
+        if getattr(args, "json", False):
+            import json
+
+            print(json.dumps(unit_cost_key_rows(), indent=2))
+        else:
+            print(unit_cost_key_table())
+        return 0
+    if args.file is None:
+        print("error: the following arguments are required: file", file=sys.stderr)
+        return 2
 
     try:
         result = compile_file(args.file)
@@ -909,6 +1018,10 @@ def _cmd_cost(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    if getattr(args, "quiet", False):
+        # Makefile contract: a clean estimate prints nothing; a compile failure
+        # already returned 2 with its report on stderr above.
+        return 0
     if getattr(args, "json", False):
         import json
 
@@ -946,7 +1059,8 @@ def _cmd_packet(args: argparse.Namespace) -> int:
 
     out = args.out or "packet.html"
     try:
-        save_packet(result, out, costs=overrides, multiplier=args.multiplier)
+        save_packet(result, out, costs=overrides, multiplier=args.multiplier,
+                    dim_mode=getattr(args, "dims", "nominal"))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1048,6 +1162,11 @@ def main(argv: list[str] | None = None) -> int:
         help="exit non-zero on warnings AND info nudges",
     )
     _add_profile_flag(p_compile)
+    p_compile.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
+    )
     p_compile.set_defaults(func=_cmd_compile)
 
     p_build = sub.add_parser("build", help="compile and render a .barn file to SVG/PNG/PDF")
@@ -1075,6 +1194,7 @@ def main(argv: list[str] | None = None) -> int:
         help="auto-place a default post-and-beam frame if the source has none",
     )
     _add_profile_flag(p_build)
+    _add_dims_flag(p_build)
     p_build.set_defaults(func=_cmd_build)
 
     p_score = sub.add_parser(
@@ -1087,6 +1207,11 @@ def main(argv: list[str] | None = None) -> int:
         help="emit the score report as machine-readable JSON",
     )
     _add_profile_flag(p_score)
+    p_score.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
+    )
     p_score.set_defaults(func=_cmd_score)
 
     p_inspect = sub.add_parser(
@@ -1174,7 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
     p_revit_import.set_defaults(func=_cmd_revit_import)
 
     p_fmt = sub.add_parser(
-        "fmt", help="canonically reformat .barn files (compile → emit)"
+        "fmt", help="canonically reformat .barn files (comments/pragmas preserved)"
     )
     p_fmt.add_argument("files", nargs="+", help="one or more .barn files")
     p_fmt.add_argument(
@@ -1184,6 +1309,11 @@ def main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="don't write; exit non-zero if any file isn't already formatted",
+    )
+    p_fmt.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
     )
     p_fmt.set_defaults(func=_cmd_fmt)
 
@@ -1215,6 +1345,18 @@ def main(argv: list[str] | None = None) -> int:
     p_dxf = sub.add_parser("dxf", help="export a plan to DXF (CAD interchange)")
     p_dxf.add_argument("file", help="path to a .barn DSL file")
     p_dxf.add_argument("--out", default="plan.dxf", help="output DXF path")
+    _add_dims_flag(p_dxf)
+    p_dxf.add_argument(
+        "--dxf-dims",
+        choices=("geometry", "associative"),
+        default="geometry",
+        dest="dxf_dims",
+        help="dimension flavor: 'geometry' (default) explodes dims to loose "
+        "lines/ticks/TEXT that every viewer renders — byte-identical to the "
+        "historical output; 'associative' emits real DIMENSION entities backed by "
+        "anonymous *D<n> geometry blocks, so a regenerating reader (AutoCAD, "
+        "BricsCAD) gets live dims while others still see the same picture.",
+    )
     p_dxf.set_defaults(func=_cmd_dxf)
 
     p_ifc = sub.add_parser(
@@ -1265,6 +1407,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_serve.set_defaults(func=_cmd_serve)
 
+    p_lsp = sub.add_parser(
+        "lsp",
+        help="run the stdlib Language Server over stdio (live diagnostics, hover, "
+        "completion, go-to-definition, formatting, code actions) for any LSP editor",
+    )
+    p_lsp.add_argument(
+        "--check",
+        action="store_true",
+        help="print the negotiated capabilities and exit (smoke-test editor configs)",
+    )
+    p_lsp.set_defaults(func=_cmd_lsp)
+
     p_elev = sub.add_parser(
         "elevation", help="render a schematic exterior elevation (one face) to SVG"
     )
@@ -1297,10 +1451,16 @@ def main(argv: list[str] | None = None) -> int:
 
     p_compare = sub.add_parser(
         "compare",
-        help="side-by-side of two plans: score, takeoff, resolved/introduced codes",
+        help="side-by-side of two plans (or a change-order history over 3+): "
+        "score, takeoff, resolved/introduced codes",
     )
     p_compare.add_argument("file_a", help="path to scheme A (.barn)")
     p_compare.add_argument("file_b", help="path to scheme B (.barn)")
+    p_compare.add_argument(
+        "files", nargs="*",
+        help="further schemes for a change-order history (A→B→C…): consecutive "
+        "pairwise sections plus a head-to-tail summary",
+    )
     p_compare.add_argument("--json", action="store_true", help="emit the comparison as JSON")
     p_compare.set_defaults(func=_cmd_compare)
 
@@ -1331,8 +1491,16 @@ def main(argv: list[str] | None = None) -> int:
         "cost",
         help="assembly-based construction cost estimate from the plan's takeoff",
     )
-    p_cost.add_argument("file", help="path to a .barn DSL file")
+    p_cost.add_argument(
+        "file", nargs="?", default=None,
+        help="path to a .barn DSL file (optional with --print-keys)",
+    )
     p_cost.add_argument("--json", action="store_true", help="emit the estimate as JSON")
+    p_cost.add_argument(
+        "--print-keys", action="store_true", dest="print_keys",
+        help="print the overridable unit-cost key table (key, default, unit, "
+        "meaning) and exit — no plan needed",
+    )
     p_cost.add_argument(
         "--costs",
         default=None,
@@ -1343,6 +1511,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=1.0,
         help="regional cost factor scaling every unit cost (e.g. 1.15)",
+    )
+    p_cost.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
     )
     p_cost.set_defaults(func=_cmd_cost)
 
@@ -1361,6 +1534,7 @@ def main(argv: list[str] | None = None) -> int:
     p_packet.add_argument(
         "--multiplier", type=float, default=1.0, help="regional cost factor for the estimate"
     )
+    _add_dims_flag(p_packet)
     p_packet.set_defaults(func=_cmd_packet)
 
     p_rlog = sub.add_parser(
@@ -1395,6 +1569,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except SourceReadError as exc:
+        # A file-taking command pointed at something unreadable (missing file, a
+        # directory, no permission, non-UTF-8): a clean one-liner + exit 2, never
+        # a traceback — the same exit convention as a fatal input error below.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except SystemExit as exc:
         # A command signalling a fatal input error (e.g. an unresolvable
         # --profile) raises SystemExit(code); surface it as an int return so

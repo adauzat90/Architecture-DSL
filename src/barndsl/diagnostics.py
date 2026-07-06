@@ -38,7 +38,7 @@ class CodeInfo:
 
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
-_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING"})
+_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING"})
 
 
 def _c(code: str, severity: Severity, title: str, explanation: str) -> tuple[str, CodeInfo]:
@@ -50,6 +50,23 @@ E, W, I = Severity.ERROR, Severity.WARNING, Severity.INFO
 #: code -> CodeInfo. Grouped by emitting phase for readability.
 REGISTRY: dict[str, CodeInfo] = dict(
     [
+        # --- suppression pragmas (the `# barndsl: accept CODE` escape hatch) --
+        _c("ACCEPT_DENIED", W, "Error can't be accepted",
+           "An `# barndsl: accept <CODE>` pragma named a code that fired as an "
+           "ERROR on its target line. Errors are unbuildable-plan problems, not "
+           "judgement calls — they must be fixed, never waived. `accept` only "
+           "downgrades warnings and infos. Resolve the underlying error."),
+        _c("ACCEPT_UNKNOWN", W, "Accept pragma names an unknown code",
+           "An `# barndsl: accept <CODE>` pragma named a code the registry doesn't "
+           "know (a typo, or an old name). The pragma suppresses nothing. Use a "
+           "real diagnostic code — the message lists did-you-mean candidates, and "
+           "`barndsl explain` / the registry has the exact spellings."),
+        _c("ACCEPT_UNUSED", I, "Accept pragma matched nothing",
+           "An `# barndsl: accept <CODE>` pragma fired on nothing — the code never "
+           "appeared on the line it targets (a trailing pragma's own line, or the "
+           "statement following a standalone one), or the standalone pragma had no "
+           "following statement. A stale pragma outlives the diagnostic it once "
+           "waived; remove it so the audit trail stays honest."),
         # --- lexer / parser (always errors) ---------------------------------
         _c("UNTERMINATED_STRING", E, "Unterminated string literal",
            "A quoted value has no closing '\"' before the end of the line."),
@@ -84,9 +101,70 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "`entry`/`window` option)."),
         _c("UNKNOWN_STMT", E, "Unknown statement",
            "The line doesn't start with a known statement keyword."),
+        # --- cross-file composition (the `use` statement + part files) ------
+        _c("USE_UNRESOLVED", E, "Part path can't be resolved",
+           "A `use \"<relpath>\"` names a part file that can't be resolved: the "
+           "path is missing, absolute, escapes the including file's directory "
+           "(`..`/symlink), exceeds the size limit, or the source has no home "
+           "directory to resolve against (a pasted or browser-opened buffer). "
+           "Paths are always relative to the including file — compile the file, "
+           "or serve its folder, and keep parts under it."),
+        _c("USE_ALIAS_DUP", E, "Duplicate use alias",
+           "Two `use` statements share an `as <alias>`. Every id inside a part is "
+           "stamped `<alias>.<id>`, so aliases must be unique across the plan — "
+           "give each instance its own (`m`, `m2`, `bath_1`, ...)."),
+        _c("USE_NESTED", E, "Use nested deeper than 2",
+           "A part used by a part tries to `use` a third part. Composition is "
+           "depth-2 (host → part → part); a `use` reaching depth 3 is refused. "
+           "Flatten the deepest level, or `use` it one level up."),
+        _c("USE_CYCLE", E, "Part cycle",
+           "A part `use`s itself, or two parts `use` each other (a → b → a). A part "
+           "library is a tree, not a ring — break the loop. The cycle path is named "
+           "in the message; the loader stops cleanly instead of recursing forever."),
+        _c("USE_PART_INVALID", E, "Part fails to compile",
+           "A used part file doesn't compile cleanly on its own (in fragment mode): "
+           "it has one or more errors of its own. The part-internal diagnostics are "
+           "reported once, anchored to the part file — fix the part, then re-use it."),
+        _c("PART_HOST_STMT", E, "Host-only statement in a part",
+           "A part file uses a statement that describes a whole building, not a "
+           "reusable block — `envelope`, `plan`, `wing`, `ceiling`, `program`, "
+           "`require`, `site`, `setback`, `building`, `street`, `orientation`, "
+           "`roof`, `overhang`, `finish`, `frame`, or `electrical`. A part borrows "
+           "the host's; size it by its rooms and drop the statement. (`use` and "
+           "`stair` ARE allowed in a part — Phase 20 nested + multi-level parts.)"),
+        _c("PARAM_UNKNOWN", E, "Unknown param name",
+           "A bare name stands where a number is expected inside a part, but it "
+           "isn't a declared `param`. Declare it (`param <name> = <number>`), or use "
+           "a number. Params are numbers only in v1 — no arithmetic."),
+        _c("PARAM_UNDECLARED", E, "Use sets an undeclared param",
+           "A `use ... with <name>=<value>` names a param the part doesn't declare. "
+           "Add `param <name> = <default>` to the part, or drop the pair — the "
+           "part's declared params are listed in the message."),
+        _c("PARAM_DUP", E, "Param declared or set twice",
+           "A `param <name>` is declared more than once in a part, or a `with` "
+           "clause sets the same param twice. Declare/set each param once."),
+        _c("PARAM_IN_PLAN", E, "param in a whole plan",
+           "`param` declares a *part* parameter — a whole plan (a `.barn` with a "
+           "`plan` header) has no use-site to pass values from. Move `param` into a "
+           "part file; the host passes values with `use ... with name=value`."),
+        _c("PART_ORIGIN", I, "Part origin normalized",
+           "A part's south-west-most corner wasn't at 0,0, so the loader shifted "
+           "the whole part to the origin before stamping (the `at` on the `use` "
+           "line then places that corner). Harmless — parts are authored in their "
+           "own local feet and needn't start at 0,0."),
+        _c("PART_EMPTY", E, "Part declares no rooms",
+           "A part file (any `.barn` file with no `plan` header) must declare at "
+           "least one `room`. An empty part composes nothing."),
         # --- envelope / wings / top level -----------------------------------
         _c("ENVELOPE", E, "Bad envelope",
            "The envelope must have positive width and length, e.g. `envelope 60 x 40`."),
+        _c("DIM_IMPLAUSIBLE", E, "Implausible dimension",
+           "An envelope, room, or wing side is non-finite or larger than the "
+           "1000 ft plausibility limit — no barndominium runs that far, and such a "
+           "value overflows the area takeoff to `inf`. Almost always a typo (a "
+           "stray digit, or feet entered as inches × something). Use a realistic "
+           "measurement in feet; the value is clamped so the rest of the report "
+           "still reads, but the plan stays unbuildable until it is fixed."),
         _c("WING_SIZE", E, "Bad wing size",
            "A `wing` block must have positive dimensions."),
         _c("FOOTPRINT_SPLIT", E, "Disconnected footprint",
@@ -100,6 +178,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two rooms share an id; ids must be unique."),
         _c("NO_BATH", W, "No bathroom",
            "The plan has no bathroom or half-bath."),
+        _c("NOTE_OUTSIDE", I, "Positioned note outside the footprint",
+           "A `note \"...\" at <x>,<y>` is anchored outside the building footprint "
+           "(envelope + wings). Often intentional — annotating the site, a setback, "
+           "or a future addition — so it's only a gentle nudge, never an error: if "
+           "the callout means to sit on the plan, move its `at` point inside the "
+           "walls."),
         _c("FLOOR_FINISH", W, "Unrecognised floor finish",
            "A room's `floor \"...\"` hint matched no material in the 3D palette, "
            "so it falls back to the default finish for its room type. Not "
@@ -123,6 +207,44 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A `setback` statement declares yard setbacks but no `site <W> x <L>` "
            "gives the lot dimensions to measure them against. Add a `site` line, "
            "or drop the setbacks."),
+        _c("SITE_REQUIRED", E, "Site feature without a site",
+           "A `drive`/`walk`/`well`/`septic`/`service` places itself in lot feet, "
+           "so it needs a `site <W> x <L>` to sit on. Declare the lot dimensions, "
+           "or remove the site feature. (`grade` is the exception — it describes "
+           "the building's height above grade and needs no lot.)"),
+        _c("SITE_REF", E, "Walk names an unknown room",
+           "A `walk from <room> to drive` names a room that doesn't exist. The walk "
+           "starts at that room's exterior door, so it must be a real room with an "
+           "exterior door. Name an existing entry room."),
+        _c("WELL_SEPTIC_CLEAR", W, "Well too close to the septic",
+           "A private well sits closer to the septic tank/drain field than the "
+           "common 100 ft health-department separation. This is a public-health "
+           "rule (not IRC) and varies by jurisdiction (50-100 ft is typical). Move "
+           "the well or septic apart, and confirm the figure with the county health "
+           "department."),
+        _c("DRIVE_DOOR", I, "Drive with no path to a door",
+           "The plan has a driveway but neither a `walk` nor a drive edge comes "
+           "within a few feet of any exterior door — guests park and have no path "
+           "to an entry. Add `walk from <room> to drive`, or extend the drive to a "
+           "door."),
+        _c("SEPTIC_SETBACK", I, "Septic inside a setback",
+           "A septic tank or its drain field falls inside a required yard setback "
+           "band. Septic components are usually held out of the setbacks too; "
+           "confirm the allowed septic setback with the county health department."),
+        _c("SITE_OVERLAP", W, "Site features of the same kind overlap",
+           "Two declared driveways overlap on the lot. The cost takeoff sums each "
+           "drive's area independently, so an overlap double-counts the shared "
+           "paving in the estimate (and the drawing paints it twice). Only drives "
+           "are checked: a `walk` is auto-routed to terminate at a drive, so a "
+           "walk-drive overlap is by design and a walk-walk overlap of two thin "
+           "auto-routed paths isn't a meaningful double-count. Merge or separate "
+           "the overlapping drives so each patch of paving is declared once."),
+        _c("PORCH_GUARD", W, "Porch needs a guard (R312.1)",
+           "The declared `grade` puts the finish floor more than 30 in above "
+           "finished grade, so every porch is a walking surface that needs a 36 in "
+           "guard (IRC R312.1) with balusters blocking a 4 in sphere. Note the "
+           "guard on the drawings. Silent when no `grade` is declared or the floor "
+           "sits <= 30 in above grade."),
         _c("RECOVERY_LIMIT", W, "Partial-plan checks incomplete",
            "Parse-error recovery kept a partial plan, but frame placement or "
            "validation crashed on it and was skipped - the diagnostics listed "
@@ -147,6 +269,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A bedroom is below the ~70 sq ft IRC minimum habitable area (R304)."),
         _c("BEDROOM_DIM", E, "Bedroom too narrow",
            "A bedroom's smallest dimension is below the 7 ft minimum (R304)."),
+        _c("ROOM_HABITABLE", W, "Habitable room below the R304 minimum",
+           "A habitable room (living, dining, office/den, loft) is below the IRC "
+           "R304 minimum — 70 sq ft of floor area (R304.1) and 7 ft in every "
+           "horizontal dimension (R304.2). Bedrooms carry the same rule as a hard "
+           "error via BEDROOM_AREA/BEDROOM_DIM (not repeated here); a kitchen is "
+           "exempt from both (R304.2). The thresholds follow the active profile's "
+           "habitable-room minimums."),
         _c("HALL_WIDTH", E, "Hallway too narrow",
            "A hallway is below the 3 ft (36 in) minimum width (R311.6)."),
         _c("ROOM_TIGHT", I, "Room below a workable size",
@@ -217,6 +346,89 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "through, so the door can't fully open past it. Keep the swing clear — "
            "slide the fixture off the door approach, or swing the door the other "
            "way."),
+        _c("FIXTURE_TOILET_CLEARANCE", W, "Toilet clearance below IRC R307.1",
+           "An author-placed toilet has less than 15 in from its centreline to the "
+           "nearest side wall or fixture, or less than 21 in of clear floor in "
+           "front (IRC R307.1). Give the water closet a 30 in bay (15 in each side "
+           "of centre) and 21 in in front — slide it along the wall or widen the "
+           "room. Only explicit `fixture toilet` placements are checked; the "
+           "auto-seed is fitted for you."),
+        _c("FIXTURE_FRONT", I, "Fixture's clear-floor strip is blocked",
+           "An author-placed fixture's approach — the clear floor it needs in front "
+           "of its face (the `front` clearance in the catalog) — is cut off by a "
+           "wall or overlapped by another fixture, so you can't use or stand at it. "
+           "A free-standing piece (table, island) instead wants ~2 ft of walkway on "
+           "at least one long side. Slide it clear, or move it toward the centre."),
+        _c("FIXTURE_ROOM_TYPE", I, "Fixture in an unusual room type",
+           "An author-placed fixture sits in a room type it isn't usually found in "
+           "— a toilet/tub/shower/lavatory outside a bath or laundry, a "
+           "range/refrigerator/island outside a kitchen, a bed outside a bedroom or "
+           "loft. Often a typo in the room id or type; if it's deliberate, ignore "
+           "the note. Storage/utility placements (a water heater in a utility, a "
+           "washer in a mudroom, a desk anywhere) are never flagged."),
+        _c("FIXTURE_BACKING", I, "Wall-backed fixture floats mid-floor",
+           "An author-placed piece that normally backs to a wall (toilet, vanity, "
+           "tub, shower, sink, range, fridge, counter, wardrobe, dresser, water "
+           "heater, washer, dryer) sits more than ~0.5 ft off every wall of its "
+           "room. Back it to a wall with `at`, or drop the coordinates and give it "
+           "`wall N|S|E|W` to auto-place against a wall."),
+        _c("FIXTURE_EGRESS", W, "Fixture blocks a bedroom escape window",
+           "A tall author-placed piece (refrigerator, wardrobe, water heater) parks "
+           "over a bedroom's emergency-escape window, so no one could get out "
+           "through it (IRC R310). Keep the egress window clear — move the fixture "
+           "to another wall."),
+        _c("COUNTER_DOOR", W, "Counter run crosses a doorway",
+           "A `fixture counter ... along <wall>` run spans a doorway, opening or "
+           "entry on that wall — you can't build countertop across an opening. Stop "
+           "the run short of the opening with `from <a> to <b>` (room-local feet "
+           "along the wall), or move the run to another wall. A full-wall run over a "
+           "door is the usual cause; a broken L/U leg clears it."),
+        _c("COUNTER_ROOM", I, "Counter in an unusual room type",
+           "A counter run sits in a room type where a run of casework reads as odd "
+           "(a bedroom, closet, hallway or loft). Counters belong to a kitchen, "
+           "pantry, bath, laundry, mudroom or shop; if this is a deliberate bar or "
+           "work ledge, ignore the note."),
+        _c("SINK_NO_COUNTER", I, "Kitchen sink not set into a counter",
+           "A kitchen sink isn't set into any counter run — a sink wants countertop "
+           "to each side to work at. Extend a `fixture counter ... along <wall>` run "
+           "past the sink so it drops into the countertop. Only fires once the "
+           "kitchen has counters placed to compare against; a bath lavatory (its own "
+           "vanity) is never judged."),
+        _c("RANGE_WINDOW", W, "Range under an operable window",
+           "A range/cooktop sits directly under a window that opens. A draft "
+           "through the sash can blow out a burner, and a curtain hangs over the "
+           "flame — common code and NKBA practice keep a cooktop out from under an "
+           "openable window. Slide the range along the wall, clear of the sash "
+           "(a fixed, non-opening window overhead is fine)."),
+        _c("RANGE_LANDING", I, "No landing surface beside the range",
+           "A range has no counter, sink, island or refrigerator within 1 ft to "
+           "either side to set a hot pan down (NKBA wants a landing surface flanking "
+           "the cooktop). Add a `fixture counter` next to the range. Only fires when "
+           "the kitchen already has other casework placed to compare against."),
+        _c("KITCHEN_TRIANGLE", I, "Kitchen work triangle too spread out",
+           "The sink–range–refrigerator work triangle (centre to centre) sums to "
+           "more than ~26 ft, so the cook walks marathons between the three "
+           "stations (NKBA keeps each leg ~4–9 ft, the perimeter ~13–26 ft). Draw "
+           "the three appliances closer together. A compact, efficient galley is "
+           "not flagged; a genuinely cramped kitchen is caught by KITCHEN_FIT."),
+        _c("DRYER_VENT", I, "Dryer far from an exterior wall",
+           "A dryer is more than ~10 ft from any exterior wall of its room (or its "
+           "room has none), so the exhaust duct runs long and bendy — lint collects "
+           "and airflow drops, a fire risk and an efficiency loss. Put the laundry "
+           "on an exterior wall, or keep the dryer near one."),
+        _c("WATER_HEATER_PLACEMENT", I, "Water heater placement needs protection",
+           "A `water_heater` fixture sits somewhere its installation needs extra "
+           "protection the DSL can't draw. In a garage or shop, a fuel-fired or "
+           "electric water heater's ignition source must be elevated 18 in above "
+           "the floor (or be a listed flammable-vapour-ignition-resistant unit), "
+           "IRC M1307.3. On an upper floor (level 1+) over habitable space, it "
+           "needs a drain pan piped to an approved drain so a leak doesn't soak the "
+           "ceiling below, IRC P2801.6. A one-per-heater INFO naming which case "
+           "applies — carry the detail onto the plumbing/mechanical documents."),
+        _c("FIXTURE_STAIR", W, "Fixture on a stair footprint",
+           "A fixture's footprint overlaps a stair's run or landing on the same "
+           "level, so it fouls the flight. Keep the stair and its landing clear — "
+           "slide the fixture off the footprint, or run the stair along a wall."),
         # --- doors ----------------------------------------------------------
         _c("SELF_DOOR", E, "Door to self",
            "An interior door connects a room to itself."),
@@ -280,6 +492,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
         # --- openings -------------------------------------------------------
         _c("WINDOW_REF", E, "Window references unknown room",
            "A window names a room id that doesn't exist."),
+        _c("OPENING_SIZE", E, "Non-positive opening width",
+           "A window, interior door, or exterior door (including an overhead "
+           "door) was declared with `width <= 0`. A zero- or negative-width "
+           "opening isn't a buildable opening, and it misprices in the estimate "
+           "(an overhead line vanishes; an entry still bills a full leaf). Give "
+           "it a positive width, e.g. `width 3`."),
         _c("OPENING_OOB", E, "Opening runs off the wall",
            "A window/entry's offset+width exceeds the wall it sits on."),
         _c("OPENING_CLASH", E, "Openings overlap",
@@ -291,8 +509,48 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("WINDOW_SILL", W, "Window head at or below its sill",
            "A window's head height is not above its sill height, so it encloses "
            "no glazed area. Set `head` above `sill` (both are ft above the floor)."),
+        _c("WINDOW_TEMPERED", W, "Window needs safety glazing",
+           "A window sits in an IRC R308.4 hazard location — within 24 in of a "
+           "door in the same wall plane (R308.4.1), within 60 in of a tub/shower "
+           "in a wet room (R308.4.5), within 36 in of a stair flight "
+           "(R308.4.6/.7, simplified), or a large glazing panel over 9 sq ft whose "
+           "bottom edge is below 18 in and top edge above 36 in above the floor, "
+           "anywhere (R308.4.3) — where human impact is likely, so its glass must "
+           "be tempered/safety glazing. The rule is derived from geometry, honours "
+           "a declared `tempered` attribute (the R308.4 escape hatch), and also "
+           "fills the window schedule's Glazing column. Specify tempered glass on "
+           "the schedule."),
+        _c("WINDOW_FALL", W, "Operable window needs fall protection",
+           "An operable window has a sill below 24 in on an upper storey. IRC "
+           "R312.2 requires window fall protection (an opening-control device or "
+           "fall guard, ASTM F2090) where an operable sash sits below 24 in and "
+           "more than 72 in above the grade below. The model carries no grade "
+           "elevation, so an upper level (>= 1) is the proxy for 'well above "
+           "grade'. Fit an opening-control device that limits the sash to a 4 in "
+           "clear opening yet still releases for escape — do not raise the sill, "
+           "which would fight the R310 egress-window rule. A fixed sash is exempt."),
         _c("ENTRY_INTERIOR", E, "Entry on an interior wall",
            "An exterior door is on a wall that doesn't face outside."),
+        _c("DOOR_THRESHOLD", I, "Threshold-to-landing drop at the egress door",
+           "A reminder-class info (the model has no vertical threshold data, so it "
+           "teaches rather than measures): at the required egress door the exterior "
+           "landing may be no more than 1.5 in below the top of the threshold — "
+           "7.75 in only where the door does not swing out over the landing (IRC "
+           "R311.3.1). Nudged once, on the primary entry, and only before a "
+           "porch/landing is modelled (mirroring DOOR_NO_LANDING's single info); "
+           "once landings are drawn, the CD set carries the detail. Confirm the "
+           "landing-to-threshold drop on the construction documents."),
+        _c("DOOR_NO_LANDING", W, "Exterior door has no landing",
+           "An exterior people-door (`entry`) opens onto no landing — IRC R311.3 "
+           "requires a floor/landing on each side of an exterior door, at least as "
+           "wide as the door and 36 in deep, so you don't step out into space. A "
+           "covered-or-open `porch` whose footprint spans the door's exterior face "
+           "for the door's full width satisfies it. Only entries are checked (an "
+           "overhead garage door needs no landing). Severity varies: with porches "
+           "modelled anywhere it's a WARNING on each uncovered entry; on a plan with "
+           "NO porches at all it's a single INFO nudge on the primary entry (the "
+           "plan simply hasn't drawn porches yet — don't spam every door). Add a "
+           "`porch` at the door, or note the landing on the construction documents."),
         # --- stairs ---------------------------------------------------------
         _c("STAIR_GEOMETRY", E, "Non-finite stair geometry",
            "A stair has nan/inf coordinates or size."),
@@ -308,28 +566,89 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A stair's footprint is too short to physically hold the run the "
            "ceiling height requires (R311.7: ~7.75 in max riser, 10 in min "
            "tread). Lengthen its footprint or model a switchback."),
+        _c("STAIR_HANDRAIL", I, "Stair flight needs a handrail",
+           "A stair flight of four or more risers requires at least one handrail, "
+           "34–38 in above the tread nosings and graspable the full length (IRC "
+           "R311.7.8). The DSL doesn't model railings, so this is a one-per-plan "
+           "checklist reminder on the first qualifying stair — carry the handrail "
+           "onto the construction documents. Fewer than four risers is exempt."),
         _c("STAIR_HEADROOM", W, "Stair headroom can't develop",
            "A stair's footprint is too short for a floor opening (stairwell) that "
            "keeps 6 ft 8 in of headroom under the upper floor (IRC R311.7.2). "
            "Lengthen the run/opening or reduce the floor-to-floor height."),
+        _c("STAIR_LANDING", I, "Flight too tall — needs an intermediate landing",
+           "A single straight flight climbs more than 12 ft 7 in (151 in) of "
+           "vertical rise. IRC R311.7.3 limits a flight to that rise between floor "
+           "levels or landings, so a taller run needs an intermediate landing (a "
+           "switchback or L-turn). Risers are computed the same way as STAIR_RUN "
+           "(rise / max riser), so a gentler profile riser is reflected in the "
+           "quoted count. A normal one-storey flight stays well under, so this only "
+           "speaks up on a tall or multi-level run. INFO — the DSL models one "
+           "straight flight, so note the mid-run landing on the construction "
+           "documents."),
         # --- guards & life safety -------------------------------------------
         _c("LOFT_GUARD", I, "Open loft edge needs a guard",
            "An upper-level room only partially covers a room below, so it "
            "overlooks a double-height void. Its open edge is a walking surface "
            "more than 30 in up and needs a 36 in guard with balusters that block a "
            "4 in sphere (IRC R312)."),
-        _c("ALARM_CO", I, "Smoke/CO alarms required",
-           "The plan has an attached garage/shop, so a carbon-monoxide alarm is "
-           "required outside each sleeping area (IRC R315), plus smoke alarms in "
-           "each bedroom, outside sleeping areas, and on every level (IRC R314). "
-           "The DSL can't place alarms — confirm them on the electrical plan."),
+        _c("ALARM_CO", I, "Smoke/CO alarms",
+           "Two roles, both info. On a plan that has bedrooms but declares NO "
+           "`alarm`, a teaching reminder to place smoke/CO alarms (IRC R314/R315). "
+           "Once alarms ARE declared, the carbon-monoxide check: bedrooms coexist "
+           "with an attached garage/shop but no `co`/`smoke_co` alarm sits outside "
+           "the sleeping areas (IRC R315). INFO — fuel-fired appliances aren't "
+           "modelled, so the attached garage/shop is the only trigger."),
+        _c("ALARM_BEDROOM", W, "Bedroom has no smoke alarm",
+           "A bedroom carries no `smoke` (or `smoke_co`) alarm. IRC R314.3 "
+           "requires a smoke alarm in each sleeping room. Runs only once a plan "
+           "declares any `alarm`. Add `alarm smoke in <bed>`."),
+        _c("ALARM_HALL", W, "No smoke alarm outside a sleeping area",
+           "No room adjacent to a bedroom carries a smoke alarm. IRC R314.3 wants "
+           "a smoke alarm outside each sleeping area; this approximates 'outside' "
+           "as a room sharing a door with the bedroom (a hallway if present, else "
+           "any adjacent room). Add `alarm smoke in <hall>`."),
+        _c("ALARM_LEVEL", W, "Level has no smoke alarm",
+           "A storey of the dwelling carries no smoke alarm. IRC R314.3(3) "
+           "requires at least one on every level, including basements. Add "
+           "`alarm smoke in <room on that level>`."),
         _c("ELECTRICAL_PLAN", I, "Electrical / life-safety checklist",
            "An opt-in reminder (the `electrical` directive) for code requirements "
            "the DSL can't place from geometry: receptacle spacing (no wall point "
            ">6 ft from an outlet, IRC E3901.2) with GFCI/AFCI protection (E3902), "
            "switched lighting outlets at habitable rooms/halls/entries (R303.7 / "
            "E3903), stair lighting, and a level landing at each exterior door "
-           "(R311.3). Carry these onto the construction documents."),
+           "(R311.3). Carry these onto the construction documents. Once a room "
+           "actually draws outlets, the sharper per-room checks (OUTLET_SPACING / "
+           "OUTLET_GFCI / ROOM_NO_LIGHT) take over from this reminder."),
+        _c("OUTLET_SPACING", W, "Receptacle spacing too wide",
+           "A habitable room has drawn receptacles, but there is a point along its "
+           "walls more than 6 ft from the nearest one — a lamp/appliance cord "
+           "would have to cross a doorway to reach power. IRC E3901.2 requires "
+           "receptacles so that no point along a wall line is more than 6 ft from "
+           "one (i.e. one at least every 12 ft of wall run, measured around "
+           "corners). Add an `outlet` in the worst gap. Only rooms that declare an "
+           "outlet are checked (drawing the electrical layer is opt-in)."),
+        _c("RECEPTACLE_COUNTER", W, "Kitchen counter needs a small-appliance receptacle",
+           "A kitchen counter run (a `fixture counter ... along` run at least 12 in "
+           "wide) leaves a point on the counter wall more than 24 in from a "
+           "receptacle. IRC E3901.4 requires small-appliance receptacles spaced so "
+           "no point along a counter is more than 24 in from one (receptacles at "
+           "most 48 in apart, and one on every counter >= 12 in wide). Add an "
+           "`outlet` on the counter wall in the gap. Only checked once a plan draws "
+           "its electrical layer (an outlet/switch/light), like OUTLET_SPACING."),
+        _c("OUTLET_GFCI", W, "Receptacle needs GFCI protection",
+           "A receptacle in a kitchen, bathroom, laundry or utility (a wet/damp "
+           "location) isn't marked `gfci`. IRC E3902 requires ground-fault "
+           "circuit-interrupter protection for receptacles in those rooms (and "
+           "outdoors). Add `gfci` to the `outlet`, or protect the circuit at the "
+           "panel and note it."),
+        _c("ROOM_NO_LIGHT", I, "Habitable room has power but no light",
+           "A habitable room draws receptacles or switches but no lighting outlet. "
+           "IRC E3903 requires at least one wall-switch-controlled lighting outlet "
+           "in every habitable room (a switched receptacle counts). Add a `light` "
+           "(or note a switched receptacle). Advisory — the switch is often there, "
+           "just not drawn."),
         # --- access ---------------------------------------------------------
         _c("NO_ENTRY", E, "No exterior door",
            "The plan has no exterior people-door — no way to enter the building. "
@@ -360,6 +679,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("NAT_LIGHT", W, "Insufficient natural light",
            "A habitable room's glazing on exterior walls is below 8% of floor "
            "area (R303.1)."),
+        _c("VENT_AREA", W, "Insufficient natural ventilation",
+           "A habitable room's OPENABLE window area on exterior walls is below 4% "
+           "of its floor area (IRC R303.1's natural-ventilation floor, half the 8% "
+           "glazing floor). A `fixed` window daylights but opens nothing, so it "
+           "counts for NAT_LIGHT but not here. Make a window operable "
+           "(casement/slider/double-hung), widen one, or confirm mechanical "
+           "ventilation on the construction documents."),
         # --- solar orientation (advisory; needs a declared `orientation`) ---
         _c("SOLAR_WEST_GAIN", I, "Overheating west glazing",
            "A habitable room has a lot of west-facing glass. The low afternoon sun "
@@ -512,9 +838,17 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "habitable space above keeps reminding."),
         _c("GARAGE_DOOR", I, "Garage/dwelling door must be self-closing & rated",
            "A door between a garage or shop and the dwelling must be self-closing "
-           "and 20-minute fire-rated (or a 1⅜ in solid-core/solid-wood door) per "
-           "IRC R302.5.1. A door into a sleeping room is barred outright "
-           "(GARAGE_BEDROOM)."),
+           "and 20-minute fire-rated (or a solid-core/solid-wood door at least "
+           "1-3/8 in thick) per IRC R302.5.1. The reminder anchors on the `door` "
+           "statement itself — the opening that has to carry the rated leaf. A door "
+           "into a sleeping room is barred outright (GARAGE_BEDROOM)."),
+        _c("CLOSET_DOOR_SWING", I, "Swing door fills a shallow closet",
+           "A swing door serves a closet shallower than the door is wide, so the "
+           "leaf can't fully open inside it. There is no IRC rule here — it's a "
+           "usability nudge. Make it a bypass/sliding or bifold door so the leaf "
+           "doesn't fill the closet. Only a leaf swinging into the closet (or an "
+           "unspecified side) is judged; one explicitly swinging into the room is "
+           "fine."),
         _c("PROGRAM_MISMATCH", W, "Plan doesn't match its program",
            "The rooms placed don't match the declared `program`: exact bed/bath "
            "counts, an at-least requirement for another room type (e.g. "

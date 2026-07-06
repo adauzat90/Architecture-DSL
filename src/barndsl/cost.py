@@ -22,9 +22,11 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from .constants import DEFAULT_ROOF_PITCH
 from .elements import Barndominium
 from .fixtures import fixtures_for
 from .geometry import shared_edge
+from .spatial import room_index
 
 #: Shown in both the text and JSON output — this is a budget aid, not a bid.
 DISCLAIMER = (
@@ -45,16 +47,23 @@ DEFAULT_UNIT_COSTS: dict[str, float] = {
     "exterior_wall_sqft": 18.0,  # framing+sheathing+insulation+siding, gross wall area
     "interior_wall_lf": 58.0,  # framed+drywalled partition, per linear foot
     "roof_sqft": 10.0,  # structure+decking+covering, per sloped sqft
-    # -- openings (each, installed) --
-    "window_casement": 780.0,
-    "window_slider": 640.0,
-    "window_double_hung": 700.0,
-    "window_fixed": 520.0,
+    # -- openings (size-aware) --
+    # Windows are priced by size, not a flat per-each: a fixed per-window base
+    # (frame, flashing, install labour) plus a rate per sq ft of *glazed* area,
+    # so a picture window costs more than a bathroom awning. A typical 3×4 (12
+    # sqft glazed) lands at 300 + 40×12 = $780 — the old flat casement price.
+    "window_each": 300.0,  # per window: frame + flashing + install labour
+    "window_glazed_sqft": 40.0,  # per sq ft of glazed (sill-to-head) area
     "door_interior": 360.0,
     "door_interior_double": 620.0,  # double / french interior pair
-    "door_exterior": 1500.0,  # single entry/exterior leaf
-    "door_exterior_double": 2800.0,  # double / french pair
-    "garage_door": 1600.0,  # overhead sectional
+    # Exterior (people) doors: a per-leaf base scaled by width over the 3 ft
+    # standard, so a 6 ft double/french pair prices at 2× a 3 ft single (~$3,000,
+    # near the old $2,800 pair) while a 3 ft entry stays at the base $1,500.
+    "door_exterior": 1500.0,  # per 3 ft of leaf width (width-weighted)
+    # Overhead (garage) doors by width: a 9 ft single ≈ 9×178 = $1,602 (near the
+    # old $1,600 flat), and a 16 ft double ≈ $2,848 — ~1.8× the single, so a wider
+    # door finally costs more (the contractor-review complaint).
+    "garage_door_lf": 178.0,  # per linear ft of overhead-door width
     # -- plumbing fixtures & kitchen appliances (each, supply+waste+fixture) --
     "fixture_toilet": 520.0,
     "fixture_lavatory": 460.0,
@@ -63,23 +72,127 @@ DEFAULT_UNIT_COSTS: dict[str, float] = {
     "fixture_sink": 950.0,  # kitchen sink + rough-in
     "fixture_range": 1300.0,  # appliance allowance
     "fixture_refrigerator": 1700.0,  # appliance allowance
+    "fixture_washer": 700.0,  # washer hookup (supply/drain box) + appliance allowance
+    "fixture_dryer": 650.0,  # dryer 240 V/gas + vent run + appliance allowance
+    "countertop_lf": 75.0,  # fabricated + installed countertop, per linear foot
     # -- per-conditioned-sqft allowances --
     "electrical_sqft": 9.0,
     "hvac_sqft": 8.0,
     "finish_sqft": 32.0,  # flooring, trim, paint, cabinets, per conditioned sqft
+    # -- site work (only when a `drive`/`walk`/`well`/`septic` is declared) --
+    # Driveway paving by surface, per sq ft of drive area; gravel is cheapest.
+    "drive_gravel_sqft": 3.0,
+    "drive_concrete_sqft": 8.0,
+    "drive_asphalt_sqft": 5.0,
+    "walk_sqft": 9.0,  # a concrete/paver walkway, per sq ft
+    # Well and septic are lump-sum ALLOWANCES — a real figure needs a driller's /
+    # installer's quote (depth, soil, perc test), so these are budget placeholders.
+    "well_allowance": 12000.0,  # drilled well + pump + pressure tank (allowance, each)
+    "septic_allowance": 15000.0,  # tank + drain field (allowance, each)
 }
 
-#: Window ``kind`` (see :data:`barndsl.elements.WINDOW_KINDS`) → unit-cost key.
-_WINDOW_KEY = {
-    "casement": "window_casement",
-    "slider": "window_slider",
-    "double-hung": "window_double_hung",
-    "fixed": "window_fixed",
+#: Per unit-cost key: ``(unit, one-line meaning)``, mirroring the inline labels
+#: on :data:`DEFAULT_UNIT_COSTS` above. Drives ``barndsl cost --print-keys`` (and
+#: is the human-readable index of what an override touches). Kept exhaustive and
+#: in-sync with :data:`DEFAULT_UNIT_COSTS` — see ``unit_cost_key_table`` and the
+#: parity test in ``tests/test_cost.py``.
+UNIT_COST_META: dict[str, tuple[str, str]] = {
+    "slab_sqft": ("sqft", "Monolithic slab-on-grade (house floor & porch platforms), per footprint sqft"),
+    "exterior_wall_sqft": ("sqft", "Framing + sheathing + insulation + siding (incl. gable ends), per gross wall sqft"),
+    "interior_wall_lf": ("lf", "Framed + drywalled partition, per linear foot"),
+    "roof_sqft": ("sqft", "Structure + decking + covering (incl. covered-porch roof), per sloped sqft"),
+    "window_each": ("each", "Per window: frame, flashing, install labour"),
+    "window_glazed_sqft": ("sqft", "Per sq ft of glazed (sill-to-head) area"),
+    "door_interior": ("each", "Interior swing door"),
+    "door_interior_double": ("each", "Interior double / french pair"),
+    "door_exterior": ("each", "Exterior people door, per 3 ft of leaf width (width-weighted)"),
+    "garage_door_lf": ("lf", "Overhead (garage) door, per linear foot of width"),
+    "fixture_toilet": ("each", "Toilet: supply + waste + fixture"),
+    "fixture_lavatory": ("each", "Bathroom lavatory: supply + waste + fixture"),
+    "fixture_tub": ("each", "Bathtub: supply + waste + fixture"),
+    "fixture_shower": ("each", "Shower: supply + waste + fixture"),
+    "fixture_sink": ("each", "Kitchen sink + rough-in"),
+    "fixture_range": ("each", "Range (appliance allowance)"),
+    "fixture_refrigerator": ("each", "Refrigerator (appliance allowance)"),
+    "fixture_washer": ("each", "Washer hookup (supply/drain box) + appliance allowance"),
+    "fixture_dryer": ("each", "Dryer 240 V/gas + vent run + appliance allowance"),
+    "countertop_lf": ("lf", "Fabricated + installed countertop, per linear foot"),
+    "electrical_sqft": ("sqft", "Electrical allowance, per conditioned interior sqft"),
+    "hvac_sqft": ("sqft", "HVAC allowance, per conditioned interior sqft"),
+    "finish_sqft": ("sqft", "Flooring, trim, paint, cabinets, per conditioned interior sqft"),
+    "drive_gravel_sqft": ("sqft", "Gravel driveway paving, per sq ft of drive area"),
+    "drive_concrete_sqft": ("sqft", "Concrete driveway paving, per sq ft of drive area"),
+    "drive_asphalt_sqft": ("sqft", "Asphalt driveway paving, per sq ft of drive area"),
+    "walk_sqft": ("sqft", "Concrete/paver walkway, per sq ft"),
+    "well_allowance": ("each", "Drilled well + pump + pressure tank (lump-sum allowance)"),
+    "septic_allowance": ("each", "Septic tank + drain field (lump-sum allowance)"),
 }
+
+
+def unit_cost_key_table() -> str:
+    """The full overridable unit-cost sheet as a greppable table — one key per
+    line, in the order the assemblies are priced: ``key  default  unit  meaning``.
+
+    Backs ``barndsl cost --print-keys``; needs no plan. Override any subset via
+    ``--costs FILE.json`` (``{"slab_sqft": 11.0, ...}``) or ``estimate_cost``'s
+    ``overrides=`` argument.
+    """
+    key_w = max(len(k) for k in DEFAULT_UNIT_COSTS)
+    rows = [
+        "Overridable unit-cost keys — pass a subset in a JSON file to "
+        "`barndsl cost --costs FILE.json`",
+        "(all in USD; a regional --multiplier scales every key). Defaults are "
+        "rough 2026 US averages.",
+        "",
+        f"  {'KEY':<{key_w}}  {'DEFAULT':>9}  {'UNIT':<4}  MEANING",
+    ]
+    for key, default in DEFAULT_UNIT_COSTS.items():
+        unit, meaning = UNIT_COST_META[key]
+        rows.append(f"  {key:<{key_w}}  {default:>9,.2f}  {unit:<4}  {meaning}")
+    return "\n".join(rows)
+
+
+def unit_cost_key_rows() -> list[dict[str, Any]]:
+    """The overridable unit-cost sheet as a machine-readable list — one dict per
+    key ``{key, default, unit, meaning}`` in pricing order.
+
+    Backs ``barndsl cost --print-keys --json``; the text form is
+    :func:`unit_cost_key_table`.
+    """
+    rows: list[dict[str, Any]] = []
+    for key, default in DEFAULT_UNIT_COSTS.items():
+        unit, meaning = UNIT_COST_META[key]
+        rows.append(
+            {"key": key, "default": float(default), "unit": unit, "meaning": meaning}
+        )
+    return rows
+
 
 #: Fixture kind (see :data:`barndsl.fixtures.FIXTURES`) → unit-cost key, in the
 #: order lines are emitted (deterministic).
-_FIXTURE_ORDER = ("toilet", "lavatory", "tub", "shower", "sink", "range", "refrigerator")
+_FIXTURE_ORDER = (
+    "toilet", "lavatory", "tub", "shower", "sink", "range", "refrigerator",
+    "washer", "dryer",
+)
+
+#: The surface -> unit-cost key for a driveway's paving.
+_DRIVE_SURFACE_KEY = {
+    "gravel": "drive_gravel_sqft",
+    "concrete": "drive_concrete_sqft",
+    "asphalt": "drive_asphalt_sqft",
+}
+
+#: Line the estimate ends with — the assemblies it does NOT price. Kept honest
+#: against what actually has a line above (see :func:`estimate_cost`): plumbing
+#: fixtures and an HVAC allowance ARE itemised, and the drive/walk/well/septic
+#: site lines appear only when declared, so what remains excluded is named
+#: explicitly (permits, GC overhead & profit, and utility trenching beyond the
+#: service-allowance stubs).
+EXCLUSIONS = (
+    "Excludes: permits & impact fees, GC overhead & profit, and utility "
+    "trenching/connection beyond the well/septic allowances. Mechanical (HVAC) "
+    "and any declared drive/walk/well/septic ARE itemized above."
+)
 
 
 def _as_plan(plan_or_result: Any) -> Barndominium:
@@ -98,14 +211,17 @@ def _interior_wall_lf(plan: Barndominium) -> float:
     rooms (each party wall counted once), via the compiler's own ``shared_edge``."""
     total = 0.0
     rooms = plan.rooms
-    for i in range(len(rooms)):
-        for j in range(i + 1, len(rooms)):
-            a, b = rooms[i], rooms[j]
-            if a.level != b.level:
-                continue
-            edge = shared_edge(a, b)
-            if edge is not None:
-                total += edge.length
+    # Only rooms whose bounding boxes touch can share a wall, so sum over the
+    # index's candidate pairs — in the same ascending (i, j) order as the old
+    # nested loop, so the running total accumulates identically to the float.
+    index = room_index(plan)
+    for i, j in index.candidate_pairs():
+        a, b = rooms[i], rooms[j]
+        if a.level != b.level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is not None:
+            total += edge.length
     return total
 
 
@@ -182,33 +298,62 @@ def estimate_cost(
     # -- Foundation --
     add("Foundation", "Slab-on-grade", m["footprint_sqft"], "sqft", "slab_sqft",
         "metrics: footprint_sqft")
+    # Every porch (covered or open) is a platform on its own slab, at the same
+    # slab rate as the house floor.
+    add("Foundation", "Porch slab", m.get("porch_sqft", 0.0), "sqft", "slab_sqft",
+        "metrics: porch_sqft (porch platforms)")
 
     # -- Shell --
     add("Shell", "Exterior walls", m["exterior_wall_area_sqft"], "sqft",
         "exterior_wall_sqft", "metrics: exterior_wall_area_sqft")
+    # A gable roof adds a triangle of wall at each gable end (the two walls the
+    # ridge runs *between*). The ridge runs along the building's *long* axis (see
+    # structure.py / revit._roof_block: ``span = min(w, l)``), so the gable-end
+    # triangles stand on the *short* dimension: base = min(width, length), rise =
+    # half-span × pitch. One triangle is base²·pitch/4 and the pair is base²·pitch/2.
+    # (Identical for a square plan; rotation-symmetric — 40×20 and 20×40 match.)
+    # Sheathed and sided like the rest of the shell, so priced at the exterior-wall rate.
+    if plan.roof_style == "gable":
+        pitch = plan.roof_pitch if plan.roof_pitch is not None else DEFAULT_ROOF_PITCH
+        gable_base = min(plan.envelope_width, plan.envelope_length)
+        gable_area = gable_base * gable_base * pitch / 2.0
+        add("Shell", "Gable-end walls", gable_area, "sqft", "exterior_wall_sqft",
+            "gable ends: short envelope side & roof pitch")
     add("Shell", "Roof", m["roof_area_sqft"], "sqft", "roof_sqft",
         "metrics: roof_area_sqft (sloped)")
+    # Covered porches carry their own roof (already sloped by the pitch), at the
+    # same roof rate as the main roof.
+    add("Shell", "Porch roof", m.get("covered_porch_roof_sqft", 0.0), "sqft",
+        "roof_sqft", "metrics: covered_porch_roof_sqft (sloped)")
 
     # -- Partitions --
     add("Partitions", "Interior partition walls", _interior_wall_lf(plan), "lf",
         "interior_wall_lf", "geometry: shared walls between rooms")
 
     # -- Openings --
-    wk = Counter(getattr(w, "kind", "casement") for w in plan.windows)
-    for kind in ("casement", "slider", "double-hung", "fixed"):
-        n = wk.get(kind, 0)
-        add("Openings", f"Windows ({kind})", n, "each", _WINDOW_KEY[kind],
-            f"plan.windows kind={kind}")
+    # Windows are priced by size: a per-window base (frame/install) plus a rate
+    # per sq ft of glazed area, so a big picture window costs more than a small
+    # awning (two clean quantity × unit lines, kind-agnostic).
+    n_win = len(plan.windows)
+    glazed_sqft = sum(w.glazed_area for w in plan.windows)
+    add("Openings", "Windows (frame & install)", n_win, "each", "window_each",
+        "plan.windows (per window)")
+    add("Openings", "Windows (glazing)", glazed_sqft, "sqft", "window_glazed_sqft",
+        "plan.windows glazed area (Σ width × sill-to-head)")
     xd = plan.exterior_doors
-    n_single = sum(1 for d in xd if getattr(d, "kind", "entry") in ("entry",))
-    n_double = sum(1 for d in xd if getattr(d, "kind", "entry") in ("double", "french"))
-    n_garage = sum(1 for d in xd if getattr(d, "kind", "entry") == "overhead")
-    add("Openings", "Exterior doors", n_single, "each", "door_exterior",
-        "plan.exterior_doors (single)")
-    add("Openings", "Exterior doors (double/french)", n_double, "each",
-        "door_exterior_double", "plan.exterior_doors (double/french)")
-    add("Openings", "Overhead (garage) doors", n_garage, "each", "garage_door",
-        "plan.exterior_doors (overhead)")
+    # People (non-overhead) doors: width-weighted per-leaf. Each door contributes
+    # max(1, width/3) "standard leaves", so a 3 ft entry = 1.0 and a 6 ft pair =
+    # 2.0 — the pair naturally prices at 2× the single without a separate key.
+    door_leaves = sum(
+        max(1.0, d.width / 3.0)
+        for d in xd
+        if getattr(d, "kind", "entry") != "overhead"
+    )
+    garage_lf = sum(d.width for d in xd if getattr(d, "kind", "entry") == "overhead")
+    add("Openings", "Exterior doors", door_leaves, "each", "door_exterior",
+        "plan.exterior_doors (width-weighted over 3 ft)")
+    add("Openings", "Overhead (garage) doors", garage_lf, "lf", "garage_door_lf",
+        "plan.exterior_doors (overhead, width in lf)")
     ints = [d for d in plan.interior_doors if getattr(d, "kind", "swing") != "cased"]
     n_int_double = sum(
         1 for d in ints if getattr(d, "kind", "swing") in ("double", "french")
@@ -223,6 +368,8 @@ def estimate_cost(
     for kind in _FIXTURE_ORDER:
         add("Plumbing & fixtures", kind.title(), fc.get(kind, 0), "each",
             f"fixture_{kind}", f"fixtures for wet/kitchen rooms ({kind})")
+    add("Plumbing & fixtures", "Countertops", m["counter_linear_ft"], "lf",
+        "countertop_lf", "metrics: counter_linear_ft (placed counter runs)")
 
     # -- Systems (per conditioned interior sqft) --
     cond = m["interior_sqft"]
@@ -235,6 +382,23 @@ def estimate_cost(
     add("Finishes", "Interior finish allowance", cond, "sqft", "finish_sqft",
         "metrics: interior_sqft")
 
+    # -- Site work (only when the plan opts into site-plan v2 features) --
+    ss = getattr(plan, "site_spec", None)
+    if ss is not None:
+        drive_area: dict[str, float] = {}
+        for d in ss.drives:
+            drive_area[d.surface] = drive_area.get(d.surface, 0.0) + d.area
+        for surface, key in _DRIVE_SURFACE_KEY.items():
+            add("Site work", f"Driveway ({surface})", drive_area.get(surface, 0.0),
+                "sqft", key, f"plan.site_spec.drives ({surface} area)")
+        walk_area = sum(wlen * wk.width for wk, _p0, _p1, wlen in plan.walk_paths())
+        add("Site work", "Walkway", walk_area, "sqft", "walk_sqft",
+            "plan.walk_paths (length × width)")
+        add("Site work", "Well allowance", len(ss.wells), "each", "well_allowance",
+            "plan.site_spec.wells (allowance)")
+        add("Site work", "Septic allowance", len(ss.septics), "each",
+            "septic_allowance", "plan.site_spec.septics (allowance)")
+
     subtotals: dict[str, float] = {}
     for ln in lines:
         subtotals[ln["group"]] = round(subtotals.get(ln["group"], 0.0) + ln["cost"], 2)
@@ -246,6 +410,7 @@ def estimate_cost(
         "multiplier": multiplier,
         "band_pct": BAND_PCT,
         "disclaimer": DISCLAIMER,
+        "exclusions": EXCLUSIONS,
         "assemblies": lines,
         "subtotals": subtotals,
         "total": {
@@ -292,6 +457,8 @@ def cost_text(est: dict[str, Any]) -> str:
         f"(range {_money(t['low'])} – {_money(t['high'])}, "
         f"+/-{est['band_pct']:g}%)"
     )
+    lines.append("")
+    lines.append(est.get("exclusions", EXCLUSIONS))
     lines.append("")
     lines.append(f"NOTE: {est['disclaimer']}")
     return "\n".join(lines)

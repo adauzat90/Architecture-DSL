@@ -28,6 +28,7 @@ from .constants import (
     SLAB_THICKNESS,
     TURNDOWN_DEPTH,
     TURNDOWN_WIDTH,
+    WALK_DEFAULT_WIDTH,
 )
 
 # --- Units ------------------------------------------------------------------
@@ -338,6 +339,11 @@ class Window:
     head_height: float = feet(6.67)
     #: One of :data:`WINDOW_KINDS`. Defaults to ``casement`` (see there for why).
     kind: str = "casement"
+    #: Author-declared safety (tempered) glazing — the R308.4 escape hatch. When
+    #: ``True`` the window is already specified as safety glass, so the
+    #: WINDOW_TEMPERED hazard-location warning is silenced for it and the window
+    #: schedule reads "tempered (declared)" rather than "tempered (required)".
+    tempered: bool = False
     #: Source location of the `window` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
@@ -346,6 +352,13 @@ class Window:
     @property
     def glazed_area(self) -> float:
         return self.width * max(0.0, self.head_height - self.sill_height)
+
+    @property
+    def openable(self) -> bool:
+        """Can this window open for ventilation? A ``fixed`` window is sealed
+        glass — it daylights but provides no openable area (IRC R303.1's 4%
+        ventilation floor, VENT_AREA). Every other kind opens."""
+        return self.kind != "fixed"
 
     @property
     def escape_capable(self) -> bool:
@@ -385,7 +398,155 @@ class PlacedFixture:
     wall: Direction | None = None
     rotation: float = 0.0
     width: float | None = None  # override the nominal run (resizable fixtures)
+    #: An **along-run** counter (the ``fixture counter in <room> along <wall>``
+    #: sugar). When set, the fixture is a wall-backed countertop spanning ``wall``:
+    #: its footprint is derived from the room's wall at resolve time (SW-corner
+    #: room-local, like every other wall offset), so geometry/validation/render/
+    #: compose all consume the desugared wall + span + depth exactly as for any
+    #: wall-backed piece. The sugar is kept here only so ``emit_dsl`` round-trips the
+    #: ``along`` form the author wrote. Legal for ``counter`` only.
+    along: Direction | None = None
+    #: The run's start/end along ``along``'s wall, room-local feet from the wall's
+    #: south/west start corner. ``None``/``None`` means the full wall. Always given
+    #: as a pair (both or neither); ``run_from <= run_to``.
+    run_from: float | None = None
+    run_to: float | None = None
+    #: The run's depth into the room (ft). ``None`` uses the along-run default
+    #: (:data:`barndsl.fixtures.ALONG_DEFAULT_DEPTH`, the US-standard 25 in).
+    run_depth: float | None = None
     #: Source location of the `fixture` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+#: The luminaire kinds a ``light`` statement can name. ``ceiling`` is the default
+#: surface-mounted fixture; ``pendant`` hangs, ``fan`` is a ceiling fan/light,
+#: ``recessed`` is a can. They differ only in how they render — every one is a
+#: lighting outlet for the IRC E3903 room-lighting check.
+LIGHT_KINDS = ("ceiling", "pendant", "fan", "recessed")
+
+
+@dataclass
+class Outlet:
+    """A receptacle (the ``outlet`` statement) on a room wall.
+
+    ``wall`` is the room wall it sits on; ``offset`` is feet from the wall's
+    **start corner** (its south or west end — the same convention as a door or
+    window offset) to the receptacle. ``gfci`` marks a ground-fault receptacle
+    (required at kitchens, baths, laundries and outdoors, IRC E3902). The level
+    comes from the room, so an outlet carries none of its own. Receptacle spacing
+    (IRC E3901.2) is checked per room once a room declares any outlet.
+    """
+
+    room: str
+    wall: Direction
+    offset: float = 1.0
+    gfci: bool = False
+    #: Source location of the `outlet` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Switch:
+    """A wall switch (the ``switch`` statement) on a room wall.
+
+    Like :class:`Outlet` but it controls lighting rather than supplying power, so
+    it never carries a GFCI flag and isn't counted for receptacle spacing. Its
+    presence (with no ``light``) drives the ROOM_NO_LIGHT nudge. ``offset`` is
+    feet from the wall's south/west start corner.
+    """
+
+    room: str
+    wall: Direction
+    offset: float = 1.0
+    #: Source location of the `switch` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Light:
+    """A ceiling luminaire (the ``light`` statement) at a room-local point.
+
+    ``x``/``y`` are **room-local** feet from the room's south-west corner (like a
+    ``fixture`` position, unlike the wall-relative outlet/switch). ``kind`` is one
+    of :data:`LIGHT_KINDS` (``ceiling`` default). A habitable room that has power
+    (outlets/switches) but no light gets the ROOM_NO_LIGHT info (IRC E3903).
+    """
+
+    room: str
+    x: float
+    y: float
+    kind: str = "ceiling"
+    #: Source location of the `light` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+#: The smoke/CO alarm kinds an ``alarm`` statement can name. ``smoke`` is a smoke
+#: alarm (IRC R314), ``co`` a carbon-monoxide alarm (IRC R315), and ``smoke_co``
+#: a combination unit that satisfies both. ``smoke_co`` is the sole spelling for
+#: the combo unit — ``combo`` is not accepted.
+ALARM_KINDS = ("smoke", "co", "smoke_co")
+
+
+@dataclass
+class Alarm:
+    """A smoke/CO alarm (the ``alarm`` statement) — a room-level ceiling device.
+
+    Alarms are placed at the room, not a wall point: ``alarm smoke in bed`` puts a
+    smoke alarm in room ``bed``. ``kind`` is one of :data:`ALARM_KINDS`. Optional
+    ``x``/``y`` are **room-local** feet from the room's SW corner (like a
+    ``light``); omitted, the renderer centres the symbol in the room. The alarm
+    drives the R314/R315 placement checks (ALARM_BEDROOM / ALARM_HALL / ALARM_LEVEL
+    / ALARM_CO) once any alarm is declared.
+    """
+
+    room: str
+    kind: str = "smoke"
+    x: float | None = None
+    y: float | None = None
+    #: Source location of the `alarm` statement (textual DSL front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+    @property
+    def is_smoke(self) -> bool:
+        """True if this unit senses smoke (a plain smoke or a combo unit)."""
+        return self.kind in ("smoke", "smoke_co")
+
+    @property
+    def is_co(self) -> bool:
+        """True if this unit senses carbon monoxide (a CO or a combo unit)."""
+        return self.kind in ("co", "smoke_co")
+
+
+@dataclass
+class Note:
+    """A positioned annotation — the ``note "text" at <x>,<y> [level <n>]`` form.
+
+    A leader-line callout drawn on the plan: ``text`` labels the point ``(x, y)``
+    in **world/plan feet** (the same SW-origin frame as rooms — +x east, +y
+    north), on floor ``level`` (0 = ground). Un-positioned ``note "text"``
+    statements are *not* stored here — they keep flowing into
+    :attr:`Barndominium.notes` (the free-text block); only a note carrying an
+    ``at`` position becomes a :class:`Note`, drawn on the plan SVG with a leader.
+    A note whose anchor lies outside the footprint is a gentle ``NOTE_OUTSIDE``
+    info (architects annotate the site on purpose), never an error.
+    """
+
+    text: str
+    x: float
+    y: float
+    level: int = 0
+    #: Source location of the `note` statement (textual front-end only), so a
+    #: surgical edit can find its line and a diagnostic can point at it.
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
@@ -459,6 +620,11 @@ class Stair:
     from_level: int = 0
     to_level: int = 1
     label: str | None = None
+    #: Source location of the `stair` statement (textual front-end only), so its
+    #: diagnostics carry a column-accurate caret and can be `accept`-ed by line.
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
     @property
     def x2(self) -> float:
@@ -480,6 +646,137 @@ class Stair:
         dx = min(self.x2, x2) - max(self.x, x)
         dy = min(self.y2, y2) - max(self.y, y)
         return dx > tol and dy > tol
+
+
+#: The paving surfaces a `drive` can declare, cheapest to most durable. ``gravel``
+#: is the default (the rural barndominium standard); the others are priced up in
+#: the cost sheet. Purely a material/cost/label distinction — geometry is the same.
+DRIVE_SURFACES = ("gravel", "concrete", "asphalt")
+
+#: The utilities a `service` drop can bring in. ``electric`` is an overhead/​buried
+#: power lateral; ``water`` a municipal/​well supply line; ``gas`` a fuel lateral.
+SERVICE_UTILITIES = ("electric", "water", "gas")
+
+
+@dataclass
+class Drive:
+    """A driveway — a paved (or gravel) parking/access rectangle on the lot.
+
+    ``(x, y)`` is the south-west corner in **lot feet** (from the lot's SW corner,
+    the same frame as ``building at``); ``width``/``length`` run east/north.
+    ``surface`` is one of :data:`DRIVE_SURFACES` (default ``gravel``). Requires a
+    declared ``site`` (it lives in lot coordinates).
+    """
+
+    x: float
+    y: float
+    width: float
+    length: float
+    surface: str = "gravel"
+    #: Source location of the `drive` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+    @property
+    def x2(self) -> float:
+        return self.x + self.width
+
+    @property
+    def y2(self) -> float:
+        return self.y + self.length
+
+    @property
+    def area(self) -> float:
+        return self.width * self.length
+
+
+@dataclass
+class Walk:
+    """A walkway from a room's exterior door to the nearest driveway edge.
+
+    ``room`` is the id of the room whose exterior door the path starts at; the
+    other end is resolved (at render/validation time) to the nearest edge of the
+    nearest ``drive``. ``width`` is the path width (feet; default
+    :data:`~barndsl.constants.WALK_DEFAULT_WIDTH`). Requires a ``site`` and a
+    ``drive`` to reach.
+    """
+
+    room: str
+    width: float = 4.0
+    #: Source location of the `walk` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Well:
+    """A private water well — a point feature at ``(x, y)`` in **lot feet**.
+
+    Renders as the standard circled ``W``. Its separation from a ``septic`` is
+    checked (WELL_SEPTIC_CLEAR). Requires a declared ``site``.
+    """
+
+    x: float
+    y: float
+    #: Source location of the `well` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Septic:
+    """A septic system — a tank at ``(x, y)`` (lot feet, the tank's SW corner)
+    with an optional drain ``field``.
+
+    The tank draws at a nominal :data:`~barndsl.constants.SEPTIC_TANK_WIDTH` x
+    :data:`~barndsl.constants.SEPTIC_TANK_LENGTH`; a declared ``field <w> x <l>``
+    draws just north of the tank (a lattice of drain lines). Both count for the
+    well-separation and setback checks. Requires a declared ``site``.
+    """
+
+    x: float
+    y: float
+    field_width: float | None = None
+    field_length: float | None = None
+    #: Source location of the `septic` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+    @property
+    def has_field(self) -> bool:
+        return self.field_width is not None and self.field_length is not None
+
+    def rects(self) -> list[tuple[float, float, float, float]]:
+        """The tank (and drain field, if any) as ``(x, y, x2, y2)`` lot-coord
+        rectangles — the footprint the clearance/setback checks measure against."""
+        from .constants import SEPTIC_FIELD_GAP, SEPTIC_TANK_LENGTH, SEPTIC_TANK_WIDTH
+
+        out = [(self.x, self.y, self.x + SEPTIC_TANK_WIDTH, self.y + SEPTIC_TANK_LENGTH)]
+        if self.field_width is not None and self.field_length is not None:
+            fy = self.y + SEPTIC_TANK_LENGTH + SEPTIC_FIELD_GAP
+            out.append((self.x, fy, self.x + self.field_width, fy + self.field_length))
+        return out
+
+
+@dataclass
+class Service:
+    """A utility service drop entering the lot from one side.
+
+    ``utility`` is one of :data:`SERVICE_UTILITIES`; ``side`` is the lot edge it
+    enters from (a :class:`Direction`). Renders as a labelled arrow crossing that
+    lot line toward the building. Requires a declared ``site``.
+    """
+
+    utility: str
+    side: "Direction"
+    #: Source location of the `service` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
 
 
 #: The structural-member roles a placed frame produces. ``post`` is a perimeter
@@ -687,6 +984,14 @@ class SiteSpec:
     front: float | None = None
     side: float | None = None
     rear: float | None = None
+    #: Optional placement of the building's plan origin (world ``0,0``, the
+    #: south-west envelope corner) on the lot — the ``building at <x>,<y>``
+    #: statement, in lot feet from the lot's south-west corner. ``None`` leaves
+    #: the building position unmodelled (the dimension-only setback fit still
+    #: runs); when set, the setback check measures each side's real clearance and
+    #: can name which side is encroached and by how much.
+    building_x: float | None = None
+    building_y: float | None = None
     #: Source location of the `site` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
@@ -695,6 +1000,20 @@ class SiteSpec:
     setback_line: int | None = None
     setback_col: int | None = None
     setback_end_col: int | None = None
+    #: Source location of the `building` statement (textual front-end only).
+    building_line: int | None = None
+    building_col: int | None = None
+    building_end_col: int | None = None
+    #: Site-plan v2 features, all in **lot feet** (the ``building at`` frame). Each
+    #: requires the lot dimensions (a feature with no ``site`` is a SITE_REQUIRED
+    #: error). Empty on a plain ``site``/``setback`` document, so nothing changes
+    #: for plans that don't opt in. See :class:`Drive`, :class:`Walk`,
+    #: :class:`Well`, :class:`Septic`, :class:`Service`.
+    drives: list["Drive"] = field(default_factory=list)
+    walks: list["Walk"] = field(default_factory=list)
+    wells: list["Well"] = field(default_factory=list)
+    septics: list["Septic"] = field(default_factory=list)
+    services: list["Service"] = field(default_factory=list)
 
     @property
     def has_dims(self) -> bool:
@@ -702,9 +1021,23 @@ class SiteSpec:
         return self.width is not None and self.length is not None
 
     @property
+    def has_features(self) -> bool:
+        """True if any site-plan v2 feature (drive/walk/well/septic/service) is
+        declared. These need lot dimensions to place; ``grade`` does not, so it is
+        stored on the plan, not here, and doesn't count."""
+        return bool(
+            self.drives or self.walks or self.wells or self.septics or self.services
+        )
+
+    @property
     def has_setback(self) -> bool:
         """True if any of front/side/rear was declared."""
         return any(v is not None for v in (self.front, self.side, self.rear))
+
+    @property
+    def has_building(self) -> bool:
+        """True once a ``building at <x>,<y>`` has pinned the building on the lot."""
+        return self.building_x is not None and self.building_y is not None
 
 
 @dataclass
@@ -738,6 +1071,90 @@ class Requirement:
     b: str | None = None
     wall: Direction | None = None
     min_area: float | None = None
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class UseSpec:
+    """A ``use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]``
+    statement (host side).
+
+    Records the author's intent to stamp a part into the host plan: the quoted
+    **relative** path to the part file, the required ``alias`` (every id inside the
+    part is stamped ``<alias>.<id>``), the ``at`` corner (the stamped bounding
+    box's SW corner in host feet), the target ``level`` (default 0) and the
+    optional transform. Parsed at compile time and kept on
+    :attr:`Barndominium.uses` so :func:`barndsl.emit.emit_dsl` can round-trip the
+    ``use`` line **verbatim** (independently of whether it resolved). The loader
+    turns each resolved ``use`` into an :class:`Instance`.
+
+    :attr:`mirror` is ``"x"`` / ``"y"`` / ``None`` and :attr:`rotate` is one of
+    ``0`` / ``90`` / ``180`` / ``270`` (a counter-clockwise turn). When both are
+    given the part is **rotated first, then mirrored** in its own local frame —
+    the composition order the stamper (:mod:`barndsl.compose`), emit and the edit
+    engine all reproduce identically (Phase 7b).
+    """
+
+    relpath: str
+    alias: str
+    x: float
+    y: float
+    level: int = 0
+    #: The instance transform (Phase 7b). ``mirror`` reflects the part about a
+    #: local axis — ``"y"`` swaps east↔west (a vertical mirror line), ``"x"``
+    #: swaps north↔south. ``rotate`` is a counter-clockwise turn in 90° steps.
+    #: Composition order is rotate-then-mirror in local coords.
+    mirror: str | None = None
+    rotate: int = 0
+    #: Use-site parameter overrides (Phase 20 — parametric parts): the ``with
+    #: k=v[, k=v…]`` clause. Each value is a number (decimal feet or a ft-in
+    #: literal); numbers only in v1. Insertion order is source order so emit
+    #: round-trips the pairs the author wrote. A key the part doesn't declare is a
+    #: ``PARAM_UNDECLARED`` error anchored to the ``use`` line (see
+    #: :mod:`barndsl.compose`). The compiled part depends on these values, so the
+    #: loader memoizes on ``(path, sorted params)``.
+    params: dict[str, float] = field(default_factory=dict)
+    #: Source location of the `use` statement (textual front-end only), so a
+    #: placement/instance diagnostic anchors to the `use` line and a surgical edit
+    #: can find it.
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Instance:
+    """A stamped part instance in a composed host plan.
+
+    Produced by the loader (:mod:`barndsl.compose`) from a resolved :class:`UseSpec`:
+    the part is fragment-compiled once, then a transformed copy of every element is
+    appended to the host plan with each id prefixed ``<alias>.``. This carries the
+    bookkeeping the playground panel, the whole-instance drag and the ``inline_use``
+    edit need — the alias, the part path, the placement, the stamped bounding box
+    (host coords), the stamped room ids and every stamped element object.
+    """
+
+    alias: str
+    relpath: str
+    part_path: str  # resolved absolute (realpath) path
+    x: float
+    y: float
+    level: int
+    #: The instance transform baked into the stamped elements (Phase 7b) — carried
+    #: so emit/edits can round-trip the `use` line and the panel can show it.
+    mirror: str | None = None
+    rotate: int = 0
+    #: Bounding box ``(min_x, min_y, max_x, max_y)`` of the stamped rooms, host feet.
+    bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    #: The stamped room ids (``<alias>.<id>``), in the part's declaration order.
+    room_ids: list[str] = field(default_factory=list)
+    #: Every stamped element object appended to the host (rooms, doors, windows,
+    #: fixtures, devices, alarms, notes) — used by emit to skip them and by
+    #: ``inline_use`` to flatten just this instance.
+    objects: list = field(default_factory=list)
+    #: Source location of the originating `use` statement.
     line: int | None = None
     col: int | None = None
     end_col: int | None = None
@@ -780,7 +1197,23 @@ class Barndominium:
     #: to a room's auto-seeds (an explicit fixture of a seeded kind replaces that
     #: seed). See :class:`PlacedFixture` and :func:`barndsl.fixtures.resolve_room_fixtures`.
     fixtures: list[PlacedFixture] = field(default_factory=list)
+    #: Author-placed electrical devices (the ``outlet`` / ``switch`` / ``light``
+    #: statements). Opt-in — a room that declares any outlet is checked for
+    #: receptacle spacing (IRC E3901.2); a wet-room outlet is checked for GFCI
+    #: (E3902); a habitable room with power but no light gets a lighting nudge
+    #: (E3903). See :class:`Outlet`, :class:`Switch`, :class:`Light`.
+    outlets: list[Outlet] = field(default_factory=list)
+    switches: list[Switch] = field(default_factory=list)
+    lights: list[Light] = field(default_factory=list)
+    #: Author-placed smoke/CO alarms (the ``alarm`` statement). Room-level ceiling
+    #: devices. Declaring any alarm turns on the real R314/R315 placement checks
+    #: (ALARM_BEDROOM / ALARM_HALL / ALARM_LEVEL / ALARM_CO). See :class:`Alarm`.
+    alarms: list[Alarm] = field(default_factory=list)
     notes: str = ""
+    #: Positioned annotations (``note "text" at <x>,<y> [level <n>]``): leader-line
+    #: callouts drawn on the plan SVG. Un-positioned notes stay in :attr:`notes`
+    #: (a plain string); only ``at``-positioned notes land here. See :class:`Note`.
+    note_marks: list[Note] = field(default_factory=list)
     #: Extra footprint blocks beyond the primary ``envelope`` rectangle. Empty for
     #: a plain rectangular building; one entry per ``wing`` for an L/T/U footprint.
     #: The primary block (the envelope at the origin) is implicit — see
@@ -806,6 +1239,11 @@ class Barndominium:
     #: validator checks the footprint fits the buildable rectangle. See
     #: :class:`SiteSpec`.
     site_spec: SiteSpec | None = None
+    #: Finish-floor height above finished grade (feet) — the ``grade`` statement.
+    #: A single flat-site value (v1 models no slope). ``None`` means undeclared, so
+    #: the grade-dependent checks (R312.1 porch guards) stay silent until a plan
+    #: opts in. Independent of the lot, so it lives on the plan, not the SiteSpec.
+    grade: float | None = None
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
     #: true north. ``None`` means **undeclared** — distinct from a declared ``0`` —
@@ -846,6 +1284,21 @@ class Barndominium:
     #: the placer; not authored directly (there is no `post`/`beam` statement).
     posts: list[Post] = field(default_factory=list)
     beams: list[Beam] = field(default_factory=list)
+    #: Cross-file composition (the ``use`` statement). :attr:`uses` are the parsed
+    #: ``use`` statements, kept verbatim so emit round-trips them (independent of
+    #: resolution). The loader (:mod:`barndsl.compose`) stamps each resolved use
+    #: into the plan and records an :class:`Instance`; :attr:`stamped_rooms` is the
+    #: set of stamped room ids (read-only members — an edit on one is refused, see
+    #: :mod:`barndsl.edits`). Empty for a plan with no ``use`` statements.
+    uses: list[UseSpec] = field(default_factory=list)
+    instances: list[Instance] = field(default_factory=list)
+    stamped_rooms: set[str] = field(default_factory=set)
+    #: Declared part parameters (Phase 20 — parametric parts): ``param <name> =
+    #: <number>`` lines, name → default value (decimal feet), in declaration order.
+    #: Only meaningful in a *part* (fragment) file; a bare param name may stand
+    #: wherever a number stands inside the part, resolving to the use-site value or
+    #: this default. Empty for a plan or a part with no params.
+    params: dict[str, float] = field(default_factory=dict)
 
     # -- fluent builder API ------------------------------------------------
     # Each method mutates the plan and returns ``self`` so calls chain. This
@@ -979,8 +1432,34 @@ class Barndominium:
             self.roofing = str(roof)
         return self
 
-    def note(self, text: str) -> "Barndominium":
-        self.notes = (self.notes + "\n" + text).strip() if self.notes else text
+    def note(
+        self,
+        text: str,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        level: int = 0,
+    ) -> "Barndominium":
+        """Add a design note.
+
+        Plain ``note("verify well location")`` appends to the free-text
+        :attr:`notes` block (the historical behaviour, unchanged). Passing a
+        position — ``note("beam above", x=20, y=15, level=1)`` — instead records a
+        :class:`Note`: a leader-line callout anchored at ``(x, y)`` (world/plan
+        feet, SW origin) on floor ``level``, drawn on the plan SVG. Give **both**
+        ``x`` and ``y`` to position a note (a lone one is an error).
+        """
+        if x is None and y is None:
+            self.notes = (self.notes + "\n" + text).strip() if self.notes else text
+            return self
+        if x is None or y is None:
+            raise ValueError("a positioned note needs both x and y.")
+        lvl = int(level)
+        if lvl < 0:
+            raise ValueError("a note's level must be >= 0 (0 = ground).")
+        self.note_marks.append(
+            Note(str(text), _finite("note", "x", x), _finite("note", "y", y), lvl)
+        )
         return self
 
     def mark_accessible(self, value: bool = True) -> "Barndominium":
@@ -1443,6 +1922,10 @@ class Barndominium:
         wall: Direction | str | None = None,
         rotation: float = 0.0,
         width: float | None = None,
+        along: Direction | str | None = None,
+        run_from: float | None = None,
+        run_to: float | None = None,
+        depth: float | None = None,
     ) -> "Barndominium":
         """Place a fixture/furnishing (the ``fixture`` statement).
 
@@ -1451,8 +1934,14 @@ class Barndominium:
         auto-place against ``wall`` (or the first free spot). ``rotation`` turns it
         in plan (degrees). Authored fixtures add to a room's auto-seeds; one of a
         seeded kind replaces that seed. See :class:`PlacedFixture`.
+
+        ``along`` (``counter`` only) makes a wall-backed countertop run spanning a
+        wall: give ``along`` a direction and, optionally, ``run_from``/``run_to``
+        (room-local feet along the wall from its S/W corner — omit for the full
+        wall) and ``depth`` (into the room; 1–4 ft, default the US-standard 25 in).
+        It is mutually exclusive with ``at``/``wall``/``width``.
         """
-        from .fixtures import FIXTURES
+        from .fixtures import ALONG_DEPTH_MAX, ALONG_DEPTH_MIN, FIXTURES
 
         kind = str(kind)
         if kind not in FIXTURES:
@@ -1460,6 +1949,7 @@ class Barndominium:
                 f"Unknown fixture kind '{kind}'. Known: {', '.join(FIXTURES)}."
             )
         wd = Direction(wall) if isinstance(wall, str) else wall
+        ad = Direction(along) if isinstance(along, str) else along
         if x is not None:
             x = _finite(room, "fixture x", x)
         if y is not None:
@@ -1470,10 +1960,267 @@ class Barndominium:
         w = None if width is None else _finite(room, "fixture width", width)
         if w is not None and w <= 0:
             raise ValueError("A fixture width must be positive.")
+        rf = None if run_from is None else _finite(room, "counter run start", run_from)
+        rt = None if run_to is None else _finite(room, "counter run end", run_to)
+        rd = None if depth is None else _finite(room, "counter depth", depth)
+        if ad is not None:
+            if kind != "counter":
+                raise ValueError(
+                    f"`along` is only for a counter run, not a '{kind}' — every "
+                    "other fixture has a fixed footprint. Use `at`/`wall` instead."
+                )
+            if x is not None or wd is not None or w is not None:
+                raise ValueError(
+                    "An `along` counter run can't also take `at`, `wall` or `width` "
+                    "— the run's wall and length come from `along` and `from`/`to`."
+                )
+            if (rf is None) != (rt is None):
+                raise ValueError("A counter run needs both `from` and `to`, or neither.")
+            if rf is not None and rt is not None and rt <= rf:
+                raise ValueError(
+                    f"A counter run's `to` ({rt:g}) must be past its `from` ({rf:g})."
+                )
+            if rd is not None and not (ALONG_DEPTH_MIN - 1e-9 <= rd <= ALONG_DEPTH_MAX + 1e-9):
+                raise ValueError(
+                    f"A counter depth must be {ALONG_DEPTH_MIN:g}–{ALONG_DEPTH_MAX:g} ft, "
+                    f"got {rd:g}."
+                )
+        elif rf is not None or rt is not None or rd is not None:
+            raise ValueError("`from`/`to`/`depth` need an `along <wall>` counter run.")
         self.fixtures.append(
-            PlacedFixture(kind, str(room), x, y, wd, rot, w)
+            PlacedFixture(kind, str(room), x, y, wd, rot, w, ad, rf, rt, rd)
         )
         return self
+
+    def add_outlet(
+        self,
+        room: str,
+        wall: Direction | str,
+        *,
+        offset: float = 1.0,
+        gfci: bool = False,
+    ) -> "Barndominium":
+        """Place a receptacle (the ``outlet`` statement) on ``wall`` of ``room``.
+
+        ``offset`` is feet from the wall's south/west start corner. ``gfci`` marks
+        a ground-fault receptacle (kitchens, baths, laundries, outdoors — IRC
+        E3902). Declaring any outlet opts the room into the receptacle-spacing
+        check (IRC E3901.2). See :class:`Outlet`.
+        """
+        o = _finite(room, "outlet offset", offset)
+        self.outlets.append(Outlet(str(room), Direction(wall), o, bool(gfci)))
+        return self
+
+    def add_switch(
+        self, room: str, wall: Direction | str, *, offset: float = 1.0
+    ) -> "Barndominium":
+        """Place a wall switch (the ``switch`` statement) on ``wall`` of ``room``.
+
+        ``offset`` is feet from the wall's south/west start corner. See
+        :class:`Switch`.
+        """
+        o = _finite(room, "switch offset", offset)
+        self.switches.append(Switch(str(room), Direction(wall), o))
+        return self
+
+    def add_light(
+        self,
+        room: str,
+        *,
+        x: float,
+        y: float,
+        kind: str = "ceiling",
+    ) -> "Barndominium":
+        """Place a ceiling luminaire (the ``light`` statement) at room-local
+        ``x``,``y`` (feet from the room's SW corner). ``kind`` is one of
+        :data:`LIGHT_KINDS` (``ceiling`` default). See :class:`Light`."""
+        kind = str(kind).lower()
+        if kind not in LIGHT_KINDS:
+            raise ValueError(
+                f"light kind must be one of {LIGHT_KINDS}, got {kind!r}."
+            )
+        lx = _finite(room, "light x", x)
+        ly = _finite(room, "light y", y)
+        self.lights.append(Light(str(room), lx, ly, kind))
+        return self
+
+    def add_alarm(
+        self,
+        room: str,
+        kind: str = "smoke",
+        *,
+        x: float | None = None,
+        y: float | None = None,
+    ) -> "Barndominium":
+        """Place a smoke/CO alarm (the ``alarm`` statement) in ``room``.
+
+        ``kind`` is one of :data:`ALARM_KINDS` (``smoke``, ``co``, or the
+        combination ``smoke_co``). ``x``/``y`` are optional **room-local** feet
+        from the room's SW corner; omit them to centre the symbol in the room.
+        See :class:`Alarm`."""
+        kind = str(kind).lower()
+        if kind not in ALARM_KINDS:
+            raise ValueError(
+                f"alarm kind must be one of {ALARM_KINDS}, got {kind!r}."
+            )
+        ax = None if x is None else _finite(room, "alarm x", x)
+        ay = None if y is None else _finite(room, "alarm y", y)
+        if (ax is None) != (ay is None):
+            raise ValueError("An alarm `at` needs both an x and a y offset.")
+        self.alarms.append(Alarm(str(room), kind, ax, ay))
+        return self
+
+    def building(self, x: float, y: float) -> "Barndominium":
+        """Pin the building's plan origin on the lot — ``building at <x>,<y>``.
+
+        ``x``/``y`` place the plan's south-west corner (world ``0,0``) in lot feet
+        from the lot's south-west corner. Optional; needs a :meth:`site`. When set
+        with ``setback``s the fit check measures each side's real clearance (and
+        names an encroached side + its overrun) instead of the dimension-only
+        bounding-box test. See :class:`SiteSpec`.
+        """
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        self.site_spec.building_x = _finite("building", "x", x)
+        self.site_spec.building_y = _finite("building", "y", y)
+        return self
+
+    def _site(self) -> SiteSpec:
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        return self.site_spec
+
+    def drive(
+        self, x: float, y: float, width: float, length: float, surface: str = "gravel",
+    ) -> "Barndominium":
+        """Add a driveway (``drive at <x>,<y> size <w> x <l> [surface]``).
+
+        Coordinates are lot feet (the ``building at`` frame). ``surface`` is one of
+        :data:`DRIVE_SURFACES`. Needs a :meth:`site`."""
+        if surface not in DRIVE_SURFACES:
+            raise ValueError(
+                f"drive surface must be one of {', '.join(DRIVE_SURFACES)}, got {surface!r}."
+            )
+        self._site().drives.append(
+            Drive(_finite("drive", "x", x), _finite("drive", "y", y),
+                  _finite("drive", "width", width), _finite("drive", "length", length),
+                  surface)
+        )
+        return self
+
+    def walk(self, room: str, width: float = WALK_DEFAULT_WIDTH) -> "Barndominium":
+        """Add a walkway from ``room``'s exterior door to the nearest drive
+        (``walk from <room> to drive [width <ft>]``). Needs a :meth:`site`."""
+        self._site().walks.append(Walk(room, _finite("walk", "width", width)))
+        return self
+
+    def well(self, x: float, y: float) -> "Barndominium":
+        """Add a water well at ``(x, y)`` in lot feet (``well at <x>,<y>``).
+        Needs a :meth:`site`."""
+        self._site().wells.append(Well(_finite("well", "x", x), _finite("well", "y", y)))
+        return self
+
+    def septic(
+        self, x: float, y: float,
+        field_width: float | None = None, field_length: float | None = None,
+    ) -> "Barndominium":
+        """Add a septic tank at ``(x, y)`` in lot feet, with an optional drain
+        field (``septic at <x>,<y> [field <w> x <l>]``). Needs a :meth:`site`."""
+        fw = None if field_width is None else _finite("septic", "field_width", field_width)
+        fl = None if field_length is None else _finite("septic", "field_length", field_length)
+        self._site().septics.append(
+            Septic(_finite("septic", "x", x), _finite("septic", "y", y), fw, fl)
+        )
+        return self
+
+    def service(self, utility: str, side: "Direction | str") -> "Barndominium":
+        """Add a utility service drop (``service <electric|water|gas> from <N|S|E|W>``).
+        Needs a :meth:`site`."""
+        if utility not in SERVICE_UTILITIES:
+            raise ValueError(
+                f"service utility must be one of {', '.join(SERVICE_UTILITIES)}, "
+                f"got {utility!r}."
+            )
+        if isinstance(side, Direction):
+            d = side
+        else:
+            key = str(side).strip().lower()
+            aliases = {"n": "north", "s": "south", "e": "east", "w": "west"}
+            d = Direction(aliases.get(key, key))
+        self._site().services.append(Service(utility, d))
+        return self
+
+    def set_grade(self, height: float) -> "Barndominium":
+        """Declare the finish-floor height above finished grade (``grade <ft>``)."""
+        self.grade = _finite("grade", "height", height)
+        return self
+
+    def walk_paths(self) -> list[tuple["Walk", tuple[float, float], tuple[float, float], float]]:
+        """Resolve every ``walk`` to ``(walk, p0, p1, length)`` in **lot feet**:
+        ``p0`` the room's exterior-door point (its centre when the room has no
+        exterior door), ``p1`` the nearest point on the nearest ``drive`` edge, and
+        the straight-line length. Empty when there is no lot, no drive, or the walk
+        names an unknown room. Shared by the site render, cost and packet so they
+        agree on the path (and its area)."""
+        origin = self.building_origin_on_lot()
+        ss = self.site_spec
+        if origin is None or ss is None or not ss.drives:
+            return []
+        bx, by = origin
+        rooms = {r.id: r for r in self.rooms}
+        out: list[tuple[Walk, tuple[float, float], tuple[float, float], float]] = []
+        for wk in ss.walks:
+            room = rooms.get(wk.room)
+            if room is None:
+                continue
+            p0 = None
+            for xd in self.exterior_doors_for(room.id):
+                if getattr(xd, "overhead", False):
+                    continue
+                mid = xd.offset + xd.width / 2.0
+                if xd.wall is Direction.SOUTH:
+                    p0 = (room.x + mid, room.y)
+                elif xd.wall is Direction.NORTH:
+                    p0 = (room.x + mid, room.y2)
+                elif xd.wall is Direction.WEST:
+                    p0 = (room.x, room.y + mid)
+                else:
+                    p0 = (room.x2, room.y + mid)
+                break
+            if p0 is None:
+                p0 = room.center
+            p0 = (bx + p0[0], by + p0[1])
+            best = None
+            for d in ss.drives:
+                cx = min(max(p0[0], d.x), d.x2)
+                cy = min(max(p0[1], d.y), d.y2)
+                dist = math.hypot(cx - p0[0], cy - p0[1])
+                if best is None or dist < best[1]:
+                    best = ((cx, cy), dist)
+            if best is None:
+                continue
+            out.append((wk, p0, best[0], best[1]))
+        return out
+
+    def building_origin_on_lot(self) -> tuple[float, float] | None:
+        """The building's plan origin (world ``0,0``, the SW envelope corner) in
+        lot feet: the declared ``building at``, or the footprint centred on the lot
+        when unplaced. ``None`` if there is no lot to place it on. Shared by the
+        site render and the site checks so they agree on where the building sits."""
+        ss = self.site_spec
+        if ss is None or ss.width is None or ss.length is None:
+            return None
+        minx, miny, maxx, maxy = self.bounds()
+        for p in self.porches:
+            minx = min(minx, p.x)
+            miny = min(miny, p.y)
+            maxx = max(maxx, p.x + p.width)
+            maxy = max(maxy, p.y + p.length)
+        if ss.has_building:
+            return (float(ss.building_x or 0.0), float(ss.building_y or 0.0))
+        fp_w = maxx - minx
+        fp_l = maxy - miny
+        return ((ss.width - fp_w) / 2.0 - minx, (ss.length - fp_l) / 2.0 - miny)
 
     def connect(
         self,
@@ -1574,10 +2321,12 @@ class Barndominium:
         sill_height: float = feet(3),
         head_height: float = feet(6.67),
         kind: str = "casement",
+        tempered: bool = False,
     ) -> "Barndominium":
         """Add a window. ``kind`` is one of :data:`WINDOW_KINDS` (default
         ``casement`` — full glazed size = clear opening; a ``fixed`` window
-        never counts as an escape opening)."""
+        never counts as an escape opening). ``tempered`` declares safety
+        glazing, the R308.4 escape hatch (silences WINDOW_TEMPERED)."""
         kind = str(kind).lower()
         if kind not in WINDOW_KINDS:
             raise ValueError(
@@ -1592,6 +2341,7 @@ class Barndominium:
                 float(sill_height),
                 float(head_height),
                 kind=kind,
+                tempered=bool(tempered),
             )
         )
         return self
@@ -1690,6 +2440,20 @@ class Barndominium:
         glaze = {"south": 0.0, "east": 0.0, "west": 0.0, "north": 0.0}
         for w in self.windows:
             glaze[wall_sector(w.wall, theta)] += w.glazed_area
+        # Countertop takeoff: the run length (the wall-parallel dimension) and the
+        # footprint area, summed over every resolved counter (authored + seeds). A
+        # counter's run is its longer footprint side; L/U corner squares are counted
+        # in BOTH meeting runs (not subtracted) — a small, deliberate over-count that
+        # keeps the takeoff a simple sum and errs generous for estimating.
+        from .fixtures import resolve_room_fixtures
+
+        counter_lf = 0.0
+        counter_area = 0.0
+        for r in self.rooms:
+            for f in resolve_room_fixtures(self, r):
+                if f.kind == "counter":
+                    counter_lf += max(f.width, f.length)
+                    counter_area += f.width * f.length
         return {
             "footprint_sqft": self.footprint_area,
             "interior_sqft": self.interior_area,
@@ -1701,6 +2465,9 @@ class Barndominium:
             "roof_area_sqft": roof_area,
             "overhang_ft": float(oh),
             "covered_porch_roof_sqft": covered_porch_roof,
+            # Flat platform area of every porch (covered or open) — each carries a
+            # slab whether or not it is roofed.
+            "porch_sqft": sum(p.area for p in self.porches),
             "climate_zone": float(self.climate) if self.climate is not None else 0.0,
             "foundation_concrete_yd3": concrete_ft3 / 27.0,
             "bedroom_count": float(
@@ -1725,4 +2492,7 @@ class Barndominium:
             "glazing_east_sqft": glaze["east"],
             "glazing_west_sqft": glaze["west"],
             "glazing_north_sqft": glaze["north"],
+            # Countertop takeoff (linear feet of run and footprint area).
+            "counter_linear_ft": counter_lf,
+            "counter_area_sqft": counter_area,
         }

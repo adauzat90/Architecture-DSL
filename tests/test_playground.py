@@ -164,6 +164,24 @@ def test_unknown_path_is_404_and_serves_no_files(server):
         assert json.loads(data)["error"]
 
 
+def test_client_disconnect_mid_response_does_not_crash_the_server(server):
+    # Item 10: a client that sends a request and closes the socket before
+    # reading the (large) response must not take down the handler thread — the
+    # next request still succeeds.
+    import socket
+
+    addr = ("127.0.0.1", server.server_address[1])
+    for _ in range(5):
+        s = socket.create_connection(addr, timeout=10)
+        # Ask for the big app HTML, then close immediately without reading it.
+        s.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        s.close()
+    # The server survived: a fresh request still gets served.
+    status, data = _request(server, "GET", "/api/examples")
+    assert status == 200
+    assert json.loads(data)
+
+
 def test_get_root_serves_the_app_with_no_external_references(server):
     status, data = _request(server, "GET", "/")
     assert status == 200
@@ -222,6 +240,41 @@ def test_compile_payload_is_pure_and_never_raises():
     assert good["ok"] is True and good["scene"]["nodes"]
 
 
+def test_compile_payload_carries_the_faces_dim_variant():
+    # Phase 18: the face-of-stud dimension variant rides in the payload as a
+    # baked SVG (like electrical_svg), so the "Dims" toggle swaps it in with no
+    # re-compile and no client-side dimension math.
+    p = compile_payload(CLEAN)
+    assert "<svg" in p["faces_svg"]
+    assert p["faces_svg"] != p["svg"]  # it really is the alternate convention
+
+
+def test_app_wires_the_dims_toggle():
+    # The SPA has the Dims toggle button, its state, and the shared variant picker
+    # that routes nominal/faces/electrical off the one payload — no re-request.
+    html = render_app(CLEAN)
+    assert 'id="dims-btn"' in html
+    assert "dimsMode" in html and "faces_svg" in html
+    assert "function planVariant" in html
+
+
+def test_compile_payload_scene_carries_the_walk_block():
+    # First-person walk mode reads its collision/floor/stair/spawn data from the
+    # scene JSON the playload ships, so it must ride along automatically.
+    p = compile_payload(CLEAN)
+    walk = p["scene"]["walk"]
+    assert {"segments", "floors", "stairs", "spawn", "eyeHeight"} <= set(walk)
+
+
+def test_app_wires_and_documents_walk_mode():
+    # The SPA embeds the walk-mode entry points and its help panel documents it,
+    # and leaving the 3D tab exits walk mode cleanly.
+    html = render_app(CLEAN)
+    assert "enterWalk" in html and "exitWalk" in html  # from the shared renderer
+    assert "ctrl.exitWalk" in html                     # tab-switch cleanup hook
+    assert "Walk mode" in html                          # help-panel THREE_TIPS line
+
+
 def test_compile_payload_carries_edit_overlay_arrays():
     # Tier 5: the payload gains compact rooms/openings arrays for the edit overlay.
     p = compile_payload(CLEAN)
@@ -252,6 +305,54 @@ def _edit(srv, source, edit):
         srv, "POST", "/api/edit", json.dumps({"source": source, "edit": edit})
     )
     return status, json.loads(data)
+
+
+def _compare(srv, a, b):
+    status, data = _request(
+        srv, "POST", "/api/compare", json.dumps({"source_a": a, "source_b": b})
+    )
+    return status, json.loads(data)
+
+
+def test_compare_endpoint_round_trip(server):
+    # A real two-source comparison: score, metrics takeoff, and the diagnostic
+    # multiset diff all ride through, plus each side's compile summary.
+    status, p = _compare(server, CLEAN, WITH_ERROR)
+    assert status == 200
+    assert {"a", "b", "deltas", "resolved", "introduced", "compile"} <= set(p)
+    assert isinstance(p["a"]["score"], (int, float))
+    assert isinstance(p["b"]["score"], (int, float))
+    # takeoff metrics present on both sides, with B − A deltas
+    assert p["a"]["metrics"] and p["b"]["metrics"]
+    assert "score" in p["deltas"] and "footprint_sqft" in p["deltas"]
+    # per-side compile summary: CLEAN is clean; WITH_ERROR renders but has an error
+    assert p["compile"]["a"]["ok"] is True
+    assert p["compile"]["b"]["ok"] is False
+    assert p["compile"]["b"]["counts"]["error"] >= 1
+    # the diagnostic multiset diff is a real diff in both directions here
+    assert p["introduced"] and p["resolved"]
+    assert "NO_ACCESS" in p["introduced"]
+
+
+def test_compare_endpoint_refuses_uncompilable_side(server):
+    # A side that can't build a plan is a typed error, not a 500 (edit's contract).
+    status, p = _compare(server, CLEAN, "total garbage that is not dsl")
+    assert status == 200
+    assert p["error"]["kind"] == "compile_error"
+    assert p["error"]["side"] == "b"
+    assert "a" not in p  # no comparison payload when a side can't build
+
+
+def test_compare_endpoint_malformed_is_400(server):
+    status, _ = _request(server, "POST", "/api/compare", json.dumps({"source_a": CLEAN}))
+    assert status == 400
+
+
+def test_compare_endpoint_unknown_path_still_404(server):
+    # /api/compare is the only new route — nothing else changed.
+    status, data = _request(server, "POST", "/api/comparez", json.dumps({}))
+    assert status == 404
+    assert json.loads(data)["error"]
 
 
 def test_edit_happy_path_changes_exactly_one_line_and_recompiles(server):
@@ -308,6 +409,24 @@ def test_app_contains_edit_mode_markup_and_no_external_refs():
     assert "//cdn" not in html and "<script src" not in html
 
 
+def test_app_ships_the_feet_inches_formatter_and_parser():
+    # The client mirrors Python's ft-in display + input parsing; both must be
+    # present and the offline guarantee must still hold (no external references).
+    html = render_app(CLEAN)
+    for token in ("function fmtFtIn(", "function parseFtIn(",
+                  "data-act=\"room.w\"", "data-act=\"op.width\""):
+        assert token in html, token
+    # the dimension fields became text inputs so ft-in strings can be typed
+    assert "data-act=\"room.w\" title=" in html
+    # display sites route through fmtFtIn (measure tape, drag chip, inspector)
+    assert "fmtFtIn(d)" in html and "fmtFtIn(c.w)" in html
+    # the prime/double-prime glyphs the formatter emits
+    assert "′" in html and "″" in html
+    # offline guarantee: no external network references
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
 def test_app_contains_level_switcher_markup_and_shortcut():
     html = render_app(CLEAN)
     for token in ('id="level-switch"', "function renderLevelSwitcher(",
@@ -320,6 +439,43 @@ def test_app_contains_level_switcher_markup_and_shortcut():
     # still no external network references (the offline guarantee holds)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_contains_notes_ui_markup_and_stays_offline():
+    html = render_app(CLEAN)
+    # the Notes design-panel affordances, overlay markers, and note edit wiring
+    for token in ('data-btn="addnote"', "function addNoteAtCenter(",
+                  'data-act="note.text"', 'data-btn="delnote"',
+                  "data-notekey=", "kind:'add_note'", "kind:'move_note'",
+                  "class=\"ov-note"):
+        assert token in html, token
+    # the offline guarantee still holds (no external network references)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_ships_the_print_to_scale_path_and_stays_offline():
+    html = render_app(CLEAN)
+    # Print builds from the scale-bar SVG + physical width the payload carries.
+    for token in ("p.print_svg", "css_width_in", "function buildPrintDoc("):
+        assert token in html, token
+    assert "http://" not in html and "https://" not in html
+
+
+def test_compile_payload_carries_notes_and_print_scale():
+    src = (
+        'plan "N"\nenvelope 40 x 30\nceiling 10\n'
+        'note "verify" at 10,10\n'
+        "room living: living at 0,0 size 20 x 20\n"
+        "entry living south width 3\nwindow living north width 4\n"
+    )
+    p = compile_payload(src)
+    assert p["notes"] and {"index", "text", "x", "y", "level", "line"} <= set(p["notes"][0])
+    assert p["notes"][0]["text"] == "verify"
+    # print metadata + a scale-bar SVG for the true-scale print path
+    assert {"label", "sheet", "css_width_in", "note"} <= set(p["print"])
+    assert "SCALE:" in p["print"]["note"]
+    assert "FEET" in p["print_svg"]
 
 
 def test_edit_upper_level_room_changes_only_its_line(server):
@@ -453,6 +609,38 @@ def test_app_contains_workspace_controls_and_localstorage_keys():
     # the autosave/restore localStorage keys are referenced by the SPA
     assert "barndsl.playground.source" in html
     assert "barndsl.playground.savedAt" in html
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_contains_compare_ui_markup_and_stays_offline():
+    html = render_app(CLEAN)
+    for token in ("id=\"compare-btn\"", "id=\"compare-modal\"", "id=\"compare-backdrop\"",
+                  "id=\"compare-body\"", "id=\"compare-set-a\"", "id=\"compare-swap\"",
+                  "id=\"compare-load-a\"", "function runCompare(", "function renderCompare(",
+                  "function setBaselineA(", "fetch('/api/compare'"):
+        assert token in html, token
+    # the baseline (scheme A) persists under the playground key family
+    assert "barndsl.playground.compareA" in html
+    # still no external network references (the offline guarantee holds)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_app_contains_multi_select_and_align_functions_and_stays_offline():
+    html = render_app(CLEAN)
+    for token in ("function toggleMultiSel(", "function clearMultiSel(",
+                  "function alignRooms(", "function distributeRooms(",
+                  "function selectedRooms(", "function nudgeMembers(",
+                  "kind:'movegroup'", "id=\"align-tools\"", "id=\"multi-count\"",
+                  "data-btn=\"align-left\"", "data-btn=\"align-right\"",
+                  "data-btn=\"align-top\"", "data-btn=\"align-bottom\"",
+                  "data-btn=\"dist-h\"", "data-btn=\"dist-v\""):
+        assert token in html, token
+    # the batched-undo labels — one undo step per group action
+    for label in ("'align rooms'", "'distribute rooms'", "'move rooms'", "'nudge rooms'"):
+        assert label in html, label
     # still no external network references (the offline guarantee holds)
     assert "http://" not in html and "https://" not in html
     assert "//cdn" not in html and "<script src" not in html
@@ -626,3 +814,681 @@ def test_plan_svg_rooms_are_clickable_for_source_linking():
     # the payload carries the matching source line for each room
     p = compile_payload(CLEAN)
     assert all(r.get("line") for r in p["rooms"])
+
+
+# --- wave 4: quick-fix, find/replace, autocomplete, comment, triage ----------
+
+
+def test_highlight_tokens_carry_statements_and_fixtures():
+    # The editor's autocomplete and the diagnostics quick-fix need statement heads
+    # and fixture kinds split out of the merged highlight vocab — derived from the
+    # same sources the parser uses, so the two can't drift.
+    from barndsl.fixtures import FIXTURES
+    from barndsl.playground import _STATEMENT_KEYWORDS, _highlight_tokens
+
+    toks = _highlight_tokens()
+    assert toks["statements"] == sorted(_STATEMENT_KEYWORDS)
+    assert toks["fixtures"] == sorted(FIXTURES)
+    # every statement head is also in the merged keyword set (colouring is unchanged)
+    assert set(toks["statements"]) <= set(toks["keywords"])
+
+
+def test_app_ships_the_statement_and_fixture_lists_to_the_page():
+    html = render_app(CLEAN)
+    # the split lists reach the SPA as JS sets it can branch on
+    assert "const HL_STMT" in html and "const HL_FIX" in html
+    assert "HIGHLIGHT.statements" in html and "HIGHLIGHT.fixtures" in html
+    # a fixture kind and a statement head both round-trip into the page JSON
+    assert '"toilet"' in html and '"fixture"' in html
+
+
+def test_app_contains_diagnostic_quickfix_apply():
+    html = render_app(CLEAN)
+    for token in ("function quickFixSnippet(", "function applyQuickFix(",
+                  "QUICKFIX_PLACEHOLDER", 'class="qfix"', 'data-qfix="'):
+        assert token in html, token
+    # the placeholder guard rejects the fill-in-the-blank hints (…/</>)
+    assert "\\.\\.\\.|" in html or "QUICKFIX_PLACEHOLDER = /" in html
+
+
+def test_app_contains_find_and_replace_bar():
+    html = render_app(CLEAN)
+    for token in ('id="find-bar"', 'id="find-input"', 'id="replace-input"',
+                  'id="find-count"', "function openFind(", "function replaceAll(",
+                  "function cycleFind(", "mark.find"):
+        assert token in html, token
+    # find + replace are taught in the keyboard-shortcuts list
+    assert "Find in the editor" in html and "Find & replace" in html
+
+
+def test_app_contains_autocomplete_popup_and_context():
+    html = render_app(CLEAN)
+    for token in ('id="ac-pop"', "function completionContext(", "function acceptAc(",
+                  "function roomIds(", "function updateAutocomplete("):
+        assert token in html, token
+    # the Ctrl+Space completion shortcut is documented
+    assert "Autocomplete" in html
+
+
+def test_app_contains_comment_toggle():
+    html = render_app(CLEAN)
+    assert "function toggleComment(" in html
+    assert "Toggle comment" in html
+
+
+def test_app_contains_diagnostics_triage():
+    html = render_app(CLEAN)
+    for token in ("function sortedDiagnostics(", "data-filter=", "let diagFilter",
+                  ".count.active"):
+        assert token in html, token
+
+
+def test_wave4_markup_keeps_the_offline_guarantee():
+    # None of the new UI reaches for the network — the offline promise holds.
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 5: split panes, theme toggle, 3D snapshot, label declutter, tab keys -
+
+
+def test_app_contains_resizable_split_handles_and_persistence_keys():
+    html = render_app(CLEAN)
+    for token in ('id="split-agent"', 'id="split-editor"', "class=\"split-h",
+                  "function startSplit(", "function afterSplitResize(",
+                  "function clampAgent(", "function clampEditor("):
+        assert token in html, token
+    # the two split widths persist under the namespaced localStorage keys
+    assert "barndsl.playground.agentWidth" in html
+    assert "barndsl.playground.editorWidth" in html
+    # a drag tick re-fits the 2D plan and re-sizes the live 3D canvas
+    assert "ctrl.resize()" in html and "planZoom.refit()" in html
+    # a collapsed agent pane hides its handle in CSS
+    assert ".agent.collapsed + .split-h" in html
+    # handles are hidden in the print stylesheet
+    assert ".split-h" in html
+
+
+def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
+    html = render_app(CLEAN)
+    assert 'id="theme-btn"' in html
+    assert "function applyTheme(" in html and "function cycleTheme(" in html
+    # the previously-inert data-theme hooks now carry the full palette, not just
+    # the #hl token colours — assert --bg reaches the dark/light attribute blocks
+    assert ':root[data-theme="dark"] { color-scheme:dark;' in html
+    assert ':root[data-theme="light"] { color-scheme:light;' in html
+    for block in ('[data-theme="dark"]', '[data-theme="light"]'):
+        i = html.index(block + " { color-scheme")
+        assert "--bg:" in html[i:i + 300], block
+    # persisted, and taught in the shortcuts list
+    assert "barndsl.playground.theme" in html
+    assert "Cycle theme" in html
+
+
+def test_app_theme_auto_is_untouched_default():
+    # Auto mode leaves the OS media query in charge — that block still exists and
+    # boot applies 'auto' when nothing is saved.
+    html = render_app(CLEAN)
+    assert "@media (prefers-color-scheme: dark)" in html
+    assert "applyTheme(saved || 'auto')" in html
+
+
+def test_app_contains_3d_snapshot_with_draw_before_read():
+    html = render_app(CLEAN)
+    assert 'id="snap-btn"' in html
+    assert "function snapshot3d(" in html
+    # PNG named from the plan slug, reusing the existing blob-download idiom
+    assert "'-3d.png'" in html and "downloadBlob(" in html
+    # the WebGL buffer has no preserveDrawingBuffer, so draw() must precede the
+    # synchronous read in the same task — assert that ordering literally
+    draw_at = html.index("ctrl.draw();")
+    read_at = html.index("canvas.toDataURL('image/png')")
+    assert draw_at < read_at
+
+
+def test_app_contains_edit_overlay_label_fit_or_hide():
+    html = render_app(CLEAN)
+    assert "function labelFits(" in html
+    # applied to fixtures and rooms with a <title> fallback for the hidden label
+    assert "labelFits(fk," in html and "labelFits(r.id," in html
+    assert "<title>" in html
+
+
+def test_app_contains_viewport_tab_shortcuts():
+    html = render_app(CLEAN)
+    # keys 1–4 map to the four tabs, guarded by the same typing/modifier predicate
+    assert "'1':'plan'" in html and "'2':'three'" in html
+    assert "'3':'views'" in html and "'4':'report'" in html
+    assert "Switch viewport tab" in html
+
+
+def test_wave5_markup_keeps_the_offline_guarantee():
+    # The split handles, theme toggle, snapshot and declutter add no network refs.
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 6: unified undo/redo history --------------------------------------
+
+
+def test_app_ships_the_unified_history_api():
+    # One linear timeline replaces the old gesture-only undoStack: the state model,
+    # the depth cap, and the single applyEdit funnel are all present, and the old
+    # names are gone.
+    html = render_app(CLEAN)
+    for token in ("let history = [], histIndex", "function histCommit(",
+                  "function applyEdit(", "function histRestore(",
+                  "function doUndo(", "function doRedo(", "function updateUndoRedo("):
+        assert token in html, token
+    # cap ~200 entries, dropping oldest
+    assert "HIST_CAP = 200" in html
+    assert "history.length > HIST_CAP" in html
+    # the retired undo-only stack API is entirely gone
+    assert "undoStack" not in html
+    assert "function pushUndo(" not in html
+
+
+def test_app_typing_coalesces_into_bursts():
+    # A shadow mirror + a coalescing constant fold a run of keystrokes into one undo
+    # unit, and composition must not fracture the burst.
+    html = render_app(CLEAN)
+    assert "COALESCE_MS = 700" in html
+    assert "function recordTyping(" in html
+    assert "histMirror" in html
+    # IME/composition is tracked so it does not split a burst
+    assert "compositionstart" in html and "let lastEditKind" in html
+
+
+def test_app_has_redo_button_paired_with_undo():
+    html = render_app(CLEAN)
+    assert 'id="redo-btn"' in html and 'id="undo-btn"' in html
+    # the redo glyph and both wirings are present
+    assert "↷" in html
+    assert "redoBtn.addEventListener('click', doRedo)" in html
+    # tooltips name the change they would undo/redo
+    assert "'Undo ' + history[histIndex].label" in html
+    assert "'Redo ' + history[histIndex + 1].label" in html
+
+
+def test_app_undo_redo_shortcuts_wired_and_documented():
+    html = render_app(CLEAN)
+    # both directions: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z and Ctrl/Cmd+Y
+    assert "function isUndoKey(" in html and "function isRedoKey(" in html
+    assert "e.key === 'y' || e.key === 'Y'" in html
+    # intercepted in the editor's own keydown so native textarea undo can't fight it
+    assert "e.preventDefault(); e.stopPropagation(); doUndo();" in html
+    assert "e.preventDefault(); e.stopPropagation(); doRedo();" in html
+    # the help panel now documents Undo / Redo with both keys, not the old single entry
+    assert "Undo / Redo" in html
+    assert "Undo a layout edit" not in html
+    # the find/replace and help-search fields keep their native per-field undo
+    assert "el === findInput" in html and "el === helpSearch" in html
+
+
+def test_app_writers_route_through_the_history_funnel():
+    # The known programmatic writers no longer assign editor.value directly for their
+    # edit — they go through applyEdit so the change is undoable and coalesces sanely.
+    html = render_app(CLEAN)
+    # quick-fix, autocomplete-accept, comment-toggle, replace-all and the drag/agent
+    # pipelines each carry a labelled applyEdit call
+    for label in ("'quick-fix'", "'autocomplete'", "'toggle comment'",
+                  "'replace all'", "'layout edit'", "'agent design'", "'load example'"):
+        assert "applyEdit(" in html and label in html, label
+    # applyQuickFix hands its new text to applyEdit rather than setting editor.value
+    assert "applyEdit(lines.join('\\n'), null, null, 'quick-fix')" in html
+    # loading a document is itself undoable (setSource funnels through applyEdit)
+    assert "function setSource(src, label)" in html
+    assert "applyEdit(src, 0, 0, label" in html
+
+
+def test_wave6_markup_keeps_the_offline_guarantee():
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 7: the design panel (outline + inspector, the no-code face) ---------
+
+
+def test_payload_carries_plan_settings_for_the_panel():
+    # The panel's Plan form reads name/envelope/ceiling and writes back via
+    # `set_plan` — the payload must carry exactly what that edit can rewrite.
+    p = compile_payload(CLEAN)
+    s = p["settings"]
+    assert s["name"] == p["title"]
+    assert s["envelope"][0] > 0 and s["envelope"][1] > 0
+    assert s["ceiling"] > 0
+
+
+def test_payload_openings_carry_inspector_facts():
+    # Interior rows name their rooms and swing; window rows their sill — mirroring
+    # what set_opening can rewrite, so the panel reads and writes the same keys.
+    p = compile_payload(CLEAN)
+    interior = [o for o in p["openings"] if o["kind"] == "interior"]
+    assert interior and all("a" in o and "b" in o and "door" in o and "into" in o
+                            for o in interior)
+    windows = [o for o in p["openings"] if o["kind"] == "window"]
+    assert windows and all("room" in o and "side" in o and "sill" in o for o in windows)
+    exterior = [o for o in p["openings"] if o["kind"] == "exterior"]
+    assert exterior and all("room" in o and "side" in o for o in exterior)
+
+
+def test_payload_fixtures_carry_rotation():
+    p = compile_payload(CLEAN)
+    assert p["fixtures"] and all("rotate" in f for f in p["fixtures"])
+
+
+def test_app_contains_the_design_panel():
+    html = render_app(CLEAN)
+    for token in ('id="design-panel"', 'id="panel-btn"', "function renderPanel(",
+                  "function renderInspector(", "function dpSelect(", "function dpChange(",
+                  "function dpDelete(", "function submitRoomForm(", "function submitOpeningForm(",
+                  'class="plan-row"'):
+        assert token in html, token
+
+
+def test_app_panel_edits_ride_the_surgical_edit_pipeline():
+    html = render_app(CLEAN)
+    # every panel control dispatches a wave-A edit kind through applyEdits
+    for kind in ("'set_plan'", "'rename_room'", "'set_room_type'", "'resize_room'",
+                 "'move_room'", "'set_opening'", "'add_room'", "'delete_room'",
+                 "'add_opening'", "'delete_opening'", "'set_fixture'", "'delete_fixture'"):
+        assert "kind:" + kind in html, kind
+    # ...and applyEdits takes the label those calls pass (unified-undo naming)
+    assert "async function applyEdits(edits, label)" in html
+
+
+def test_app_panel_selection_is_shared_with_the_overlay():
+    html = render_app(CLEAN)
+    # clicking a room/fixture on the plan selects it in the panel too
+    assert "dpSelect('room', d.id)" in html
+    assert "dpSelect('fx', d.f.id)" in html
+    # and the design panel is taught in the help tips + hidden from print
+    assert "Design panel" in html or "design panel" in html
+    assert ".design-panel," in html
+
+
+def test_wave7_markup_keeps_the_offline_guarantee():
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+# --- wave 8: architect utility pass (furnish, measure, nudge, duplicate) ------
+
+
+def test_app_furnish_palette_places_new_fixtures():
+    # The ＋Fixture form is the only UI path to a brand-new fixture (drag only
+    # materialises seeds) — it must offer the full catalog and ride add_fixture.
+    html = render_app(CLEAN)
+    for token in ('data-btn="addfix"', "function addFixtureForm(",
+                  "function submitFixtureForm(", "HIGHLIGHT.fixtures",
+                  "'add_fixture'", "id=\"nf-kind\"", "id=\"nf-wall\""):
+        assert token in html, token
+
+
+def test_app_duplicate_room_button():
+    html = render_app(CLEAN)
+    for token in ('data-btn="duproom"', "function duplicateRoom(",
+                  "'duplicate room'"):
+        assert token in html, token
+
+
+def test_app_measure_tool():
+    html = render_app(CLEAN)
+    for token in ('id="measure-btn"', "function setMeasure(", "function drawMeasure(",
+                  "function measureLabel(", "'measure'", ".ov-measure",
+                  "svg.measuring"):
+        assert token in html, token
+
+
+def test_app_keyboard_nudge_and_selection_keys():
+    html = render_app(CLEAN)
+    # arrows accumulate into ONE move_room edit; r rotates; Delete clears selection
+    for token in ("function nudgeMembers(", "function flushNudge(", "function cancelNudge(",
+                  "'nudge room'", "'rotate fixture'", "e.key === 'Delete'"):
+        assert token in html, token
+    # nudge/measure/rotate never fire while typing in a field
+    assert "tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT'" in html
+
+
+def test_wave8_markup_keeps_the_offline_guarantee():
+    html = render_app(CLEAN)
+    assert "http://" not in html and "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_plan_svg_always_carries_a_north_arrow():
+    # Every professional floor plan carries a north arrow. Unsited plans get the
+    # plan-north caption; a sited plan keeps its true-azimuth rosette unchanged.
+    from barndsl.compiler import compile_source
+    from barndsl.render import render_svg
+
+    plain = compile_source(CLEAN)
+    assert plain.plan is not None
+    assert "plan north" in render_svg(plain.plan)
+
+    sited = compile_source(CLEAN + "\norientation 30\n")
+    assert sited.plan is not None
+    svg = render_svg(sited.plan)
+    assert "true N · 30°" in svg and "plan north" not in svg
+
+
+# --- Phase 4: electrical layer + site plan in the playground ------------------
+
+_ELEC_SITE = """\
+plan "Wired"
+envelope 40 x 30
+ceiling 9
+site 120 x 90
+setback front 25 side 10 rear 20
+building at 40,30
+room living: living at 0,0 size 40 x 30
+outlet in living wall S offset 3 gfci
+switch in living wall E offset 1
+light in living at 20,15
+entry living south width 3 offset 10
+window living west width 10 offset 8
+"""
+
+
+def test_payload_carries_electrical_and_site_svg_variants():
+    p = compile_payload(_ELEC_SITE)
+    assert 'data-layer="electrical"' in p["electrical_svg"]
+    assert "electrical" not in p["svg"] or 'data-layer="electrical"' not in p["svg"]
+    assert p["site_svg"].startswith("<svg") and "BUILDING" in p["site_svg"]
+    elec = p["electrical"]
+    assert len(elec["outlets"]) == 1 and elec["outlets"][0]["gfci"] is True
+    assert len(elec["switches"]) == 1 and len(elec["lights"]) == 1
+
+
+def test_payload_omits_site_svg_when_no_lot():
+    p = compile_payload(CLEAN)
+    assert "site_svg" not in p
+    # The electrical variant is always present (the ⚡ toggle needs it).
+    assert "electrical_svg" in p
+
+
+def test_electrical_and_site_ui_markup_present():
+    html = render_app(CLEAN)
+    # The ⚡ plan-toolbar toggle and its swap logic.
+    assert 'id="elec-btn"' in html and "⚡ Electrical" in html
+    assert "elecMode" in html and "electrical_svg" in html
+    # The ＋ Electrical room-inspector affordance and its handlers.
+    assert 'data-btn="addelec"' in html and "＋ Electrical" in html
+    assert 'data-btn="elecsubmit"' in html
+    assert "addElectricalForm" in html and "submitElectricalForm" in html
+    assert 'id="ne-kind"' in html and 'id="ne-wall"' in html
+    # The site plan on the Elevations tab.
+    assert 'data-view="site"' in html and "site_svg" in html
+
+
+def test_electrical_site_ui_keeps_the_offline_guarantee():
+    html = render_app(_ELEC_SITE)
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html
+    assert "//cdn" not in html and "<script src" not in html
+
+
+def test_history_never_mints_an_undo_step_for_a_no_op_write():
+    # A programmatic write whose text equals the on-screen mirror (e.g. a blur
+    # re-firing `change` after a committed edit, whose no-op edit echoes the same
+    # source) must not push a history state — otherwise the next undo appears
+    # dead. Pinned at the single funnel every writer uses.
+    html = render_app(CLEAN)
+    assert "if (v === histMirror) return;" in html
+
+
+# --- cross-file composition: the Parts browser (Phase 7b) --------------------
+
+_COMPOSED_DIR = os.path.join(EXAMPLES, "composed")
+
+
+def test_scan_parts_lists_plan_less_files_under_a_folder():
+    from barndsl.playground import scan_parts
+
+    parts = scan_parts(_COMPOSED_DIR)
+    rels = {p["relpath"] for p in parts}
+    # the four starter parts live in parts/ — listed with the parts/ prefix
+    assert "parts/bath_core.barn" in rels
+    assert {"parts/master_suite.barn", "parts/kitchen_l.barn",
+            "parts/laundry_core.barn"} <= rels
+    # the whole-building example (has a `plan` header) is NOT a part
+    assert "cedar_ridge.barn" not in rels
+    # each entry carries a name + a room count sniffed without a full compile
+    bath = next(p for p in parts if p["relpath"] == "parts/bath_core.barn")
+    assert bath["name"] == "bath_core" and bath["rooms"] == 1
+
+
+def test_scan_parts_without_base_dir_is_empty():
+    from barndsl.playground import scan_parts
+
+    assert scan_parts(None) == []
+
+
+def test_scan_parts_is_capped(tmp_path):
+    from barndsl.playground import MAX_LISTED_PARTS, scan_parts
+
+    for i in range(MAX_LISTED_PARTS + 8):
+        (tmp_path / f"p{i:03d}.barn").write_text("room a: bathroom at 0,0 size 8 x 6\n")
+    parts = scan_parts(str(tmp_path))
+    assert len(parts) == MAX_LISTED_PARTS
+
+
+def test_compile_payload_carries_parts_available_with_base_dir():
+    with open(os.path.join(_COMPOSED_DIR, "cedar_ridge.barn"), encoding="utf-8") as fh:
+        composed = fh.read()
+    p = compile_payload(composed, base_dir=_COMPOSED_DIR)
+    rels = {x["relpath"] for x in p["parts_available"]}
+    assert "parts/bath_core.barn" in rels
+    # the composed plan's instances carry their transform for the panel/emit
+    b1 = next(i for i in p["instances"] if i["alias"] == "b1")
+    assert b1["mirror"] == "y" and b1["rotate"] == 0
+
+
+def test_compile_payload_parts_available_empty_without_base_dir():
+    p = compile_payload(CLEAN)  # a browser-opened buffer has no home directory
+    assert p["parts_available"] == []
+
+
+def test_app_has_parts_browser_markup_and_stays_offline():
+    html = render_app(CLEAN)
+    for token in ("function partsBrowser(", "function insertPart(",
+                  "function mintAlias(", "parts_available", "data-part=",
+                  "data-btn=\"parts\"", "and they appear here",
+                  "data-act=\"inst.mirror\"", "data-act=\"inst.rotate\""):
+        assert token in html, token
+    # the offline guarantee holds — no external references
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html and "//cdn" not in html and "<script src" not in html
+
+
+# --- Phase 14: offline /api/layout, clean cold start, offline Design form -----
+
+
+def _layout(srv, body):
+    status, data = _request(srv, "POST", "/api/layout", json.dumps(body))
+    return status, json.loads(data)
+
+
+def test_layout_endpoint_valid_brief_compiles_clean(server):
+    from barndsl.compiler import compile_source
+
+    status, p = _layout(server, {
+        "bedrooms": 3, "bathrooms": 2, "width": 40, "length": 30,
+        "open_kitchen": True, "extras": ["garage"], "name": "Fresh Start",
+    })
+    assert status == 200
+    assert "error" not in p and isinstance(p["source"], str)
+    result = compile_source(p["source"])
+    assert result.ok, [d.code for d in result.errors]
+    assert result.plan.metrics()["bedroom_count"] == 3
+
+
+def test_layout_endpoint_clamps_hostile_numbers_without_crashing(server):
+    # Absurd/mistyped values are clamped, not fatal — always a 200 with source.
+    status, p = _layout(server, {
+        "bedrooms": 99999, "bathrooms": -5, "width": -1, "length": "abc",
+        "extras": ["garage", "evil-drop-tables", "shop"], "name": '"; DROP',
+    })
+    assert status == 200 and "source" in p
+    # the injected quote was stripped, so the `plan "..."` line stays well-formed
+    # (exactly one quote pair) and the source still parses to a plan.
+    from barndsl.compiler import compile_source
+
+    first = p["source"].splitlines()[0]
+    assert first.count('"') == 2
+    assert compile_source(p["source"]).plan is not None
+
+
+def test_layout_endpoint_non_object_body_is_400(server):
+    status, _ = _request(server, "POST", "/api/layout", json.dumps([1, 2, 3]))
+    assert status == 400
+
+
+def test_layout_endpoint_ignores_unknown_extras(server):
+    status, p = _layout(server, {"bedrooms": 1, "bathrooms": 1,
+                                 "width": 30, "length": 24, "extras": ["nope"]})
+    assert status == 200 and "garage" not in p["source"]
+
+
+def test_layout_brief_text_shape():
+    from barndsl.playground import layout_brief_text
+
+    txt = layout_brief_text("My Barndo", 2, 1, 40, 30, True, ["garage"])
+    assert txt.startswith('plan "My Barndo"')
+    assert "envelope 40 x 30" in txt
+    assert "room garage: garage" in txt and "adjacent" in txt and "entry living" in txt
+
+
+def test_default_source_is_the_clean_scaffold_not_cedar():
+    # Cold start: a fresh session opens the known-clean starter (0/0/0), not the
+    # example that carries diagnostics.
+    from barndsl.compiler import compile_source
+    from barndsl.playground import default_source
+    from barndsl.scaffold import starter_dsl
+
+    src = default_source()
+    assert src == starter_dsl("My Barndo")
+    result = compile_source(src)
+    assert result.ok and not result.errors and not result.warnings
+    assert "Cedar Ridge" not in src
+
+
+def test_cedar_ridge_stays_available_as_an_example():
+    # Flipping the cold start must not remove Cedar Ridge — it's still bundled.
+    names = {ex["name"] for ex in load_examples()}
+    assert "cedar_ridge.barn" in names
+
+
+def test_app_has_offline_design_form_and_layout_wiring():
+    html = render_app(CLEAN)
+    for token in ("Design (offline — rule-based)", "Design with Claude",
+                  "id=\"od-btn\"", "/api/layout", "function designOffline(",
+                  "od-beds", "od-extras", "open kitchen"):
+        assert token in html, token
+    # still fully offline
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html and "//cdn" not in html and "<script src" not in html
+
+
+def test_app_has_envelope_fit_assist_wiring():
+    html = render_app(CLEAN)
+    for token in ("function offerFitIfStranded(", "fit_envelope",
+                  "Fit rooms to new envelope", "function fitEnvelope("):
+        assert token in html, token
+
+
+def test_app_autocomplete_knows_the_counter_along_grammar():
+    # The editor's completion context must learn the counter run grammar:
+    # `fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]`.
+    html = render_app(CLEAN)
+    # The dedicated counter branch and each slot it serves.
+    assert "toLowerCase() === 'counter'" in html
+    assert "['N', 'S', 'E', 'W']" in html          # walls after `along`
+    assert "items = ['along'];" in html            # after `in <room>`
+    assert "items = ['from'];" in html             # after the wall
+    # And it explicitly skips the numeric from/to/depth slots (no popup there).
+    assert "from/to/depth" in html
+
+
+# --- Phase 21: iPad / touch support (structural pins on the SPA markup) -------
+
+
+def test_app_viewport_meta_is_touch_and_keyboard_safe():
+    """Pinch stays available page-wide; the OSK resizes the layout, not covers it."""
+    html = render_app(CLEAN)
+    assert "interactive-widget=resizes-content" in html
+    # never disable page pinch (no user-scalable=no / maximum-scale clamp)
+    assert "user-scalable=no" not in html
+    assert "maximum-scale" not in html
+
+
+def test_app_touch_action_discipline_per_surface():
+    """Each interactive surface picks a deliberate touch-action (see the CSS note)."""
+    html = render_app(CLEAN)
+    # the plan pane + edit overlay + splitters + canvas own every gesture (none)…
+    assert ".plan-body .svgbox" in html and "touch-action:none" in html
+    assert "touch-action:none" in html  # edit-layer svg + split-h + three-canvas
+    # …while the diagnostics list must still finger-scroll vertically
+    assert "touch-action:pan-y" in html
+    # the documented policy table ships in the stylesheet
+    assert "TOUCH / COARSE-POINTER SUPPORT" in html
+
+
+def test_app_coarse_pointer_media_block_bumps_hit_targets():
+    html = render_app(CLEAN)
+    assert "@media (pointer: coarse)" in html
+    # buttons/rows grow to a comfortable ~40px touch size
+    assert "min-height:40px" in html
+    # JS also detects a coarse pointer to grow SVG handles + show nudge chevrons
+    assert "matchMedia('(pointer: coarse)')" in html
+    assert "const COARSE" in html
+
+
+def test_app_edit_overlay_uses_pointer_events_with_capture_and_cancel():
+    html = render_app(CLEAN)
+    for token in ("svgEl.addEventListener('pointerdown', onDown)",
+                  "svgEl.addEventListener('pointermove', onMove)",
+                  "svgEl.addEventListener('pointerup', onUp)",
+                  "svgEl.addEventListener('pointercancel', onCancel)",
+                  "setPointerCapture", "function onCancel(", "abortDrag"):
+        assert token in html, token
+
+
+def test_app_plan_pane_has_two_finger_pinch_and_double_tap_fit():
+    html = render_app(CLEAN)
+    # pinch = two active pointers driving the existing zoomAt (not gesturechange)
+    assert "const ptrs = new Map()" in html
+    assert "gesturechange" not in html
+    assert "pinchD" in html and "zoomAt(d / pinchD" in html
+    # touch double-tap on empty space mirrors Fit
+    assert "lastTapT" in html
+
+
+def test_app_edit_overlay_has_transform_pan_pinch_and_panedit():
+    html = render_app(CLEAN)
+    for token in ("class=\"edit-tf\"", "function zoomEditAt(", "function applyEditTf(",
+                  "function resetEditTf(", "kind:'panedit'", "editPtrs", "editPinchD"):
+        assert token in html, token
+
+
+def test_app_has_touch_nudge_chevrons_and_measure_endpoints():
+    html = render_app(CLEAN)
+    assert "function nudgeChevron(" in html
+    assert "data-nudge" in html and "ov-nudge" in html
+    assert "ov-measure-end" in html
+
+
+def test_app_panel_inputs_scroll_into_view_on_focus():
+    html = render_app(CLEAN)
+    assert "dpEl.addEventListener('focusin'" in html
+    assert "scrollIntoView({ block:'nearest' })" in html
+
+
+def test_touch_support_keeps_the_app_offline():
+    html = render_app(CLEAN)
+    assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html and "//cdn" not in html and "<script src" not in html

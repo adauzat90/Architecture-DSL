@@ -6,11 +6,15 @@ import csv
 import io
 
 from barndsl import compile_source
+from barndsl.render import render_svg
 from barndsl.schedule import (
+    door_marks,
     door_rows,
+    opening_tag_points,
     room_rows,
     schedules_csv,
     schedules_markdown,
+    window_marks,
     window_rows,
 )
 
@@ -63,6 +67,26 @@ def test_door_rows_number_interior_then_exterior():
     assert "exterior" in ext[0]["to"]
 
 
+def test_plan_tags_and_schedule_marks_are_the_same_and_in_order():
+    # Item 4 (mandatory parity): the D1…/W1… bubbles drawn on the plan and the
+    # marks in the door/window schedules come from the ONE shared helper, so they
+    # are identical and in the same order. If they ever diverge, this fails.
+    plan = _plan()
+    sched_doors = [r["mark"] for r in door_rows(plan)]
+    sched_windows = [r["mark"] for r in window_rows(plan)]
+    assert sched_doors == [m for m, _ in door_marks(plan)]
+    assert sched_windows == [m for m, _ in window_marks(plan)]
+
+    # Every schedule mark is drawn on the plan exactly once, same label set.
+    tag_marks = [m for m, _x, _y in opening_tag_points(plan)]
+    assert tag_marks == sched_doors + sched_windows
+
+    # And each mark's text actually appears in the rendered SVG bubble layer.
+    svg = render_svg(plan)
+    for mark in sched_doors + sched_windows:
+        assert f">{mark}<" in svg
+
+
 def test_window_rows_have_height_and_glazed_area():
     plan = _plan()
     rows = window_rows(plan)
@@ -72,6 +96,50 @@ def test_window_rows_have_height_and_glazed_area():
     # default head 6.67 - sill 3.0 ≈ 3.67 ft tall.
     assert abs(w["height"] - 3.67) < 0.01
     assert w["area"] > 0
+
+
+def test_window_near_jamb_offsets_and_corner():
+    plan = _plan()
+    rows = window_rows(plan)
+    # `window living south width 8 offset 2` — a south (horizontal) wall is
+    # measured from its WEST start; offset is already the near-jamb distance.
+    w1 = next(r for r in rows if r["mark"] == "W1")
+    assert w1["offset"] == 2 and w1["corner"] == "W"
+    w2 = next(r for r in rows if r["mark"] == "W2")  # window bed south offset 3
+    assert w2["offset"] == 3 and w2["corner"] == "W"
+
+
+def test_exterior_door_offset_and_corner():
+    plan = _plan()
+    rows = door_rows(plan)
+    south_entry = next(r for r in rows if r["to"] == "exterior (south)")
+    assert south_entry["offset"] == 13 and south_entry["corner"] == "W"
+    west_entry = next(r for r in rows if r["to"] == "exterior (west)")
+    # A west (vertical) wall is measured from its SOUTH start.
+    assert west_entry["offset"] == 3 and west_entry["corner"] == "S"
+
+
+def test_interior_door_offset_explicit_and_centered():
+    plan = _plan()
+    rows = door_rows(plan)
+    # `door living - hall width 3 offset 0.5` sits on the vertical wall at x=18
+    # (measured from the SOUTH end) at an explicit 0.5 ft.
+    lh = next(r for r in rows if r["from"] == "living" and r["to"] == "hall")
+    assert lh["offset"] == 0.5 and lh["corner"] == "S"
+    # `open living - kitchen width 8` has no offset → centred on the 18 ft shared
+    # (horizontal) wall: near jamb at (18 - 8) / 2 = 5 ft from the WEST end.
+    cased = next(r for r in rows if r["kind"] == "cased")
+    assert cased["offset"] == 5.0 and cased["corner"] == "W"
+
+
+def test_offset_column_renders_in_markdown_and_csv():
+    md = schedules_markdown(_plan(), rooms=False)
+    assert "Near jamb" in md
+    assert "13′ from W" in md   # the south entry
+    assert "5′ from W" in md    # the centred cased opening
+    csv_out = schedules_csv(_plan(), rooms=False, doors=True, windows=False)
+    assert "Near jamb" in csv_out
+    assert "from S" in csv_out  # the vertical-wall doors
 
 
 def test_markdown_has_a_table_per_schedule():

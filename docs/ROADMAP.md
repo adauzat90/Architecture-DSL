@@ -1,0 +1,363 @@
+# Roadmap — remaining items from the persona review cycle
+
+Status: **proposed** (nothing below is scheduled until picked). Phases 1–15 are
+shipped; this document sequences everything that was found by the four-persona
+test panel (novice / architect / contractor / developer) or deferred from an
+earlier phase, but not yet built. Ordered by recommended sequence — value first,
+then the items that depend on it.
+
+Each phase lists why it matters (who asked), the scope, what it deliberately
+does NOT include, and its acceptance bar. Effort is a coarse T-shirt size
+relative to past phases (M ≈ one focused agent phase like countertops; L ≈
+composition 7a).
+
+---
+
+## Phase 16 — Site plan v2: driveway, utilities, grade (L) — **SHIPPED**
+
+**Status:** shipped. Grammar (`drive`/`walk`/`well`/`septic`/`service`/`grade`),
+the site render (drive/well/septic/service symbols, a legend, and *actual*
+building-to-lot-line clearance dims), four new rules (`WELL_SEPTIC_CLEAR`,
+`DRIVE_DOOR`, `SEPTIC_SETBACK`, and — resolving the Phase 13 skip below —
+`PORCH_GUARD` for IRC R312.1), site cost lines (drive by surface, walk, well &
+septic allowances) with a reworded exclusions footer, and a packet clearance
+table all landed. Showcase: `examples/gallery/homestead.barn` (0/0/0).
+
+**Who asked:** the contractor persona ("site plan has no drive, well/septic, or
+service entrance; building-to-line clearances aren't dimensioned") and,
+indirectly, the architect persona — R312.1 exterior guards were skipped in
+Phase 13 *because the model has no grade elevation*. This phase is the enabler.
+
+**Scope**
+- Grammar: `drive at <x>,<y> size <w> x <l> [gravel|concrete|asphalt]`,
+  `walk from <door-room> to drive [width <ft>]`, `well at <x>,<y>`,
+  `septic at <x>,<y> [field <w> x <l>]`, `service <electric|water|gas> from
+  <N|S|E|W>`, and `grade <ft>` (finish-floor height above grade; single value,
+  v1 is flat sites).
+- Site render: draw the new features with standard symbols (drive hatch, well
+  circle-W, septic tank + field lattice, service drop arrows), dimension the
+  building's *actual* setback distances to each lot line (today only the
+  required setback lines draw), and a site legend.
+- Rules: `WELL_SEPTIC_CLEAR` (warning — separation distance below the common
+  100 ft well-to-septic rule, profile-amendable), `DRIVE_DOOR` (info — no
+  walk/drive reaches an entry), `SEPTIC_SETBACK` (info), and — now expressible —
+  **R312.1 `PORCH_GUARD`** (warning: porch/landing with `grade` > 30 in needs a
+  guard; the Phase 13 skip becomes a rule).
+- Cost: drive area by surface type, walk area; septic/well as allowance line
+  items with an "allowance" tag; the exclusions footer drops "site work" and
+  names what is still excluded (permits, overhead & profit).
+- Packet: the site sheet gains the new symbols + a clearance table.
+
+**Not included:** contour/sloped grades, easements, multiple buildings,
+survey-grade bearing/distance lot lines (the lot stays a rectangle).
+
+**Acceptance:** a plan with drive/well/septic/grade renders a site sheet a
+plans desk would recognize; PORCH_GUARD fires on a 36-in grade porch and stays
+silent at 24 in; cost gains the site lines; all example plans unchanged unless
+they opt in.
+
+---
+
+## Phase 17 — Compile performance: kill the O(n²) (M) — **SHIPPED**
+
+**Status:** shipped. One shared uniform-grid spatial index over the room
+rectangles (`src/barndsl/spatial.py`, stdlib only) turns the all-pairs room
+loops into candidate-pair lookups, with the candidates handed back in the exact
+ascending `(i, j)` order the old nested loops used — so every diagnostic, wall
+band, DXF and summed length is byte-for-byte unchanged (verified across all nine
+bundled examples plus a 400-room synthetic plan, all four artifact classes:
+diagnostics, emit, SVG, DXF). Profiling picked the targets: `_validate_access`'s
+per-room `geometric_neighbors` scan (4.0 M `shared_edge` calls at 2 k rooms) and
+`_validate_geometry`'s all-pairs `overlaps` (2.0 M). Rerouted through the index:
+`validation.geometric_neighbors`, `validation._validate_geometry`,
+`cost._interior_wall_lf`, and both `wallbodies.wall_bands`/`opening_gaps`
+partition loops. Two secondary quadratics fell too — the `plan.room()` linear
+scan (now an O(1) id→index map on the index) and the DUP_ID `ids.count()` loop
+(now a `Counter`). The index caches on the plan under an O(1) key
+(`id(rooms), len(rooms)`), rebuilt automatically for a new/recompiled plan; it is
+first built *after* the Phase 10 dimension clamp mutates room sizes, so it always
+reflects clamped geometry.
+
+Measured compile time (`compile_file`, grid fixtures):
+
+| rooms  | before   | after   |
+|-------:|---------:|--------:|
+| 250    | 0.21 s   | 0.02 s  |
+| 500    | 0.32 s   | 0.04 s  |
+| 1000   | 1.14 s   | 0.07 s  |
+| 2000   | 4.47 s   | 0.14 s  |
+| 10000  | ~115 s   | 0.77 s  |
+
+The curve is now near-linear (~2× time for 2× rooms). `tests/test_perf_scaling.py`
+pins it with a deterministic candidate-pair operation count (not wall time, so it
+can't flake) plus a generous wall-clock ceiling and a two-run determinism check.
+
+**Who asked:** the developer persona — 10 k lines compiles in ~115 s with a
+measured quadratic curve (5× rooms ⇒ 25× time). Irrelevant at 30 rooms, but
+`watch`, the LSP, and generated plans all pay it.
+
+**Scope**
+- Profile first, commit the numbers: the prime suspects are the all-pairs room
+  loops (overlap, shared-edge discovery, adjacency, partition walls) and any
+  per-diagnostic rescans of `plan.rooms`/openings.
+- Introduce one shared spatial index built once per compile (a uniform grid or
+  sorted-interval sweep — stdlib only) and route the pairwise checks through
+  it. `shared_edge`/overlap results can be memoized on the plan object for the
+  validation pass.
+- Hard constraint: **zero behavior change** — diagnostics, emit, render, DXF
+  byte-identical across the whole suite and gallery (the suite is the oracle;
+  add a determinism test that compiles a large generated plan twice).
+
+**Acceptance:** the developer persona's 10 k-line fixture compiles in < 5 s;
+the 2 k-line fixture in < 1 s; full suite green with no pin changes; a
+scaling test pins the new curve (e.g. 2× rooms ≤ ~2.5× time).
+
+---
+
+## Phase 18 — Dimension convention: face-of-stud mode (M) — SHIPPED
+
+**Who asked:** the architect persona — pros dimension to face-of-stud or
+centerline, not to nominal room lines. Phases 10/12 kept dims nominal (the
+model's coordinate truth) and documented it; this makes the pro convention
+available without changing the default.
+
+**Scope**
+- `RenderConfig.dim_mode = "nominal" | "faces"` (default `"nominal"`, so
+  nothing changes for existing users). In `"faces"` mode the chain and overall
+  dims measure to wall faces from the shared `wallbodies` geometry: exterior
+  overall = outside face to outside face; room segments = clear face to face;
+  opening jambs unchanged (already face-of-opening).
+- The packet and `barndsl build` grow a `--dims faces` flag; the playground a
+  small toggle next to the print controls.
+- Schedules already report clear dimensions; add the mode note to the packet
+  title block ("dimensions to face of stud" vs "to nominal room lines").
+- DXF inherits the same switch (its dim geometry comes from the same helpers).
+
+**Not included:** mixed conventions on one sheet, dimension grips/associativity.
+
+**Acceptance:** the two modes agree with hand math on a fixture plan (nominal
+12′0″ room with 4.5 in partitions reads 11′7½″ clear in faces mode); default
+output byte-identical to today; SVG/DXF stay in parity in both modes.
+
+**Shipped:** `RenderConfig.dim_mode = "nominal" | "faces"` (default nominal,
+byte-identical); face offsets sourced from the shared `wallbodies` bands (a
+face tick lands pixel-exact on the drawn poché edge, plumbing walls read their
+real 6½″); overall dims go outside-face to outside-face; interior breaks
+double-tick to clear-width / wall-thickness / clear-width and still sum to the
+overall; opening jambs unchanged. `to_dxf(plan, dim_mode=…)` shares the
+renderer's break computation (SVG/DXF parity in both modes). CLI `--dims
+nominal|faces` on `build` / `dxf` / `packet`; playground *Dims* toggle (baked
+`faces_svg` payload variant, no client re-computation); packet scale note states
+the convention. `fmt_ft_in` now renders to the nearest 1/8 in so faces labels
+read `11′-7½″` / `4½″` (nominal dims are whole inches, unchanged). AUTHORING.md
+updated.
+
+---
+
+## Phase 19 — DXF v2: associative dimensions + glyph polish (M/L) — SHIPPED
+
+**Who asked:** the architect persona (DXF should carry real `DIMENSION`
+entities); plus two small Phase 11/12 deferrals.
+
+**Scope**
+- Real associative `DIMENSION` entities (rotated linear) for the overall and
+  chain strings, each with its anonymous `*D<n>` block rendering the exploded
+  geometry we already know how to draw — readers that regenerate get live
+  dims, readers that don't still see the block. Keep the exploded-geometry
+  layer behind a flag for compatibility (`--dxf-dims geometry|associative`).
+  This was deferred in Phase 11 as a tar pit — the ezdxf oracle from that
+  phase is the safety net; budget the risk here, not in v1.
+- Counter mitring in DXF (plain rectangles today; reuse the renderer's trim).
+- Overhead/garage door: full dashed-panel glyph instead of a track line.
+- Loft/stair guard lines on open edges (SVG + DXF, from `LOFT_GUARD` data).
+
+**Acceptance:** ezdxf audit stays zero-error; a regenerating viewer shows true
+associative dims; non-regenerating render matches today's geometry pixel-wise;
+byte-determinism preserved.
+
+**Shipped:** `--dxf-dims geometry|associative` (default `geometry`, byte-identical
+to Phase 11) and `to_dxf(plan, dims=…)`. Associative emits one rotated-linear
+`DIMENSION` (dimtype 32) per overall/chain segment, each backed by an anonymous
+`*D<n>` block holding exactly the exploded geometry the geometry flavor draws —
+so a non-regenerating viewer is pixel-identical and a regenerating one gets live
+dims; our ft-in label rides group 1 (overrides the recomputed measurement), and
+the definition points sit on the non-plotting `Defpoints` layer. `*D<n>` names
+and all handles are assigned in draw order (deterministic twice-in-process).
+ezdxf `readfile`+`audit` is zero error/zero fix on cedar_ridge + the whole
+gallery in both dim modes, and every parsed `DIMENSION` resolves its geometry
+block. Counter mitring reuses the renderer's `_miter_counters` (no re-derived
+trim) — trimmed rects + 45° miter `LINE`s on `A-FLOR-FIXT`, SVG byte-unchanged.
+Overhead doors draw a dashed panel-line pair across the opening plus a dashed
+track line (matching the SVG's dashed convention). Loft guard lines come from a
+shared `loft_guard_pairs`/`loft_guard_edges` in `validation.py` that the
+`LOFT_GUARD` check and both exports consume, so a flagged edge is always the
+drawn edge; SVG draws a thin double line (level-aware), DXF a double line on
+`A-FLOR-OTLN`. Default DXF bytes change only for plans that actually use the new
+glyphs (overhead doors, corner counters, guarded lofts); determinism holds
+everywhere. AUTHORING.md updated.
+
+---
+
+## Phase 20 — Composition v2 (L) — **SHIPPED** (3 of 4; `extends` NO-GO)
+
+**Who asked:** the cross-file composition design doc's Futures section
+(docs/design/cross-file-composition.md) — requested capabilities that were
+consciously cut from 7a/7b.
+
+**Shipped** — the three required features, each keeping every 7a/7b guarantee
+(resolver sandbox: relative-only, realpath containment under the *host* root at
+every depth, 256 KiB / 64-instance caps; deterministic `alias.id` stamping;
+part-internal diagnostic attribution; read-only stamped members; emit round-trip
+fixpoints; mirror/rotate):
+
+- **Parametric parts:** `param <name> = <number>` in a part (numbers only —
+  decimal feet or ft-in; mandatory default) + `use ... with k=v[, k=v…]` on the
+  host. Resolved at the **token level** in fragment mode (`_Cursor.number` reads a
+  `param_env` = defaults ⊕ use-site overrides; no textual substitution). Memo keyed
+  `(path, sorted params)`. Diagnostics: `PARAM_UNKNOWN` / `PARAM_UNDECLARED`
+  (did-you-mean) / `PARAM_DUP` / `PARAM_IN_PLAN`.
+- **Nested `use` (depth 2)** — nested paths resolve relative to the using part's
+  dir, containment always against the host root; `USE_NESTED` at depth 3, clean
+  `USE_CYCLE` for self/mutual use (names the cycle, no hang); id-prefixing and
+  mirror/rotate transforms compose; one shared instance budget across depths;
+  diagnostics chain through two levels with innermost `file` attribution.
+- **Multi-level parts** — a part may carry `level 1` rooms + a `stair`; stamping
+  offsets every member's level by the instance `level n`, and whole-building
+  cross-level checks (stair rise/run, `ALARM_LEVEL`, `LOFT_GUARD`, garage
+  separation) run on the composed plan so they see the final levels.
+
+Showcase: `examples/composed/cedar_ridge_v2.barn` (parametric bath + nested guest
+wing + two-level shop/loft — 0 errors, 0 warnings, 6 accepted deviations). The
+existing `cedar_ridge.barn` is unchanged. Tests in `tests/test_compose_v2.py`
+(+ updates to `tests/test_compose.py`). Full design in the composition doc §12.
+
+**`extends` — NO-GO (deferred).** `plan "X" extends "base.barn"` was evaluated and
+deliberately skipped: the "override by id/kind" rule is only clean for id'd rooms
+and singletons — openings/fixtures/devices have no stable identity to merge on — and
+a correct emit round-trip needs new base-vs-host provenance tracking. It deserves
+its own design pass rather than a rushed one at the end of this phase. Rationale +
+an append-only design sketch (reusing the Phase 20 `_ComposeCtx` + nested-diagnostic
+chaining) are in the composition doc §13.
+
+---
+
+## Phase 21 — iPad / touch support for the playground (M) — **SHIPPED**
+
+**Status:** shipped. The playground is now genuinely usable with a finger without
+any change to the mouse/keyboard experience.
+
+- **Pointer Events everywhere:** edit-mode drag/select/measure, the plan pan/zoom
+  controller, and the pane splitters all run one pointer-event path (mouse + touch +
+  pen) with `setPointerCapture` on the active target. `pointercancel` (iOS fires it
+  when it steals a gesture) aborts a drag cleanly — no stuck state, no phantom edit.
+- **touch-action discipline:** the plan pane, edit overlay, splitters and 3D canvas
+  take `none` (the app owns every gesture); the diagnostics list keeps `pan-y` so a
+  finger still scrolls it; the editor and report tab keep native scroll + page pinch.
+  The per-surface policy is documented in a CSS comment block.
+- **Pinch-zoom + pan:** two fingers pinch the plan around the gesture midpoint
+  (driving the existing `zoomAt` scale mechanism); one finger pans; a double-tap fits.
+  In edit mode a finger on empty space pans/pinches the overlay (via a CSS transform on
+  a `.edit-tf` wrapper, so the drag math via `getScreenCTM()` stays exact) while a
+  finger on a room/handle drags it.
+- **Coarse-pointer ergonomics:** a `@media (pointer: coarse)` block grows buttons,
+  tabs, list rows and panel inputs to ~40 px, and JS grows the SVG resize handles and
+  measure endpoints. On-screen nudge chevrons (touch arrow-keys) appear around the
+  selected room.
+- **OSK-safe layout:** the viewport meta uses `interactive-widget=resizes-content`
+  (page pinch still enabled), and panel fields `scrollIntoView` on focus.
+
+Verified on iPad-like Playwright contexts (landscape 1024×768, portrait 768×1024,
+`has_touch`/`is_mobile`, dsf 2) plus a desktop mouse regression pass — tap-select,
+one-finger drag → surgical edit, pointercancel abort, pinch-zoom, double-tap fit,
+measure, finger-scroll, nudge chevrons, and coarse-pointer computed styles all pass.
+The playground stays fully offline (zero external references).
+
+---
+
+## Minor items bucket (S — batch several into any phase) — **SHIPPED**
+
+All six items below landed together (each with tests; suite/ruff/mypy green).
+
+- **Set-iteration nondeterminism (bug — fixed).** Some advisory messages named a
+  neighbour picked out of an adjacency `set`, so the text (and, for the
+  multi-emit checks, the issue order) drifted with `PYTHONHASHSEED`. Fixed at
+  five sites in `validation.py` by a deterministic `sorted()` tie-break:
+  `BED_PRIVACY`, `ALARM_HALL`, `PRIVATE_PASSTHROUGH` (named-neighbour text) plus
+  `GARAGE_BEDROOM` and `BATH_OVERSIZE` (emit order). A subprocess test compiles a
+  triggering fixture under `PYTHONHASHSEED=0/1/42` and asserts byte-identical
+  diagnostics (`tests/test_determinism.py`). Only one bundled-example message
+  changed: `examples/composed/parts/master_suite.barn` compiled standalone now
+  suggests `alarm smoke in bath` (was the hash-order `wic`).
+- **Playground autocomplete for the `along`/`from`/`to` counter grammar.** The
+  editor's completion context now knows `fixture counter in <room> along
+  N|S|E|W [from <a> to <b>]` — suggesting `along`, then N/S/E/W, then `from`, and
+  skipping the numeric from/to slots. (The LSP already carried counter
+  completions independently — verified, left as-is.)
+- **Revit round-trip diagnostic-drift note** documented in AUTHORING.md (new
+  "Revit exchange" section): reimport re-derives explicit offsets, so
+  advice-class infos like `DOOR_CENTERED` vanish by design.
+- **`barndsl compare` on 3+ files** (A→B→C change-order history): consecutive
+  pairwise sections plus a head-to-tail summary; JSON is `{steps, overall}` while
+  the two-file call keeps its exact flat shape (no script regression).
+- **`barndsl cost --print-keys`** prints the full overridable unit-cost key table
+  (key, default, unit, one-line meaning) and exits 0 with no plan file; the flag
+  is mentioned in the cost section of AUTHORING.md.
+- **LSP: diagnostics for open part files.** A host's part-internal findings are
+  now mirrored onto the part file's own URI/lines *when that part is open in the
+  editor* — never to an unopened URI (the Phase 8 rule), cleared when the part
+  closes. Works regardless of the order host/part were opened.
+
+## Phase 22 — Second persona-panel round-2 findings (S/M batch) — **SHIPPED**
+
+Eleven confirmed findings from a second persona-panel review, landed together
+(each with tests; full suite + ruff + mypy green). Closes:
+
+1. **Gable-end cost bug (HIGH — a 4× overcharge).** `cost.py` computed the
+   gable-end triangle base from `envelope_width` unconditionally, but the ridge
+   runs the **long** axis (per `structure.py` / `revit._roof_block`), so the
+   triangles stand on the **short** dimension. Fixed to `min(width, length)`;
+   pinned with a rotation-symmetry property test (`40×20` == `20×40`). Bundled
+   examples with a wider-than-long gable roof re-priced downward (e.g. cedar_ridge
+   `600 → 266.67` sq ft of gable wall, −$6,000).
+2. **Zero/negative opening widths** now a proper `OPENING_SIZE` **error** (windows,
+   interior + exterior + overhead doors), so the cost path never prices a
+   non-buildable opening.
+3. **Overlapping site features** draw a `SITE_OVERLAP` **warning** (drive↔drive;
+   the cost sums each drive's area, so an overlap double-counts) — the honest fix,
+   no silent math change. Walks are auto-routed to meet a drive, so excluded.
+4. **Schedule mark tags on the plan.** One shared helper
+   (`schedule.door_marks`/`window_marks`/`opening_tag_points`) numbers the D1…/W1…
+   marks; the SVG plan draws bubbles and the DXF writes TEXT on `A-ANNO-NOTE` from
+   it, so tags and schedules can never disagree (parity test). Packet inherits.
+5. **R304 habitable-room minimums** — new `ROOM_HABITABLE` warning (living, dining,
+   office/den, loft ≥ 70 sq ft and ≥ 7 ft) with bedrooms (hard error) and kitchens
+   (R304.2 exempt) excluded; zero diagnostic delta on every bundled example.
+6. **Tablet ergonomics** — the Design panel's room list scrolls independently and
+   the action row is sticky (primary actions reachable at 768 px); resize handles
+   get a ~44 px invisible hit halo on coarse pointers (visual size unchanged);
+   `add_room` on a full envelope returns `placed:"fallback"` so the UI offers a
+   one-tap envelope grow instead of silently overlapping at the origin.
+7. **LSP headerless-fragment detection** — a buffer with no `plan` statement (an
+   opened part file) compiles as a fragment, so it gets its part-internal findings
+   without whole-plan noise (ENVELOPE/NO_ENTRY/OUT_OF_BOUNDS). Reuses the
+   `_sniff_part` header heuristic; a buffer *with* `plan` keeps full behavior.
+8. **`cost --print-keys --json`** emits a machine shape `[{key, default, unit,
+   meaning}, …]`; the text table is unchanged.
+9. **`-q`/`--quiet`** on `compile`/`fmt`/`score`/`cost` — nothing on success,
+   errors to stderr, exit code unchanged (Makefile/CI use).
+10. **Playground BrokenPipe guard** — the response writers ignore a client that
+    disconnects mid-response instead of crashing the handler thread.
+11. **Site-sheet actual clearance** — the packet's Site Plan prints the compiler's
+    real well↔septic separation vs the 100 ft rule (and each drive's distance to
+    the nearest lot line) whenever the features exist.
+
+## Explicitly rejected (recorded so they aren't re-litigated)
+
+- **Flat 12-riser stair-landing trigger** — would flag every normal
+  single-story flight; the shipped rule uses the real R311.7.3 rise limit.
+- **R312.1 porch guards without grade data** — fired always or never;
+  ~~unblocked by~~ **resolved in** Phase 16: the `grade` statement now supplies
+  the finish-floor-above-grade height, and `PORCH_GUARD` fires per porch only
+  when that exceeds 30 in.
+- **Solid-fill hatch DIMENSION-free DXF dims as the only mode** — viewers that
+  regenerate would lose fidelity; Phase 19 keeps both.

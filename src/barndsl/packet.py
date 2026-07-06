@@ -25,7 +25,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from .cost import estimate_cost
-from .render import render_svg
+from .render import RenderConfig, render_site_svg, render_svg, sheet_scale
 from .schedule import _schedules
 from .score import design_score
 
@@ -53,6 +53,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .svgwrap { overflow-x: auto; border: 1px solid var(--line); padding: 10px;
            background: #fff; }
 .svgwrap svg { max-width: 100%; height: auto; }
+/* The true-scale floor-plan wrapper is sized in physical inches; the SVG must
+   fill it exactly — max-width alone shrinks an oversized drawing but would
+   never grow one, silently printing below the stated scale. content-box keeps
+   the inch width on the content itself (border-box would fold the wrapper's
+   padding/border into it, shaving ~2% off the printed scale). */
+.svgwrap.scaled { box-sizing: content-box; }
+.svgwrap.scaled svg { width: 100%; height: auto; display: block; }
 .diag { font-size: 13px; margin: 4px 0; padding: 8px 10px; border-left: 4px solid; }
 .diag.error { border-color: #c0392b; background: #fdeceb; }
 .diag.warning { border-color: #d68910; background: #fef6e9; }
@@ -90,8 +97,10 @@ def _cover(result: Any, plan: Any, est: dict[str, Any]) -> str:
         ("Exterior wall area", f"{m['exterior_wall_area_sqft']:.0f} sq ft"),
         ("Roof area (approx)", f"{m['roof_area_sqft']:.0f} sq ft"),
         ("Foundation concrete", f"{m['foundation_concrete_yd3']:.1f} cu yd"),
-        ("Estimated cost", f"${est['total']['expected']:,.0f}"),
     ]
+    if m.get("counter_linear_ft", 0.0) > 0:
+        rows.append(("Countertops", f"{m['counter_linear_ft']:.0f} lf"))
+    rows.append(("Estimated cost", f"${est['total']['expected']:,.0f}"))
     metric_rows = "\n".join(
         f"<tr><td>{_tag(k)}</td><td>{_tag(v)}</td></tr>" for k, v in rows
     )
@@ -120,21 +129,273 @@ def _cover(result: Any, plan: Any, est: dict[str, Any]) -> str:
 """
 
 
-def _floor_plan(plan: Any) -> str:
+#: Feet (′) and inches (″) glyphs for the scale statement.
+_FT_GLYPH, _IN_GLYPH = "′", "″"
+
+
+def _dim_convention_note(dim_mode: str) -> str:
+    """The dimension-convention line for the title block / scale note — states
+    which reference every dimension is measured to (Phase 18)."""
+    if dim_mode == "faces":
+        return "Dimensions to face of stud"
+    return "Dimensions to nominal room lines (partition centrelines)"
+
+
+def _floor_plan(plan: Any, sheet: str = "Letter", dim_mode: str = "nominal") -> str:
     # render_svg draws the dimensioned plan (overall dimension lines + per-room
-    # W x L, and one stacked block per level for a multi-story plan); inline it.
-    svg = render_svg(plan)
+    # W x L, and one stacked block per level for a multi-story plan). For the
+    # permit sheet — the drawing an architect submits — pick the largest standard
+    # architectural scale that fits the target sheet, size the embedded SVG in
+    # physical inches so the plan prints at that true scale, state the scale, and
+    # draw a graphic scale bar (which survives any reprographic resize).
+    ipf, label, css_w = sheet_scale(plan, sheet=sheet)
+    statement = f"SCALE: {label} = 1{_FT_GLYPH}-0{_IN_GLYPH} ({sheet})"
+    convention = _dim_convention_note(dim_mode)
+    cfg = RenderConfig(scale_bar=True, scale_note=statement, dim_mode=dim_mode)
+    svg = render_svg(plan, cfg)
     levels = plan.levels()
     note = (
         f"One block per level ({len(levels)} levels)."
         if len(levels) > 1
-        else "Dimensions in feet."
+        else "Drawn to architectural scale."
     )
+    # Inline physical width (inches) so the plan prints at true scale; the graphic
+    # scale bar in the SVG is the reprographic-safe backup (browser print margins
+    # can't be guaranteed to the pixel — the scale statement + bar are the answer).
     return f"""
 <section class="page">
   <h2>Floor Plan</h2>
+  <p class="sub">{_tag(statement)} · {_tag(convention)}</p>
+  <div class="svgwrap scaled" style="width:{css_w:.2f}in; max-width:100%;">{svg}</div>
+  <p class="note">{_tag(note)} Verify against the graphic scale bar and stated
+     dimensions.</p>
+</section>
+"""
+
+
+def _has_devices(plan: Any) -> bool:
+    """True when the plan declares any receptacle / switch / light layout."""
+    return bool(plan.outlets or plan.switches or plan.lights)
+
+
+def _has_alarms(plan: Any) -> bool:
+    return bool(getattr(plan, "alarms", None))
+
+
+def _has_electrical(plan: Any) -> bool:
+    """Whether an Electrical Plan sheet should be produced at all.
+
+    Three states drive the sheet (see :func:`_electrical_plan`): a device layout
+    (full sheet), alarms only (sheet + an "alarms only" note), or nothing at all
+    (no sheet — never a 0/0/0 device table an examiner would bounce)."""
+    return _has_devices(plan) or _has_alarms(plan)
+
+
+def _electrical_plan(plan: Any, sheet: str = "Letter", dim_mode: str = "nominal") -> str:
+    """The Electrical Plan sheet: the floor plan with the electrical layer on, a
+    small legend, and an outlet/switch/light count table. Only included when the
+    plan declares electrical items."""
+    ipf, label, css_w = sheet_scale(plan, sheet=sheet)
+    statement = f"SCALE: {label} = 1{_FT_GLYPH}-0{_IN_GLYPH} ({sheet})"
+    cfg = RenderConfig(
+        scale_bar=True, scale_note=statement, show_electrical=True, dim_mode=dim_mode
+    )
+    svg = render_svg(plan, cfg)
+    n_out = len(plan.outlets)
+    n_gfci = sum(1 for o in plan.outlets if o.gfci)
+    n_sw = len(plan.switches)
+    n_light = len(plan.lights)
+    alarms = getattr(plan, "alarms", None) or []
+    n_smoke = sum(1 for a in alarms if a.is_smoke)
+    n_co = sum(1 for a in alarms if a.is_co)
+    count_rows = "\n".join(
+        f"<tr><td>{_tag(name)}</td><td class='num'>{n}</td></tr>"
+        for name, n in (
+            ("Receptacles (outlets)", n_out),
+            ("— of which GFCI", n_gfci),
+            ("Wall switches", n_sw),
+            ("Ceiling lights", n_light),
+            ("Smoke alarms", n_smoke),
+            ("CO alarms", n_co),
+        )
+    )
+    legend = (
+        "<span class='badge'>⊙ receptacle · ⊙ GFCI = ground-fault · "
+        "S = switch · ⊗ = ceiling light · SD/CO = smoke/CO alarm</span>"
+    )
+    # Alarms-only: a plan that declares smoke/CO alarms but no receptacle/switch/
+    # lighting layout still earns a sheet (the alarms must be shown), but the sheet
+    # says so plainly rather than pretending a 0/0/0 device table is the design.
+    alarms_only = not _has_devices(plan)
+    alarms_note = (
+        '<p class="note">No receptacle/switch/lighting layout declared — alarms '
+        "only.</p>"
+        if alarms_only
+        else ""
+    )
+    return f"""
+<section class="page">
+  <h2>Electrical Plan</h2>
+  <p class="sub">{_tag(statement)} · devices shown in violet. {legend}</p>
+  <div class="svgwrap scaled" style="width:{css_w:.2f}in; max-width:100%;">{svg}</div>
+  {alarms_note}
+  <h3>Device count</h3>
+  <table class="metrics">{count_rows}</table>
+  <p class="note">Schematic device layout — verify circuiting, GFCI/AFCI
+     protection and switched-lighting coverage against IRC E39xx on the final
+     electrical plan.</p>
+</section>
+"""
+
+
+def _site_clearance_rows(plan: Any) -> list[tuple[str, str, str, bool]]:
+    """``(side, required, actual, ok)`` for each lot side — the building's real
+    yard vs its required setback. Empty when the building isn't placeable on the
+    lot. ``ok`` is True when there's no requirement or the yard meets it."""
+    from .render import fmt_ft_in
+
+    ss = plan.site_spec
+    origin = plan.building_origin_on_lot()
+    if origin is None:
+        return []
+    bx, by = origin
+    minx, miny, maxx, maxy = plan.bounds()
+    for p in plan.porches:
+        minx, miny = min(minx, p.x), min(miny, p.y)
+        maxx, maxy = max(maxx, p.x + p.width), max(maxy, p.y + p.length)
+    lot_w, lot_l = ss.width, ss.length
+    sides = [
+        ("Front (south)", ss.front, by + miny),
+        ("Rear (north)", ss.rear, lot_l - (by + maxy)),
+        ("West side", ss.side, bx + minx),
+        ("East side", ss.side, lot_w - (bx + maxx)),
+    ]
+    rows = []
+    for label, req, actual in sides:
+        req_str = "—" if req is None else fmt_ft_in(req)
+        ok = req is None or actual >= req - 1e-6
+        rows.append((label, req_str, fmt_ft_in(actual), ok))
+    return rows
+
+
+def _site_feature_clearance_rows(plan: Any) -> list[tuple[str, str, str, bool]]:
+    """``(measure, required, actual, ok)`` for the site-feature health clearances
+    the compiler already computes: the actual well↔septic separation (vs the
+    100 ft rule), and each drive's proximity to the nearest lot line (contractor
+    ask — the number the site sheet should print, not just a pass/fail flag).
+    Empty unless the relevant features are declared."""
+    from .constants import WELL_SEPTIC_MIN_SEPARATION
+    from .render import fmt_ft_in
+    from .validation import _pt_rect_dist
+
+    ss = plan.site_spec
+    rows: list[tuple[str, str, str, bool]] = []
+    # Well ↔ septic separation — only when both a well and a septic exist.
+    sep = WELL_SEPTIC_MIN_SEPARATION
+    for wi, wl in enumerate(ss.wells):
+        for si, sp in enumerate(ss.septics):
+            dist = min(_pt_rect_dist(wl.x, wl.y, rect) for rect in sp.rects())
+            label = "Well ↔ septic"
+            if len(ss.wells) > 1 or len(ss.septics) > 1:
+                label += f" (#{wi + 1}↔#{si + 1})"
+            rows.append(
+                (label, f"≥ {fmt_ft_in(sep)}", fmt_ft_in(dist), dist >= sep - 1e-6)
+            )
+    # Drive → nearest lot line (cheap: rect-to-boundary). Informational, so it
+    # always "passes" (no code minimum) but prints the real number.
+    lot_w, lot_l = ss.width, ss.length
+    for di, d in enumerate(ss.drives):
+        gap = min(d.x, d.y, lot_w - d.x2, lot_l - d.y2)
+        label = "Drive → lot line" + (f" (#{di + 1})" if len(ss.drives) > 1 else "")
+        rows.append((label, "—", fmt_ft_in(gap), gap >= -1e-6))
+    return rows
+
+
+def _site_plan(plan: Any) -> str:
+    """The Site Plan sheet: the lot, setback lines, site features (drive/well/
+    septic/service) and building footprint placed on the lot, with dimensions, a
+    yard-clearance table and site notes. Only included when the plan declares a
+    ``site``."""
+    ss = plan.site_spec
+    svg = render_site_svg(plan)
+    rows = [("Lot", f"{ss.width:g}′ × {ss.length:g}′")]
+    for label, val in (("Front setback", ss.front), ("Rear setback", ss.rear),
+                       ("Side setback", ss.side)):
+        if val is not None:
+            rows.append((label, f"{val:g}′"))
+    if ss.has_building:
+        rows.append(("Building at", f"{ss.building_x:g}′, {ss.building_y:g}′ (SW corner)"))
+    if plan.grade is not None:
+        from .render import fmt_ft_in
+        rows.append(("Grade", f"finish floor {fmt_ft_in(plan.grade)} above grade"))
+    dim_rows = "\n".join(
+        f"<tr><td>{_tag(k)}</td><td>{_tag(v)}</td></tr>" for k, v in rows
+    )
+
+    # Yard-clearance table: required setback vs the building's actual distance.
+    clearance = _site_clearance_rows(plan)
+    clearance_html = ""
+    if clearance:
+        body = "\n".join(
+            f"<tr><td>{_tag(side)}</td><td>{_tag(req)}</td><td>{_tag(act)}</td>"
+            f"<td>{'✓' if ok else '✗ short'}</td></tr>"
+            for side, req, act, ok in clearance
+        )
+        clearance_html = (
+            "<h3>Yard clearances</h3>"
+            "<table class='metrics'><tr><th>Side</th><th>Required</th>"
+            f"<th>Actual</th><th>OK</th></tr>{body}</table>"
+        )
+
+    # Feature clearances: the actual well↔septic separation and drive→lot-line
+    # proximity the compiler computes (contractor ask — print the real number).
+    feature_rows = _site_feature_clearance_rows(plan)
+    feature_html = ""
+    if feature_rows:
+        body = "\n".join(
+            f"<tr><td>{_tag(m)}</td><td>{_tag(req)}</td><td>{_tag(act)}</td>"
+            f"<td>{'✓' if ok else '✗ short'}</td></tr>"
+            for m, req, act, ok in feature_rows
+        )
+        feature_html = (
+            "<h3>Feature clearances</h3>"
+            "<table class='metrics'><tr><th>Measure</th><th>Required</th>"
+            f"<th>Actual</th><th>OK</th></tr>{body}</table>"
+        )
+
+    # Site-feature notes (drive/well/septic/service), only when present.
+    notes = []
+    for d in ss.drives:
+        notes.append(f"Driveway: {d.width:g}′ × {d.length:g}′ {d.surface}.")
+    if ss.walks:
+        notes.append("Walkway from an entry to the drive.")
+    for _wl in ss.wells:
+        notes.append("Private water well (confirm 100 ft septic separation).")
+    for sp in ss.septics:
+        notes.append(
+            "Septic tank" + (" + drain field" if sp.has_field else "")
+            + " (allowance; requires a perc test)."
+        )
+    for sv in ss.services:
+        notes.append(f"Service: {sv.utility} from the {sv.side.value}.")
+    notes_html = ""
+    if notes:
+        items = "\n".join(f"<li>{_tag(n)}</li>" for n in notes)
+        notes_html = f"<h3>Site notes</h3><ul class='notes'>{items}</ul>"
+
+    return f"""
+<section class="page">
+  <h2>Site Plan</h2>
+  <p class="sub">Lot boundary, required setbacks (dashed), site features, and building footprint.</p>
   <div class="svgwrap">{svg}</div>
-  <p class="note">{_tag(note)} Not to scale when printed — verify all dimensions.</p>
+  <h3>Lot &amp; setbacks</h3>
+  <table class="metrics">{dim_rows}</table>
+  {clearance_html}
+  {feature_html}
+  {notes_html}
+  <p class="note">Schematic, fit-to-page — not drawn to a fixed engineering scale
+     (a limitation; the floor-plan sheet carries the true architectural scale).
+     Not a substitute for a surveyed site plan.</p>
 </section>
 """
 
@@ -190,6 +451,7 @@ def _cost_section(est: dict[str, Any]) -> str:
     <tr class="total-row"><td colspan="4">Range (+/-{est['band_pct']:g}%)</td>
         <td class="num">${t['low']:,.0f} – ${t['high']:,.0f}</td><td></td></tr>
   </table>
+  <p class="note">{_tag(est.get('exclusions', ''))}</p>
   <p class="note">{_tag(est['disclaimer'])}</p>
 </section>
 """
@@ -197,11 +459,16 @@ def _cost_section(est: dict[str, Any]) -> str:
 
 def _diagnostics(result: Any) -> str:
     diags = sorted(result.diagnostics, key=lambda i: (i.line or 0, i.col or 0))
-    if not diags:
+    # Accepted deviations (downgraded by a `# barndsl: accept CODE` pragma) get
+    # their own audit subsection — the documented, deliberate deviations an AHJ
+    # reviewer reads — separate from the diagnostics still needing attention.
+    accepted = [d for d in diags if getattr(d, "accepted", False)]
+    active = [d for d in diags if not getattr(d, "accepted", False)]
+    if not active:
         body = "<p>No diagnostics — the plan compiles clean.</p>"
     else:
         items = []
-        for d in diags:
+        for d in active:
             sev = d.severity.value
             where = f" ({_tag(d.room)})" if d.room else ""
             loc = f"line {d.line}: " if d.line else ""
@@ -211,13 +478,37 @@ def _diagnostics(result: Any) -> str:
                 f"{where} — {_tag(d.message)}{hint}</div>"
             )
         body = "\n".join(items)
+    accepted_html = ""
+    if accepted:
+        rows = []
+        for d in accepted:
+            where = f" ({_tag(d.room)})" if d.room else ""
+            loc = f"line {d.line}: " if d.line else ""
+            reason = getattr(d, "accept_reason", None)
+            reason_html = (
+                f"<div class='hint'>reason: {_tag(reason)}</div>"
+                if reason
+                else "<div class='hint'>reason: (none given)</div>"
+            )
+            rows.append(
+                f"<div class='diag info accepted'>{loc}"
+                f"<span class='code'>{_tag(d.code)}</span>{where} — "
+                f"accepted deviation{reason_html}</div>"
+            )
+        accepted_html = f"""
+  <h3>Accepted deviations</h3>
+  <p class="sub">{len(accepted)} deviation(s) waived by an `accept` pragma — a
+     documented, deliberate departure recorded for review, not a defect.</p>
+  {"".join(rows)}
+"""
     c = result.to_dict()["counts"]
     return f"""
 <section class="page">
   <h2>Diagnostics Appendix</h2>
   <p class="sub">{c['error']} error(s), {c['warning']} warning(s),
-     {c['info']} info(s)</p>
+     {c['info']} info(s){f' — including {len(accepted)} accepted' if accepted else ''}</p>
   {body}
+  {accepted_html}
 </section>
 """
 
@@ -227,12 +518,20 @@ def build_packet(
     *,
     costs: dict[str, float] | None = None,
     multiplier: float = 1.0,
+    sheet: str = "Letter",
+    dim_mode: str = "nominal",
 ) -> str:
     """Return the full permit-sketch packet as a self-contained HTML string.
 
     ``result`` is a :class:`~barndsl.compiler.CompileResult` (needed for the
     diagnostics appendix); its ``plan`` must be non-``None``. ``costs`` and
     ``multiplier`` are passed straight to :func:`~barndsl.cost.estimate_cost`.
+    ``sheet`` selects the print sheet the floor plan is scaled to fit — one of
+    :data:`~barndsl.render.SHEETS` (``"Letter"`` default, ``"Tabloid"`` for
+    11×17); the largest standard architectural scale that fits is chosen and
+    stated on the sheet with a graphic scale bar. ``dim_mode`` picks the
+    dimension convention (``"nominal"`` room lines or face-of-stud ``"faces"``);
+    the floor-plan sheet states which on its scale-note line.
     """
     plan = getattr(result, "plan", None)
     if plan is None:
@@ -240,7 +539,14 @@ def build_packet(
     est = estimate_cost(plan, overrides=costs, multiplier=multiplier)
     sections = (
         _cover(result, plan, est)
-        + _floor_plan(plan)
+        + _floor_plan(plan, sheet=sheet, dim_mode=dim_mode)
+        + (_electrical_plan(plan, sheet=sheet, dim_mode=dim_mode)
+           if _has_electrical(plan) else "")
+        + (
+            _site_plan(plan)
+            if plan.site_spec is not None and plan.site_spec.has_dims
+            else ""
+        )
         + _schedule_tables(plan)
         + _cost_section(est)
         + _diagnostics(result)
@@ -260,9 +566,13 @@ def save_packet(
     *,
     costs: dict[str, float] | None = None,
     multiplier: float = 1.0,
+    sheet: str = "Letter",
+    dim_mode: str = "nominal",
 ) -> str:
     """Write :func:`build_packet` to ``path``. Returns the path."""
-    html = build_packet(result, costs=costs, multiplier=multiplier)
+    html = build_packet(
+        result, costs=costs, multiplier=multiplier, sheet=sheet, dim_mode=dim_mode
+    )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html)
     return path

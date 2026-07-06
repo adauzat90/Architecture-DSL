@@ -13,7 +13,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     envelope <W> x <L>
     wing <W> x <L> at <x>,<y>          # optional — L/T/U footprint extensions
     ceiling <H>
-    note "free text"
+    note "free text" [at <x>,<y> [level <n>]]  # design note; positioned = a plan leader callout
     require adjacent|separate <a> <b>  # declared spatial intent, checked vs the plan
     require exterior <room> [<wall>]   # (also: require area <room> >= <sqft>)
     room <id>: <type> <placement> size <W> x <L> [level <n>]
@@ -26,6 +26,12 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
     fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]  # place a fixture/furnishing
+    use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]  # stamp a part
+    outlet in <room> wall N|S|E|W offset <ft> [gfci]      # receptacle on a room wall
+    switch in <room> wall N|S|E|W offset <ft>             # wall switch
+    light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]  # ceiling luminaire (room-local x,y)
+    alarm smoke|co|smoke_co in <room> [at <x>,<y>]        # smoke/CO alarm (room-level, IRC R314/R315)
+    building at <x>,<y>                # optional — place the building's SW corner on the lot
     frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
     roof gable|shed|monitor [pitch <rise:run>]            # optional roof form (default gable)
 
@@ -35,20 +41,36 @@ south-of <room>`` (abut an already-defined room), or one of each to pin a corner
 Coordinates are in feet; origin (0,0) is the south-west corner, x→east, y→north.
 ``<type>`` is a RoomType value (living, kitchen, bedroom, bathroom, hallway,
 shop, …); ``<wall>`` is north|south|east|west.
+
+Any LENGTH field (a size, position, offset, width, setback, ceiling…) accepts a
+feet-and-inches literal as well as decimal feet: ``12-6`` (= 12′6″ = 12.5 ft),
+``12′6″``, ``12′``, ``12'6``, ``12'`` and ``6″``. These are recognised only as a
+single whitespace-free token, so ``12 - 6`` (three tokens), ``door a - b`` and a
+plain negative ``-6`` keep their meanings; ``-12-6`` (negative feet + inches) is
+rejected, and ASCII ``12'6"`` is unsupported because ``"`` starts a string.
 """
 
 from __future__ import annotations
 
+import difflib
 import math
+import os
+import re
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .constants import WALK_DEFAULT_WIDTH
 from .elements import (
+    ALARM_KINDS,
     DEFAULT_DOUBLE_DOOR_WIDTH,
     DOOR_KINDS,
     DOUBLE_LEAF_KINDS,
+    DRIVE_SURFACES,
     OVERHEAD_DOOR_HEIGHT,
     OVERHEAD_DOOR_WIDTH,
+    LIGHT_KINDS,
+    SERVICE_UTILITIES,
     WALL_ATTRIBUTES,
     WINDOW_KINDS,
     Barndominium,
@@ -66,9 +88,24 @@ if TYPE_CHECKING:  # the annotation-only import; runtime resolution is lazy
 _KEYWORDS = (
     "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
-    "roof", "orientation", "finish", "accessible", "site", "setback", "suite",
-    "zone", "electrical", "street", "overhang", "climate", "fixture"
+    "roof", "orientation", "finish", "accessible", "site", "setback", "building",
+    "suite", "zone", "electrical", "street", "overhang", "climate", "fixture",
+    "outlet", "switch", "light", "alarm", "use", "param",
+    "drive", "walk", "well", "septic", "service", "grade",
 )
+
+#: Statements that describe a whole *building*, not a reusable block — illegal
+#: inside a part file (fragment mode) → ``PART_HOST_STMT``. A part borrows the
+#: host's. ``use`` is legal in a part (Phase 20 — nested composition, depth ≤ 2,
+#: guarded by :func:`barndsl.compose.compose_uses`); ``stair`` is legal too (Phase
+#: 20 — multi-level parts, a part may carry ``level 1`` rooms + a connecting
+#: stair). See the design doc §3.1.
+_HOST_ONLY = frozenset({
+    "plan", "envelope", "wing", "ceiling", "program", "require", "site",
+    "setback", "building", "street", "orientation", "roof", "overhang",
+    "finish", "frame", "electrical",
+    "drive", "walk", "well", "septic", "service", "grade",
+})
 
 #: Single-letter wall aliases the `fixture` statement accepts (N|S|E|W), plus the
 #: full names, mapped to a :class:`~barndsl.elements.Direction`.
@@ -79,10 +116,31 @@ _FIXTURE_WALLS = {
     "w": Direction.WEST, "west": Direction.WEST,
 }
 _TYPES = ", ".join(t.value for t in RoomType)
+#: The room-type names as a plain list, for did-you-mean ranking (BAD_TYPE).
+_TYPE_VALUES = tuple(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
+
+
+def _did_you_mean(word: str, options: tuple[str, ...] | list[str]) -> str:
+    """A leading ``Did you mean `x` or `y`?`` clause for ``word`` against
+    ``options`` (empty when nothing is close). Mirrors the accept-pragma's use of
+    :func:`difflib.get_close_matches` so a misspelled keyword/type ranks the near
+    hits instead of dumping the whole list."""
+    hits = difflib.get_close_matches(word.lower(), list(options), n=3)
+    if not hits:
+        return ""
+    return "Did you mean " + " or ".join(f"`{h}`" for h in hits) + "? "
+
+#: A `use` alias is a plain identifier — no dot (dots namespace stamped ids).
+_ALIAS_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+#: A `param` name is a plain identifier (Phase 20). A bare name matching this that
+#: also names a declared param resolves as a number inside a parametric part.
+_PARAM_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 _DOOR_KINDS = frozenset(DOOR_KINDS)
 _WINDOW_KIND_SET = frozenset(WINDOW_KINDS)
+_LIGHT_KIND_SET = frozenset(LIGHT_KINDS)
+_ALARM_KIND_SET = frozenset(ALARM_KINDS)
 _WALL_ATTRS = ", ".join(WALL_ATTRIBUTES)
 _BED_WORDS = frozenset({"bed", "beds", "bedroom", "bedrooms"})
 #: 'bath' is an aggregate (bathroom + half_bath), matching the compile recap.
@@ -115,6 +173,19 @@ One statement per line. '#' begins a comment. Braces { } are optional.
 Measurements are in FEET. Origin (0,0) is the south-west corner; x increases
 east, y increases north. A room at x,y with size W x L occupies [x, x+W] east-west
 and [y, y+L] south-north (south wall=y, north=y+L, west=x, east=x+W).
+Any length may be written in decimal feet (12, 10.5) OR feet-and-inches as one
+token: 12-6, 12'6, 12', 12′6″, 12′ or 6″ (12-6 = 12′6″ = 12.5 ft). The dash form
+only reads as a length when there is no space around it, so `12 - 6`, `door a - b`
+and a plain `-6` are unaffected; `-12-6` (negative feet + inches) is rejected, and
+ASCII 12'6" (with the inch ") is not accepted because " starts a string.
+
+A comment may carry a suppression pragma for a justified deviation:
+  # barndsl: accept <CODE> ["reason"]
+Trailing a statement it downgrades that CODE on that line to an accepted INFO;
+on its own line it applies to the next statement line. Errors cannot be accepted
+(ACCEPT_DENIED); an unknown code is ACCEPT_UNKNOWN; a pragma matching no
+diagnostic on its line is ACCEPT_UNUSED. Accepted diagnostics stop deducting from
+the design score but survive as an audited INFO (packet: "Accepted deviations").
 
 Statements:
   plan "Name"
@@ -124,7 +195,14 @@ Statements:
   floor <D>                       # inter-floor assembly depth (ft); floor-to-floor = ceiling + this
   accessible                      # opt-in: run accessibility / aging-in-place nudges
   electrical                      # opt-in: emit the electrical / life-safety checklist reminder
-  note "free text"                # optional design note
+  note "free text" [at <x>,<y> [level <n>]]
+                                  # a design note. Bare = free text carried in the
+                                  #   packet/notes; with `at <x>,<y>` it becomes a
+                                  #   leader-line callout drawn on the plan at that
+                                  #   world point (SW origin, +x east, +y north),
+                                  #   on floor `level` (default 0). A note anchored
+                                  #   outside the footprint is a gentle NOTE_OUTSIDE
+                                  #   info, not an error.
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior;
                                   #   storage = min closet+pantry sq ft
@@ -172,26 +250,91 @@ Statements:
   entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]
         # shorthand for `door <id> <wall> exterior ...`; double/french = a pair of
         # half-width leaves (egress clear width counts ONE leaf, IRC R311.2)
-  window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
+  window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>] [fixed] [tempered]
         # window; sill/head are ft above the floor. The kind (default casement)
         # sets the escape-opening math: a casement opens ~its full glazed size, a
         # slider opens ~half its width, a double-hung ~half its height, and FIXED
-        # glass never counts for bedroom egress (it still daylights).
+        # glass never counts for bedroom egress (it still daylights). `fixed` may
+        # also trail as a flag; a fixed window counts for daylight but not the
+        # openable-area ventilation floor (VENT_AREA). `tempered` declares safety
+        # glazing — the IRC R308.4 escape hatch that silences WINDOW_TEMPERED here.
   porch <id> at <x>,<y> size <W> x <L> [covered|open]
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
         # room on each level so it links them (and makes the upper floor reachable).
   fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>]
+  fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]
         # place a fixture / furnishing (bed_queen, sofa, dining_table, desk,
         # washer, kitchen_island, counter, ...). `at <x>,<y>` is ROOM-LOCAL feet,
         # measured from the room's SW corner (unlike every other statement, which
         # is in world coordinates). Omit `at` to auto-place against `wall`, or omit
         # both for the first free spot. `rotate` turns it in plan (snapped to a
         # quarter-turn); `width` overrides the run of a resizable piece (a counter).
+        # `along <wall>` (COUNTER ONLY) lays a countertop RUN along a wall: the whole
+        # wall, or `from <a> to <b>` (room-local ft from the wall's S/W corner), at
+        # `depth <d>` into the room (1–4 ft; default the US-standard 25 in = 2-1).
+        # It's a wall-backed counter like any other — an L or U is two/three runs
+        # meeting at mitred corners, and a sink/range set into a run doesn't clash
+        # with it. `along` is exclusive with `at`/`wall`/`width`. Other kinds have a
+        # fixed footprint, so `along` on them is an error.
         # Fixtures ADD to a room's auto-seeds; an explicit fixture of a seeded kind
         # (bath toilet/lavatory/tub, kitchen fridge/range/sink, laundry washer/
         # dryer) REPLACES just that seed. Baths, kitchens and laundries auto-seed
         # their fixtures with no `fixture` line at all.
+  outlet in <room> wall N|S|E|W offset <ft> [gfci]
+        # a receptacle on a room wall, `offset` ft from the wall's S/W start
+        # corner. `gfci` marks a ground-fault receptacle (required at kitchens,
+        # baths, laundries and outdoors, IRC E3902). Declaring any outlet opts the
+        # room into the receptacle-spacing check (no wall point > 6 ft from one,
+        # IRC E3901.2 -> OUTLET_SPACING); a wet-room outlet without `gfci` warns
+        # (OUTLET_GFCI). The electrical layer is opt-in — draw it or don't.
+  switch in <room> wall N|S|E|W offset <ft>
+        # a wall switch on a room wall (offset from the S/W start corner). A
+        # habitable room with power (outlets/switches) but no `light` gets the
+        # ROOM_NO_LIGHT lighting-outlet nudge (IRC E3903).
+  light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]
+        # a ceiling luminaire at ROOM-LOCAL x,y (feet from the room's SW corner,
+        # like a `fixture at`). kind defaults to ceiling.
+  alarm smoke|co|smoke_co in <room> [at <x>,<y>]
+        # a smoke and/or carbon-monoxide alarm, placed at the room (a ceiling
+        # device — no wall/offset). `smoke` = smoke alarm (IRC R314), `co` = CO
+        # alarm (R315), `smoke_co` = a combination unit satisfying both (the only
+        # combo spelling — `combo` is not accepted). Optional `at <x>,<y>` is
+        # ROOM-LOCAL feet for the symbol (defaults to the room centre). Declaring
+        # any alarm turns on the placement checks: a bedroom without a smoke/combo
+        # alarm (ALARM_BEDROOM), a sleeping area with no adjacent-hall alarm
+        # (ALARM_HALL), a level with no smoke alarm (ALARM_LEVEL), and — with
+        # bedrooms + a garage/shop — no CO/combo alarm (ALARM_CO, info).
+  use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270] [with k=v[, k=v…]]
+        # cross-file composition: stamp a PART (any `.barn` file with no `plan`
+        # header — rooms/openings/windows/fixtures/devices in its own local feet)
+        # into this plan. `"<relpath>"` is quoted and RELATIVE to the including
+        # file's directory (absolute paths / `..` escapes / no-home-dir sources are
+        # USE_UNRESOLVED errors — parts stay under the folder you compile or serve).
+        # `as <alias>` is a required, unique identifier: every id inside the part is
+        # stamped `<alias>.<id>` (m.bed, m.bath), and host statements reference those
+        # namespaced ids like locals (`door great - m.bed`). `at <x>,<y>` places the
+        # stamped bounding box's SW corner (ft); `level <n>` lands it on host level n
+        # (default 0) — a part's own `level 1` rooms lift by n. `mirror y` flips the
+        # part east↔west, `mirror x` north↔south; `rotate 90|180|270` turns it
+        # counter-clockwise (rooms are axis-aligned, so only 90° steps). With both,
+        # the part is ROTATED FIRST, THEN MIRRORED in its own local frame; the
+        # transformed bounding box's SW corner still lands at `at`. `with k=v, …`
+        # passes PARAM values to a parametric part (numbers only; keys the part
+        # doesn't declare are PARAM_UNDECLARED). Wall directions, wall offsets and
+        # fixture rotations all remap so the stamped copy stays code-clean. A part
+        # may itself `use` nested parts (depth ≤ 2; a cycle is USE_CYCLE, depth 3 is
+        # USE_NESTED) and may carry `level 1` rooms + a `stair`. The part is compiled
+        # once per (path, param values) and stamped per use; part-internal
+        # diagnostics report once (anchored to the part file), placement-dependent
+        # ones per use (anchored to the `use` line).
+  param <name> = <number>            # (part files only) declare a part PARAMETER — a
+        # number (decimal feet or ft-in) the host may override with `use ... with
+        # name=value`. The default is mandatory (every param is optional at use).
+        # Inside the part, the bare NAME stands wherever a number stands (sizes,
+        # positions, offsets…). Numbers only in v1 — no strings, no arithmetic. A
+        # bare name that names no param is PARAM_UNKNOWN; `param` in a plan is
+        # PARAM_IN_PLAN.
   frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]
         # auto-place the post-and-beam structural frame over the footprint: bents
         # spaced <= bay ft along the long axis (default 12), each spanning the short
@@ -212,8 +355,30 @@ Statements:
         # the buildable rectangle is the lot minus its setbacks: front/rear
         # consume the plan's south/north depth, `side` clears BOTH east & west
         # edges. If the building footprint (envelope + wings + porches) doesn't
-        # fit inside it, that's a SETBACK error (checked by dimensions only —
-        # there is no lot-position statement). A `setback` with no `site` errors.
+        # fit inside it, that's a SETBACK error. A `setback` with no `site` errors.
+  building at <x>,<y>              # optional; place the building on the lot
+        # pins the plan origin (the SW envelope corner, world 0,0) at <x>,<y> in
+        # lot feet from the lot's SW corner. With it declared the setback check
+        # measures each side's real clearance and can name which side is encroached
+        # and by how much (ft-in); without it the check is dimensions-only.
+  drive at <x>,<y> size <W> x <L> [gravel|concrete|asphalt]
+        # a driveway on the lot, in LOT feet (the `building at` frame). Surface
+        # defaults to gravel; concrete/asphalt cost more. Needs a `site`.
+  walk from <room> to drive [width <ft>]
+        # a walkway from <room>'s exterior door to the nearest drive edge (width
+        # default 4 ft). Only a `drive` is a valid destination. Needs a `site`.
+  well at <x>,<y>                  # a water well (lot feet). Needs a `site`.
+  septic at <x>,<y> [field <W> x <L>]
+        # a septic tank at <x>,<y> (lot feet), with an optional drain field drawn
+        # just north of the tank. Its separation from a `well` is checked (the
+        # common 100 ft health-department rule). Needs a `site`.
+  service electric|water|gas from N|S|E|W
+        # a utility service drop entering from a lot side (drawn as a labelled
+        # arrow). Needs a `site`.
+  grade <ft>                       # finish-floor height above finished grade
+        # a single flat-site value (e.g. `grade 2-8`). When it exceeds 30 in, every
+        # porch is a walking surface that needs a 36 in guard (IRC R312.1). Does
+        # NOT need a `site` — it's about the building, not the lot.
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -276,6 +441,138 @@ class _Token:
 
 _SEPARATORS = set(" \t,:")
 _DROP = set("{}")
+
+# --- feet-and-inches length literals ----------------------------------------
+#
+# A LENGTH field (a size, position, offset, width, setback, ceiling…) accepts a
+# US feet-and-inches literal in addition to a decimal-feet number. These are all
+# recognised at the NUMBER-PARSING level (in `_Cursor.number`), not by the lexer:
+# the tokenizer already splits on whitespace and NOT on `-`/`'`/`′`/`″`, so
+# `12-6`, `12'6`, `12′6″` and `12′` each arrive as a SINGLE token, while the
+# separator forms keep their meanings — `12 - 6` and `door a - b` tokenize with a
+# standalone `-`, and a plain negative like `-6` still parses as a float. Doing
+# this in `number()` means the disambiguation is free: a length literal is only a
+# length literal when it's one whitespace-free token, exactly the property that
+# tells `12-6` (ft-in) apart from `12 - 6` (three tokens) and `a - b`.
+#
+# Accepted:  12-6  (12′6″ = 12.5 ft; inches 0–11.99, feet non-negative)
+#            12′6″  12′6  12′     (Unicode prime/double-prime; inches optional)
+#            12'6   12'            (ASCII foot mark; NO inch double-quote)
+#            6″                    (Unicode inches alone)
+# Rejected:  -12-6  (negative feet WITH an inch part — ambiguous sign; errors)
+#            12'6"  and  6"        (ASCII inch double-quote — `"` starts a string
+#                                   in the lexer, so it never reaches here intact)
+#: <feet>(' | ′)[<inches>][″] — the foot-mark form (ASCII or Unicode prime).
+_FT_IN_FOOT = re.compile(r"^(-?\d+(?:\.\d+)?)['′](\d+(?:\.\d+)?)?[″]?$")
+#: <feet>-<inches> — the dash form; feet must be non-negative (no leading `-`).
+_FT_IN_DASH = re.compile(r"^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$")
+#: <inches>″ — inches alone, Unicode double-prime only.
+_FT_IN_INCH = re.compile(r"^(-?\d+(?:\.\d+)?)″$")
+
+
+def _parse_ft_in(text: str) -> float | None:
+    """Parse a feet-and-inches length literal to decimal feet, or ``None`` if
+    ``text`` isn't one of the accepted forms (see the module note above). Inches
+    outside ``[0, 12)`` make it *not* a length literal (returns ``None``), so the
+    caller reports a plain malformed-number error rather than silently over-rolling
+    the inches into feet."""
+    m = _FT_IN_FOOT.match(text)
+    if m is not None:
+        ft = float(m.group(1))
+        inch = float(m.group(2)) if m.group(2) is not None else 0.0
+        if not (0.0 <= inch < 12.0):
+            return None
+        return ft + (-1.0 if ft < 0 else 1.0) * inch / 12.0
+    m = _FT_IN_DASH.match(text)
+    if m is not None:
+        inch = float(m.group(2))
+        if not (0.0 <= inch < 12.0):
+            return None
+        return float(m.group(1)) + inch / 12.0  # feet is non-negative here
+    m = _FT_IN_INCH.match(text)
+    if m is not None:
+        return float(m.group(1)) / 12.0
+    return None
+
+
+#: Words a first-time user reaches for to mean feet/inches, which the DSL never
+#: accepts (a length is one token: 12, 12-6 or 12′6″). Recognised only to *teach*.
+_FEET_WORDS = {"feet", "ft", "foot"}
+_INCH_WORDS = {"inches", "inch", "in", "ins"}
+#: `<digits>('|′)<digits?>` — the foot-mark form a user typed before an ASCII `"`.
+_FOOTMARK_STEM = re.compile(r"^(\d+(?:\.\d+)?)['′](\d+(?:\.\d+)?)?$")
+
+
+def _ftin_string_hint(raw: str, quote_col: int) -> str | None:
+    """Teach the ``12'6\"`` slip that opens a string literal.
+
+    When an unterminated ``"`` immediately follows a digit — the tell-tale of a
+    user writing feet-and-inches with the ASCII inch mark (``12'6"``) — return a
+    targeted hint translating it to an accepted form (``12-6`` / ``12′6″``);
+    otherwise ``None`` (the generic add-the-quote hint stands). ``quote_col`` is
+    the 1-based column of the opening quote."""
+    idx = quote_col - 2  # 0-based index of the char just before the quote
+    if idx < 0 or idx >= len(raw) or not raw[idx].isdigit():
+        return None
+    # Grab the bareword run right before the quote (the would-be length token).
+    j = idx
+    while j >= 0 and raw[j] not in ' \t,:"#{}':
+        j -= 1
+    stem = raw[j + 1:idx + 1]
+    m = _FOOTMARK_STEM.match(stem)
+    if m is not None:
+        ft, inch = m.group(1), m.group(2)
+        dash = f"{ft}-{inch}" if inch else ft
+        uni = f"{ft}′{inch}″" if inch else f"{ft}′"
+        bad = stem + '"'
+        return (
+            f"Feet-and-inches uses a dash or unicode marks — write `{dash}` or "
+            f"`{uni}`, not `{bad}` (the ASCII `\"` opens a string literal)."
+        )
+    return (
+        "Feet-and-inches uses a dash (`12-6`) or unicode marks (`12′6″`); the "
+        "ASCII `\"` opens a string literal, so it can't close a length."
+    )
+
+
+def _units_word_hint(toks: list[_Token], unit_idx: int) -> str | None:
+    """Teach ``12 feet 6 inches`` — a length spelled out in words.
+
+    ``toks[unit_idx]`` is a ``feet``/``ft``/``foot`` token; the token before it is
+    the feet number, and an optional ``<n> inches`` may follow. Return a hint that
+    translates the literal input to the accepted single-token form (``12-6``),
+    or ``None`` when the shape isn't the words-for-units slip."""
+    if unit_idx <= 0 or unit_idx >= len(toks):
+        return None
+    if toks[unit_idx].text.lower() not in _FEET_WORDS:
+        return None
+    feet_tok = toks[unit_idx - 1]
+    if feet_tok.quoted:
+        return None
+    try:
+        float(feet_tok.text)
+    except ValueError:
+        return None
+    feet = feet_tok.text
+    literal = f"{feet} {toks[unit_idx].text}"
+    inch: str | None = None
+    # Optional `<inches> inch(es)` right after the feet word.
+    if unit_idx + 2 < len(toks) and toks[unit_idx + 2].text.lower() in _INCH_WORDS:
+        cand = toks[unit_idx + 1]
+        if not cand.quoted:
+            try:
+                float(cand.text)
+                inch = cand.text
+                literal += f" {cand.text} {toks[unit_idx + 2].text}"
+            except ValueError:
+                inch = None
+    dash = f"{feet}-{inch}" if inch else feet
+    uni = f"{feet}′{inch}″" if inch else f"{feet}′"
+    return (
+        f"Feet-and-inches is one token — write `{dash}` (or `{uni}`), e.g. "
+        f"`size {dash} x <length>`. `{literal}` is several tokens the parser "
+        "can't read as one length."
+    )
 
 
 def _tokenize_line(line: str, lineno: int) -> list[_Token]:
@@ -341,9 +638,15 @@ class _ParseError(Exception):
 
 
 class _Cursor:
-    def __init__(self, tokens: list[_Token]):
+    def __init__(self, tokens: list[_Token], param_env: dict[str, float] | None = None):
         self.toks = tokens
         self.i = 0
+        #: Parametric-part environment (Phase 20). When compiling a part fragment
+        #: with params, a bare identifier standing where a NUMBER is expected
+        #: resolves to its param value (use-site override or declared default).
+        #: ``None`` outside a parametric part — an identifier is then the usual
+        #: ``BAD_NUMBER``. See :meth:`number`.
+        self.param_env = param_env
 
     @property
     def eol_col(self) -> int:
@@ -374,11 +677,38 @@ class _Cursor:
         try:
             value = float(t.text)
         except ValueError:
+            # A LENGTH field also accepts a feet-and-inches literal (12-6, 12′6″,
+            # 12′, 12'6, 6″). These aren't valid floats, so try them here — the
+            # single-token property is what keeps `12-6` (ft-in) distinct from
+            # `12 - 6` / `a - b` (which tokenize with a standalone `-`).
+            ft_in = _parse_ft_in(t.text)
+            if ft_in is not None:
+                return ft_in
+            # Parametric parts (Phase 20): inside a part fragment, a bare param
+            # NAME stands wherever a number stands — resolve it to the use-site
+            # value or its declared default. Numbers only in v1 (no arithmetic),
+            # so this is a plain name → value lookup at the token level; the source
+            # text is never rewritten. An identifier matching no param is
+            # PARAM_UNKNOWN (with a did-you-mean over the declared names).
+            if self.param_env is not None and _PARAM_NAME_RE.match(t.text):
+                if t.text in self.param_env:
+                    return self.param_env[t.text]
+                raise _ParseError(
+                    "PARAM_UNKNOWN",
+                    f"{_did_you_mean(t.text, tuple(self.param_env))}"
+                    f"'{t.text}' is not a declared param.",
+                    t.col,
+                    end_col=t.end_col,
+                    hint="Declare it with `param " + t.text + " = <number>`, or use a "
+                    "number. Params are numbers only (no arithmetic).",
+                )
             raise _ParseError(
                 "BAD_NUMBER",
                 f"Expected a number for {what}, got '{t.text}'.",
                 t.col,
                 end_col=t.end_col,
+                hint="Use decimal feet (12 or 10.5) or feet-and-inches "
+                "(12-6, 12′6″, 12′, 12'6).",
             )
         if not math.isfinite(value):
             raise _ParseError(
@@ -454,11 +784,15 @@ class _Cursor:
     def keyword(self, expected: str) -> _Token:
         t = self.take(f"'{expected}'")
         if t.text.lower() != expected:
+            # A first-timer spelling a length in words (`size 12 feet 6 inches x
+            # 14`) trips here on the missing `x`; teach the single-token form.
+            hint = _units_word_hint(self.toks, self.i - 1)
             raise _ParseError(
                 "SYNTAX",
                 f"Expected '{expected}', got '{t.text}'.",
                 t.col,
                 end_col=t.end_col,
+                hint=hint,
             )
         return t
 
@@ -469,7 +803,7 @@ class _Cursor:
         except ValueError:
             raise _ParseError(
                 "BAD_TYPE",
-                f"Unknown room type '{t.text}'.",
+                f"{_did_you_mean(t.text, _TYPE_VALUES)}Unknown room type '{t.text}'.",
                 t.col,
                 hint=f"Use one of: {_TYPES}.",
                 end_col=t.end_col,
@@ -498,6 +832,8 @@ class _Cursor:
                     "`align`/`offset` go on the relative anchor, before `size` "
                     "(e.g. `room x: bedroom east-of y align far size 12 x 11`)."
                 )
+            elif _units_word_hint(self.toks, self.i) is not None:
+                hint = _units_word_hint(self.toks, self.i)  # type: ignore[assignment]
             else:
                 hint = "Remove the extra token(s)."
             raise _ParseError(
@@ -600,10 +936,46 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
     return kwargs, first_ref
 
 
+def _scan_param_defaults(source: str) -> dict[str, float]:
+    """Best-effort pre-scan of a part's ``param <name> = <number>`` declarations
+    (Phase 20), name → default value, so the resolution environment is ready
+    *before* the statement loop — a bare param name may then be referenced on a
+    line above its own ``param`` line. Silent and tolerant: a malformed ``param``
+    line is skipped here (the authoritative parse in :func:`_parse_statement`
+    reports it). Later duplicate declarations overwrite earlier ones; the
+    authoritative parse flags the duplicate."""
+    defaults: dict[str, float] = {}
+    for raw in source.splitlines():
+        toks = _tokenize_line(raw, 0)
+        if not toks or toks[0].text.lower() != "param":
+            continue
+        rest = "".join(t.text for t in toks[1:])
+        name, sep, val = rest.partition("=")
+        if not sep or not _PARAM_NAME_RE.match(name):
+            continue
+        num = _param_value(val)
+        if num is not None:
+            defaults[name] = num
+    return defaults
+
+
+def _param_value(text: str) -> float | None:
+    """Parse a param default / use-site value literal (Phase 20): a decimal-feet
+    number or a feet-and-inches literal, or ``None`` if it isn't a number. Params
+    are **numbers only** in v1 — no names, no arithmetic — so this never consults a
+    param environment."""
+    try:
+        v = float(text)
+    except ValueError:
+        return _parse_ft_in(text)
+    return v if math.isfinite(v) else None
+
+
 def _parse_statement(
-    tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int
+    tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int,
+    param_env: dict[str, float] | None = None,
 ) -> None:
-    c = _Cursor(tokens)
+    c = _Cursor(tokens, param_env=param_env)
     kw = c.take("a statement keyword")
     key = kw.text.lower()
 
@@ -723,6 +1095,132 @@ def _parse_statement(
         ss = plan.site_spec
         assert ss is not None  # .setback() just created it
         ss.setback_line, ss.setback_col, ss.setback_end_col = lineno, kw.col, kw.end_col
+    elif key == "building":
+        # `building at <x>,<y>` — the plan origin (SW envelope corner) on the lot.
+        c.keyword("at")
+        bx = c.number("the building x on the lot")
+        by = c.number("the building y on the lot")
+        c.expect_end()
+        plan.building(bx, by)
+        ss = plan.site_spec
+        assert ss is not None  # .building() just created it
+        ss.building_line, ss.building_col, ss.building_end_col = lineno, kw.col, kw.end_col
+    elif key == "drive":
+        # `drive at <x>,<y> size <w> x <l> [gravel|concrete|asphalt]` (default gravel).
+        from .elements import Drive
+
+        c.keyword("at")
+        dx = c.number("the drive x on the lot")
+        dy = c.number("the drive y on the lot")
+        c.keyword("size")
+        dw = c.number("the drive width")
+        c.keyword("x")
+        dl = c.number("the drive length")
+        surface = "gravel"
+        if (tok := c.peek()) is not None:
+            surface = c.take("a drive surface").text.lower()
+            if surface not in DRIVE_SURFACES:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown drive surface '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint=f"Use one of: {', '.join(DRIVE_SURFACES)} (default gravel).",
+                )
+        c.expect_end()
+        plan._site().drives.append(
+            Drive(dx, dy, dw, dl, surface, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "walk":
+        # `walk from <room> to drive [width <ft>]` — a path from a room's exterior
+        # door to the nearest drive edge.
+        from .elements import Walk
+
+        c.keyword("from")
+        room_tok = c.ident("a room id")
+        c.keyword("to")
+        c.keyword("drive")
+        width = WALK_DEFAULT_WIDTH
+        if (tok := c.peek()) is not None:
+            if tok.text.lower() != "width":
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown walk option '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint="A walk takes only `width <ft>`, e.g. `walk from mud to drive width 4`.",
+                )
+            c.keyword("width")
+            width = c.number("the walk width")
+        c.expect_end()
+        plan._site().walks.append(
+            Walk(room_tok.text, width, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "well":
+        # `well at <x>,<y>` — a water well point (lot feet).
+        from .elements import Well
+
+        c.keyword("at")
+        wx = c.number("the well x on the lot")
+        wy = c.number("the well y on the lot")
+        c.expect_end()
+        plan._site().wells.append(
+            Well(wx, wy, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "septic":
+        # `septic at <x>,<y> [field <w> x <l>]` — a septic tank + optional drain field.
+        from .elements import Septic
+
+        c.keyword("at")
+        px = c.number("the septic x on the lot")
+        py = c.number("the septic y on the lot")
+        fw = fl = None
+        if (tok := c.peek()) is not None:
+            if tok.text.lower() != "field":
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown septic option '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint="A septic takes only `field <w> x <l>`, e.g. "
+                    "`septic at 90,20 field 40 x 60`.",
+                )
+            c.keyword("field")
+            fw = c.number("the drain-field width")
+            c.keyword("x")
+            fl = c.number("the drain-field length")
+        c.expect_end()
+        plan._site().septics.append(
+            Septic(px, py, fw, fl, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "service":
+        # `service <electric|water|gas> from <N|S|E|W>` — a utility drop.
+        from .elements import Service
+
+        util_tok = c.take("a utility (electric|water|gas)")
+        utility = util_tok.text.lower()
+        if utility not in SERVICE_UTILITIES:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown service utility '{util_tok.text}'.",
+                util_tok.col, end_col=util_tok.end_col,
+                hint=f"Use one of: {', '.join(SERVICE_UTILITIES)}.",
+            )
+        c.keyword("from")
+        side_tok = c.take("a lot side (N|S|E|W)")
+        svc_side = _FIXTURE_WALLS.get(side_tok.text.lower())
+        if svc_side is None:
+            raise _ParseError(
+                "BAD_WALL",
+                f"Unknown lot side '{side_tok.text}'.",
+                side_tok.col, end_col=side_tok.end_col,
+                hint="Use N, S, E or W (the lot edge the service enters from).",
+            )
+        c.expect_end()
+        plan._site().services.append(
+            Service(utility, svc_side, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "grade":
+        # `grade <ft>` — finish-floor height above finished grade (flat site).
+        plan.set_grade(c.number("the finish-floor height above grade"))
+        c.expect_end()
     elif key == "roof":
         # `roof <style> [pitch <p>]` — style in gable|shed|monitor.
         style_tok = c.take("a roof style (gable|shed|monitor)")
@@ -743,8 +1241,25 @@ def _parse_statement(
                 "(optionally `pitch <rise:run>`).",
             )
     elif key == "note":
-        plan.note(c.take("a quoted note").text)
-        c.expect_end()
+        # `note "text"` (free-text) or, positioned, `note "text" at <x>,<y>
+        # [level <n>]` — a leader-line callout on the plan.
+        text = c.take("a quoted note").text
+        nxt = c.peek()
+        if nxt is not None and nxt.text.lower() == "at":
+            c.keyword("at")
+            x = c.number("the note x")
+            y = c.number("the note y")
+            level = 0
+            if (tok := c.peek()) is not None and tok.text.lower() == "level":
+                c.keyword("level")
+                level = c.level_value()
+            c.expect_end()
+            plan.note(text, x=x, y=y, level=level)
+            nm = plan.note_marks[-1]
+            nm.line, nm.col, nm.end_col = lineno, kw.col, kw.end_col
+        else:
+            plan.note(text)
+            c.expect_end()
     elif key == "program":
         # `program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`.
         # The first clause (bed) is mandatory; the rest are any order. bed/bath
@@ -778,6 +1293,7 @@ def _parse_statement(
             if cat is None:
                 raise _ParseError(
                     "BAD_TYPE",
+                    f"{_did_you_mean(noun.text, _TYPE_VALUES)}"
                     f"Unknown program room type '{noun.text}'.",
                     noun.col,
                     end_col=noun.end_col,
@@ -1179,6 +1695,7 @@ def _parse_statement(
             kind = c.take("a window kind").text.lower()
         width, offset = 4.0, 2.0
         sill, head = 3.0, 6.67  # ft above the floor; matches Window's defaults
+        tempered = False
         while c.peek() is not None:
             opt = c.take("an option").text.lower()
             if opt == "width":
@@ -1189,6 +1706,15 @@ def _parse_statement(
                 sill = c.number("sill height")
             elif opt == "head":
                 head = c.number("head height")
+            elif opt == "tempered":
+                # Declared safety glazing — the R308.4 escape hatch (silences the
+                # WINDOW_TEMPERED hazard-location warning for this window).
+                tempered = True
+            elif opt == "fixed":
+                # `fixed` as a trailing flag is the same non-opening glass as the
+                # `fixed` kind (it just reads naturally after the size). It opens
+                # nothing, so it counts for daylight but not ventilation.
+                kind = "fixed"
             else:
                 raise _ParseError(
                     "BAD_OPTION",
@@ -1196,12 +1722,12 @@ def _parse_statement(
                     c.toks[c.i - 1].col,
                     hint="Options: a kind (casement/slider/fixed/double-hung, "
                     "right after the wall), width <n>, offset <n>, sill <n>, "
-                    "head <n>.",
+                    "head <n>, fixed, tempered.",
                     end_col=c.toks[c.i - 1].end_col,
                 )
         plan.add_window(
             rid, wall, width=width, offset=offset, sill_height=sill,
-            head_height=head, kind=kind,
+            head_height=head, kind=kind, tempered=tempered,
         )
         win = plan.windows[-1]
         win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
@@ -1251,6 +1777,8 @@ def _parse_statement(
                 sid_tok.text, x=x, y=y, width=w, length=length,
                 from_level=lo, to_level=hi,
             )
+            st = plan.stairs[-1]
+            st.line, st.col, st.end_col = lineno, sid_tok.col, sid_tok.end_col
         except ValueError as exc:
             raise _ParseError(
                 "BAD_LEVEL", str(exc), sid_tok.col, end_col=sid_tok.end_col,
@@ -1308,16 +1836,20 @@ def _parse_statement(
         c.keyword("in")
         room_tok = c.ident("a room id")
         fx = fy = wall = width = None
+        along: Direction | None = None
+        run_from: float | None = None
+        run_to: float | None = None
+        run_depth: float | None = None
         rotation = 0.0
         while (tok := c.peek()) is not None:
             opt = c.take("an option").text.lower()
             if opt == "at":
                 fx = c.number("the fixture x offset")
                 fy = c.number("the fixture y offset")
-            elif opt == "wall":
+            elif opt in ("wall", "along"):
                 wt = c.take("a wall (N|S|E|W)")
-                wall = _FIXTURE_WALLS.get(wt.text.lower())
-                if wall is None:
+                wd = _FIXTURE_WALLS.get(wt.text.lower())
+                if wd is None:
                     raise _ParseError(
                         "BAD_WALL",
                         f"Unknown wall '{wt.text}'.",
@@ -1325,6 +1857,16 @@ def _parse_statement(
                         end_col=wt.end_col,
                         hint="Use N, S, E or W (or north/south/east/west).",
                     )
+                if opt == "along":
+                    along = wd
+                else:
+                    wall = wd
+            elif opt == "from":
+                run_from = c.number("the counter run start")
+            elif opt == "to":
+                run_to = c.number("the counter run end")
+            elif opt == "depth":
+                run_depth = c.number("the counter depth")
             elif opt in ("rotate", "rotation"):
                 rotation = c.number("the rotation in degrees")
             elif opt == "width":
@@ -1335,12 +1877,15 @@ def _parse_statement(
                     f"Unknown fixture option '{tok.text}'.",
                     tok.col,
                     end_col=tok.end_col,
-                    hint="Options: at <x>,<y>, wall N|S|E|W, rotate <deg>, width <w>.",
+                    hint="Options: at <x>,<y>, wall N|S|E|W, rotate <deg>, width <w>, "
+                    "or (counter) along N|S|E|W [from <a> to <b>] [depth <d>].",
                 )
         c.expect_end()
         try:
             plan.add_fixture(
-                kind, room_tok.text, x=fx, y=fy, wall=wall, rotation=rotation, width=width
+                kind, room_tok.text, x=fx, y=fy, wall=wall, rotation=rotation,
+                width=width, along=along, run_from=run_from, run_to=run_to,
+                depth=run_depth,
             )
         except ValueError as exc:
             raise _ParseError(
@@ -1348,10 +1893,288 @@ def _parse_statement(
             )
         pf = plan.fixtures[-1]
         pf.line, pf.col, pf.end_col = lineno, kw.col, kw.end_col
+    elif key in ("outlet", "switch"):
+        # `outlet in <room> wall <N|S|E|W> offset <n> [gfci]`
+        # `switch in <room> wall <N|S|E|W> offset <n>`
+        c.keyword("in")
+        room_tok = c.ident("a room id")
+        wall = None
+        offset = 1.0
+        gfci = False
+        while (tok := c.peek()) is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "wall":
+                wt = c.take("a wall (N|S|E|W)")
+                wall = _FIXTURE_WALLS.get(wt.text.lower())
+                if wall is None:
+                    raise _ParseError(
+                        "BAD_WALL",
+                        f"Unknown wall '{wt.text}'.",
+                        wt.col,
+                        end_col=wt.end_col,
+                        hint="Use N, S, E or W (or north/south/east/west).",
+                    )
+            elif opt == "offset":
+                offset = c.number(f"the {key} offset")
+            elif opt == "gfci" and key == "outlet":
+                gfci = True
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown {key} option '{tok.text}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint=(
+                        "Options: wall N|S|E|W, offset <n>, gfci."
+                        if key == "outlet"
+                        else "Options: wall N|S|E|W, offset <n>."
+                    ),
+                )
+        if wall is None:
+            raise _ParseError(
+                "BAD_WALL",
+                f"A `{key}` needs a wall: `{key} in <room> wall N|S|E|W offset <n>`.",
+                kw.col,
+                end_col=kw.end_col,
+                hint="Name the wall (N|S|E|W) the device sits on.",
+            )
+        c.expect_end()
+        if key == "outlet":
+            plan.add_outlet(room_tok.text, wall, offset=offset, gfci=gfci)
+            plan.outlets[-1].line = lineno
+            plan.outlets[-1].col = kw.col
+            plan.outlets[-1].end_col = kw.end_col
+        else:
+            plan.add_switch(room_tok.text, wall, offset=offset)
+            plan.switches[-1].line = lineno
+            plan.switches[-1].col = kw.col
+            plan.switches[-1].end_col = kw.end_col
+    elif key == "light":
+        # `light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]`
+        c.keyword("in")
+        room_tok = c.ident("a room id")
+        c.keyword("at")
+        lx = c.number("the light x offset")
+        ly = c.number("the light y offset")
+        lkind = "ceiling"
+        while (tok := c.peek()) is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "kind":
+                kt = c.take("a light kind")
+                lkind = kt.text.lower()
+                if lkind not in _LIGHT_KIND_SET:
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"Unknown light kind '{kt.text}'.",
+                        kt.col,
+                        end_col=kt.end_col,
+                        hint=f"Use one of: {', '.join(LIGHT_KINDS)}.",
+                    )
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown light option '{tok.text}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint="Options: kind ceiling|pendant|fan|recessed.",
+                )
+        c.expect_end()
+        plan.add_light(room_tok.text, x=lx, y=ly, kind=lkind)
+        lm = plan.lights[-1]
+        lm.line, lm.col, lm.end_col = lineno, kw.col, kw.end_col
+    elif key == "alarm":
+        # `alarm <smoke|co|smoke_co> in <room> [at <x>,<y>]`
+        kind_tok = c.ident("an alarm kind (smoke|co|smoke_co)")
+        akind = kind_tok.text.lower()
+        if akind not in _ALARM_KIND_SET:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown alarm kind '{kind_tok.text}'.",
+                kind_tok.col,
+                end_col=kind_tok.end_col,
+                hint=f"Use one of: {', '.join(ALARM_KINDS)} "
+                "(smoke_co is the combination unit).",
+            )
+        c.keyword("in")
+        room_tok = c.ident("a room id")
+        ax = ay = None
+        while (tok := c.peek()) is not None:
+            opt = c.take("an option").text.lower()
+            if opt == "at":
+                ax = c.number("the alarm x offset")
+                ay = c.number("the alarm y offset")
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown alarm option '{tok.text}'.",
+                    tok.col,
+                    end_col=tok.end_col,
+                    hint="Options: at <x>,<y> (room-local; a ceiling device).",
+                )
+        c.expect_end()
+        plan.add_alarm(room_tok.text, akind, x=ax, y=ay)
+        am = plan.alarms[-1]
+        am.line, am.col, am.end_col = lineno, kw.col, kw.end_col
+    elif key == "use":
+        # `use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]`
+        # — stamp a part, optionally rotated (ccw) then mirrored in its local frame.
+        from .elements import UseSpec
+
+        path_tok = c.take("a quoted part path")
+        if not path_tok.quoted:
+            raise _ParseError(
+                "SYNTAX",
+                f"Expected a quoted part path, got '{path_tok.text}'.",
+                path_tok.col, end_col=path_tok.end_col,
+                hint='Quote the relative path, e.g. `use "parts/bath_core.barn" as b at 0,0`.',
+            )
+        c.keyword("as")
+        alias_tok = c.ident("an alias")
+        if not _ALIAS_RE.match(alias_tok.text):
+            raise _ParseError(
+                "SYNTAX",
+                f"'{alias_tok.text}' is not a valid alias.",
+                alias_tok.col, end_col=alias_tok.end_col,
+                hint="An alias is a plain identifier (letters, digits, underscore; "
+                "not starting with a digit), e.g. `as m`.",
+            )
+        c.keyword("at")
+        ux = c.number("the use x")
+        uy = c.number("the use y")
+        ulevel = 0
+        umirror: str | None = None
+        urotate = 0
+        uparams: dict[str, float] = {}
+        while (tok := c.peek()) is not None:
+            opt = tok.text.lower()
+            if opt == "level":
+                c.keyword("level")
+                ulevel = c.level_value()
+            elif opt == "with":
+                # `with k=v[, k=v…]` — use-site param overrides (Phase 20). Each
+                # pair is a single `key=value` token (commas are separators, so
+                # `with w=8, d=7-6` arrives as the tokens `w=8` `d=7-6`); a value
+                # is a number (decimal feet or ft-in). Numbers only in v1. A key
+                # the part doesn't declare is caught later (PARAM_UNDECLARED, at
+                # the use line) once the part's params are known.
+                c.keyword("with")
+                seen_pair = False
+                while (pt := c.peek()) is not None and "=" in pt.text and not pt.quoted:
+                    c.take("a param pair")
+                    seen_pair = True
+                    name, _, val = pt.text.partition("=")
+                    if not _PARAM_NAME_RE.match(name):
+                        raise _ParseError(
+                            "SYNTAX",
+                            f"'{name}' is not a valid param name in `with`.",
+                            pt.col, end_col=pt.end_col,
+                            hint="Write `with width=8, depth=7-6` — a plain name, "
+                            "then `=`, then a number.",
+                        )
+                    num = _param_value(val)
+                    if num is None:
+                        raise _ParseError(
+                            "BAD_NUMBER",
+                            f"`with {name}=` needs a number, got '{val}'.",
+                            pt.col, end_col=pt.end_col,
+                            hint="Params are numbers only (decimal feet or ft-in, "
+                            "e.g. 8 or 7-6) — no names or arithmetic in v1.",
+                        )
+                    if name in uparams:
+                        raise _ParseError(
+                            "PARAM_DUP",
+                            f"param '{name}' is set twice in this `with` clause.",
+                            pt.col, end_col=pt.end_col,
+                            hint="Set each param once per `use`.",
+                        )
+                    uparams[name] = num
+                if not seen_pair:
+                    nxt = c.peek()
+                    raise _ParseError(
+                        "SYNTAX",
+                        "`with` needs at least one `key=value` param pair.",
+                        nxt.col if nxt else kw.col,
+                        end_col=nxt.end_col if nxt else kw.end_col,
+                        hint="e.g. `with width=8, depth=7-6` (no spaces around `=`).",
+                    )
+            elif opt == "mirror":
+                c.keyword("mirror")
+                axis_tok = c.take("a mirror axis (x or y)")
+                axis = axis_tok.text.lower()
+                if axis not in ("x", "y"):
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"`mirror` takes an axis x or y, got '{axis_tok.text}'.",
+                        axis_tok.col, end_col=axis_tok.end_col,
+                        hint="`mirror y` flips east↔west; `mirror x` flips north↔south.",
+                    )
+                umirror = axis
+            elif opt == "rotate":
+                c.keyword("rotate")
+                ang_tok = c.take("a rotation of 90, 180 or 270")
+                try:
+                    ang = int(float(ang_tok.text))
+                except ValueError:
+                    ang = -1
+                if ang_tok.quoted or ang not in (90, 180, 270):
+                    raise _ParseError(
+                        "BAD_OPTION",
+                        f"`rotate` on `use` takes 90, 180 or 270, got '{ang_tok.text}'.",
+                        ang_tok.col, end_col=ang_tok.end_col,
+                        hint="Rooms are axis-aligned, so a part turns in 90° steps "
+                        "(90, 180 or 270) — a quarter, half or three-quarter turn.",
+                    )
+                urotate = ang
+            else:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown use option '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint="Options: level <n>, mirror x|y, rotate 90|180|270, "
+                    "with k=v.",
+                )
+        plan.uses.append(
+            UseSpec(path_tok.text, alias_tok.text, ux, uy, ulevel,
+                    mirror=umirror, rotate=urotate, params=uparams,
+                    line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "param":
+        # `param <name> = <number>` — a part parameter (Phase 20). The default is
+        # mandatory (every param is optional at use). Numbers only in v1. The
+        # authoritative declaration: stores the default on the plan and reports
+        # PARAM diagnostics; the resolution env is built by a pre-scan (see
+        # :func:`_scan_param_defaults`) so a name may be referenced before its
+        # `param` line. Whole line joined so `w = 8` / `w=8` / `w =8` all parse.
+        rest = "".join(t.text for t in tokens[1:])
+        pname, psep, pval = rest.partition("=")
+        if not psep or not _PARAM_NAME_RE.match(pname):
+            raise _ParseError(
+                "SYNTAX",
+                "A param is `param <name> = <number>`.",
+                kw.end_col + 1, end_col=c.eol_col,
+                hint="e.g. `param width = 8` or `param depth = 7-6`.",
+            )
+        pnum = _param_value(pval)
+        if pnum is None:
+            raise _ParseError(
+                "BAD_NUMBER",
+                f"param '{pname}' needs a numeric default, got '{pval}'.",
+                kw.end_col + 1, end_col=c.eol_col,
+                hint="The default is mandatory and a number (decimal feet or "
+                "ft-in, e.g. 8 or 7-6) — no names or arithmetic in v1.",
+            )
+        if pname in plan.params:
+            raise _ParseError(
+                "PARAM_DUP",
+                f"param '{pname}' is declared more than once.",
+                kw.end_col + 1, end_col=c.eol_col,
+                hint="Declare each param once.",
+            )
+        plan.params[pname] = pnum
     else:
         raise _ParseError(
             "UNKNOWN_STMT",
-            f"Unknown statement '{kw.text}'.",
+            f"{_did_you_mean(kw.text, _KEYWORDS)}Unknown statement '{kw.text}'.",
             kw.col,
             hint=f"Statements start with one of: {', '.join(_KEYWORDS)}.",
             end_col=kw.end_col,
@@ -1432,6 +2255,10 @@ class CompileResult:
                     "room": d.room,
                     "message": d.message,
                     "hint": d.hint,
+                    "accepted": getattr(d, "accepted", False),
+                    "accept_reason": getattr(d, "accept_reason", None),
+                    "file": getattr(d, "file", None),
+                    "part": getattr(d, "part", None),
                 }
                 for d in sorted(
                     self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)
@@ -1465,8 +2292,90 @@ def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[st
     return out
 
 
+def _finish_fragment(
+    plan: Barndominium,
+    diagnostics: list[Issue],
+    source: str,
+    smap: "_SourceMap",
+    pragmas: list,
+    profile: "Profile | None",
+    composition: object | None = None,
+) -> CompileResult:
+    """Finish a fragment (part) compile: PART_EMPTY / origin normalization /
+    local-only validation. See :func:`compile_source` (``fragment=True``).
+
+    ``composition`` (Phase 20 — nested parts) carries the part's own stamped
+    nested instances so a local finding on a nested stamped room is deduped
+    against the nested part's already-folded part-internal diagnostics, exactly
+    as the host does for its stamps."""
+    from .compose import Composition, PART_LOCAL_CODES, normalize_part_origin
+    from .pragma import apply_pragmas
+
+    stamped_map = composition.stamped_map if isinstance(composition, Composition) else {}
+    part_keys = composition.part_keys if isinstance(composition, Composition) else {}
+
+    if not plan.rooms:
+        diagnostics.append(Issue(
+            Severity.ERROR, "PART_EMPTY",
+            "A part declares no rooms — an empty part composes nothing.",
+            hint="Add at least one `room`, e.g. `room bath: bathroom at 0,0 size 8 x 8`.",
+        ))
+        apply_pragmas(diagnostics, pragmas)
+        return CompileResult(plan, diagnostics, source, room_lines=dict(smap.room_line))
+
+    if normalize_part_origin(plan) != (0.0, 0.0):
+        diagnostics.append(Issue(
+            Severity.INFO, "PART_ORIGIN",
+            "Part's south-west corner wasn't at 0,0 — normalized to the origin "
+            "before stamping.",
+            hint="Parts are authored in their own local feet; the `use ... at` "
+            "places this corner.",
+        ))
+    # A synthetic envelope covering the part lets the local checks run without an
+    # ENVELOPE error; the composed host validate is the real placement authority.
+    plan.envelope_width = max(r.x + r.width for r in plan.rooms)
+    plan.envelope_length = max(r.y + r.length for r in plan.rooms)
+
+    try:
+        report = validate(plan, profile)
+    except Exception:
+        report = None
+    if report is not None:
+        for iss in report.issues:
+            if iss.code not in PART_LOCAL_CODES:
+                continue  # whole-building / placement-dependent — skipped in a part
+            # A local finding on a nested stamped room (Phase 20): either a
+            # duplicate of the nested part's already-folded finding (drop it) or a
+            # placement-dependent finding of *this* part (anchor to the nested
+            # `use` line so the part author sees where the block lands).
+            if iss.room is not None and iss.room in stamped_map:
+                local, inst = stamped_map[iss.room]
+                if (iss.code, local) in part_keys.get(inst.part_path, ()):
+                    continue
+                iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
+                iss.message = f"instance {inst.alias}: {iss.message}"
+                diagnostics.append(iss)
+                continue
+            if iss.room is not None:
+                if iss.line is None:
+                    iss.line = smap.room_line.get(iss.room)
+                if iss.col is None and iss.room in smap.room_col:
+                    iss.col, iss.end_col = smap.room_col[iss.room]
+            diagnostics.append(iss)
+    apply_pragmas(diagnostics, pragmas)
+    return CompileResult(plan, diagnostics, source, room_lines=dict(smap.room_line))
+
+
 def compile_source(
-    source: str, name: str | None = None, profile: "Profile | None" = None
+    source: str,
+    name: str | None = None,
+    profile: "Profile | None" = None,
+    *,
+    fragment: bool = False,
+    base_dir: str | None = None,
+    params: dict[str, float] | None = None,
+    compose_ctx: object | None = None,
+    self_path: str | None = None,
 ) -> CompileResult:
     """Compile DSL ``source`` into a validated plan + diagnostics.
 
@@ -1474,10 +2383,45 @@ def compile_source(
     against (see :mod:`barndsl.profiles`); ``None`` uses the IRC baseline
     (:data:`~barndsl.profiles.DEFAULT`), which is byte-identical to the
     pre-profile behaviour.
+
+    Cross-file composition (see :mod:`barndsl.compose`):
+
+    * ``base_dir`` is the directory ``use "<relpath>"`` paths resolve against —
+      the including file's own directory. ``None`` (a pasted/browser source with
+      no home directory) makes any ``use`` a ``USE_UNRESOLVED`` error.
+    * ``fragment=True`` compiles a **part** file (a ``.barn`` with no ``plan``
+      header): no ``plan``/``envelope`` is required, host-only statements are
+      ``PART_HOST_STMT`` errors, at least one ``room`` is required (``PART_EMPTY``),
+      the origin is normalized to the SW corner (``PART_ORIGIN`` info), and only
+      *local* checks run (whole-building checks are skipped). A part may itself
+      ``use`` nested parts (depth ≤ 2) and may carry ``level 1`` rooms + a stair.
+      This is what the loader calls once per part; ordinary top-level compiles use
+      ``fragment=False``.
+    * ``params`` (Phase 20) are the use-site parameter overrides for a parametric
+      part — merged over the part's declared ``param`` defaults to build the
+      resolution environment a bare param name reads from.
+    * ``compose_ctx`` / ``self_path`` are internal recursion state threaded by the
+      loader for nested composition (the sandbox root, depth, cycle stack, shared
+      memo + instance budget). External callers leave them ``None``.
     """
+    from .compose import _ComposeCtx
+    from .pragma import apply_pragmas, parse_pragmas
+
+    # Strip a leading UTF-8 BOM for API callers who pass raw file text (the CLI's
+    # read helper strips it too; stripping here keeps direct compile_source users
+    # from a stray U+FEFF making the first token unlexable).
+    source = _strip_bom(source)
     diagnostics: list[Issue] = []
     plan = Barndominium(name=name or "Untitled")
     smap = _SourceMap()
+    pragmas = parse_pragmas(source)
+    # Parametric parts (Phase 20): pre-scan `param` defaults so a bare param name
+    # resolves as a number anywhere in a part, then overlay the use-site values.
+    # Only meaningful in a part (fragment); a plan's `param` is a PARAM_IN_PLAN
+    # error and never builds an environment.
+    param_env: dict[str, float] | None = None
+    if fragment:
+        param_env = {**_scan_param_defaults(source), **(params or {})}
     # True once any statement was skipped by parse-error recovery. Tracked at
     # the skip sites themselves (not inferred from ERROR diagnostics later):
     # semantic build errors also record ERRORs but skip nothing, and they must
@@ -1488,6 +2432,7 @@ def compile_source(
         toks = _tokenize_line(raw, lineno)
         unterminated = next((t for t in toks if t.unterminated), None)
         if unterminated is not None:
+            ftin_hint = _ftin_string_hint(raw, unterminated.col)
             diagnostics.append(
                 Issue(
                     Severity.ERROR,
@@ -1496,7 +2441,7 @@ def compile_source(
                     line=lineno,
                     col=unterminated.col,
                     end_col=unterminated.end_col,
-                    hint='Add the closing quote, e.g. `plan "Name"`.',
+                    hint=ftin_hint or 'Add the closing quote, e.g. `plan "Name"`.',
                 )
             )
             skipped = True
@@ -1522,8 +2467,32 @@ def compile_source(
                 )
                 skipped = True
             continue
+        key = toks[0].text.lower()
+        if fragment and key in _HOST_ONLY:
+            diagnostics.append(Issue(
+                Severity.ERROR, "PART_HOST_STMT",
+                f"`{key}` describes a whole building — a part borrows the "
+                "host's. Remove it; size the part by its rooms.",
+                line=lineno, col=toks[0].col, end_col=toks[0].end_col,
+                hint="A part is any `.barn` file with no `plan` header: rooms, "
+                "openings, windows, fixtures, devices — in its own local feet.",
+            ))
+            skipped = True
+            continue
+        if not fragment and key == "param":
+            # `param` declares a *part* parameter — a whole plan has no use-site to
+            # pass values, so it's the mirror of PART_HOST_STMT.
+            diagnostics.append(Issue(
+                Severity.ERROR, "PARAM_IN_PLAN",
+                "`param` declares a part parameter — a whole plan can't take one.",
+                line=lineno, col=toks[0].col, end_col=toks[0].end_col,
+                hint="Move `param` into a part file (a `.barn` with no `plan` "
+                "header); the host passes values with `use ... with name=value`.",
+            ))
+            skipped = True
+            continue
         try:
-            _parse_statement(toks, plan, smap, lineno)
+            _parse_statement(toks, plan, smap, lineno, param_env=param_env)
         except _ParseError as err:
             diagnostics.append(
                 Issue(
@@ -1538,6 +2507,28 @@ def compile_source(
             )
             skipped = True
 
+    # Cross-file composition: resolve + stamp every `use` into `plan` BEFORE
+    # validation, so overlap/envelope/egress/adjacency run on the composed plan.
+    # Resolution errors and (deduped) part-internal diagnostics are appended now;
+    # placement-dependent (instance) findings are reclassified after validate.
+    # This runs in BOTH modes (Phase 20 — a part may `use` nested parts, depth ≤
+    # 2); ``compose_ctx`` carries the recursion state (sandbox root, depth, cycle
+    # stack, shared memo + instance budget), built fresh at the top level.
+    composition = None
+    if plan.uses:
+        from .compose import compose_uses
+
+        ctx = compose_ctx if isinstance(compose_ctx, _ComposeCtx) else \
+            _ComposeCtx.top_level(base_dir, self_path)
+        composition = compose_uses(plan, base_dir, diagnostics, profile, ctx=ctx)
+
+    # Fragment mode (a part file): no plan/envelope required, ≥1 room, origin
+    # normalized, only local checks. The loader (compose.load_part) calls this.
+    if fragment:
+        return _finish_fragment(
+            plan, diagnostics, source, smap, pragmas, profile, composition
+        )
+
     # Statement-level error recovery (review §1.3): a statement that failed to
     # parse already recorded its diagnostic and was skipped, but the *surviving*
     # statements still built a partial plan. Rather than throw it away (the old
@@ -1550,6 +2541,7 @@ def compile_source(
     # empty/garbage input scores a flat zero with no misleading semantic cascade;
     # see score.py's plan-None handling).
     if skipped and not plan.rooms:
+        apply_pragmas(diagnostics, pragmas)
         return CompileResult(None, diagnostics, source, room_lines=dict(smap.room_line))
 
     # Derive the structural frame (if requested) before checks, so the validator
@@ -1586,7 +2578,21 @@ def compile_source(
         report = None
         diagnostics.append(_recovery_limit("Validation"))
     if report is not None:
+        stamped_map = composition.stamped_map if composition is not None else {}
+        part_keys = composition.part_keys if composition is not None else {}
         for iss in report.issues:
+            # A diagnostic on a *stamped* room is either a duplicate of a
+            # part-internal finding (already reported once, so drop it) or a
+            # placement-dependent *instance* finding (re-anchor to the `use` line,
+            # name the alias). See compose.compose_uses.
+            if iss.room is not None and iss.room in stamped_map:
+                local, inst = stamped_map[iss.room]
+                if (iss.code, local) in part_keys.get(inst.part_path, ()):
+                    continue  # part-internal — reported once via the fragment
+                iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
+                iss.message = f"instance {inst.alias}: {iss.message}"
+                diagnostics.append(iss)
+                continue
             # Anchor semantic diagnostics to the room's `room ...` line, and point
             # the caret at the room's id token, so quality/code-check issues get the
             # same column-accurate underline as syntax errors.
@@ -1595,13 +2601,67 @@ def compile_source(
                     iss.line = smap.room_line.get(iss.room)
                 if iss.col is None and iss.room in smap.room_col:
                     iss.col, iss.end_col = smap.room_col[iss.room]
-        diagnostics.extend(report.issues)
+            diagnostics.append(iss)
+    # Suppression pragmas run last, once every diagnostic carries its resolved
+    # line (semantic issues were just anchored to their room's statement line):
+    # a pragma downgrades the matched warnings/infos to accepted INFOs and flags
+    # any that can't be honoured.
+    apply_pragmas(diagnostics, pragmas)
     return CompileResult(
         plan, diagnostics, source, recovered=skipped, room_lines=dict(smap.room_line)
     )
 
 
+class SourceReadError(Exception):
+    """A file the user pointed at could not be read — missing, a directory, no
+    permission, or not UTF-8 text. Carries a clean one-line ``<path>: <reason>``
+    message so the CLI can print ``error: …`` and exit 2 instead of dumping a
+    traceback from deep in the I/O stack."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+        self.reason = reason
+
+
+def _strip_bom(text: str) -> str:
+    """Drop a leading UTF-8 byte-order mark. Some editors (Notepad, older VS on
+    Windows) prepend U+FEFF; left in, it makes the first token unlexable."""
+    return text[1:] if text.startswith("﻿") else text
+
+
+def read_source_file(path: str) -> tuple[str, str | None]:
+    """Read DSL source for a file-taking command: ``(text, base_dir)``.
+
+    ``-`` reads standard input (an untitled buffer — ``base_dir`` ``None``, so a
+    ``use`` relpath is unresolvable, the same as a pasted source). Otherwise the
+    file's UTF-8 text (any leading BOM stripped) with its own directory as the
+    ``use`` resolution root. Raises :class:`SourceReadError` — never a raw
+    traceback — for a missing file, a directory, a permission error, or bytes
+    that are not valid UTF-8."""
+    if path == "-":
+        return _strip_bom(sys.stdin.read()), None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        raise SourceReadError(path, "no such file") from None
+    except IsADirectoryError:
+        raise SourceReadError(path, "is a directory") from None
+    except PermissionError:
+        raise SourceReadError(path, "permission denied") from None
+    except UnicodeDecodeError:
+        raise SourceReadError(path, "not valid UTF-8 text") from None
+    return _strip_bom(text), os.path.dirname(os.path.abspath(path))
+
+
 def compile_file(path: str, profile: "Profile | None" = None) -> CompileResult:
-    """Compile a ``.barn`` file (see :func:`compile_source` for ``profile``)."""
-    with open(path, encoding="utf-8") as fh:
-        return compile_source(fh.read(), profile=profile)
+    """Compile a ``.barn`` file (see :func:`compile_source` for ``profile``).
+
+    The file's own directory is the resolution root for any ``use "<relpath>"``
+    (cross-file composition) — parts are found relative to the including file.
+    ``path`` may be ``-`` to read standard input. A file that cannot be read
+    raises :class:`SourceReadError` (a clean message, no traceback)."""
+    text, base_dir = read_source_file(path)
+    self_path = None if path == "-" else os.path.realpath(path)
+    return compile_source(text, profile=profile, base_dir=base_dir, self_path=self_path)

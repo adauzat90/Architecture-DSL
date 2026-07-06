@@ -1,0 +1,50 @@
+plan "Cedar Ridge (composed)"
+envelope 48 x 30
+ceiling 10
+
+# --- proven, reusable blocks (see parts/) -------------------------------------
+# Each `use` stamps a transformed copy of a part into the plan; its ids become
+# <alias>.<id> (m.bed, k.kitchen, b1.bath). Host statements reference the stamped
+# ids exactly like local ones — `door great - m.bed`, `door dining - k.kitchen`.
+# The master's bath is an interior core (mechanical vent) and its bedroom opens to
+# the great room in this open plan — both accepted, audited deviations.
+# barndsl: accept BATH_VENT "interior bath core — mechanical ventilation"
+# barndsl: accept BED_PRIVACY "open-plan suite off the great room"
+use "parts/master_suite.barn" as m  at 0,0
+use "parts/kitchen_l.barn"    as k  at 26,18
+# `mirror y` reflects the bath core east↔west (Phase 7b): its window offset
+# re-derives to the same exterior wall while the interior fixture layout flips —
+# the dual-orientation motif a mirror-image pair of cores is built from.
+use "parts/bath_core.barn"    as b1 at 40,0 mirror y
+use "parts/laundry_core.barn" as lc at 40,6
+
+# --- the host's own rooms -----------------------------------------------------
+room great: living at 0,13 size 22 x 17
+room hall: hallway at 22,0 size 4 x 30   # barndsl: accept HALL_DEADEND "spine reaches the north entry"
+room dining: dining at 26,0 size 14 x 18
+room office: office at 40,13 size 8 x 17
+
+# --- host circulation reaches into the stamped parts by their namespaced ids --
+door great - m.bed width 3 offset 2 into m.bed hinge near
+door great - hall cased width 6
+door hall - m.bath width 2.5 into m.bath hinge near   # a private hall door to the suite
+door hall - dining cased width 6
+door dining - k.kitchen cased width 8
+door dining - b1.bath width 2.5 into b1.bath hinge near
+door dining - lc.laundry width 2.5 offset 1 into lc.laundry hinge near
+door dining - office width 3
+
+# --- the building entrances (people doors) + their landings -------------------
+entry great west width 3 offset 6
+entry hall north width 3 offset 0.5
+porch stoop_w at -4,18 size 4 x 4 covered
+porch stoop_n at 22,30 size 4 x 4 covered
+
+# --- daylight the habitable host rooms + safety glazing near doors ------------
+window great north width 8 offset 7 tempered
+window great west width 5 offset 11 tempered
+window dining south width 7 offset 4
+window office east width 5 offset 6
+
+# --- life safety: a smoke alarm outside the sleeping area (IRC R314) -----------
+alarm smoke in great

@@ -15,10 +15,12 @@ final layout is the designer's.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
-from .elements import Barndominium, Room, RoomType
-from .validation import clear_box
+from .elements import Barndominium, Direction, Room, RoomType
+from .geometry import opening_endpoints
+from .validation import clear_box, exterior_walls
 
 
 @dataclass(frozen=True)
@@ -75,15 +77,109 @@ FIXTURES: dict[str, FixtureSpec] = {
 #: Every catalog kind, for the parser (a `fixture <kind>` must name one of these).
 FIXTURE_KINDS: tuple[str, ...] = tuple(FIXTURES)
 
+#: Kinds that read as *wall-backed* casework — parked floating in open floor they
+#: look misplaced (``FIXTURE_BACKING``). Free-standing pieces (a table, an island)
+#: and the furniture that sits proud of a wall (bed, sofa, armchair, desk) are not
+#: here: they legitimately float.
+_WALL_BACKED: frozenset[str] = frozenset(
+    {
+        "toilet", "lavatory", "tub", "shower", "sink", "range", "refrigerator",
+        "counter", "wardrobe", "dresser", "water_heater", "washer", "dryer",
+    }
+)
+
+#: Tall, view-blocking pieces that must never park over a bedroom's escape window
+#: (``FIXTURE_EGRESS``) — a small, deliberately conservative set.
+_TALL_KINDS: frozenset[str] = frozenset({"refrigerator", "wardrobe", "water_heater"})
+
+#: Landing surfaces a cooktop wants beside it (``RANGE_LANDING``; NKBA practice).
+_LANDING_KINDS: frozenset[str] = frozenset(
+    {"counter", "sink", "kitchen_island", "refrigerator"}
+)
+
+#: The default depth of an ``along`` counter run (into the room). 25 in — 2 ft 1 in
+#: — is the US-standard finished countertop depth (24 in cabinet + a 1 in overhang),
+#: so an ``along`` run without a ``depth`` uses it. (The catalog ``counter`` keeps
+#: its nominal 2 ft for an ``at``-placed piece; ``along`` is the run form.)
+ALONG_DEFAULT_DEPTH: float = 25.0 / 12.0
+#: The accepted range for a counter run's ``depth`` (ft) — a shallow bar ledge up to
+#: a deep island-style run.
+ALONG_DEPTH_MIN: float = 1.0
+ALONG_DEPTH_MAX: float = 4.0
+#: Appliances that read as *set into* a counter run (a top-mount sink, a slide-in
+#: range) rather than colliding with it — the FIXTURE_OVERLAP inset exemption. A
+#: refrigerator or dishwasher is not inset (it stands proud), so it isn't here.
+_INSET_KINDS: frozenset[str] = frozenset({"sink", "range"})
+#: How much of an inset appliance's footprint must lie within a counter to read as
+#: set into it (its centre must also fall inside the run).
+_INSET_MIN_FRACTION: float = 0.70
+
+#: ``FIXTURE_ROOM_TYPE`` unusual-map: a kind -> the room types where it reads as
+#: at home. A kind absent from this map is *never* judged, so a desk in a bedroom,
+#: a water heater in a utility/closet/garage, a washer in a mudroom — all pass. The
+#: map is deliberately small and conservative so the note doesn't cry wolf.
+_EXPECTED_ROOMS: dict[str, frozenset[RoomType]] = {
+    "toilet": frozenset({RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.LAUNDRY}),
+    "tub": frozenset({RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.LAUNDRY}),
+    "shower": frozenset({RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.LAUNDRY}),
+    "lavatory": frozenset({RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.LAUNDRY}),
+    "range": frozenset({RoomType.KITCHEN}),
+    "refrigerator": frozenset({RoomType.KITCHEN}),
+    "kitchen_island": frozenset({RoomType.KITCHEN}),
+    "bed_queen": frozenset({RoomType.BEDROOM, RoomType.LOFT}),
+    "bed_twin": frozenset({RoomType.BEDROOM, RoomType.LOFT}),
+}
+
+#: Room types where a counter run reads as odd (``COUNTER_ROOM`` info). Counters
+#: are at home in a kitchen, pantry, bath (vanity), laundry, mudroom, office, shop
+#: — this is the deliberately-small set where one is surprising enough to flag.
+_COUNTER_ODD_ROOMS: frozenset[RoomType] = frozenset(
+    {RoomType.BEDROOM, RoomType.CLOSET, RoomType.HALLWAY, RoomType.LOFT}
+)
+
+#: IRC R307.1 water-closet clearances (feet): 15 in from the centreline to any
+#: wall/fixture on each side, 21 in of clear floor in front.
+_WC_SIDE_CLEAR = 15.0 / 12.0
+_WC_FRONT_CLEAR = 21.0 / 12.0
+#: NKBA work-triangle: legs summing past ~26 ft mean a kitchen whose appliances
+#: are scattered too far apart. (The compact lower bound is left to ``KITCHEN_FIT``
+#: — a tight galley is efficient, not a defect, and the auto-seed lays a compact
+#: row on purpose.)
+_TRIANGLE_MAX = 26.0
+#: A dryer wants a short duct run to an exterior wall (``DRYER_VENT``).
+_DRYER_VENT_REACH = 10.0
+#: How far off every wall a wall-backed piece must float to look adrift.
+_BACKING_FLOAT = 0.5
+
 #: Which fixtures each room type auto-seeds. Furniture is a deliberate authoring
 #: act, so bedrooms/living rooms stay unseeded; a laundry seeds its washer + dryer
 #: because those are the room's whole reason to exist.
 _ROOM_FIXTURES: dict[RoomType, list[str]] = {
     RoomType.BATHROOM: ["toilet", "lavatory", "tub"],
     RoomType.HALF_BATH: ["toilet", "lavatory"],
-    RoomType.KITCHEN: ["refrigerator", "range", "sink"],
+    # Kitchen: the range leads its wall (clear of a centred window, where a cooktop
+    # doesn't belong), then a landing to the sink, then the tall refrigerator in a
+    # bay of its own — never butted straight against the cooktop. See
+    # _KITCHEN_SEED_GAPS for the spread.
+    RoomType.KITCHEN: ["range", "sink", "refrigerator"],
     RoomType.LAUNDRY: ["washer", "dryer"],
 }
+
+#: Landing gaps (ft) the kitchen seed leaves *before* each appliance, so the three
+#: spread with working counter between them rather than stacking in a butted row
+#: (an "un-buildable" layout an architect flagged). The range→sink gap stays inside
+#: a cook's landing reach so RANGE_LANDING still sees a landing beside the cooktop;
+#: the refrigerator gets a wider bay of its own, well clear of the range. The range
+#: leads (no gap) so it sits at the working end rather than under a centred window.
+#: Deterministic, keyed by the fixture the gap precedes; non-kitchens keep the
+#: tight butted seed.
+_KITCHEN_SEED_GAPS: dict[str, float] = {"sink": 0.75, "refrigerator": 1.5}
+
+
+def _seed_gaps(room_type: RoomType) -> dict[str, float] | None:
+    """The per-appliance lead gaps the perimeter placer uses for ``room_type`` (a
+    kitchen spreads its appliances; every other room butts its seeds)."""
+    return _KITCHEN_SEED_GAPS if room_type is RoomType.KITCHEN else None
 
 
 def fixtures_for(room_type: RoomType) -> list[str]:
@@ -155,22 +251,211 @@ def _rects_overlap(a, b, tol: float = 1e-6) -> bool:
     return dx > tol and dy > tol
 
 
+def _rect_intersection(a, b):
+    """The overlap rectangle ``(x, y, w, l)`` of two boxes, or ``None`` if they
+    don't overlap."""
+    ax, ay, aw, al = a
+    bx, by, bw, bl = b
+    ix = max(ax, bx)
+    iy = max(ay, by)
+    iw = min(ax + aw, bx + bw) - ix
+    il = min(ay + al, by + bl) - iy
+    if iw <= 1e-9 or il <= 1e-9:
+        return None
+    return (ix, iy, iw, il)
+
+
+def _counter_depth(f: "Fixture") -> float:
+    """A counter's depth into the room — its shorter footprint side (the run is the
+    longer side)."""
+    return min(f.width, f.length)
+
+
+def _is_mitred_corner(a: "Fixture", b: "Fixture") -> bool:
+    """True if counters ``a`` and ``b`` meet only in a corner square — an L/U join,
+    not a collinear double-stack. The overlap must fit within ``depth × depth`` of
+    the deeper run (a corner square), which two parallel runs overlapping along
+    their length never do."""
+    if a.kind != "counter" or b.kind != "counter":
+        return False
+    inter = _rect_intersection(
+        (a.x, a.y, a.width, a.length), (b.x, b.y, b.width, b.length)
+    )
+    if inter is None:
+        return False
+    _ix, _iy, iw, il = inter
+    dmax = max(_counter_depth(a), _counter_depth(b))
+    return iw <= dmax + 1e-6 and il <= dmax + 1e-6
+
+
+def _inset_pair(a: "Fixture", b: "Fixture"):
+    """If one of ``a``/``b`` is an inset appliance (sink/range) set *into* the other
+    counter, return ``(appliance, counter)``; else ``None``. "Set into" means the
+    appliance's centre lies inside the counter and ≥ :data:`_INSET_MIN_FRACTION` of
+    its footprint overlaps."""
+    for app, counter in ((a, b), (b, a)):
+        if app.kind not in _INSET_KINDS or counter.kind != "counter":
+            continue
+        inter = _rect_intersection(
+            (app.x, app.y, app.width, app.length),
+            (counter.x, counter.y, counter.width, counter.length),
+        )
+        if inter is None:
+            continue
+        _ix, _iy, iw, il = inter
+        area = app.width * app.length
+        cx, cy = app.center
+        centre_in = (
+            counter.x - 1e-6 <= cx <= counter.x + counter.width + 1e-6
+            and counter.y - 1e-6 <= cy <= counter.y + counter.length + 1e-6
+        )
+        if centre_in and area > 0 and (iw * il) / area >= _INSET_MIN_FRACTION - 1e-9:
+            return app, counter
+    return None
+
+
+def _overlap_exempt(a: "Fixture", b: "Fixture") -> bool:
+    """Whether an overlap between ``a`` and ``b`` is a legitimate kitchen join —
+    a mitred counter corner (L/U) or an appliance set into a counter run — rather
+    than a real collision. Collinear/parallel double-stacked counters and any
+    non-inset piece over a counter are NOT exempt."""
+    return _is_mitred_corner(a, b) or _inset_pair(a, b) is not None
+
+
+def _rect_gap(a, b) -> float:
+    """The clear distance between two axis-aligned rectangles (0 if they touch or
+    overlap) — the larger of the x-gap and y-gap, so two boxes side by side on a
+    wall report their along-wall separation."""
+    ax, ay, aw, al = a
+    bx, by, bw, bl = b
+    gx = max(0.0, bx - (ax + aw), ax - (bx + bw))
+    gy = max(0.0, by - (ay + al), ay - (by + bl))
+    return max(gx, gy)
+
+
+def _side_clearances(f: "Fixture", room: Room, others: list) -> dict[str, float]:
+    """Clear distance from ``f``'s footprint to the nearest wall (or ``others``
+    fixture) on each of its four sides (keys S/N/W/E)."""
+    fx, fy, fw, fl = f.x, f.y, f.width, f.length
+    out = {
+        "S": fy - room.y,
+        "N": room.y2 - (fy + fl),
+        "W": fx - room.x,
+        "E": room.x2 - (fx + fw),
+    }
+    for ox, oy, ow, ol in others:
+        x_ov = min(fx + fw, ox + ow) - max(fx, ox) > 1e-6
+        y_ov = min(fy + fl, oy + ol) - max(fy, oy) > 1e-6
+        if y_ov:
+            if ox + ow <= fx + 1e-6:
+                out["W"] = min(out["W"], fx - (ox + ow))
+            elif ox >= fx + fw - 1e-6:
+                out["E"] = min(out["E"], ox - (fx + fw))
+        if x_ov:
+            if oy + ol <= fy + 1e-6:
+                out["S"] = min(out["S"], fy - (oy + ol))
+            elif oy >= fy + fl - 1e-6:
+                out["N"] = min(out["N"], oy - (fy + fl))
+    return out
+
+
+def _front_strip(f: "Fixture", front: float):
+    """The clear-floor rectangle a fixture needs in front of its face, projected
+    ``front`` ft from the face into the room (the fixture backs to ``f.wall`` and
+    faces the opposite way). ``None`` for a free-standing piece with no wall."""
+    if f.wall == "S":  # backs south, faces north
+        return (f.x, f.y + f.length, f.width, front)
+    if f.wall == "N":  # faces south
+        return (f.x, f.y - front, f.width, front)
+    if f.wall == "W":  # faces east
+        return (f.x + f.width, f.y, front, f.length)
+    if f.wall == "E":  # faces west
+        return (f.x - front, f.y, front, f.length)
+    return None
+
+
+def _window_reach_rect(room: Room, w, depth: float):
+    """A thin rectangle over a window's span, ``depth`` ft into the room from the
+    wall — the floor a fixture would have to occupy to sit under that window."""
+    x1, y1, x2, y2 = opening_endpoints(room, w.wall, w.offset, w.width)
+    if w.wall is Direction.SOUTH:
+        return (min(x1, x2), room.y, abs(x2 - x1), depth)
+    if w.wall is Direction.NORTH:
+        return (min(x1, x2), room.y2 - depth, abs(x2 - x1), depth)
+    if w.wall is Direction.WEST:
+        return (room.x, min(y1, y2), depth, abs(y2 - y1))
+    return (room.x2 - depth, min(y1, y2), depth, abs(y2 - y1))  # EAST
+
+
+def _wc_clearances(f: "Fixture", room: Room, others: list) -> tuple[float, float]:
+    """A water closet's ``(side, front)`` clearances in feet (IRC R307.1).
+
+    ``side`` is the smaller of the two centreline-to-obstruction distances along
+    the back wall (obstruction = a side wall or an adjacent fixture whose depth
+    band overlaps the toilet's); ``front`` is the clear floor from the toilet face
+    to the nearest wall or fixture directly ahead.
+    """
+    fx, fy, fw, fl = f.x, f.y, f.width, f.length
+    horiz = f.wall in ("S", "N")
+    if horiz:
+        c = fx + fw / 2.0
+        depth_lo, depth_hi = fy, fy + fl
+        along_lo, along_hi = fx, fx + fw
+        left, right = c - room.x, room.x2 - c
+        if f.wall == "S":
+            face, fwall, fsign = fy + fl, room.y2, 1.0
+        else:
+            face, fwall, fsign = fy, room.y, -1.0
+    else:
+        c = fy + fl / 2.0
+        depth_lo, depth_hi = fx, fx + fw
+        along_lo, along_hi = fy, fy + fl
+        left, right = c - room.y, room.y2 - c
+        if f.wall == "W":
+            face, fwall, fsign = fx + fw, room.x2, 1.0
+        else:
+            face, fwall, fsign = fx, room.x, -1.0
+    front = (fwall - face) * fsign
+    for ox, oy, ow, ol in others:
+        if horiz:
+            o_alo, o_ahi, o_plo, o_phi = ox, ox + ow, oy, oy + ol
+        else:
+            o_alo, o_ahi, o_plo, o_phi = oy, oy + ol, ox, ox + ow
+        if min(o_phi, depth_hi) - max(o_plo, depth_lo) > 1e-6:  # beside the toilet
+            if o_ahi <= c + 1e-6:
+                left = min(left, c - o_ahi)
+            elif o_alo >= c - 1e-6:
+                right = min(right, o_alo - c)
+        if min(o_ahi, along_hi) - max(o_alo, along_lo) > 1e-6:  # ahead of the face
+            o_near = o_plo if fsign > 0 else o_phi
+            d = (o_near - face) * fsign
+            if d >= -1e-6:
+                front = min(front, max(0.0, d))
+    return min(left, right), front
+
+
 def _place_perimeter(
     x0: float, y0: float, cw: float, cl: float, kinds: list[str],
     keepouts: tuple = (),
+    gaps: dict[str, float] | None = None,
 ) -> list[Fixture]:
     """Lay ``kinds`` along the clear-box perimeter (longer wall first), wrapping to
     the next wall when the current one runs out — the deterministic seed layout.
 
     ``keepouts`` are ``(x, y, w, l)`` door-swing rectangles a fixture must stay
     clear of; a blocked spot slides the fixture along the wall until it clears (or
-    wraps to the next wall), so the placer never parks a fixture in a door's arc."""
+    wraps to the next wall), so the placer never parks a fixture in a door's arc.
+    ``gaps`` maps a kind to a landing gap (ft) left *before* it on the same wall —
+    how the kitchen seed spreads its appliances (a wrap to a new wall drops the
+    gap, so a fixture still starts at the corner)."""
     walls = _walls(cw, cl)
     placed: list[Fixture] = []
     wi = 0
     cursor = 0.0
     for kind in kinds:
         spec = FIXTURES[kind]
+        if gaps:
+            cursor += gaps.get(kind, 0.0)  # a landing gap before this fixture
         # Advance to a wall with room for this fixture's width (leave the corner),
         # nudging past any spot a door swings through.
         wall = fx = fy = fw = fl = None
@@ -187,7 +472,7 @@ def _place_perimeter(
                 continue
             wall, fx, fy, fw, fl = wname, tx, ty, tw, tl
             break
-        if wall is None:
+        if wall is None or fx is None or fy is None or fw is None or fl is None:
             break  # ran out of perimeter; the fit check reports the shortfall
         placed.append(Fixture(kind, fx, fy, fw, fl, wall))
         cursor += spec.width
@@ -213,7 +498,7 @@ def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = Tr
     if cw <= 0 or cl <= 0:
         return []
     keepouts = tuple(_door_swing_rects(plan, room)) if avoid_doors else ()
-    return _place_perimeter(x0, y0, cw, cl, kinds, keepouts)
+    return _place_perimeter(x0, y0, cw, cl, kinds, keepouts, _seed_gaps(room.type))
 
 
 def _quarter_turns(rotation: float) -> int:
@@ -223,11 +508,38 @@ def _quarter_turns(rotation: float) -> int:
     return int(round((rotation or 0.0) / 90.0)) % 4
 
 
+def _place_along(room: Room, pf) -> Fixture:
+    """Resolve an ``along`` counter run to a world :class:`Fixture`.
+
+    The run backs to ``pf.along``'s wall and spans it from ``run_from`` to ``run_to``
+    (room-local feet from the wall's south/west start corner; the full wall when
+    both are ``None``), projecting ``run_depth`` (or :data:`ALONG_DEFAULT_DEPTH`)
+    into the room. The result is an ordinary wall-backed footprint, so every
+    downstream consumer treats it exactly like an ``at``-placed counter."""
+    wall = pf.along.name[0]  # S | N | E | W
+    depth = pf.run_depth if pf.run_depth is not None else ALONG_DEFAULT_DEPTH
+    run = room.width if wall in ("S", "N") else room.length
+    a = 0.0 if pf.run_from is None else float(pf.run_from)
+    b = run if pf.run_to is None else float(pf.run_to)
+    length = max(0.0, b - a)  # the along-wall dimension
+    if wall == "S":
+        fx, fy, fw, fl = room.x + a, room.y, length, depth
+    elif wall == "N":
+        fx, fy, fw, fl = room.x + a, room.y2 - depth, length, depth
+    elif wall == "W":
+        fx, fy, fw, fl = room.x, room.y + a, depth, length
+    else:  # E
+        fx, fy, fw, fl = room.x2 - depth, room.y + a, depth, length
+    return Fixture(pf.kind, fx, fy, fw, fl, wall)
+
+
 def _place_explicit(
     room: Room, pf, x0: float, y0: float, cw: float, cl: float, occupied: list
 ) -> Fixture:
     """Resolve one authored :class:`~barndsl.elements.PlacedFixture` to a world
     :class:`Fixture`, honouring its ``at``/``wall``/``rotate`` (or auto-placing)."""
+    if getattr(pf, "along", None) is not None:
+        return _place_along(room, pf)
     spec = FIXTURES[pf.kind]
     width = float(pf.width) if getattr(pf, "width", None) else spec.width
     depth = spec.depth
@@ -297,7 +609,7 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
 
     explicit_kinds = {pf.kind for pf in explicit}
     surviving = [k for k in fixtures_for(room.type) if k not in explicit_kinds]
-    placed = _place_perimeter(x0, y0, cw, cl, surviving)
+    placed = _place_perimeter(x0, y0, cw, cl, surviving, gaps=_seed_gaps(room.type))
 
     occupied = [(f.x, f.y, f.width, f.length) for f in placed]
     for pf in explicit:
@@ -318,12 +630,26 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
 
 
 def validate_fixtures(plan: Barndominium, add) -> None:
-    """Compiler-as-teacher checks on authored fixtures (all non-blocking).
+    """Compiler-as-teacher checks on placed fixtures (all non-blocking).
 
-    Warns when an authored fixture names an unknown room (``FIXTURE_ROOM``), when
-    its footprint leaves the room's clear box (``FIXTURE_OOB``), or when it overlaps
-    another fixture (``FIXTURE_OVERLAP``); an info when it lands in a door's swing
-    (``FIXTURE_DOOR``). Seeds are auto-fitted, so only authored fixtures are judged.
+    Two families of check run over the resolved layout (:func:`resolve_room_fixtures`
+    — seeds plus authored pieces):
+
+    *Placement* checks judge only **authored** fixtures — the auto-placer fits its
+    own seeds, so it shouldn't nag about them: an unknown room (``FIXTURE_ROOM``),
+    a footprint past the room (``FIXTURE_OOB``), an overlap (``FIXTURE_OVERLAP``), a
+    door swing (``FIXTURE_DOOR``), a water-closet clearance short of IRC R307.1
+    (``FIXTURE_TOILET_CLEARANCE``), a blocked clear-floor strip in front
+    (``FIXTURE_FRONT``), a fixture in an unusual room type (``FIXTURE_ROOM_TYPE``),
+    a wall-backed piece floating mid-floor (``FIXTURE_BACKING``), and a tall piece
+    parked over a bedroom's escape window (``FIXTURE_EGRESS``).
+
+    *Plan* checks judge seeds **and** authored pieces, because what they teach is
+    about the plan, not the placement: a range under an operable window
+    (``RANGE_WINDOW``) or with no landing beside it (``RANGE_LANDING``), a work
+    triangle scattered too wide (``KITCHEN_TRIANGLE``), a dryer far from any
+    exterior wall to vent through (``DRYER_VENT``), and a fixture on a stair
+    footprint (``FIXTURE_STAIR``).
     """
     from .validation import Issue, Severity  # local: validation imports this module
 
@@ -371,7 +697,7 @@ def validate_fixtures(plan: Barndominium, add) -> None:
             for j, other in enumerate(fixtures):
                 if j <= i:
                     continue
-                if _rects_overlap(rects[i], rects[j]):
+                if _rects_overlap(rects[i], rects[j]) and not _overlap_exempt(f, other):
                     add(
                         Issue(
                             Severity.WARNING,
@@ -400,6 +726,355 @@ def validate_fixtures(plan: Barndominium, add) -> None:
                         )
                     )
                     break
+
+        _check_placement(plan, room, fixtures, rects, add, Issue, Severity)
+        _check_plan_rules(plan, room, fixtures, add, Issue, Severity)
+
+
+def _check_placement(plan, room, fixtures, rects, add, Issue, Severity) -> None:
+    """The authored-only placement checks (clearance, front, room type, backing,
+    egress). Seeds are auto-fitted, so they're skipped here."""
+    ext = set(exterior_walls(plan, room))
+    windows = [w for w in plan.windows if w.room == room.id]
+    for i, f in enumerate(fixtures):
+        if f.seed:
+            continue
+        spec = FIXTURES.get(f.kind)
+        if spec is None:
+            continue
+        others = [rects[j] for j in range(len(fixtures)) if j != i]
+
+        # FIXTURE_TOILET_CLEARANCE — IRC R307.1 (15 in side, 21 in front).
+        if f.kind == "toilet" and f.wall in ("S", "N", "E", "W"):
+            side, front = _wc_clearances(f, room, others)
+            if side + 1e-6 < _WC_SIDE_CLEAR or front + 1e-6 < _WC_FRONT_CLEAR:
+                if side + 1e-6 < _WC_SIDE_CLEAR:
+                    what = (
+                        f"only {side * 12:.0f} in from its centreline to the nearest "
+                        "wall or fixture (IRC R307.1 wants 15 in each side)"
+                    )
+                else:
+                    what = (
+                        f"only {front * 12:.0f} in of clear floor in front (IRC R307.1 "
+                        "wants 21 in)"
+                    )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "FIXTURE_TOILET_CLEARANCE",
+                        f"Toilet in '{room.id}' has {what}.",
+                        room=room.id,
+                        line=f.source_line,
+                        hint="Give the toilet a 30 in bay (15 in each side of centre) "
+                        "and 21 in of clear floor in front — slide it along the wall "
+                        "or widen the room.",
+                    )
+                )
+
+        # FIXTURE_FRONT — the clear-floor strip a fixture needs in front is blocked.
+        # A toilet's front clearance is the R307.1 job of FIXTURE_TOILET_CLEARANCE.
+        if f.kind == "toilet":
+            pass
+        elif spec.free:
+            gaps = _side_clearances(f, room, others)
+            long_sides = (
+                (gaps["N"], gaps["S"]) if f.width >= f.length else (gaps["E"], gaps["W"])
+            )
+            if max(long_sides) + 1e-6 < 2.0:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "FIXTURE_FRONT",
+                        f"Free-standing '{f.kind}' in '{room.id}' has under 2 ft of "
+                        "walkway on either long side.",
+                        room=room.id,
+                        line=f.source_line,
+                        hint="Leave ~2 ft to pass on at least one long side, or move "
+                        "it toward the room centre.",
+                    )
+                )
+        elif spec.front > 0:
+            strip = _front_strip(f, spec.front)
+            if strip is not None:
+                sx, sy, sw, sl = strip
+                cut = (
+                    sx + 1e-6 < room.x
+                    or sy + 1e-6 < room.y
+                    or sx + sw - 1e-6 > room.x2
+                    or sy + sl - 1e-6 > room.y2
+                )
+                blocked = any(_rects_overlap(strip, o) for o in others)
+                if cut or blocked:
+                    by = "a wall" if cut and not blocked else "another fixture"
+                    add(
+                        Issue(
+                            Severity.INFO,
+                            "FIXTURE_FRONT",
+                            f"Fixture '{f.kind}' in '{room.id}' has its "
+                            f"{_fmt(spec.front)} ft clear-floor strip cut off by {by}.",
+                            room=room.id,
+                            line=f.source_line,
+                            hint="Keep clear floor in front of it — slide it along the "
+                            "wall, or place it where nothing crowds its approach.",
+                        )
+                    )
+
+        # FIXTURE_ROOM_TYPE — a fixture in a surprising room type.
+        expected = _EXPECTED_ROOMS.get(f.kind)
+        if expected is not None and room.type not in expected:
+            names = " / ".join(
+                sorted(t.value.replace("_", " ") for t in expected)
+            )
+            add(
+                Issue(
+                    Severity.INFO,
+                    "FIXTURE_ROOM_TYPE",
+                    f"A {f.kind.replace('_', ' ')} in the {room.type.value} "
+                    f"'{room.id}' is unusual — intentional?",
+                    room=room.id,
+                    line=f.source_line,
+                    hint=f"A {f.kind.replace('_', ' ')} normally lives in a {names}; "
+                    "if this is deliberate, ignore this note.",
+                )
+            )
+
+        # FIXTURE_BACKING — a wall-backed piece floating off every wall.
+        if f.kind in _WALL_BACKED:
+            wall_gap = min(
+                f.y - room.y,
+                room.y2 - (f.y + f.length),
+                f.x - room.x,
+                room.x2 - (f.x + f.width),
+            )
+            if wall_gap > _BACKING_FLOAT + 1e-6:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "FIXTURE_BACKING",
+                        f"Fixture '{f.kind}' in '{room.id}' floats "
+                        f"{_fmt(wall_gap)} ft off every wall.",
+                        room=room.id,
+                        line=f.source_line,
+                        hint=f"A {f.kind.replace('_', ' ')} backs to a wall — back it "
+                        "to a wall or use `wall N|S|E|W`.",
+                    )
+                )
+
+        # COUNTER_ROOM — a counter in a room type where it reads as odd.
+        if f.kind == "counter" and room.type in _COUNTER_ODD_ROOMS:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "COUNTER_ROOM",
+                    f"A counter in the {room.type.value} '{room.id}' is unusual — "
+                    "a run of casework reads as a kitchen/utility surface.",
+                    room=room.id,
+                    line=f.source_line,
+                    hint="Counters live in a kitchen, pantry, bath, laundry or shop; "
+                    "if this is a deliberate bar or work ledge, ignore this note.",
+                )
+            )
+
+        # COUNTER_DOOR — a counter run crosses a doorway/opening/entry on its wall.
+        if f.kind == "counter" and f.wall in ("S", "N", "E", "W"):
+            if f.wall in ("S", "N"):
+                clo, chi = f.x, f.x + f.width
+            else:
+                clo, chi = f.y, f.y + f.length
+            for label, olo, ohi in _openings_on_wall(plan, room, f.wall):
+                if min(chi, ohi) - max(clo, olo) > 1e-6:
+                    add(
+                        Issue(
+                            Severity.WARNING,
+                            "COUNTER_DOOR",
+                            f"The counter run in '{room.id}' crosses {label} on its "
+                            f"{f.wall} wall.",
+                            room=room.id,
+                            line=f.source_line,
+                            hint="A run can't span a doorway — stop it short with "
+                            "`from`/`to` so it clears the opening, or move the run to "
+                            "another wall.",
+                        )
+                    )
+                    break
+
+        # FIXTURE_EGRESS — a tall piece parked over a bedroom's escape window.
+        if room.type is RoomType.BEDROOM and f.kind in _TALL_KINDS:
+            for w in windows:
+                if not getattr(w, "escape_capable", True) or w.wall not in ext:
+                    continue
+                if _rects_overlap(rects[i], _window_reach_rect(room, w, 1.5)):
+                    add(
+                        Issue(
+                            Severity.WARNING,
+                            "FIXTURE_EGRESS",
+                            f"Fixture '{f.kind}' in bedroom '{room.id}' blocks the "
+                            "escape window on its "
+                            f"{w.wall.value} wall (IRC R310 emergency egress).",
+                            room=room.id,
+                            line=f.source_line,
+                            hint="Keep the egress window clear — a bedroom must be able "
+                            "to escape through it. Move the fixture to another wall.",
+                        )
+                    )
+                    break
+
+
+def _check_plan_rules(plan, room, fixtures, add, Issue, Severity) -> None:
+    """The plan checks that judge seeds and authored pieces alike (range window /
+    landing, kitchen triangle, dryer vent, stair)."""
+    ext = set(exterior_walls(plan, room))
+    windows = [w for w in plan.windows if w.room == room.id]
+    stairs = getattr(plan, "stairs", []) or []
+
+    for f in fixtures:
+        rect = (f.x, f.y, f.width, f.length)
+        line = None if f.seed else f.source_line
+
+        # RANGE_WINDOW — a cooktop directly under an operable window.
+        if f.kind == "range":
+            for w in windows:
+                if not getattr(w, "escape_capable", True) or w.wall not in ext:
+                    continue  # a fixed sash doesn't open; interior walls give no code
+                if _rects_overlap(rect, _window_reach_rect(room, w, 2.0)):
+                    add(
+                        Issue(
+                            Severity.WARNING,
+                            "RANGE_WINDOW",
+                            f"The range in '{room.id}' sits under the operable window "
+                            f"on its {w.wall.value} wall.",
+                            room=room.id,
+                            line=line,
+                            hint="Don't put a cooktop under an openable window — a "
+                            "breeze can blow out a burner and curtains hang over the "
+                            "flame. Slide the range along the wall, clear of the sash.",
+                        )
+                    )
+                    break
+
+        # FIXTURE_STAIR — a fixture parked on a stair's footprint.
+        for s in stairs:
+            if room.level not in (s.from_level, s.to_level):
+                continue
+            if _rects_overlap(rect, (s.x, s.y, s.width, s.length)):
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "FIXTURE_STAIR",
+                        f"Fixture '{f.kind}' in '{room.id}' overlaps the "
+                        f"'{s.id}' stair footprint.",
+                        room=room.id,
+                        line=line,
+                        hint="Keep the run and its landing clear — slide the fixture "
+                        "off the stair, or move the stair along the wall.",
+                    )
+                )
+                break
+
+        # DRYER_VENT — a dryer with a long duct run to any exterior wall.
+        if f.kind == "dryer":
+            cx, cy = f.center
+            reach = math.inf
+            for d in ext:
+                if d is Direction.SOUTH:
+                    reach = min(reach, cy - room.y)
+                elif d is Direction.NORTH:
+                    reach = min(reach, room.y2 - cy)
+                elif d is Direction.WEST:
+                    reach = min(reach, cx - room.x)
+                elif d is Direction.EAST:
+                    reach = min(reach, room.x2 - cx)
+            if reach > _DRYER_VENT_REACH + 1e-6:
+                where = (
+                    f"~{reach:.0f} ft from the nearest exterior wall"
+                    if reach != math.inf
+                    else "in a room with no exterior wall"
+                )
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "DRYER_VENT",
+                        f"The dryer in '{room.id}' is {where} — a long vent duct.",
+                        room=room.id,
+                        line=line,
+                        hint="Keep the dryer within ~10 ft of an exterior wall; long, "
+                        "bendy ducts trap lint and cut airflow.",
+                    )
+                )
+
+    # RANGE_LANDING — a cooktop with no landing surface within 1 ft to either side.
+    if room.type is RoomType.KITCHEN:
+        landings = [
+            (f.x, f.y, f.width, f.length)
+            for f in fixtures
+            if f.kind in _LANDING_KINDS
+        ]
+        if landings:  # only judge when there's other casework to compare against
+            for f in fixtures:
+                if f.kind != "range":
+                    continue
+                rect = (f.x, f.y, f.width, f.length)
+                if not any(_rect_gap(rect, land) <= 1.0 + 1e-6 for land in landings):
+                    add(
+                        Issue(
+                            Severity.INFO,
+                            "RANGE_LANDING",
+                            f"The range in '{room.id}' has no counter, sink or "
+                            "refrigerator landing within 1 ft to either side.",
+                            room=room.id,
+                            line=None if f.seed else f.source_line,
+                            hint="NKBA wants a landing surface beside the cooktop — "
+                            "put a `fixture counter` next to the range to set hot pans "
+                            "down.",
+                        )
+                    )
+
+        # SINK_NO_COUNTER — a kitchen sink not set into any counter run. Only fires
+        # once the kitchen has counters (like RANGE_LANDING, we don't nag a bare
+        # seed-only kitchen); a bath lavatory has its own vanity, so it's not judged.
+        counters = [f for f in fixtures if f.kind == "counter"]
+        if counters:
+            for f in fixtures:
+                if f.kind != "sink":
+                    continue
+                if not any(_inset_pair(f, c) is not None for c in counters):
+                    add(
+                        Issue(
+                            Severity.INFO,
+                            "SINK_NO_COUNTER",
+                            f"The sink in '{room.id}' isn't set into any counter run.",
+                            room=room.id,
+                            line=None if f.seed else f.source_line,
+                            hint="A kitchen sink wants counter to each side — extend a "
+                            "`fixture counter ... along <wall>` run past the sink so "
+                            "it drops into the countertop.",
+                        )
+                    )
+                    break
+
+        # KITCHEN_TRIANGLE — sink/range/refrigerator scattered too far apart.
+        sink = next((f for f in fixtures if f.kind == "sink"), None)
+        rng = next((f for f in fixtures if f.kind == "range"), None)
+        fridge = next((f for f in fixtures if f.kind == "refrigerator"), None)
+        if sink and rng and fridge:
+            def _d(a, b):
+                (ax, ay), (bx, by) = a.center, b.center
+                return math.hypot(ax - bx, ay - by)
+
+            perim = _d(sink, rng) + _d(rng, fridge) + _d(fridge, sink)
+            if perim > _TRIANGLE_MAX + 1e-6:
+                add(
+                    Issue(
+                        Severity.INFO,
+                        "KITCHEN_TRIANGLE",
+                        f"Kitchen '{room.id}' has a {perim:.0f} ft work triangle "
+                        f"(sink–range–fridge) — over the ~{_TRIANGLE_MAX:.0f} ft NKBA "
+                        "keeps within.",
+                        room=room.id,
+                        hint="Draw the three closer together (each leg ~4–9 ft) so the "
+                        "cook isn't walking marathons between sink, range and fridge.",
+                    )
+                )
 
 
 def _fmt(v: float) -> str:
@@ -435,6 +1110,53 @@ def _door_swing_rects(plan: Barndominium, room: Room) -> list:
             inward = edge.pos < room.center[1]
             by = edge.pos if inward else edge.pos - w
             out.append((start, by, w, w))
+    return out
+
+
+def _openings_on_wall(plan: Barndominium, room: Room, wall: str) -> list[tuple[str, float, float]]:
+    """Every doorway/opening/entry on ``room``'s ``wall`` (S/N/E/W), as
+    ``(label, lo, hi)`` world intervals along that wall — x for S/N walls, y for
+    W/E. Used by ``COUNTER_DOOR`` to see when a counter run crosses an opening."""
+    from .geometry import shared_edge
+
+    dir_map = {
+        "S": Direction.SOUTH, "N": Direction.NORTH,
+        "W": Direction.WEST, "E": Direction.EAST,
+    }
+    wd = dir_map[wall]
+    horiz = wall in ("S", "N")
+    wall_pos = {"S": room.y, "N": room.y2, "W": room.x, "E": room.x2}[wall]
+    out: list[tuple[str, float, float]] = []
+    for d in plan.exterior_doors:
+        if d.room != room.id or d.wall is not wd:
+            continue
+        base = room.x if horiz else room.y
+        lo = base + d.offset
+        label = (
+            "the overhead door" if d.overhead
+            else "the entry" if d.egress else "the exterior door"
+        )
+        out.append((label, lo, lo + d.width))
+    for idoor in plan.interior_doors:
+        if room.id not in (idoor.room_a, idoor.room_b):
+            continue
+        other = plan.room(idoor.room_b if idoor.room_a == room.id else idoor.room_a)
+        if other is None:
+            continue
+        edge = shared_edge(room, other)
+        if edge is None:
+            continue
+        want = "h" if horiz else "v"
+        if edge.orientation != want or abs(edge.pos - wall_pos) > 1e-6:
+            continue
+        w = min(idoor.width, edge.length)
+        offset = idoor.offset if idoor.offset is not None else max(0.0, (edge.length - w) / 2.0)
+        lo = edge.lo + max(0.0, min(offset, edge.length - w))
+        label = (
+            "the cased opening" if getattr(idoor, "kind", "swing") == "cased"
+            else f"the door to '{other.id}'"
+        )
+        out.append((label, lo, lo + w))
     return out
 
 

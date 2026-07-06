@@ -43,6 +43,27 @@ GUARD_HEIGHT = 36.0 / 12.0
 #: Glazing must total at least 8% of a habitable room's floor area.
 NATURAL_LIGHT_RATIO = 0.08
 
+# --- site: driveway, well & septic (a site-plan v2 layer) --------------------
+#: Minimum well-to-septic separation (feet). This is a public-health rule, not
+#: an IRC one — most state/county health departments require a private well to
+#: sit at least 100 ft from a septic tank or its drain field. It varies by
+#: jurisdiction (50–100 ft is the common band), so it lives here as a named
+#: default rather than in the IRC-flavoured :class:`~barndsl.profiles.Profile`;
+#: override it by editing this constant or supplying a stricter local figure.
+WELL_SEPTIC_MIN_SEPARATION = 100.0
+#: Nominal plan size of a septic *tank* rectangle (feet) — a typical 1000-gal
+#: two-compartment tank reads ~5 x 8 ft in plan. The `septic at <x>,<y>` point
+#: is the tank's south-west corner; a declared drain `field` sits just north.
+SEPTIC_TANK_WIDTH = 5.0
+SEPTIC_TANK_LENGTH = 8.0
+#: Gap (feet) between the tank and the drain field when both are drawn.
+SEPTIC_FIELD_GAP = 3.0
+#: A walkway with no `width` declared is this many feet wide (a comfortable path).
+WALK_DEFAULT_WIDTH = 4.0
+#: How near (feet) a drive edge must come to an exterior door for the door to
+#: count as reachable without a dedicated `walk` (the DRIVE_DOOR nudge).
+DRIVE_DOOR_REACH = 3.0
+
 # --- solar orientation (northern hemisphere) ---------------------------------
 # The compass sector a wall's outward face falls into drives the solar-glazing
 # nudges. Arcs are chosen so the *hot afternoon quadrant* (SW→W) is one sector,

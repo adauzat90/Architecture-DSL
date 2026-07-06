@@ -187,6 +187,52 @@ def test_opening_running_off_the_wall_is_flagged():
     assert any(d.code == "OPENING_OOB" and d.room == "a" for d in r.errors)
 
 
+# --- Phase 22 item 2: a non-positive opening width is a proper ERROR ---------
+
+
+_TWO_ROOMS = (
+    "plan \"x\"\nenvelope 40 x 30\nceiling 9\n"
+    "room a: living at 0,0 size 20 x 30\n"
+    "room b: bedroom at 20,0 size 20 x 30\n"
+)
+
+
+@pytest.mark.parametrize("bad", [0, -2])
+def test_zero_or_negative_window_width_is_an_error(bad):
+    r = compile_source(_TWO_ROOMS + f"window a north width {bad} sill 3 head 6\n")
+    assert any(d.code == "OPENING_SIZE" and d.room == "a" for d in r.errors)
+
+
+@pytest.mark.parametrize("bad", [0, -1.5])
+def test_zero_or_negative_interior_door_width_is_an_error(bad):
+    r = compile_source(_TWO_ROOMS + f"door a - b width {bad}\n")
+    assert any(d.code == "OPENING_SIZE" for d in r.errors)
+
+
+@pytest.mark.parametrize("bad", [0, -3])
+def test_zero_or_negative_exterior_door_width_is_an_error(bad):
+    r = compile_source(_TWO_ROOMS + f"entry a south width {bad}\n")
+    assert any(d.code == "OPENING_SIZE" and d.room == "a" for d in r.errors)
+
+
+@pytest.mark.parametrize("bad", [0, -10])
+def test_zero_or_negative_overhead_door_width_is_an_error(bad):
+    src = (
+        "plan \"g\"\nenvelope 42 x 30\nceiling 9\n"
+        "room g: garage at 0,0 size 42 x 30\n"
+        f"door g south overhead width {bad} offset 2\n"
+    )
+    r = compile_source(src)
+    assert any(d.code == "OPENING_SIZE" and d.room == "g" for d in r.errors)
+
+
+def test_tiny_positive_opening_width_is_not_an_opening_size_error():
+    # A small-but-positive width is still allowed (it may draw DOOR_NARROW /
+    # DOOR_SIZE, but never the non-positive OPENING_SIZE error).
+    r = compile_source(_TWO_ROOMS + "entry a south width 0.5\n")
+    assert not any(d.code == "OPENING_SIZE" for d in r.diagnostics)
+
+
 # --- Bug 10: a door can't connect a room to itself --------------------------
 
 
