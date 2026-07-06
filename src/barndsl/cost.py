@@ -78,6 +78,16 @@ DEFAULT_UNIT_COSTS: dict[str, float] = {
     "electrical_sqft": 9.0,
     "hvac_sqft": 8.0,
     "finish_sqft": 32.0,  # flooring, trim, paint, cabinets, per conditioned sqft
+    # -- site work (only when a `drive`/`walk`/`well`/`septic` is declared) --
+    # Driveway paving by surface, per sq ft of drive area; gravel is cheapest.
+    "drive_gravel_sqft": 3.0,
+    "drive_concrete_sqft": 8.0,
+    "drive_asphalt_sqft": 5.0,
+    "walk_sqft": 9.0,  # a concrete/paver walkway, per sq ft
+    # Well and septic are lump-sum ALLOWANCES — a real figure needs a driller's /
+    # installer's quote (depth, soil, perc test), so these are budget placeholders.
+    "well_allowance": 12000.0,  # drilled well + pump + pressure tank (allowance, each)
+    "septic_allowance": 15000.0,  # tank + drain field (allowance, each)
 }
 
 #: Fixture kind (see :data:`barndsl.fixtures.FIXTURES`) → unit-cost key, in the
@@ -87,12 +97,23 @@ _FIXTURE_ORDER = (
     "washer", "dryer",
 )
 
+#: The surface -> unit-cost key for a driveway's paving.
+_DRIVE_SURFACE_KEY = {
+    "gravel": "drive_gravel_sqft",
+    "concrete": "drive_concrete_sqft",
+    "asphalt": "drive_asphalt_sqft",
+}
+
 #: Line the estimate ends with — the assemblies it does NOT price. Kept honest
 #: against what actually has a line above (see :func:`estimate_cost`): plumbing
-#: fixtures and an HVAC allowance ARE itemised, so they are qualified here.
+#: fixtures and an HVAC allowance ARE itemised, and the drive/walk/well/septic
+#: site lines appear only when declared, so what remains excluded is named
+#: explicitly (permits, GC overhead & profit, and utility trenching beyond the
+#: service-allowance stubs).
 EXCLUSIONS = (
-    "Excludes: site work, well/septic, permits, mechanical (HVAC) unless "
-    "itemized, GC overhead & profit."
+    "Excludes: permits & impact fees, GC overhead & profit, and utility "
+    "trenching/connection beyond the well/septic allowances. Mechanical (HVAC) "
+    "and any declared drive/walk/well/septic ARE itemized above."
 )
 
 
@@ -275,6 +296,23 @@ def estimate_cost(
     # -- Finishes (per conditioned interior sqft) --
     add("Finishes", "Interior finish allowance", cond, "sqft", "finish_sqft",
         "metrics: interior_sqft")
+
+    # -- Site work (only when the plan opts into site-plan v2 features) --
+    ss = getattr(plan, "site_spec", None)
+    if ss is not None:
+        drive_area: dict[str, float] = {}
+        for d in ss.drives:
+            drive_area[d.surface] = drive_area.get(d.surface, 0.0) + d.area
+        for surface, key in _DRIVE_SURFACE_KEY.items():
+            add("Site work", f"Driveway ({surface})", drive_area.get(surface, 0.0),
+                "sqft", key, f"plan.site_spec.drives ({surface} area)")
+        walk_area = sum(wlen * wk.width for wk, _p0, _p1, wlen in plan.walk_paths())
+        add("Site work", "Walkway", walk_area, "sqft", "walk_sqft",
+            "plan.walk_paths (length × width)")
+        add("Site work", "Well allowance", len(ss.wells), "each", "well_allowance",
+            "plan.site_spec.wells (allowance)")
+        add("Site work", "Septic allowance", len(ss.septics), "each",
+            "septic_allowance", "plan.site_spec.septics (allowance)")
 
     subtotals: dict[str, float] = {}
     for ln in lines:

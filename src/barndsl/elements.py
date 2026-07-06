@@ -28,6 +28,7 @@ from .constants import (
     SLAB_THICKNESS,
     TURNDOWN_DEPTH,
     TURNDOWN_WIDTH,
+    WALK_DEFAULT_WIDTH,
 )
 
 # --- Units ------------------------------------------------------------------
@@ -647,6 +648,137 @@ class Stair:
         return dx > tol and dy > tol
 
 
+#: The paving surfaces a `drive` can declare, cheapest to most durable. ``gravel``
+#: is the default (the rural barndominium standard); the others are priced up in
+#: the cost sheet. Purely a material/cost/label distinction — geometry is the same.
+DRIVE_SURFACES = ("gravel", "concrete", "asphalt")
+
+#: The utilities a `service` drop can bring in. ``electric`` is an overhead/​buried
+#: power lateral; ``water`` a municipal/​well supply line; ``gas`` a fuel lateral.
+SERVICE_UTILITIES = ("electric", "water", "gas")
+
+
+@dataclass
+class Drive:
+    """A driveway — a paved (or gravel) parking/access rectangle on the lot.
+
+    ``(x, y)`` is the south-west corner in **lot feet** (from the lot's SW corner,
+    the same frame as ``building at``); ``width``/``length`` run east/north.
+    ``surface`` is one of :data:`DRIVE_SURFACES` (default ``gravel``). Requires a
+    declared ``site`` (it lives in lot coordinates).
+    """
+
+    x: float
+    y: float
+    width: float
+    length: float
+    surface: str = "gravel"
+    #: Source location of the `drive` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+    @property
+    def x2(self) -> float:
+        return self.x + self.width
+
+    @property
+    def y2(self) -> float:
+        return self.y + self.length
+
+    @property
+    def area(self) -> float:
+        return self.width * self.length
+
+
+@dataclass
+class Walk:
+    """A walkway from a room's exterior door to the nearest driveway edge.
+
+    ``room`` is the id of the room whose exterior door the path starts at; the
+    other end is resolved (at render/validation time) to the nearest edge of the
+    nearest ``drive``. ``width`` is the path width (feet; default
+    :data:`~barndsl.constants.WALK_DEFAULT_WIDTH`). Requires a ``site`` and a
+    ``drive`` to reach.
+    """
+
+    room: str
+    width: float = 4.0
+    #: Source location of the `walk` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Well:
+    """A private water well — a point feature at ``(x, y)`` in **lot feet**.
+
+    Renders as the standard circled ``W``. Its separation from a ``septic`` is
+    checked (WELL_SEPTIC_CLEAR). Requires a declared ``site``.
+    """
+
+    x: float
+    y: float
+    #: Source location of the `well` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
+@dataclass
+class Septic:
+    """A septic system — a tank at ``(x, y)`` (lot feet, the tank's SW corner)
+    with an optional drain ``field``.
+
+    The tank draws at a nominal :data:`~barndsl.constants.SEPTIC_TANK_WIDTH` x
+    :data:`~barndsl.constants.SEPTIC_TANK_LENGTH`; a declared ``field <w> x <l>``
+    draws just north of the tank (a lattice of drain lines). Both count for the
+    well-separation and setback checks. Requires a declared ``site``.
+    """
+
+    x: float
+    y: float
+    field_width: float | None = None
+    field_length: float | None = None
+    #: Source location of the `septic` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+    @property
+    def has_field(self) -> bool:
+        return self.field_width is not None and self.field_length is not None
+
+    def rects(self) -> list[tuple[float, float, float, float]]:
+        """The tank (and drain field, if any) as ``(x, y, x2, y2)`` lot-coord
+        rectangles — the footprint the clearance/setback checks measure against."""
+        from .constants import SEPTIC_FIELD_GAP, SEPTIC_TANK_LENGTH, SEPTIC_TANK_WIDTH
+
+        out = [(self.x, self.y, self.x + SEPTIC_TANK_WIDTH, self.y + SEPTIC_TANK_LENGTH)]
+        if self.field_width is not None and self.field_length is not None:
+            fy = self.y + SEPTIC_TANK_LENGTH + SEPTIC_FIELD_GAP
+            out.append((self.x, fy, self.x + self.field_width, fy + self.field_length))
+        return out
+
+
+@dataclass
+class Service:
+    """A utility service drop entering the lot from one side.
+
+    ``utility`` is one of :data:`SERVICE_UTILITIES`; ``side`` is the lot edge it
+    enters from (a :class:`Direction`). Renders as a labelled arrow crossing that
+    lot line toward the building. Requires a declared ``site``.
+    """
+
+    utility: str
+    side: "Direction"
+    #: Source location of the `service` statement (textual front-end only).
+    line: int | None = None
+    col: int | None = None
+    end_col: int | None = None
+
+
 #: The structural-member roles a placed frame produces. ``post`` is a perimeter
 #: column on an exterior wall; ``interior`` is a column carrying a beam where the
 #: clear span is too long for one piece; ``frame`` is a bent (the truss/beam
@@ -872,11 +1004,30 @@ class SiteSpec:
     building_line: int | None = None
     building_col: int | None = None
     building_end_col: int | None = None
+    #: Site-plan v2 features, all in **lot feet** (the ``building at`` frame). Each
+    #: requires the lot dimensions (a feature with no ``site`` is a SITE_REQUIRED
+    #: error). Empty on a plain ``site``/``setback`` document, so nothing changes
+    #: for plans that don't opt in. See :class:`Drive`, :class:`Walk`,
+    #: :class:`Well`, :class:`Septic`, :class:`Service`.
+    drives: list["Drive"] = field(default_factory=list)
+    walks: list["Walk"] = field(default_factory=list)
+    wells: list["Well"] = field(default_factory=list)
+    septics: list["Septic"] = field(default_factory=list)
+    services: list["Service"] = field(default_factory=list)
 
     @property
     def has_dims(self) -> bool:
         """True once a ``site <W> x <L>`` has set the lot dimensions."""
         return self.width is not None and self.length is not None
+
+    @property
+    def has_features(self) -> bool:
+        """True if any site-plan v2 feature (drive/walk/well/septic/service) is
+        declared. These need lot dimensions to place; ``grade`` does not, so it is
+        stored on the plan, not here, and doesn't count."""
+        return bool(
+            self.drives or self.walks or self.wells or self.septics or self.services
+        )
 
     @property
     def has_setback(self) -> bool:
@@ -1080,6 +1231,11 @@ class Barndominium:
     #: validator checks the footprint fits the buildable rectangle. See
     #: :class:`SiteSpec`.
     site_spec: SiteSpec | None = None
+    #: Finish-floor height above finished grade (feet) — the ``grade`` statement.
+    #: A single flat-site value (v1 models no slope). ``None`` means undeclared, so
+    #: the grade-dependent checks (R312.1 porch guards) stay silent until a plan
+    #: opts in. Independent of the lot, so it lives on the plan, not the SiteSpec.
+    grade: float | None = None
     #: True-north orientation: the compass azimuth (degrees, clockwise from north)
     #: that the plan's ``+y`` (plan-north) axis points. ``0`` means plan-north is
     #: true north. ``None`` means **undeclared** — distinct from a declared ``0`` —
@@ -1914,6 +2070,143 @@ class Barndominium:
         self.site_spec.building_x = _finite("building", "x", x)
         self.site_spec.building_y = _finite("building", "y", y)
         return self
+
+    def _site(self) -> SiteSpec:
+        if self.site_spec is None:
+            self.site_spec = SiteSpec()
+        return self.site_spec
+
+    def drive(
+        self, x: float, y: float, width: float, length: float, surface: str = "gravel",
+    ) -> "Barndominium":
+        """Add a driveway (``drive at <x>,<y> size <w> x <l> [surface]``).
+
+        Coordinates are lot feet (the ``building at`` frame). ``surface`` is one of
+        :data:`DRIVE_SURFACES`. Needs a :meth:`site`."""
+        if surface not in DRIVE_SURFACES:
+            raise ValueError(
+                f"drive surface must be one of {', '.join(DRIVE_SURFACES)}, got {surface!r}."
+            )
+        self._site().drives.append(
+            Drive(_finite("drive", "x", x), _finite("drive", "y", y),
+                  _finite("drive", "width", width), _finite("drive", "length", length),
+                  surface)
+        )
+        return self
+
+    def walk(self, room: str, width: float = WALK_DEFAULT_WIDTH) -> "Barndominium":
+        """Add a walkway from ``room``'s exterior door to the nearest drive
+        (``walk from <room> to drive [width <ft>]``). Needs a :meth:`site`."""
+        self._site().walks.append(Walk(room, _finite("walk", "width", width)))
+        return self
+
+    def well(self, x: float, y: float) -> "Barndominium":
+        """Add a water well at ``(x, y)`` in lot feet (``well at <x>,<y>``).
+        Needs a :meth:`site`."""
+        self._site().wells.append(Well(_finite("well", "x", x), _finite("well", "y", y)))
+        return self
+
+    def septic(
+        self, x: float, y: float,
+        field_width: float | None = None, field_length: float | None = None,
+    ) -> "Barndominium":
+        """Add a septic tank at ``(x, y)`` in lot feet, with an optional drain
+        field (``septic at <x>,<y> [field <w> x <l>]``). Needs a :meth:`site`."""
+        fw = None if field_width is None else _finite("septic", "field_width", field_width)
+        fl = None if field_length is None else _finite("septic", "field_length", field_length)
+        self._site().septics.append(
+            Septic(_finite("septic", "x", x), _finite("septic", "y", y), fw, fl)
+        )
+        return self
+
+    def service(self, utility: str, side: "Direction | str") -> "Barndominium":
+        """Add a utility service drop (``service <electric|water|gas> from <N|S|E|W>``).
+        Needs a :meth:`site`."""
+        if utility not in SERVICE_UTILITIES:
+            raise ValueError(
+                f"service utility must be one of {', '.join(SERVICE_UTILITIES)}, "
+                f"got {utility!r}."
+            )
+        if isinstance(side, Direction):
+            d = side
+        else:
+            key = str(side).strip().lower()
+            aliases = {"n": "north", "s": "south", "e": "east", "w": "west"}
+            d = Direction(aliases.get(key, key))
+        self._site().services.append(Service(utility, d))
+        return self
+
+    def set_grade(self, height: float) -> "Barndominium":
+        """Declare the finish-floor height above finished grade (``grade <ft>``)."""
+        self.grade = _finite("grade", "height", height)
+        return self
+
+    def walk_paths(self) -> list[tuple["Walk", tuple[float, float], tuple[float, float], float]]:
+        """Resolve every ``walk`` to ``(walk, p0, p1, length)`` in **lot feet**:
+        ``p0`` the room's exterior-door point (its centre when the room has no
+        exterior door), ``p1`` the nearest point on the nearest ``drive`` edge, and
+        the straight-line length. Empty when there is no lot, no drive, or the walk
+        names an unknown room. Shared by the site render, cost and packet so they
+        agree on the path (and its area)."""
+        origin = self.building_origin_on_lot()
+        ss = self.site_spec
+        if origin is None or ss is None or not ss.drives:
+            return []
+        bx, by = origin
+        rooms = {r.id: r for r in self.rooms}
+        out: list[tuple[Walk, tuple[float, float], tuple[float, float], float]] = []
+        for wk in ss.walks:
+            room = rooms.get(wk.room)
+            if room is None:
+                continue
+            p0 = None
+            for xd in self.exterior_doors_for(room.id):
+                if getattr(xd, "overhead", False):
+                    continue
+                mid = xd.offset + xd.width / 2.0
+                if xd.wall is Direction.SOUTH:
+                    p0 = (room.x + mid, room.y)
+                elif xd.wall is Direction.NORTH:
+                    p0 = (room.x + mid, room.y2)
+                elif xd.wall is Direction.WEST:
+                    p0 = (room.x, room.y + mid)
+                else:
+                    p0 = (room.x2, room.y + mid)
+                break
+            if p0 is None:
+                p0 = room.center
+            p0 = (bx + p0[0], by + p0[1])
+            best = None
+            for d in ss.drives:
+                cx = min(max(p0[0], d.x), d.x2)
+                cy = min(max(p0[1], d.y), d.y2)
+                dist = math.hypot(cx - p0[0], cy - p0[1])
+                if best is None or dist < best[1]:
+                    best = ((cx, cy), dist)
+            if best is None:
+                continue
+            out.append((wk, p0, best[0], best[1]))
+        return out
+
+    def building_origin_on_lot(self) -> tuple[float, float] | None:
+        """The building's plan origin (world ``0,0``, the SW envelope corner) in
+        lot feet: the declared ``building at``, or the footprint centred on the lot
+        when unplaced. ``None`` if there is no lot to place it on. Shared by the
+        site render and the site checks so they agree on where the building sits."""
+        ss = self.site_spec
+        if ss is None or ss.width is None or ss.length is None:
+            return None
+        minx, miny, maxx, maxy = self.bounds()
+        for p in self.porches:
+            minx = min(minx, p.x)
+            miny = min(miny, p.y)
+            maxx = max(maxx, p.x + p.width)
+            maxy = max(maxy, p.y + p.length)
+        if ss.has_building:
+            return (float(ss.building_x or 0.0), float(ss.building_y or 0.0))
+        fp_w = maxx - minx
+        fp_l = maxy - miny
+        return ((ss.width - fp_w) / 2.0 - minx, (ss.length - fp_l) / 2.0 - miny)
 
     def connect(
         self,

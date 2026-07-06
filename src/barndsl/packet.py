@@ -237,9 +237,41 @@ def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
 """
 
 
+def _site_clearance_rows(plan: Any) -> list[tuple[str, str, str, bool]]:
+    """``(side, required, actual, ok)`` for each lot side — the building's real
+    yard vs its required setback. Empty when the building isn't placeable on the
+    lot. ``ok`` is True when there's no requirement or the yard meets it."""
+    from .render import fmt_ft_in
+
+    ss = plan.site_spec
+    origin = plan.building_origin_on_lot()
+    if origin is None:
+        return []
+    bx, by = origin
+    minx, miny, maxx, maxy = plan.bounds()
+    for p in plan.porches:
+        minx, miny = min(minx, p.x), min(miny, p.y)
+        maxx, maxy = max(maxx, p.x + p.width), max(maxy, p.y + p.length)
+    lot_w, lot_l = ss.width, ss.length
+    sides = [
+        ("Front (south)", ss.front, by + miny),
+        ("Rear (north)", ss.rear, lot_l - (by + maxy)),
+        ("West side", ss.side, bx + minx),
+        ("East side", ss.side, lot_w - (bx + maxx)),
+    ]
+    rows = []
+    for label, req, actual in sides:
+        req_str = "—" if req is None else fmt_ft_in(req)
+        ok = req is None or actual >= req - 1e-6
+        rows.append((label, req_str, fmt_ft_in(actual), ok))
+    return rows
+
+
 def _site_plan(plan: Any) -> str:
-    """The Site Plan sheet: the lot, setback lines, and building footprint placed
-    on the lot, with dimensions. Only included when the plan declares a ``site``."""
+    """The Site Plan sheet: the lot, setback lines, site features (drive/well/
+    septic/service) and building footprint placed on the lot, with dimensions, a
+    yard-clearance table and site notes. Only included when the plan declares a
+    ``site``."""
     ss = plan.site_spec
     svg = render_site_svg(plan)
     rows = [("Lot", f"{ss.width:g}′ × {ss.length:g}′")]
@@ -249,16 +281,57 @@ def _site_plan(plan: Any) -> str:
             rows.append((label, f"{val:g}′"))
     if ss.has_building:
         rows.append(("Building at", f"{ss.building_x:g}′, {ss.building_y:g}′ (SW corner)"))
+    if plan.grade is not None:
+        from .render import fmt_ft_in
+        rows.append(("Grade", f"finish floor {fmt_ft_in(plan.grade)} above grade"))
     dim_rows = "\n".join(
         f"<tr><td>{_tag(k)}</td><td>{_tag(v)}</td></tr>" for k, v in rows
     )
+
+    # Yard-clearance table: required setback vs the building's actual distance.
+    clearance = _site_clearance_rows(plan)
+    clearance_html = ""
+    if clearance:
+        body = "\n".join(
+            f"<tr><td>{_tag(side)}</td><td>{_tag(req)}</td><td>{_tag(act)}</td>"
+            f"<td>{'✓' if ok else '✗ short'}</td></tr>"
+            for side, req, act, ok in clearance
+        )
+        clearance_html = (
+            "<h3>Yard clearances</h3>"
+            "<table class='metrics'><tr><th>Side</th><th>Required</th>"
+            f"<th>Actual</th><th>OK</th></tr>{body}</table>"
+        )
+
+    # Site-feature notes (drive/well/septic/service), only when present.
+    notes = []
+    for d in ss.drives:
+        notes.append(f"Driveway: {d.width:g}′ × {d.length:g}′ {d.surface}.")
+    if ss.walks:
+        notes.append("Walkway from an entry to the drive.")
+    for _wl in ss.wells:
+        notes.append("Private water well (confirm 100 ft septic separation).")
+    for sp in ss.septics:
+        notes.append(
+            "Septic tank" + (" + drain field" if sp.has_field else "")
+            + " (allowance; requires a perc test)."
+        )
+    for sv in ss.services:
+        notes.append(f"Service: {sv.utility} from the {sv.side.value}.")
+    notes_html = ""
+    if notes:
+        items = "\n".join(f"<li>{_tag(n)}</li>" for n in notes)
+        notes_html = f"<h3>Site notes</h3><ul class='notes'>{items}</ul>"
+
     return f"""
 <section class="page">
   <h2>Site Plan</h2>
-  <p class="sub">Lot boundary, required setbacks (dashed), and building footprint.</p>
+  <p class="sub">Lot boundary, required setbacks (dashed), site features, and building footprint.</p>
   <div class="svgwrap">{svg}</div>
   <h3>Lot &amp; setbacks</h3>
   <table class="metrics">{dim_rows}</table>
+  {clearance_html}
+  {notes_html}
   <p class="note">Schematic, fit-to-page — not drawn to a fixed engineering scale
      (a limitation; the floor-plan sheet carries the true architectural scale).
      Not a substitute for a surveyed site plan.</p>

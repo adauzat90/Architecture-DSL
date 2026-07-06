@@ -39,6 +39,8 @@ from .constants import (
     SOLAR_SOUTH_SHADE_GLAZING,
     SOLAR_WEST_MAX_GLAZING,
     STAIR_HEADROOM,
+    DRIVE_DOOR_REACH,
+    WELL_SEPTIC_MIN_SEPARATION,
 )
 from .profiles import DEFAULT, Profile
 from .elements import (
@@ -1022,6 +1024,8 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
             )
 
     _validate_site(plan, add)
+    _validate_site_features(plan, add, profile)
+    _validate_porch_guards(plan, add)
 
     if not plan.rooms:
         add(
@@ -1197,6 +1201,20 @@ def _validate_site(plan: Barndominium, add) -> None:
                     **loc,
                 )
             )
+        if ss.has_features:
+            # A drive/walk/well/septic/service places itself in lot feet, so it
+            # needs the lot dimensions to sit on. One error per orphaned feature.
+            for feat, what in _orphan_site_features(ss):
+                add(
+                    Issue(
+                        Severity.ERROR,
+                        "SITE_REQUIRED",
+                        f"A `{what}` was declared but there is no `site` to place it on.",
+                        line=feat.line, col=feat.col, end_col=feat.end_col,
+                        hint="Add the lot dimensions with `site <W> x <L>` (feet) so "
+                        "the feature has a lot to sit on.",
+                    )
+                )
         return
     # A degenerate lot is an authoring error whether or not setbacks follow —
     # mirror the ENVELOPE check's stance on non-positive/non-finite dims.
@@ -1328,6 +1346,188 @@ def _validate_site_placed(plan: Barndominium, ss, add) -> None:
                 end_col=ss.setback_end_col or ss.building_end_col or ss.end_col,
                 hint="Move the building (`building at <x>,<y>`), shrink the "
                 "footprint, enlarge the `site`, or reduce the `setback`.",
+            )
+        )
+
+
+def _orphan_site_features(ss):
+    """``(feature, keyword)`` pairs for every site feature on a ``SiteSpec`` with
+    no lot dimensions — the SITE_REQUIRED offenders, in source order."""
+    out = []
+    for d in ss.drives:
+        out.append((d, "drive"))
+    for w in ss.walks:
+        out.append((w, "walk"))
+    for w in ss.wells:
+        out.append((w, "well"))
+    for s in ss.septics:
+        out.append((s, "septic"))
+    for s in ss.services:
+        out.append((s, "service"))
+    out.sort(key=lambda t: (t[0].line or 0, t[0].col or 0))
+    return out
+
+
+def _pt_rect_dist(px: float, py: float, rect: tuple[float, float, float, float]) -> float:
+    """Distance from point ``(px, py)`` to axis-aligned rect ``(x1, y1, x2, y2)``
+    (0 if the point is inside)."""
+    x1, y1, x2, y2 = rect
+    dx = max(x1 - px, 0.0, px - x2)
+    dy = max(y1 - py, 0.0, py - y2)
+    return math.hypot(dx, dy)
+
+
+def _door_lot_point(room, door, bx: float, by: float) -> tuple[float, float]:
+    """The midpoint of an exterior door, in lot feet (building origin at bx,by)."""
+    mid = door.offset + door.width / 2.0
+    if door.wall is Direction.SOUTH:
+        mx, my = room.x + mid, room.y
+    elif door.wall is Direction.NORTH:
+        mx, my = room.x + mid, room.y2
+    elif door.wall is Direction.WEST:
+        mx, my = room.x, room.y + mid
+    else:  # EAST
+        mx, my = room.x2, room.y + mid
+    return (bx + mx, by + my)
+
+
+def _exterior_door_points(plan: Barndominium, bx: float, by: float):
+    """``(room_id, (lot_x, lot_y))`` for every people (non-overhead) exterior door."""
+    rooms = {r.id: r for r in plan.rooms}
+    out = []
+    for d in plan.exterior_doors:
+        if getattr(d, "overhead", False):
+            continue
+        room = rooms.get(d.room)
+        if room is not None:
+            out.append((d.room, _door_lot_point(room, d, bx, by)))
+    return out
+
+
+def _validate_site_features(plan: Barndominium, add, profile) -> None:
+    """The site-plan v2 checks: well/septic separation, drive-to-door access, and
+    septic-in-setback. All silent unless the plan declares the relevant features,
+    so a plan with no site features gets zero of these diagnostics."""
+    ss = getattr(plan, "site_spec", None)
+    if ss is None or not ss.has_dims or not ss.has_features:
+        return
+    origin = plan.building_origin_on_lot()
+    if origin is None:
+        return
+    bx, by = origin
+    room_ids = {r.id for r in plan.rooms}
+
+    # A walk must name a real room (a dangling reference is an authoring error).
+    for wk in ss.walks:
+        if wk.room not in room_ids:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "SITE_REF",
+                    f"`walk` names unknown room '{wk.room}'.",
+                    line=wk.line, col=wk.col, end_col=wk.end_col,
+                    hint="Name a room that exists and has an exterior door, e.g. "
+                    "`walk from mud to drive`.",
+                )
+            )
+
+    # WELL_SEPTIC_CLEAR — the common 100 ft well-to-septic health rule.
+    sep = WELL_SEPTIC_MIN_SEPARATION
+    for wl in ss.wells:
+        for sp in ss.septics:
+            dist = min(_pt_rect_dist(wl.x, wl.y, rect) for rect in sp.rects())
+            if dist < sep - EPSILON:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "WELL_SEPTIC_CLEAR",
+                        f"The well is {_f(dist)} ft from the septic "
+                        f"{'field/tank' if sp.has_field else 'tank'} — the common "
+                        f"health-department rule wants at least {_f(sep)} ft between a "
+                        "private well and a septic system.",
+                        line=wl.line, col=wl.col, end_col=wl.end_col,
+                        hint=f"Move the well or septic so they are >= {_f(sep)} ft "
+                        "apart (confirm the exact separation with your county health "
+                        "department — it varies).",
+                    )
+                )
+
+    # DRIVE_DOOR — a drive but no path (walk, or a near-enough drive edge) to a door.
+    if ss.drives:
+        door_pts = _exterior_door_points(plan, bx, by)
+        drive_rects = [(d.x, d.y, d.x2, d.y2) for d in ss.drives]
+        served = bool(ss.walks) or any(
+            min(_pt_rect_dist(px, py, r) for r in drive_rects) <= DRIVE_DOOR_REACH + EPSILON
+            for _, (px, py) in door_pts
+        )
+        if door_pts and not served:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "DRIVE_DOOR",
+                    "The plan has a drive but no walk or drive edge reaches an "
+                    "exterior door — guests arrive at the drive and have no path to a "
+                    "door.",
+                    hint="Add `walk from <room> to drive` from an entry room, or "
+                    "extend the drive to within a few feet of a door.",
+                )
+            )
+
+    # SEPTIC_SETBACK — a septic tank/field inside a required setback band.
+    lot_w, lot_l = ss.width, ss.length
+    front, rear, side = ss.front or 0.0, ss.rear or 0.0, ss.side or 0.0
+    bands = []  # (label, x1, y1, x2, y2)
+    if front > 0:
+        bands.append(("front", 0.0, 0.0, lot_w, front))
+    if rear > 0:
+        bands.append(("rear", 0.0, lot_l - rear, lot_w, lot_l))
+    if side > 0:
+        bands.append(("west side", 0.0, 0.0, side, lot_l))
+        bands.append(("east side", lot_w - side, 0.0, lot_w, lot_l))
+    for sp in ss.septics:
+        hit = None
+        for rx1, ry1, rx2, ry2 in sp.rects():
+            for label, bx1, by1, bx2, by2 in bands:
+                if (min(rx2, bx2) - max(rx1, bx1) > EPSILON
+                        and min(ry2, by2) - max(ry1, by1) > EPSILON):
+                    hit = label
+                    break
+            if hit:
+                break
+        if hit:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "SEPTIC_SETBACK",
+                    f"The septic system sits inside the {hit} setback band — septic "
+                    "tanks and drain fields are usually held out of the required "
+                    "yards too.",
+                    line=sp.line, col=sp.col, end_col=sp.end_col,
+                    hint="Move the septic clear of the setback, or confirm the "
+                    "allowed septic setback with your county health department.",
+                )
+            )
+
+
+def _validate_porch_guards(plan: Barndominium, add) -> None:
+    """IRC R312.1 — when the finish floor sits more than 30 in above finished
+    grade, every porch is a walking surface that needs a guard. Fires once per
+    porch; silent when no ``grade`` is declared or grade <= 30 in (so an at-grade
+    or shallow-grade plan is never nagged). This resolves the Phase 13 skip:
+    R312.1 exterior guards were unexpressible without a grade elevation."""
+    grade = getattr(plan, "grade", None)
+    if grade is None or grade <= GUARD_DROP_TRIGGER + EPSILON:
+        return
+    for p in plan.porches:
+        add(
+            Issue(
+                Severity.WARNING,
+                "PORCH_GUARD",
+                f"Porch '{p.display_name}' sits {_f(grade)} ft above grade "
+                f"(> {GUARD_DROP_TRIGGER * 12:.0f} in), so it needs a "
+                f"{GUARD_HEIGHT * 12:.0f} in guard (IRC R312.1).",
+                hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard along the porch's open "
+                "edges (balusters blocking a 4 in sphere) and note it on the drawings.",
             )
         )
 

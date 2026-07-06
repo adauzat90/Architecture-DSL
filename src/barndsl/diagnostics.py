@@ -187,6 +187,36 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A `setback` statement declares yard setbacks but no `site <W> x <L>` "
            "gives the lot dimensions to measure them against. Add a `site` line, "
            "or drop the setbacks."),
+        _c("SITE_REQUIRED", E, "Site feature without a site",
+           "A `drive`/`walk`/`well`/`septic`/`service` places itself in lot feet, "
+           "so it needs a `site <W> x <L>` to sit on. Declare the lot dimensions, "
+           "or remove the site feature. (`grade` is the exception — it describes "
+           "the building's height above grade and needs no lot.)"),
+        _c("SITE_REF", E, "Walk names an unknown room",
+           "A `walk from <room> to drive` names a room that doesn't exist. The walk "
+           "starts at that room's exterior door, so it must be a real room with an "
+           "exterior door. Name an existing entry room."),
+        _c("WELL_SEPTIC_CLEAR", W, "Well too close to the septic",
+           "A private well sits closer to the septic tank/drain field than the "
+           "common 100 ft health-department separation. This is a public-health "
+           "rule (not IRC) and varies by jurisdiction (50-100 ft is typical). Move "
+           "the well or septic apart, and confirm the figure with the county health "
+           "department."),
+        _c("DRIVE_DOOR", I, "Drive with no path to a door",
+           "The plan has a driveway but neither a `walk` nor a drive edge comes "
+           "within a few feet of any exterior door — guests park and have no path "
+           "to an entry. Add `walk from <room> to drive`, or extend the drive to a "
+           "door."),
+        _c("SEPTIC_SETBACK", I, "Septic inside a setback",
+           "A septic tank or its drain field falls inside a required yard setback "
+           "band. Septic components are usually held out of the setbacks too; "
+           "confirm the allowed septic setback with the county health department."),
+        _c("PORCH_GUARD", W, "Porch needs a guard (R312.1)",
+           "The declared `grade` puts the finish floor more than 30 in above "
+           "finished grade, so every porch is a walking surface that needs a 36 in "
+           "guard (IRC R312.1) with balusters blocking a 4 in sphere. Note the "
+           "guard on the drawings. Silent when no `grade` is declared or the floor "
+           "sits <= 30 in above grade."),
         _c("RECOVERY_LIMIT", W, "Partial-plan checks incomplete",
            "Parse-error recovery kept a partial plan, but frame placement or "
            "validation crashed on it and was skipped - the diagnostics listed "

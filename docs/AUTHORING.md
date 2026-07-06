@@ -107,6 +107,12 @@ require exterior <room> [<wall>]              #   `require area <room> >= <sqft>
 site <W> x <L>                     # optional; the lot's east-west × north-south dimensions (ft)
 setback [front <n>] [side <n>] [rear <n>]     # optional; required yard clearances (needs a `site`)
 building at <x>,<y>                # optional; place the building's SW corner on the lot (default centred)
+drive at <x>,<y> size <W> x <L> [gravel|concrete|asphalt]  # optional; a driveway (lot ft; needs a `site`)
+walk from <room> to drive [width <ft>]        # optional; a path from a room's exterior door to the drive
+well at <x>,<y>                    # optional; a water well (lot ft; needs a `site`)
+septic at <x>,<y> [field <W> x <L>]           # optional; a septic tank + optional drain field (needs a `site`)
+service electric|water|gas from N|S|E|W       # optional; a utility service drop from a lot side
+grade <ft>                         # optional; finish-floor height above finished grade (flat site)
 
 room <id>: <type> <placement> size <W> x <L> [level <n>]
 wall <id_a> - <id_b> plumbing|bearing|rated   # optional; attribute(s) of the shared wall (rooms must abut)
@@ -225,6 +231,38 @@ frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
   and the site plan centres the footprint on the lot. It also drives the **Site
   Plan** sheet in the permit packet and the site drawing on the playground's
   Elevations tab.
+
+### Site plan: driveway, utilities, and grade
+
+With a `site` declared you can lay out the rest of the lot. Every coordinate here
+is in **lot feet** (the same `building at` frame — from the lot's SW corner), so
+the features sit in the same drawing as the lot and building:
+
+- `drive at <x>,<y> size <W> x <L> [gravel|concrete|asphalt]` — a driveway
+  (surface defaults to `gravel`; concrete/asphalt cost more). `walk from <room> to
+  drive [width <ft>]` runs a walkway (default 4 ft) from that room's exterior door
+  to the nearest drive edge. A drive with **no** walk or drive edge reaching a
+  door draws a `DRIVE_DOOR` info ("guests arrive and have no path to a door").
+- `well at <x>,<y>` places a water well; `septic at <x>,<y> [field <W> x <L>]` a
+  septic tank (drawn ~5×8 ft) with an optional drain field just north of it. A
+  well closer than **100 ft** to the septic tank/field warns (`WELL_SEPTIC_CLEAR`
+  — the common health-department separation; edit `WELL_SEPTIC_MIN_SEPARATION` in
+  `constants.py` for a different local figure). A septic component inside a
+  required setback band draws a `SEPTIC_SETBACK` info.
+- `service electric|water|gas from N|S|E|W` draws a labelled service drop entering
+  from a lot side.
+- `grade <ft>` is the finish-floor height above finished grade (a single flat-site
+  value — v1 models no slope; `grade 2-8` is fine). When it exceeds **30 in**,
+  every `porch` is a walking surface that needs a **36 in guard** (IRC R312.1),
+  drawn as a `PORCH_GUARD` warning per porch — note the guard on the drawings.
+  `grade` is the exception to "site features need a `site`": it describes the
+  building, not the lot, so it stands alone.
+
+The site render adds recognisable symbols (drive hatch, circled-W well, septic
+tank + drain-field lattice, service arrows), a **legend**, and dimensions of the
+building's *actual* distance to each lot line; the permit packet's Site Plan sheet
+adds a **yard-clearance table** (required setback vs actual, pass/fail) and site
+notes. See `examples/gallery/homestead.barn` for the full vocabulary, clean.
 - The **electrical layer** is opt-in and drawn per statement:
   `outlet in <room> wall N|S|E|W offset <ft> [gfci]` places a receptacle on a
   wall (offset from its south/west start corner; `gfci` = ground-fault),

@@ -1,0 +1,83 @@
+# Homestead — the site-plan v2 showcase. A clean 3-bed / 2-bath barndominium
+# (the hall-spine layout) sited on a rural acre with the full site vocabulary:
+# a gravel drive, a walkway to the front door, a water well, a septic tank +
+# drain field, a utility service drop, and a finish-floor grade. Every site
+# feature is placed to stay code-clean — the well sits well over 100 ft from the
+# septic, the septic clears the setbacks, and a `walk` gives the drive a path to
+# a door — so this compiles 0 errors / 0 warnings / 0 infos.
+plan "Homestead"
+envelope 69 x 33
+ceiling 10
+program 3 bed 2 bath
+require adjacent kitchen dining
+
+# --- the lot: a rural acre, building pinned on it ---
+site 180 x 160
+setback front 25 side 15 rear 25
+building at 35,45
+street south
+grade 1-6                              # finish floor 18 in above grade (stem wall)
+
+# --- public band (south, y 0..15) ---
+room living:  living  at 0,0   size 27 x 15
+room kitchen: kitchen at 27,0  size 20 x 15
+room dining:  dining  at 47,0  size 22 x 15
+
+# --- the spine: 4 ft, ending at the master door ---
+room hall: hallway at 0,15 size 63 x 4
+
+# --- west: bed1 + bed2 flanking a stacked pair of square walk-in closets ---
+room bed1:    bedroom at 0,19   size 13 x 14
+room closet1: closet  at 13,19  size 6 x 7
+room closet2: closet  at 13,26  size 6 x 7
+room bed2:    bedroom at 19,19  size 13 x 14
+
+# --- centre: shared hall bath ---
+room bath1: bathroom at 32,19 size 9 x 14
+
+# --- east: primary suite (ensuite backs onto the hall bath; walk-in caps the
+#     NE corner so the hall needn't run past the master door) ---
+room mbath:   bathroom at 41,19 size 6 x 14
+room master:  bedroom  at 47,19 size 16 x 14
+room mcloset: closet   at 63,15 size 6 x 18
+
+open living - kitchen width 10
+open kitchen - dining width 10
+open living - hall width 4
+door hall - bed1 width 3 offset 0.5
+door hall - bed2 width 3 offset 0.5
+door hall - bath1 width 2.67 offset 3
+door hall - master width 3 offset 12.5
+door bed1 - closet1 width 2.5 offset 0.5 into bed1
+door bed2 - closet2 width 2.5 offset 0.5
+door master - mbath width 2.67 offset 0.5 into mbath
+door master - mcloset width 2.5 offset 10.5 into master
+
+entry living south width 3 offset 20
+entry dining east width 3 offset 6
+
+# Covered landings at both exterior doors — a floor to step onto (IRC R311.3).
+porch front at 18,-6 size 7 x 6 covered
+porch back at 69,4 size 6 x 7 covered
+window living south width 10 offset 2
+window kitchen south width 8 offset 6
+window dining south width 8 offset 6
+window bed1 north width 5 offset 4
+window bed2 north width 5 offset 4
+window master north width 6 offset 6
+window bath1 north width 3 offset 2 sill 5
+window mbath north width 3 offset 1 sill 5
+
+# Smoke alarms: one in every bedroom plus the hall outside the sleeping rooms
+# (IRC R314); the bath windows are high privacy transoms clear of the tubs.
+alarm smoke in bed1
+alarm smoke in bed2
+alarm smoke in master
+alarm smoke in hall
+
+# --- the site plan (all in LOT feet, from the lot's SW corner) ---
+drive at 48,8 size 28 x 28 gravel      # gravel drive up to the front yard
+walk from living to drive              # a path from the front door to the drive
+well at 20,30                          # water well, SW corner (>100 ft from septic)
+septic at 120,90 field 40 x 30         # tank + drain field, NE (clear of setbacks)
+service electric from N                # power lateral from the north lot line

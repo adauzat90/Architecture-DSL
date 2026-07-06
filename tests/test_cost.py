@@ -235,11 +235,14 @@ def test_gable_end_triangles_added_only_for_a_gable_roof():
 
 def test_exclusions_footer_present_and_overridable_costs_still_work():
     est = estimate_cost(compile_source(_COMPLETE))
-    assert "Excludes: site work" in est["exclusions"]
+    # Phase 16 reworded the footer: it no longer says "site work" (drive/walk/
+    # well/septic are itemised when declared); it names what's still excluded.
+    assert "Excludes: site work" not in est["exclusions"]
+    assert "permits" in est["exclusions"]
     assert "GC overhead & profit" in cost_text(est)
-    # HVAC IS itemised, so the footer qualifies it ("unless itemized").
+    # HVAC IS itemised, so the footer says so.
     assert any(ln["item"] == "HVAC allowance" for ln in est["assemblies"])
-    assert "unless itemized" in est["exclusions"]
+    assert "itemized" in est["exclusions"]
     # Overrides still reach the new keys.
     bumped = estimate_cost(compile_source(_COMPLETE), overrides={"fixture_washer": 1000.0})
     assert _named_line(bumped, "Washer")["cost"] == 1000.0

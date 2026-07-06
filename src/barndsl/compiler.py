@@ -60,14 +60,17 @@ import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .constants import WALK_DEFAULT_WIDTH
 from .elements import (
     ALARM_KINDS,
     DEFAULT_DOUBLE_DOOR_WIDTH,
     DOOR_KINDS,
     DOUBLE_LEAF_KINDS,
+    DRIVE_SURFACES,
     OVERHEAD_DOOR_HEIGHT,
     OVERHEAD_DOOR_WIDTH,
     LIGHT_KINDS,
+    SERVICE_UTILITIES,
     WALL_ATTRIBUTES,
     WINDOW_KINDS,
     Barndominium,
@@ -88,6 +91,7 @@ _KEYWORDS = (
     "roof", "orientation", "finish", "accessible", "site", "setback", "building",
     "suite", "zone", "electrical", "street", "overhang", "climate", "fixture",
     "outlet", "switch", "light", "alarm", "use",
+    "drive", "walk", "well", "septic", "service", "grade",
 )
 
 #: Statements that describe a whole *building*, not a reusable block — illegal
@@ -99,6 +103,7 @@ _HOST_ONLY = frozenset({
     "plan", "envelope", "wing", "ceiling", "program", "require", "site",
     "setback", "building", "street", "orientation", "roof", "overhang",
     "finish", "frame", "electrical", "stair",
+    "drive", "walk", "well", "septic", "service", "grade",
 })
 
 #: Single-letter wall aliases the `fixture` statement accepts (N|S|E|W), plus the
@@ -340,6 +345,24 @@ Statements:
         # lot feet from the lot's SW corner. With it declared the setback check
         # measures each side's real clearance and can name which side is encroached
         # and by how much (ft-in); without it the check is dimensions-only.
+  drive at <x>,<y> size <W> x <L> [gravel|concrete|asphalt]
+        # a driveway on the lot, in LOT feet (the `building at` frame). Surface
+        # defaults to gravel; concrete/asphalt cost more. Needs a `site`.
+  walk from <room> to drive [width <ft>]
+        # a walkway from <room>'s exterior door to the nearest drive edge (width
+        # default 4 ft). Only a `drive` is a valid destination. Needs a `site`.
+  well at <x>,<y>                  # a water well (lot feet). Needs a `site`.
+  septic at <x>,<y> [field <W> x <L>]
+        # a septic tank at <x>,<y> (lot feet), with an optional drain field drawn
+        # just north of the tank. Its separation from a `well` is checked (the
+        # common 100 ft health-department rule). Needs a `site`.
+  service electric|water|gas from N|S|E|W
+        # a utility service drop entering from a lot side (drawn as a labelled
+        # arrow). Needs a `site`.
+  grade <ft>                       # finish-floor height above finished grade
+        # a single flat-site value (e.g. `grade 2-8`). When it exceeds 30 in, every
+        # porch is a walking surface that needs a 36 in guard (IRC R312.1). Does
+        # NOT need a `site` — it's about the building, not the lot.
 
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
@@ -1006,6 +1029,122 @@ def _parse_statement(
         ss = plan.site_spec
         assert ss is not None  # .building() just created it
         ss.building_line, ss.building_col, ss.building_end_col = lineno, kw.col, kw.end_col
+    elif key == "drive":
+        # `drive at <x>,<y> size <w> x <l> [gravel|concrete|asphalt]` (default gravel).
+        from .elements import Drive
+
+        c.keyword("at")
+        dx = c.number("the drive x on the lot")
+        dy = c.number("the drive y on the lot")
+        c.keyword("size")
+        dw = c.number("the drive width")
+        c.keyword("x")
+        dl = c.number("the drive length")
+        surface = "gravel"
+        if (tok := c.peek()) is not None:
+            surface = c.take("a drive surface").text.lower()
+            if surface not in DRIVE_SURFACES:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown drive surface '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint=f"Use one of: {', '.join(DRIVE_SURFACES)} (default gravel).",
+                )
+        c.expect_end()
+        plan._site().drives.append(
+            Drive(dx, dy, dw, dl, surface, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "walk":
+        # `walk from <room> to drive [width <ft>]` — a path from a room's exterior
+        # door to the nearest drive edge.
+        from .elements import Walk
+
+        c.keyword("from")
+        room_tok = c.ident("a room id")
+        c.keyword("to")
+        c.keyword("drive")
+        width = WALK_DEFAULT_WIDTH
+        if (tok := c.peek()) is not None:
+            if tok.text.lower() != "width":
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown walk option '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint="A walk takes only `width <ft>`, e.g. `walk from mud to drive width 4`.",
+                )
+            c.keyword("width")
+            width = c.number("the walk width")
+        c.expect_end()
+        plan._site().walks.append(
+            Walk(room_tok.text, width, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "well":
+        # `well at <x>,<y>` — a water well point (lot feet).
+        from .elements import Well
+
+        c.keyword("at")
+        wx = c.number("the well x on the lot")
+        wy = c.number("the well y on the lot")
+        c.expect_end()
+        plan._site().wells.append(
+            Well(wx, wy, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "septic":
+        # `septic at <x>,<y> [field <w> x <l>]` — a septic tank + optional drain field.
+        from .elements import Septic
+
+        c.keyword("at")
+        px = c.number("the septic x on the lot")
+        py = c.number("the septic y on the lot")
+        fw = fl = None
+        if (tok := c.peek()) is not None:
+            if tok.text.lower() != "field":
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown septic option '{tok.text}'.",
+                    tok.col, end_col=tok.end_col,
+                    hint="A septic takes only `field <w> x <l>`, e.g. "
+                    "`septic at 90,20 field 40 x 60`.",
+                )
+            c.keyword("field")
+            fw = c.number("the drain-field width")
+            c.keyword("x")
+            fl = c.number("the drain-field length")
+        c.expect_end()
+        plan._site().septics.append(
+            Septic(px, py, fw, fl, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "service":
+        # `service <electric|water|gas> from <N|S|E|W>` — a utility drop.
+        from .elements import Service
+
+        util_tok = c.take("a utility (electric|water|gas)")
+        utility = util_tok.text.lower()
+        if utility not in SERVICE_UTILITIES:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown service utility '{util_tok.text}'.",
+                util_tok.col, end_col=util_tok.end_col,
+                hint=f"Use one of: {', '.join(SERVICE_UTILITIES)}.",
+            )
+        c.keyword("from")
+        side_tok = c.take("a lot side (N|S|E|W)")
+        svc_side = _FIXTURE_WALLS.get(side_tok.text.lower())
+        if svc_side is None:
+            raise _ParseError(
+                "BAD_WALL",
+                f"Unknown lot side '{side_tok.text}'.",
+                side_tok.col, end_col=side_tok.end_col,
+                hint="Use N, S, E or W (the lot edge the service enters from).",
+            )
+        c.expect_end()
+        plan._site().services.append(
+            Service(utility, svc_side, line=lineno, col=kw.col, end_col=kw.end_col)
+        )
+    elif key == "grade":
+        # `grade <ft>` — finish-floor height above finished grade (flat site).
+        plan.set_grade(c.number("the finish-floor height above grade"))
+        c.expect_end()
     elif key == "roof":
         # `roof <style> [pitch <p>]` — style in gable|shed|monitor.
         style_tok = c.take("a roof style (gable|shed|monitor)")

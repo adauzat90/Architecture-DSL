@@ -13,7 +13,15 @@ composition 7a).
 
 ---
 
-## Phase 16 — Site plan v2: driveway, utilities, grade (L)
+## Phase 16 — Site plan v2: driveway, utilities, grade (L) — **SHIPPED**
+
+**Status:** shipped. Grammar (`drive`/`walk`/`well`/`septic`/`service`/`grade`),
+the site render (drive/well/septic/service symbols, a legend, and *actual*
+building-to-lot-line clearance dims), four new rules (`WELL_SEPTIC_CLEAR`,
+`DRIVE_DOOR`, `SEPTIC_SETBACK`, and — resolving the Phase 13 skip below —
+`PORCH_GUARD` for IRC R312.1), site cost lines (drive by surface, walk, well &
+septic allowances) with a reworded exclusions footer, and a packet clearance
+table all landed. Showcase: `examples/gallery/homestead.barn` (0/0/0).
 
 **Who asked:** the contractor persona ("site plan has no drive, well/septic, or
 service entrance; building-to-line clearances aren't dimensioned") and,
@@ -170,7 +178,9 @@ the browser, and an on-screen keyboard-safe editor layout.
 
 - **Flat 12-riser stair-landing trigger** — would flag every normal
   single-story flight; the shipped rule uses the real R311.7.3 rise limit.
-- **R312.1 porch guards without grade data** — fires always or never;
-  unblocked by Phase 16's `grade`.
+- **R312.1 porch guards without grade data** — fired always or never;
+  ~~unblocked by~~ **resolved in** Phase 16: the `grade` statement now supplies
+  the finish-floor-above-grade height, and `PORCH_GUARD` fires per porch only
+  when that exceeds 30 in.
 - **Solid-fill hatch DIMENSION-free DXF dims as the only mode** — viewers that
   regenerate would lose fidelity; Phase 19 keeps both.

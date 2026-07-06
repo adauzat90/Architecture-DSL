@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
-from .constants import EXTERIOR_WALL_THICKNESS
+from .constants import EPSILON, EXTERIOR_WALL_THICKNESS
 from .elements import Barndominium, Direction, RoomType
 from .geometry import opening_endpoints, shared_edge
 from .wallbodies import wall_bands
@@ -1641,6 +1641,27 @@ class _Renderer:
             self._text(cx + 18, y, t.value.replace("_", " ").title(), size=10, anchor="start", fill="#444444")
 
 
+def _site_legend_rows(plan: Barndominium, ss) -> list[tuple[str, str]]:
+    """``(marker, label)`` rows for the site legend — one per feature kind present
+    (plus grade). Empty when the plan declares no site-plan v2 feature, so a plain
+    ``site``/``setback`` drawing gets no legend block."""
+    rows: list[tuple[str, str]] = []
+    surfaces = sorted({d.surface for d in ss.drives})
+    if ss.drives:
+        rows.append(("▭", "Driveway — " + ", ".join(surfaces)))
+    if ss.walks:
+        rows.append(("—", "Walkway to a door"))
+    if ss.wells:
+        rows.append(("Ⓦ", "Water well"))
+    if ss.septics:
+        rows.append(("▤", "Septic tank + drain field"))
+    for sv in ss.services:
+        rows.append(("→", f"Service: {sv.utility} from {sv.side.value}"))
+    if plan.grade is not None:
+        rows.append(("↥", f"Finish floor {fmt_ft_in(plan.grade)} above grade"))
+    return rows
+
+
 def render_site_svg(plan: Barndominium) -> str:
     """Render a site plan: the lot boundary, the required setback lines, and the
     building footprint placed on the lot, with a north arrow, the street side, and
@@ -1687,8 +1708,12 @@ def render_site_svg(plan: Barndominium) -> str:
     scale = avail / max(lot_w, lot_l) if max(lot_w, lot_l) > 0 else 1.0
     draw_w = lot_w * scale
     draw_h = lot_l * scale
+    # A site-plan v2 legend of the features present (drive/walk/well/septic/service/
+    # grade). Built now because its row count sets the drawing's extra height.
+    legend_rows = _site_legend_rows(plan, ss)
+    legend_h = (len(legend_rows) * 15.0 + 22.0) if legend_rows else 0.0
     width = margin * 2 + draw_w
-    height = top + draw_h + 66.0
+    height = top + draw_h + 66.0 + legend_h
     parts: list[str] = []
 
     def sx(x: float) -> float:
@@ -1772,6 +1797,123 @@ def render_site_svg(plan: Barndominium) -> str:
     text(sx(bx + (minx + maxx) / 2.0), sy(by + (miny + maxy) / 2.0) + 4, "BUILDING",
          size=11, weight="bold", fill="#5A3210")
 
+    # --- Site-plan v2 features (drive / walk / well / septic / service) --------
+    _DRIVE_FILL = {"gravel": "#e7e0cd", "concrete": "#e2e2e2", "asphalt": "#c8c8ce"}
+
+    def _rect(x, y, w, l, fill, stroke, sw=1.2, dash=None):
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        parts.append(
+            f'<rect x="{sx(x):.1f}" y="{sy(y + l):.1f}" width="{w * scale:.1f}" '
+            f'height="{l * scale:.1f}" fill="{fill}" stroke="{stroke}" '
+            f'stroke-width="{sw}"{d} />'
+        )
+
+    for d in ss.drives:
+        _rect(d.x, d.y, d.width, d.length, _DRIVE_FILL.get(d.surface, "#e7e0cd"),
+              "#8a8a80", sw=1.2)
+        text(sx(d.x + d.width / 2.0), sy(d.y + d.length / 2.0) + 3,
+             f"DRIVE ({d.surface})", size=9, fill="#6b6b5e")
+
+    # Walkways: a strip from a room's exterior door to the nearest drive edge.
+    for wk, p0, target, _wlen in plan.walk_paths():
+        parts.append(
+            f'<line x1="{sx(p0[0]):.1f}" y1="{sy(p0[1]):.1f}" x2="{sx(target[0]):.1f}" '
+            f'y2="{sy(target[1]):.1f}" stroke="#cfc7b0" '
+            f'stroke-width="{max(3.0, wk.width * scale):.1f}" stroke-linecap="round" />'
+        )
+        parts.append(
+            f'<line x1="{sx(p0[0]):.1f}" y1="{sy(p0[1]):.1f}" x2="{sx(target[0]):.1f}" '
+            f'y2="{sy(target[1]):.1f}" stroke="#a89f82" stroke-width="0.7" '
+            f'stroke-dasharray="2 3" />'
+        )
+
+    # Wells: a circle with a W.
+    for wl in ss.wells:
+        parts.append(
+            f'<circle cx="{sx(wl.x):.1f}" cy="{sy(wl.y):.1f}" r="9" fill="#ffffff" '
+            f'stroke="#2b6cb0" stroke-width="1.6" />'
+        )
+        text(sx(wl.x), sy(wl.y) + 4, "W", size=11, weight="bold", fill="#2b6cb0")
+
+    # Septic: a tank rectangle + a drain-field lattice (parallel drain lines).
+    for sp in ss.septics:
+        rects = sp.rects()
+        tx1, ty1, tx2, ty2 = rects[0]
+        _rect(tx1, ty1, tx2 - tx1, ty2 - ty1, "#dfe7df", "#4a7a4a", sw=1.4)
+        text(sx((tx1 + tx2) / 2.0), sy((ty1 + ty2) / 2.0) + 3, "S", size=10,
+             weight="bold", fill="#4a7a4a")
+        if sp.has_field:
+            fx1, fy1, fx2, fy2 = rects[1]
+            _rect(fx1, fy1, fx2 - fx1, fy2 - fy1, "none", "#4a7a4a", sw=1.0, dash="4 3")
+            # A lattice of drain lines running the field's long axis.
+            n = max(2, int((fy2 - fy1) / 6.0))
+            for i in range(1, n):
+                yy = fy1 + (fy2 - fy1) * i / n
+                line(sx(fx1) + 2, sy(yy), sx(fx2) - 2, sy(yy), "#7aa47a", sw=0.7)
+            text(sx((fx1 + fx2) / 2.0), sy(fy2) - 5, "DRAIN FIELD", size=8,
+                 fill="#4a7a4a")
+
+    # Service drops: a labelled arrow entering from the named lot side.
+    _SVC_COLOR = {"electric": "#c05621", "water": "#2b6cb0", "gas": "#975a16"}
+    _svc_stack: dict[str, int] = {}
+    for sv in ss.services:
+        key = sv.side.value
+        idx = _svc_stack.get(key, 0)
+        _svc_stack[key] = idx + 1
+        col = _SVC_COLOR.get(sv.utility, "#555555")
+        off = idx * 16.0
+        if sv.side is Direction.NORTH:
+            ax, ay0, ay1 = sx(lot_w * 0.5) + off, sy(lot_l) - 4, sy(lot_l) + 26
+        elif sv.side is Direction.SOUTH:
+            ax, ay0, ay1 = sx(lot_w * 0.5) + off, sy(0) + 4, sy(0) - 26
+        elif sv.side is Direction.WEST:
+            ay, ax0, ax1 = sy(lot_l * 0.5) + off, sx(0) - 26, sx(0) + 4
+        else:
+            ay, ax0, ax1 = sy(lot_l * 0.5) + off, sx(lot_w) + 26, sx(lot_w) - 4
+        if sv.side in (Direction.NORTH, Direction.SOUTH):
+            line(ax, ay0, ax, ay1, col, sw=1.6)
+            parts.append(
+                f'<circle cx="{ax:.1f}" cy="{ay1:.1f}" r="2.4" fill="{col}" />'
+            )
+            text(ax + 4, (ay0 + ay1) / 2.0, sv.utility, size=8, anchor="start", fill=col)
+        else:
+            line(ax0, ay, ax1, ay, col, sw=1.6)
+            parts.append(
+                f'<circle cx="{ax1:.1f}" cy="{ay:.1f}" r="2.4" fill="{col}" />'
+            )
+            text((ax0 + ax1) / 2.0, ay - 4, sv.utility, size=8, fill=col)
+
+    # --- Actual building-to-lot-line clearances (dimensioned) -----------------
+    # Today only the *required* setback lines draw; here we dimension the building's
+    # real distance to each lot line so a plans desk can read the yards.
+    dimc = DIM_COLOR
+    bcx = bx + (minx + maxx) / 2.0
+    bcy = by + (miny + maxy) / 2.0
+
+    def _vdim(y_lo, y_hi, x_at, val):
+        if val <= EPSILON:
+            return
+        xx = sx(x_at)
+        line(xx, sy(y_lo), xx, sy(y_hi), dimc, sw=0.7)
+        line(xx - 3, sy(y_lo), xx + 3, sy(y_lo), dimc, sw=0.7)
+        line(xx - 3, sy(y_hi), xx + 3, sy(y_hi), dimc, sw=0.7)
+        text(xx + 3, (sy(y_lo) + sy(y_hi)) / 2.0 + 3, fmt_ft_in(val), size=8,
+             anchor="start", fill=dimc)
+
+    def _hdim(x_lo, x_hi, y_at, val):
+        if val <= EPSILON:
+            return
+        yy = sy(y_at)
+        line(sx(x_lo), yy, sx(x_hi), yy, dimc, sw=0.7)
+        line(sx(x_lo), yy - 3, sx(x_lo), yy + 3, dimc, sw=0.7)
+        line(sx(x_hi), yy - 3, sx(x_hi), yy + 3, dimc, sw=0.7)
+        text((sx(x_lo) + sx(x_hi)) / 2.0, yy - 3, fmt_ft_in(val), size=8, fill=dimc)
+
+    _vdim(0.0, by + miny, bcx, by + miny)                    # front (south) yard
+    _vdim(by + maxy, lot_l, bcx, lot_l - (by + maxy))        # rear (north) yard
+    _hdim(0.0, bx + minx, bcy, bx + minx)                    # west side yard
+    _hdim(bx + maxx, lot_w, bcy, lot_w - (bx + maxx))        # east side yard
+
     # Street side marker (reuse the `street` directive; front = south edge).
     st = plan.street
     if st is not None:
@@ -1822,6 +1964,15 @@ def render_site_svg(plan: Barndominium) -> str:
         f'transform="rotate(-90 {lx_dim - 6:.1f} {(sy(0) + sy(lot_l)) / 2:.1f})">'
         f'{escape(fmt_ft_in(lot_l))}</text>'
     )
+
+    # Site legend (only when the plan declares site-plan v2 features).
+    if legend_rows:
+        ly0 = top + draw_h + 54.0
+        text(margin, ly0, "Legend", size=11, anchor="start", weight="bold")
+        for i, (marker, label) in enumerate(legend_rows):
+            ry = ly0 + 15.0 * (i + 1)
+            text(margin, ry, f"{marker}  {label}", size=10, anchor="start",
+                 fill="#555555")
 
     parts.append("</svg>")
     return "\n".join(parts)

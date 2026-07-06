@@ -6,7 +6,7 @@ the emitted text reproduces an equivalent plan.
 
 from __future__ import annotations
 
-from .constants import FLOOR_ASSEMBLY_DEPTH
+from .constants import FLOOR_ASSEMBLY_DEPTH, WALK_DEFAULT_WIDTH
 from .elements import OVERHEAD_DOOR_HEIGHT, Barndominium
 
 
@@ -254,6 +254,29 @@ def emit_dsl(plan: Barndominium, flatten: bool = False) -> str:
         out.append(line)
     if ss is not None and ss.has_building:
         out.append(f"building at {_n(ss.building_x)},{_n(ss.building_y)}")
+    if plan.grade is not None:
+        out.append(f"grade {_n(plan.grade)}")
+    if ss is not None:
+        _side_letter = {"north": "N", "south": "S", "east": "E", "west": "W"}
+        for d in ss.drives:
+            line = f"drive at {_n(d.x)},{_n(d.y)} size {_n(d.width)} x {_n(d.length)}"
+            if d.surface != "gravel":  # gravel is the default, so it's implicit
+                line += f" {d.surface}"
+            out.append(line)
+        for wk in ss.walks:
+            line = f"walk from {wk.room} to drive"
+            if abs(wk.width - WALK_DEFAULT_WIDTH) > 1e-9:
+                line += f" width {_n(wk.width)}"
+            out.append(line)
+        for wl in ss.wells:
+            out.append(f"well at {_n(wl.x)},{_n(wl.y)}")
+        for sp in ss.septics:
+            line = f"septic at {_n(sp.x)},{_n(sp.y)}"
+            if sp.field_width is not None and sp.field_length is not None:
+                line += f" field {_n(sp.field_width)} x {_n(sp.field_length)}"
+            out.append(line)
+        for sv in ss.services:
+            out.append(f"service {sv.utility} from {_side_letter[sv.side.value]}")
     if plan.program_spec is not None:
         spec = plan.program_spec
         line = f"program {spec.beds} bed"
