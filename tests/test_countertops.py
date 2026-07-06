@@ -510,3 +510,55 @@ def test_lsp_hover_counter_card():
     li = max(i for i, ln in enumerate(lines) if ln.startswith("fixture counter"))
     h = hover(src, r, li, 20)
     assert h is not None and "counter run" in h["contents"]["value"]
+
+
+# --- render: mitred corners draw as one surface (no crossing boxes) -----------
+
+
+def _counter_screen_rects(svg):
+    """The (x, y, w, h) of every counter's outline rect in the SVG, by group."""
+    import re
+
+    rects = []
+    for m in re.finditer(
+        r'<g data-fixture="k~counter~\d+">\s*<rect x="([\d.]+)" y="([\d.]+)" '
+        r'width="([\d.]+)" height="([\d.]+)"',
+        svg,
+    ):
+        rects.append(tuple(float(v) for v in m.groups()))
+    return rects
+
+
+def test_mitred_corner_runs_are_drawn_abutting_not_overlapping():
+    # A U: full W run + S and N runs starting at the same corner. The model keeps
+    # the overlapping corner squares (the mitred exemption / takeoff), but the
+    # DRAWING must trim the later runs so no two counter rects overlap on paper.
+    from barndsl.render import render_svg
+
+    src = _plan(
+        "fixture counter in k along W",
+        "fixture counter in k along S from 0 to 12",
+        "fixture counter in k along N from 0 to 12",
+    )
+    svg = render_svg(_compile(src).plan)
+    rects = _counter_screen_rects(svg)
+    assert len(rects) == 3
+    eps = 0.01
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            (ax, ay, aw, ah), (bx, by, bw, bh) = rects[i], rects[j]
+            ox = min(ax + aw, bx + bw) - max(ax, bx)
+            oy = min(ay + ah, by + bh) - max(ay, by)
+            assert not (ox > eps and oy > eps), (
+                f"drawn counter rects {i} and {j} overlap by {ox:.2f}x{oy:.2f}px"
+            )
+    # ...and each L/U joint carries the 45-degree miter line across the corner.
+    assert svg.count('data-joint="miter"') == 2
+
+
+def test_single_run_draws_untrimmed_with_no_miter():
+    from barndsl.render import render_svg
+
+    svg = render_svg(_compile(_plan("fixture counter in k along S")).plan)
+    assert 'data-joint="miter"' not in svg
+    assert len(_counter_screen_rects(svg)) == 1

@@ -563,14 +563,78 @@ class _Renderer:
         for r in self.plan.rooms:
             if level is not None and r.level != level:
                 continue
+            fixtures = resolve_room_fixtures(self.plan, r)
+            counters = [f for f in fixtures if f.kind == "counter"]
+            trimmed, miters = self._miter_counters(r, counters)
             # Counters draw FIRST (z-under), the drafting convention: a sink or
-            # range set into a run then draws cleanly over the countertop.
-            fixtures = sorted(
-                resolve_room_fixtures(self.plan, r),
-                key=lambda f: 0 if f.kind == "counter" else 1,
-            )
+            # range set into a run then draws cleanly over the countertop. Runs
+            # meeting in a mitred corner are drawn trimmed to abut, with the 45°
+            # joint line across the corner square — one continuous surface, not
+            # two crossing boxes.
+            for f in trimmed:
+                if f.width > 0.05 and f.length > 0.05:
+                    self._fixture_glyph(f)
+            for x1, y1, x2, y2 in miters:
+                self.parts.append(
+                    f'<line x1="{self.sx(x1):.1f}" y1="{self.sy(y1):.1f}" '
+                    f'x2="{self.sx(x2):.1f}" y2="{self.sy(y2):.1f}" '
+                    f'stroke="{FIXTURE_COLOR}" stroke-width="0.6" '
+                    'data-joint="miter" />'
+                )
             for f in fixtures:
-                self._fixture_glyph(f)
+                if f.kind != "counter":
+                    self._fixture_glyph(f)
+
+    def _miter_counters(self, room, counters):
+        """Resolve mitred counter corners for drawing: for each L/U join, trim the
+        later run back to abut the earlier one along its run axis, and return the
+        45° miter diagonal across the corner square (from the square's outer
+        corner — farthest from the room's centre — to its inner one). The model
+        keeps the full overlapping rectangles (the takeoff counts the corner in
+        both runs, documented); only the drawing is trimmed."""
+        from dataclasses import replace
+
+        from .fixtures import _is_mitred_corner, _rect_intersection
+
+        adjusted = list(counters)
+        miters: list[tuple[float, float, float, float]] = []
+        rcx, rcy = room.x + room.width / 2.0, room.y + room.length / 2.0
+        for i in range(len(adjusted)):
+            for j in range(i + 1, len(adjusted)):
+                a, b = adjusted[i], adjusted[j]
+                if not _is_mitred_corner(a, b):
+                    continue
+                inter = _rect_intersection(
+                    (a.x, a.y, a.width, a.length), (b.x, b.y, b.width, b.length)
+                )
+                if inter is None:
+                    continue
+                ix, iy, iw, il = inter
+                # Trim b away from the joint along its run axis (its wall's axis;
+                # a free-standing run falls back to its longer side).
+                axis = (
+                    "x" if b.wall in ("S", "N")
+                    else "y" if b.wall in ("W", "E")
+                    else ("x" if b.width >= b.length else "y")
+                )
+                if axis == "x":
+                    if (ix - b.x) <= (b.x + b.width) - (ix + iw):  # joint at low-x end
+                        nb = replace(b, x=ix + iw, width=b.width - iw)
+                    else:
+                        nb = replace(b, width=b.width - iw)
+                else:
+                    if (iy - b.y) <= (b.y + b.length) - (iy + il):  # joint at low-y end
+                        nb = replace(b, y=iy + il, length=b.length - il)
+                    else:
+                        nb = replace(b, length=b.length - il)
+                adjusted[j] = nb
+                # Miter diagonal: outer corner = the square's corner farthest from
+                # the room centre (the walls' meeting corner), to its opposite.
+                corners = [(ix, iy), (ix + iw, iy), (ix, iy + il), (ix + iw, iy + il)]
+                outer = max(corners, key=lambda c: (c[0] - rcx) ** 2 + (c[1] - rcy) ** 2)
+                inner = (ix + iw - (outer[0] - ix), iy + il - (outer[1] - iy))
+                miters.append((outer[0], outer[1], inner[0], inner[1]))
+        return adjusted, miters
 
     def _fx_ellipse(self, cx, cy, rx, ry, sw=0.8, fill="none"):
         self.parts.append(
