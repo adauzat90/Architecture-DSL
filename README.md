@@ -581,7 +581,9 @@ barndsl explain BEDROOM_EGRESS                     # what a diagnostic code mean
 **Outputs without Revit.** `barndsl schedule` emits room/door/window schedules
 (Markdown or CSV) straight from the compiler — the same data the Revit *Document*
 pass schedules, but for users who don't open Revit. `barndsl dxf` exports the
-plan to DXF (a minimal, dependency-free DXF R12 writer) for any CAD tool;
+plan to DXF (a dependency-free **DXF R2000 / AC1015** writer) for any CAD tool —
+closed hatchable wall polygons with real thickness, door swing arcs, window
+symbols and dimension geometry on AIA-style layers, with declared imperial units;
 coordinates pass straight through (feet, x-east/y-north). `barndsl build
 --format png|pdf` rasterises the SVG (optional `cairosvg`). `barndsl elevation`
 and `barndsl section` draw the **vertical** dimension the floor plan can't — a
@@ -774,7 +776,7 @@ src/barndsl/
   structure.py   # auto post-and-beam frame placement (the `frame` directive)
   revit.py       # lower the plan IR → Revit-shaped exchange JSON (barndsl.revit/1)
   schedule.py    # room/door/window schedules → Markdown or CSV (no Revit needed)
-  dxf.py         # export the plan → DXF R12 (CAD interchange), dependency-free
+  dxf.py         # export the plan → DXF R2000/AC1015 (CAD interchange), dependency-free
   ifc.py         # export the plan → IFC4 BIM (STEP/SPF), hand-written, dependency-free
   scaffold.py    # the starter plan `barndsl new` writes
   render.py      # annotated 2D SVG renderer (+ PNG/PDF via optional cairosvg)

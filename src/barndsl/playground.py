@@ -488,7 +488,7 @@ def export_artifact(fmt: str, plan: Any, result: Any = None) -> tuple[bytes, str
 
     Reuses the standalone exporters verbatim; ``fmt`` must be in
     :data:`EXPORT_FORMATS` (the caller validates). Binary formats return raw
-    bytes; text formats are UTF-8 (DXF R12 is ASCII, matching :func:`~barndsl.dxf.save_dxf`).
+    bytes; text formats are UTF-8 (DXF/AC1015 is ASCII, matching :func:`~barndsl.dxf.save_dxf`).
     ``result`` (the :class:`~barndsl.compiler.CompileResult`) is only needed by the
     ``packet`` format, which binds the diagnostics appendix in too.
     """

@@ -1045,3 +1045,48 @@ Every porch carries a **slab** line in `barndsl cost`; a `covered` porch adds a
   still firing, `CODE (5 → 4)`) and `more` (rose). When both sides compile
   cleanly it also shows the **cost delta** (`Cost: $196,227 → $200,794
   (+$4,567)`).
+
+## Exports: DXF for CAD
+
+`barndsl dxf FILE.barn --out plan.dxf` writes a **DXF R2000 (AC1015)** drawing —
+the oldest DXF that carries declared drawing units and the `LWPOLYLINE` entity,
+so the export is a real drawing rather than a massing underlay. It is hand-written
+in pure Python (no `ezdxf` dependency), and is **byte-reproducible**: the same
+plan always yields an identical file.
+
+- **Units are declared imperial** — `$INSUNITS = 2` (feet), `$MEASUREMENT = 0`
+  (English), `$LUNITS = 4` (architectural). Coordinates pass straight through at
+  1 unit = 1 foot, and `$EXTMIN`/`$EXTMAX` bound the whole drawing including the
+  dimension strings.
+- **Walls are closed, hatchable polygons** with real thickness (the same nominal
+  `EXTERIOR_WALL_THICKNESS` / `INTERIOR_WALL_THICKNESS` the schedules net out):
+  the exterior shell as per-side bands centred on the envelope, interior
+  partitions centred on each shared room edge, with door and window openings
+  **cut out** of the band.
+- **Doors** draw a leaf line plus a 90° swing `ARC` (the SVG's hinge/swing side);
+  **windows** draw the classic sill / head / centre-glazing symbol.
+- **Dimensions are drawing geometry, not associative `DIMENSION` entities** — the
+  overall dims per side plus the exterior chain strings with jamb breaks are
+  emitted as dim lines, extension lines, ticks and `TEXT`. Every viewer renders
+  them; a drafter can explode and re-associate if needed.
+- **Multi-level plans** draw every floor at true model coordinates, with each
+  floor above the ground on `-L{n}`-suffixed copies of the layers (`A-WALL-L1`,
+  …) — toggle a level's layers to isolate it. Dimensions annotate the ground
+  floor.
+
+The geometry lands on AIA-style, discipline-prefixed layers:
+
+| Layer | Colour | Contents |
+| --- | --- | --- |
+| `A-WALL` | 7 | Wall bodies — exterior shell bands + interior partitions |
+| `A-DOOR` | 30 | Door leaves and swing arcs |
+| `A-GLAZ` | 5 | Windows (sill / head / glazing lines) |
+| `A-FLOR-FIXT` | 8 | Plumbing / kitchen fixtures and furniture, with kind labels |
+| `A-FLOR-OTLN` | 9 | Porch and stair outlines (dashed) |
+| `A-AREA-IDEN` | 3 | Room name and area text |
+| `A-ANNO-DIMS` | 2 | Dimension lines, ticks and text |
+| `A-ANNO-NOTE` | 4 | Leader notes |
+| `S-COLS` | 6 | Structural frame posts and beams |
+
+For a full BIM hand-off (walls with voided openings, spaces, roof, stairs) use
+`barndsl ifc` (IFC4) instead — DXF is the 2D-drafting deliverable.
