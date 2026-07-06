@@ -326,3 +326,40 @@ def test_cli_cost_overrides_and_multiplier(tmp_path, capsys):
     # A bad --costs file → exit 2.
     costs.write_text("{ not json", encoding="utf-8")
     assert main(["cost", str(good), "--costs", str(costs)]) == 2
+
+
+# -- `cost --print-keys`: the overridable unit-cost reference table -----------
+
+
+def test_print_keys_lists_every_default_key_and_exits_zero(capsys):
+    from barndsl.cost import UNIT_COST_META
+
+    assert main(["cost", "--print-keys"]) == 0  # no plan file needed
+    out = capsys.readouterr().out
+    # Every overridable key appears, one per line, greppable.
+    for key in DEFAULT_UNIT_COSTS:
+        assert key in out, f"{key} missing from --print-keys output"
+    # A key's default value and unit ride on its line (spot-check a few).
+    key_lines = {
+        line.split()[0]: line
+        for line in out.splitlines()
+        if line.startswith("  ") and line.split() and line.split()[0] in DEFAULT_UNIT_COSTS
+    }
+    assert "9.00" in key_lines["slab_sqft"] and "sqft" in key_lines["slab_sqft"]
+    assert "12,000.00" in key_lines["well_allowance"] and "each" in key_lines["well_allowance"]
+    # The meaning column carries prose from UNIT_COST_META.
+    assert UNIT_COST_META["slab_sqft"][1] in out
+
+
+def test_print_keys_metadata_stays_in_sync_with_defaults():
+    from barndsl.cost import UNIT_COST_META
+
+    # The table must describe exactly the overridable keys — no more, no less.
+    assert set(UNIT_COST_META) == set(DEFAULT_UNIT_COSTS)
+
+
+def test_print_keys_needs_no_file_but_estimate_still_requires_one(capsys):
+    # Without the flag and without a file, cost errors (exit 2) — the flag is the
+    # only way to run `cost` with no plan.
+    assert main(["cost"]) == 2
+    assert "required" in capsys.readouterr().err.lower()

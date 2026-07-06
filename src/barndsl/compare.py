@@ -119,6 +119,67 @@ def compare_plans(
     return out
 
 
+def compare_series(
+    results: list[CompileResult], names: list[str]
+) -> dict[str, Any]:
+    """An N-way change-order comparison over 3+ plans: A → B → C → …
+
+    Renders as consecutive pairwise steps (A→B, B→C, …) — each step is exactly a
+    :func:`compare_plans` dict, so nothing about the two-file shape changes — plus
+    an ``overall`` head-to-tail roll-up (score and, when the first and last both
+    compiled cleanly, cost from A to the final plan)::
+
+        {"steps": [<compare_plans A→B>, <compare_plans B→C>, …], "overall": {…}}
+
+    ``overall`` always carries ``names`` (``[first, last]``) and ``score``
+    (``{first, last, delta}``); it carries ``cost`` (same triple) only when both
+    ends priced cleanly — the same honesty rule as a single pairwise ``cost``.
+    """
+    if len(results) < 2:
+        raise ValueError("compare_series needs at least two plans")
+    steps = [
+        compare_plans(results[i], results[i + 1], (names[i], names[i + 1]))
+        for i in range(len(results) - 1)
+    ]
+    first, last = _side(names[0], results[0]), _side(names[-1], results[-1])
+    overall: dict[str, Any] = {
+        "names": [names[0], names[-1]],
+        "score": {
+            "first": first["score"],
+            "last": last["score"],
+            "delta": round(last["score"] - first["score"], 1),
+        },
+    }
+    cost_first, cost_last = _cost_expected(results[0]), _cost_expected(results[-1])
+    if cost_first is not None and cost_last is not None:
+        overall["cost"] = {
+            "first": cost_first,
+            "last": cost_last,
+            "delta": round(cost_last - cost_first, 2),
+        }
+    return {"steps": steps, "overall": overall}
+
+
+def series_text(series: dict[str, Any]) -> str:
+    """Human rendering of a :func:`compare_series` roll-up: each pairwise step
+    under an ``A → B`` header, then a compact head-to-tail summary line."""
+    blocks: list[str] = []
+    for step in series["steps"]:
+        header = f"=== {step['a']['name']} → {step['b']['name']} ==="
+        blocks.append(header + "\n" + comparison_text(step))
+    o = series["overall"]
+    sc = o["score"]
+    summary = (
+        f"Overall {o['names'][0]} → {o['names'][1]}: "
+        f"score {sc['first']:g} → {sc['last']:g} ({sc['delta']:+g})"
+    )
+    if "cost" in o:
+        c = o["cost"]
+        summary += f", cost {_money(c['first'])} → {_money(c['last'])} ({_signed_money(c['delta'])})"
+    blocks.append(summary)
+    return "\n\n".join(blocks)
+
+
 def comparison_text(cmp: dict[str, Any]) -> str:
     """The compact human rendering (one screen, no tables to scroll)."""
     a, b, deltas = cmp["a"], cmp["b"], cmp["deltas"]

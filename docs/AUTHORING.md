@@ -1197,7 +1197,9 @@ Every porch carries a **slab** line in `barndsl cost`; a `covered` porch adds a
   laundry washer/dryer**, systems (electrical + HVAC allowances) and finishes,
   then prints an **exclusions** footer (site work, well/septic, permits, HVAC
   unless itemized, GC overhead & profit). Every unit cost is overridable with
-  `--costs FILE.json`.
+  `--costs FILE.json`. Run **`barndsl cost --print-keys`** (no plan needed) to
+  dump the full overridable key table — every key with its default, unit and a
+  one-line meaning — so you know exactly what an override touches.
   - **Openings are priced by size, not a flat per-each** (so a picture window
     costs more than a bathroom awning and a 16 ft garage door costs more than a
     9 ft one):
@@ -1281,3 +1283,19 @@ The geometry lands on AIA-style, discipline-prefixed layers:
 
 For a full BIM hand-off (walls with voided openings, spaces, roof, stairs) use
 `barndsl ifc` (IFC4) instead — DXF is the 2D-drafting deliverable.
+
+## Revit exchange: `revit` / `revit-import`
+
+`barndsl revit FILE.barn` lowers a plan to the `barndsl.revit/1` exchange JSON
+for the pyRevit add-in, and `barndsl revit-import FILE.json` reconstructs DSL
+from that exchange (or from a model the add-in exported back).
+
+The export→import round-trip is **geometry-faithful but not
+diagnostic-identical**: the reconstructed plan places every room, wall and
+opening at the same coordinates, but each opening comes back with an **explicit
+`offset` re-derived from its position**, because the exchange carries geometry,
+not authoring intent. So *advice-class* infos that only fire on an
+**unspecified** placement — most visibly `DOOR_CENTERED`, which flags a swing
+door left to float mid-wall — vanish after a reimport by design: the door now
+carries a concrete offset, so there is nothing left to advise about. This is
+expected drift, not data loss; the drawing is unchanged.

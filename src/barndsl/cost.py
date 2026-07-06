@@ -91,6 +91,67 @@ DEFAULT_UNIT_COSTS: dict[str, float] = {
     "septic_allowance": 15000.0,  # tank + drain field (allowance, each)
 }
 
+#: Per unit-cost key: ``(unit, one-line meaning)``, mirroring the inline labels
+#: on :data:`DEFAULT_UNIT_COSTS` above. Drives ``barndsl cost --print-keys`` (and
+#: is the human-readable index of what an override touches). Kept exhaustive and
+#: in-sync with :data:`DEFAULT_UNIT_COSTS` — see ``unit_cost_key_table`` and the
+#: parity test in ``tests/test_cost.py``.
+UNIT_COST_META: dict[str, tuple[str, str]] = {
+    "slab_sqft": ("sqft", "Monolithic slab-on-grade (house floor & porch platforms), per footprint sqft"),
+    "exterior_wall_sqft": ("sqft", "Framing + sheathing + insulation + siding (incl. gable ends), per gross wall sqft"),
+    "interior_wall_lf": ("lf", "Framed + drywalled partition, per linear foot"),
+    "roof_sqft": ("sqft", "Structure + decking + covering (incl. covered-porch roof), per sloped sqft"),
+    "window_each": ("each", "Per window: frame, flashing, install labour"),
+    "window_glazed_sqft": ("sqft", "Per sq ft of glazed (sill-to-head) area"),
+    "door_interior": ("each", "Interior swing door"),
+    "door_interior_double": ("each", "Interior double / french pair"),
+    "door_exterior": ("each", "Exterior people door, per 3 ft of leaf width (width-weighted)"),
+    "garage_door_lf": ("lf", "Overhead (garage) door, per linear foot of width"),
+    "fixture_toilet": ("each", "Toilet: supply + waste + fixture"),
+    "fixture_lavatory": ("each", "Bathroom lavatory: supply + waste + fixture"),
+    "fixture_tub": ("each", "Bathtub: supply + waste + fixture"),
+    "fixture_shower": ("each", "Shower: supply + waste + fixture"),
+    "fixture_sink": ("each", "Kitchen sink + rough-in"),
+    "fixture_range": ("each", "Range (appliance allowance)"),
+    "fixture_refrigerator": ("each", "Refrigerator (appliance allowance)"),
+    "fixture_washer": ("each", "Washer hookup (supply/drain box) + appliance allowance"),
+    "fixture_dryer": ("each", "Dryer 240 V/gas + vent run + appliance allowance"),
+    "countertop_lf": ("lf", "Fabricated + installed countertop, per linear foot"),
+    "electrical_sqft": ("sqft", "Electrical allowance, per conditioned interior sqft"),
+    "hvac_sqft": ("sqft", "HVAC allowance, per conditioned interior sqft"),
+    "finish_sqft": ("sqft", "Flooring, trim, paint, cabinets, per conditioned interior sqft"),
+    "drive_gravel_sqft": ("sqft", "Gravel driveway paving, per sq ft of drive area"),
+    "drive_concrete_sqft": ("sqft", "Concrete driveway paving, per sq ft of drive area"),
+    "drive_asphalt_sqft": ("sqft", "Asphalt driveway paving, per sq ft of drive area"),
+    "walk_sqft": ("sqft", "Concrete/paver walkway, per sq ft"),
+    "well_allowance": ("each", "Drilled well + pump + pressure tank (lump-sum allowance)"),
+    "septic_allowance": ("each", "Septic tank + drain field (lump-sum allowance)"),
+}
+
+
+def unit_cost_key_table() -> str:
+    """The full overridable unit-cost sheet as a greppable table — one key per
+    line, in the order the assemblies are priced: ``key  default  unit  meaning``.
+
+    Backs ``barndsl cost --print-keys``; needs no plan. Override any subset via
+    ``--costs FILE.json`` (``{"slab_sqft": 11.0, ...}``) or ``estimate_cost``'s
+    ``overrides=`` argument.
+    """
+    key_w = max(len(k) for k in DEFAULT_UNIT_COSTS)
+    rows = [
+        "Overridable unit-cost keys — pass a subset in a JSON file to "
+        "`barndsl cost --costs FILE.json`",
+        "(all in USD; a regional --multiplier scales every key). Defaults are "
+        "rough 2026 US averages.",
+        "",
+        f"  {'KEY':<{key_w}}  {'DEFAULT':>9}  {'UNIT':<4}  MEANING",
+    ]
+    for key, default in DEFAULT_UNIT_COSTS.items():
+        unit, meaning = UNIT_COST_META[key]
+        rows.append(f"  {key:<{key_w}}  {default:>9,.2f}  {unit:<4}  {meaning}")
+    return "\n".join(rows)
+
+
 #: Fixture kind (see :data:`barndsl.fixtures.FIXTURES`) → unit-cost key, in the
 #: order lines are emitted (deterministic).
 _FIXTURE_ORDER = (

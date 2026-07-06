@@ -85,6 +85,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Any
 
 from . import __version__
 from .compiler import SourceReadError, compile_file, compile_source, read_source_file
@@ -865,24 +866,33 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
-    """Side-by-side of two plans: score, takeoff, resolved/introduced codes."""
-    from .compare import compare_plans, comparison_text
+    """Side-by-side of two plans — or a change-order history over 3+ (A→B→C…):
+    score, takeoff, resolved/introduced codes."""
+    from .compare import compare_plans, compare_series, comparison_text, series_text
 
+    files = [args.file_a, args.file_b, *args.files]
     try:
-        result_a = compile_file(args.file_a)
-        result_b = compile_file(args.file_b)
+        results = [compile_file(f) for f in files]
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    names = (os.path.basename(args.file_a), os.path.basename(args.file_b))
-    cmp = compare_plans(result_a, result_b, names)
-    if getattr(args, "json", False):
+    names = [os.path.basename(f) for f in files]
+    want_json = getattr(args, "json", False)
+    payload: dict[str, Any]
+    if len(files) == 2:
+        # Two files keep the EXACT flat pairwise shape (no regression for scripts).
+        payload = compare_plans(results[0], results[1], (names[0], names[1]))
+        text = comparison_text(payload)
+    else:
+        payload = compare_series(results, names)
+        text = series_text(payload)
+    if want_json:
         import json
 
-        print(json.dumps(cmp, indent=2))
+        print(json.dumps(payload, indent=2))
     else:
-        print(comparison_text(cmp))
-    return 0 if result_a.plan is not None and result_b.plan is not None else 1
+        print(text)
+    return 0 if all(r.plan is not None for r in results) else 1
 
 
 def _cmd_revit_diff(args: argparse.Namespace) -> int:
@@ -928,7 +938,16 @@ def _cmd_revit_diff(args: argparse.Namespace) -> int:
 
 def _cmd_cost(args: argparse.Namespace) -> int:
     """Assembly-based construction cost estimate from the plan's takeoff."""
-    from .cost import cost_text, estimate_cost
+    from .cost import cost_text, estimate_cost, unit_cost_key_table
+
+    # `--print-keys` is a reference dump, not an estimate — it needs no plan, so
+    # the positional file is optional when it's set.
+    if getattr(args, "print_keys", False):
+        print(unit_cost_key_table())
+        return 0
+    if args.file is None:
+        print("error: the following arguments are required: file", file=sys.stderr)
+        return 2
 
     try:
         result = compile_file(args.file)
@@ -1374,10 +1393,16 @@ def main(argv: list[str] | None = None) -> int:
 
     p_compare = sub.add_parser(
         "compare",
-        help="side-by-side of two plans: score, takeoff, resolved/introduced codes",
+        help="side-by-side of two plans (or a change-order history over 3+): "
+        "score, takeoff, resolved/introduced codes",
     )
     p_compare.add_argument("file_a", help="path to scheme A (.barn)")
     p_compare.add_argument("file_b", help="path to scheme B (.barn)")
+    p_compare.add_argument(
+        "files", nargs="*",
+        help="further schemes for a change-order history (A→B→C…): consecutive "
+        "pairwise sections plus a head-to-tail summary",
+    )
     p_compare.add_argument("--json", action="store_true", help="emit the comparison as JSON")
     p_compare.set_defaults(func=_cmd_compare)
 
@@ -1408,8 +1433,16 @@ def main(argv: list[str] | None = None) -> int:
         "cost",
         help="assembly-based construction cost estimate from the plan's takeoff",
     )
-    p_cost.add_argument("file", help="path to a .barn DSL file")
+    p_cost.add_argument(
+        "file", nargs="?", default=None,
+        help="path to a .barn DSL file (optional with --print-keys)",
+    )
     p_cost.add_argument("--json", action="store_true", help="emit the estimate as JSON")
+    p_cost.add_argument(
+        "--print-keys", action="store_true", dest="print_keys",
+        help="print the overridable unit-cost key table (key, default, unit, "
+        "meaning) and exit — no plan needed",
+    )
     p_cost.add_argument(
         "--costs",
         default=None,

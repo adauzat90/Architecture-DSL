@@ -439,6 +439,33 @@ def _part_line_from_message(issue: Issue) -> int:
     return 0
 
 
+def _part_diagnostic(issue: Issue) -> dict:
+    """A part-internal finding rendered against the **part file's own** line.
+
+    The host anchors the same finding at its ``use`` line (see :func:`diagnostics`);
+    here — for the part file, which the editor also has open — we drop the
+    host-facing ``in part <rel>:<n> — `` prefix (the part IS the context) and
+    anchor the whole line the composer recorded via :func:`_part_line_from_message`.
+    """
+    line = _part_line_from_message(issue)
+    accepted = getattr(issue, "accepted", False)
+    sev = 4 if accepted else _LSP_SEVERITY.get(issue.severity, 3)
+    message = re.sub(r"^in part [^\n—]+— ", "", issue.message)
+    if accepted and issue.accept_reason:
+        message = f"{message}  (accepted: {issue.accept_reason})"
+    elif accepted:
+        message = f"{message}  (accepted)"
+    if issue.hint:
+        message = f"{message}\n{issue.hint}"
+    return {
+        "range": _range(line, 0, 1_000),  # whole line — editors clamp the end
+        "severity": sev,
+        "code": issue.code,
+        "source": "barndsl",
+        "message": message,
+    }
+
+
 # --- 3.2 hover ---------------------------------------------------------------
 
 
@@ -1045,6 +1072,9 @@ class DocumentStore:
     def close(self, uri: str) -> None:
         self._docs.pop(uri, None)
 
+    def uris(self) -> list[str]:
+        return list(self._docs)
+
     def text(self, uri: str) -> str | None:
         entry = self._docs.get(uri)
         return entry[0] if entry else None
@@ -1094,6 +1124,11 @@ class Server:
         self._dirty: dict[str, int] = {}
         #: uri -> (version, CompileResult) — the cache a request reuses.
         self._compiled: dict[str, tuple[int, CompileResult]] = {}
+        #: host uri -> the set of OPEN part uris we last published part-internal
+        #: diagnostics to for that host, so a later host compile can clear the
+        #: parts that no longer have findings (Phase 8 deferral: only ever open
+        #: parts, never an unsolicited URI). See ``_publish_part_diags``.
+        self._host_part_targets: dict[str, set[str]] = {}
         self.rename_enabled = True
 
     # -- transport --
@@ -1142,6 +1177,7 @@ class Server:
         self._compiled[uri] = (version, result)
         self._dirty.pop(uri, None)
         self._publish(uri, result, version)
+        self._publish_part_diags(uri, result)
 
     def _flush_all_dirty(self) -> None:
         for uri in list(self._dirty):
@@ -1152,6 +1188,64 @@ class Server:
             "textDocument/publishDiagnostics",
             {"uri": uri, "version": version, "diagnostics": diagnostics(result, uri)},
         )
+
+    # -- part-file diagnostics (Phase 8 deferral, now shipped) --
+
+    def _open_uri_for_path(self, path: str) -> str | None:
+        """The open document URI whose file is ``path`` (realpath-matched), or
+        ``None`` when that file isn't open. This is the guard that keeps us from
+        ever publishing to a URI the editor never opened."""
+        real = os.path.realpath(path)
+        for uri in self.store.uris():
+            p = uri_to_path(uri)
+            if p is not None and os.path.realpath(p) == real:
+                return uri
+        return None
+
+    def _publish_part_diags(self, host_uri: str, result: CompileResult) -> None:
+        """Mirror a host compile's *part-internal* findings (``issue.file`` set)
+        onto the part files that are themselves open, mapped to each part's own
+        lines. Parts that had findings last time but don't now are cleared. Never
+        touches a URI that isn't open."""
+        targets: dict[str, list[dict]] = {}
+        for issue in result.diagnostics:
+            part_file = getattr(issue, "file", None)
+            if not part_file:
+                continue
+            part_uri = self._open_uri_for_path(part_file)
+            if part_uri is None or part_uri == host_uri:
+                continue  # not open (or the host itself) → don't publish
+            targets.setdefault(part_uri, []).append(_part_diagnostic(issue))
+        for part_uri, diags in targets.items():
+            self._notify(
+                "textDocument/publishDiagnostics",
+                {"uri": part_uri, "version": self.store.version(part_uri) or 0,
+                 "diagnostics": diags},
+            )
+        # Clear parts this host used to write to that no longer have findings.
+        for stale in self._host_part_targets.get(host_uri, set()) - set(targets):
+            if stale in self.store:
+                self._notify(
+                    "textDocument/publishDiagnostics",
+                    {"uri": stale, "diagnostics": []},
+                )
+        if targets:
+            self._host_part_targets[host_uri] = set(targets)
+        else:
+            self._host_part_targets.pop(host_uri, None)
+
+    def _mark_hosts_referencing_dirty(self, part_uri: str) -> None:
+        """When a part file opens, re-flush any already-compiled host that has
+        part-internal findings for it, so the freshly-opened part immediately
+        shows the host's in-context diagnostics (regardless of open order)."""
+        for host_uri, (_ver, result) in self._compiled.items():
+            if host_uri == part_uri:
+                continue
+            for issue in result.diagnostics:
+                part_file = getattr(issue, "file", None)
+                if part_file and self._open_uri_for_path(part_file) == part_uri:
+                    self._dirty[host_uri] = self.store.version(host_uri) or 0
+                    break
 
     def _input_ready(self) -> bool:
         """True when another message is *immediately* readable (zero-timeout
@@ -1242,6 +1336,10 @@ class Server:
             return
         self.store.open(uri, doc.get("text", ""), doc.get("version", 0))
         self._dirty[uri] = doc.get("version", 0)
+        # If this newly-opened file is a part referenced by an already-compiled
+        # host, re-flush that host so the part immediately gets its in-context
+        # diagnostics — independent of the order the two files were opened.
+        self._mark_hosts_referencing_dirty(uri)
 
     def _on_did_change(self, req_id: Any, params: dict) -> None:
         doc = params.get("textDocument", {})
@@ -1263,6 +1361,16 @@ class Server:
         self._dirty.pop(uri, None)
         self._compiled.pop(uri, None)
         self._notify("textDocument/publishDiagnostics", {"uri": uri, "diagnostics": []})
+        # Part-diagnostic bookkeeping: forget this URI as a part target of any
+        # host, and — if it was a host — clear the (still-open) parts it fed.
+        for parts in self._host_part_targets.values():
+            parts.discard(uri)
+        for part_uri in self._host_part_targets.pop(uri, set()):
+            if part_uri in self.store and part_uri != uri:
+                self._notify(
+                    "textDocument/publishDiagnostics",
+                    {"uri": part_uri, "diagnostics": []},
+                )
 
     def _on_did_save(self, req_id: Any, params: dict) -> None:
         pass  # nothing to do — we compile on change, not on save

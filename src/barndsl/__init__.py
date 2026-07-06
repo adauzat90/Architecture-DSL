@@ -90,7 +90,7 @@ from .revit import (
     to_revit_model,
 )
 from .fixtures import Fixture, fixtures_fit, fixtures_for, plan_room_fixtures
-from .compare import compare_plans, comparison_text
+from .compare import compare_plans, compare_series, comparison_text, series_text
 from .revitdiff import diff_plans, diff_text
 from .cost import cost_text, estimate_cost
 from .packet import build_packet, save_packet
@@ -160,7 +160,9 @@ __all__ = [
     # resolved-geometry introspection (the geometry pack behind `barndsl inspect`)
     "buildlog_issues",
     "compare_plans",
+    "compare_series",
     "comparison_text",
+    "series_text",
     # revit-diff: drift between a Revit model export and the authored plan
     "diff_plans",
     "diff_text",

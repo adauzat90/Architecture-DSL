@@ -766,3 +766,76 @@ def test_end_to_end_subprocess():
     assert pubs and any(d["code"] == "CEILING" for d in pubs[-1]["params"]["diagnostics"])
     hov = next(r for r in replies if r.get("id") == 2)
     assert hov["result"] is not None
+
+
+# -- part-file diagnostics: mirror a host's part-internal findings onto an
+#    open part file (Phase 8 deferral, now shipped) ---------------------------
+
+
+def _part_scenario(tmp_path):
+    """A part with an odd-proportion office (a part-internal ROOM_PROPORTION) and
+    a host that uses it. Returns (host_uri, part_uri, host_src)."""
+    (tmp_path / "pod.barn").write_text("room lounge: office at 0,0 size 24 x 7\n")
+    host = (
+        'plan "H"\nenvelope 40 x 30\nceiling 9\n'
+        'use "pod.barn" as p at 0,0\n'
+        "room main: living at 0,10 size 20 x 20\n"
+    )
+    (tmp_path / "host.barn").write_text(host)
+    return (
+        path_to_uri(str(tmp_path / "host.barn")),
+        path_to_uri(str(tmp_path / "pod.barn")),
+        host,
+    )
+
+
+def _publishes_to(replies, uri):
+    """Every publishDiagnostics for ``uri``, in order, as diagnostic lists."""
+    return [
+        r["params"]["diagnostics"]
+        for r in replies
+        if r.get("method") == "textDocument/publishDiagnostics"
+        and r["params"]["uri"] == uri
+    ]
+
+
+def test_open_part_gets_host_part_internal_diagnostics_then_cleared(tmp_path):
+    host_uri, part_uri, host = _part_scenario(tmp_path)
+    replies = _run_server([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": part_uri,
+                             "text": (tmp_path / "pod.barn").read_text(), "version": 1}}},
+        {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": host_uri, "text": host, "version": 1}}},
+        {"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {
+            "textDocument": {"uri": part_uri}}},
+        {"jsonrpc": "2.0", "method": "exit"},
+    ])
+
+    part_pubs = _publishes_to(replies, part_uri)
+    # At some point the part received the host's in-context finding, mapped to the
+    # part's OWN first line (0-based line 0), not the host's `use` line.
+    host_derived = [
+        d for pub in part_pubs for d in pub
+        if d["code"] == "ROOM_PROPORTION"
+    ]
+    assert host_derived, "the open part should receive the host's part-internal finding"
+    assert host_derived[0]["range"]["start"]["line"] == 0
+    # The host-facing "in part …" prefix is stripped on the part's own file.
+    assert "in part" not in host_derived[0]["message"]
+    # Closing the part clears its diagnostics (last publish to it is empty).
+    assert part_pubs[-1] == []
+
+
+def test_never_publishes_to_a_part_that_is_not_open(tmp_path):
+    host_uri, part_uri, host = _part_scenario(tmp_path)
+    replies = _run_server([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        # Only the host is open — the part file is never opened by the editor.
+        {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": host_uri, "text": host, "version": 1}}},
+        {"jsonrpc": "2.0", "method": "exit"},
+    ])
+    # Nothing is ever published to the un-opened part URI (the Phase 8 rule).
+    assert _publishes_to(replies, part_uri) == []

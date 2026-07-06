@@ -3155,6 +3155,18 @@ function completionContext(){
     items = HIGHLIGHT.types || [];                                    // room type after `room <id>:`
   } else if (head === 'fixture' && toks.length === 1){
     items = HL_FIX;                                                   // `fixture <kind>`
+  } else if (head === 'fixture' && (toks[1] || '').toLowerCase() === 'counter'){
+    // counter run grammar: `in <room> along N|S|E|W [from <a> to <b>] [depth <d>]`.
+    // (The `in <room>` id slot is already served by the room-id branch above.)
+    const t = toks.map(s => s.toLowerCase());
+    const alongIdx = t.indexOf('along');
+    if (last === 'along'){
+      items = ['N', 'S', 'E', 'W'];                                  // wall after `along`
+    } else if (alongIdx === -1 && t.length >= 4 && t[t.length - 2] === 'in'){
+      items = ['along'];                                             // after `in <room>`
+    } else if (alongIdx >= 0 && t.length === alongIdx + 2){
+      items = ['from'];                                              // after the wall
+    } else { return null; }                                          // from/to/depth: no numeric popup
   } else { return null; }
   if (!items || !items.length) return null;
   return { word: w, items };

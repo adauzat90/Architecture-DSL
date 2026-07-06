@@ -3107,11 +3107,14 @@ def _validate_life_safety(plan: Barndominium, add) -> None:
     for b in bedrooms:
         neighbours = adj.get(b.id, set())
         if not any(n in smoke_rooms for n in neighbours):
+            # sorted() so the suggested room is stable across PYTHONHASHSEED —
+            # a set's iteration order must never leak into the hint text.
+            ordered_nb = sorted(neighbours)
             hall = next(
-                (n for n in neighbours if by_id.get(n) and by_id[n].type is RoomType.HALLWAY),
+                (n for n in ordered_nb if by_id.get(n) and by_id[n].type is RoomType.HALLWAY),
                 None,
             )
-            target = hall or (next(iter(neighbours), None))
+            target = hall or (next(iter(ordered_nb), None))
             where = f" (e.g. `alarm smoke in {target}`)" if target else ""
             add(
                 Issue(
@@ -3289,7 +3292,9 @@ def _dq_bed_privacy(plan: Barndominium, graph, by_id, add) -> None:
             # `_same_suite` filter is a no-op, so behaviour is unchanged.
             public_nb = [
                 n
-                for n in graph.get(room.id, ())
+                # sorted() so the named neighbour is stable — a set's iteration
+                # order varies with PYTHONHASHSEED and must never leak into text.
+                for n in sorted(graph.get(room.id, ()))
                 if n in by_id and by_id[n].type in PUBLIC_TYPES
                 and not _same_suite(plan, room.id, n)
             ]
@@ -3355,8 +3360,10 @@ def _dq_private_passthrough(plan: Barndominium, graph, by_id, add) -> None:
             if suite_exempt and all(by_id[r].type in suite_exempt for r in comp):
                 continue
             for rid in sorted(comp):
+                # sorted() so the named gateway room is stable across
+                # PYTHONHASHSEED (a set's iteration order otherwise leaks in).
                 gate = next(
-                    (n for n in graph.get(rid, ()) if n in gate_ids), None
+                    (n for n in sorted(graph.get(rid, ())) if n in gate_ids), None
                 )
                 if gate is None:
                     continue  # separated, but not directly off this gateway kind
@@ -3667,7 +3674,9 @@ def _dq_bath_oversize(plan: Barndominium, graph, by_id, add) -> None:
     #     it serves — that's a sign the suite is mis-proportioned. Only judged for
     #     a true ensuite (a bath reached only through this bedroom, closets aside).
     for bed in (r for r in plan.rooms if r.type is RoomType.BEDROOM):
-        for n in graph.get(bed.id, ()):
+        # sorted() so multiple ensuites off one bedroom emit in a stable order
+        # (set iteration otherwise varies the issue order with PYTHONHASHSEED).
+        for n in sorted(graph.get(bed.id, ())):
             bath = by_id.get(n)
             if bath is None or bath.type is not RoomType.BATHROOM:
                 continue
@@ -4020,7 +4029,9 @@ def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
     garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
         label = g.type.value
-        for n in graph.get(g.id, ()):
+        # sorted() so multiple bedrooms off one garage emit in a stable order
+        # (set iteration otherwise varies the issue order with PYTHONHASHSEED).
+        for n in sorted(graph.get(g.id, ())):
             if n in by_id and by_id[n].type is RoomType.BEDROOM:
                 add(
                     Issue(

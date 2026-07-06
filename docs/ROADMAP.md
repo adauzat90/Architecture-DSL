@@ -250,16 +250,38 @@ the browser, and an on-screen keyboard-safe editor layout.
 
 ---
 
-## Minor items bucket (S — batch several into any phase)
+## Minor items bucket (S — batch several into any phase) — **SHIPPED**
 
-- Playground autocomplete for the `along`/`from`/`to` counter grammar.
-- Document the Revit round-trip's intentional diagnostic drift (reimport
-  writes explicit offsets, so `DOOR_CENTERED` infos vanish) in AUTHORING.md.
-- `barndsl compare` on three or more files (A→B→C change-order history).
-- Cost overrides discoverability: `barndsl cost --print-keys` emitting the
-  full overridable key table with defaults.
-- LSP: publish diagnostics for open part files too (deferred in Phase 8; only
-  when the editor has the part open — no unsolicited URIs).
+All six items below landed together (each with tests; suite/ruff/mypy green).
+
+- **Set-iteration nondeterminism (bug — fixed).** Some advisory messages named a
+  neighbour picked out of an adjacency `set`, so the text (and, for the
+  multi-emit checks, the issue order) drifted with `PYTHONHASHSEED`. Fixed at
+  five sites in `validation.py` by a deterministic `sorted()` tie-break:
+  `BED_PRIVACY`, `ALARM_HALL`, `PRIVATE_PASSTHROUGH` (named-neighbour text) plus
+  `GARAGE_BEDROOM` and `BATH_OVERSIZE` (emit order). A subprocess test compiles a
+  triggering fixture under `PYTHONHASHSEED=0/1/42` and asserts byte-identical
+  diagnostics (`tests/test_determinism.py`). Only one bundled-example message
+  changed: `examples/composed/parts/master_suite.barn` compiled standalone now
+  suggests `alarm smoke in bath` (was the hash-order `wic`).
+- **Playground autocomplete for the `along`/`from`/`to` counter grammar.** The
+  editor's completion context now knows `fixture counter in <room> along
+  N|S|E|W [from <a> to <b>]` — suggesting `along`, then N/S/E/W, then `from`, and
+  skipping the numeric from/to slots. (The LSP already carried counter
+  completions independently — verified, left as-is.)
+- **Revit round-trip diagnostic-drift note** documented in AUTHORING.md (new
+  "Revit exchange" section): reimport re-derives explicit offsets, so
+  advice-class infos like `DOOR_CENTERED` vanish by design.
+- **`barndsl compare` on 3+ files** (A→B→C change-order history): consecutive
+  pairwise sections plus a head-to-tail summary; JSON is `{steps, overall}` while
+  the two-file call keeps its exact flat shape (no script regression).
+- **`barndsl cost --print-keys`** prints the full overridable unit-cost key table
+  (key, default, unit, one-line meaning) and exits 0 with no plan file; the flag
+  is mentioned in the cost section of AUTHORING.md.
+- **LSP: diagnostics for open part files.** A host's part-internal findings are
+  now mirrored onto the part file's own URI/lines *when that part is open in the
+  editor* — never to an unopened URI (the Phase 8 rule), cleared when the part
+  closes. Works regardless of the order host/part were opened.
 
 ## Explicitly rejected (recorded so they aren't re-litigated)
 

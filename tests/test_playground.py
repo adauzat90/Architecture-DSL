@@ -1381,3 +1381,16 @@ def test_app_has_envelope_fit_assist_wiring():
     for token in ("function offerFitIfStranded(", "fit_envelope",
                   "Fit rooms to new envelope", "function fitEnvelope("):
         assert token in html, token
+
+
+def test_app_autocomplete_knows_the_counter_along_grammar():
+    # The editor's completion context must learn the counter run grammar:
+    # `fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]`.
+    html = render_app(CLEAN)
+    # The dedicated counter branch and each slot it serves.
+    assert "toLowerCase() === 'counter'" in html
+    assert "['N', 'S', 'E', 'W']" in html          # walls after `along`
+    assert "items = ['along'];" in html            # after `in <room>`
+    assert "items = ['from'];" in html             # after the wall
+    # And it explicitly skips the numeric from/to/depth slots (no popup there).
+    assert "from/to/depth" in html

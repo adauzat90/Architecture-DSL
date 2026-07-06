@@ -192,3 +192,87 @@ def test_cli_compare_human_and_json(tmp_path, capsys):
     broken = tmp_path / "broken.barn"
     broken.write_text("not a plan at all\n", encoding="utf-8")
     assert main(["compare", str(fa), str(broken)]) == 1
+
+
+# -- N-way change-order history (A → B → C …) --------------------------------
+
+
+def test_two_file_call_keeps_exact_flat_shape():
+    """No regression for scripts: the two-file result has no `steps`/`overall`."""
+    cmp = _cmp()
+    assert set(cmp) >= {"a", "b", "deltas", "resolved", "introduced", "fewer", "more"}
+    assert "steps" not in cmp and "overall" not in cmp
+
+
+def test_series_steps_are_consecutive_pairwise_shapes():
+    from barndsl import compare_series
+
+    # C grows the bed again — a three-scheme history A → B → C.
+    C = B.replace('plan "B"', 'plan "C"').replace(
+        "room bed: bedroom at 18,0 size 15 x 24",
+        "room bed: bedroom at 18,0 size 18 x 24",
+    ).replace("envelope 33 x 24", "envelope 36 x 24")
+    ra, rb, rc = compile_source(A), compile_source(B), compile_source(C)
+    series = compare_series([ra, rb, rc], ["A", "B", "C"])
+
+    assert set(series) == {"steps", "overall"}
+    assert len(series["steps"]) == 2
+    # Each step is exactly a compare_plans dict, spanning the right pair.
+    assert series["steps"][0]["a"]["name"] == "A" and series["steps"][0]["b"]["name"] == "B"
+    assert series["steps"][1]["a"]["name"] == "B" and series["steps"][1]["b"]["name"] == "C"
+    for step in series["steps"]:
+        assert set(step) >= {"a", "b", "deltas", "resolved", "introduced", "fewer", "more"}
+    # Each step matches a standalone pairwise compare (bit-for-bit).
+    assert series["steps"][0] == compare_plans(ra, rb, ("A", "B"))
+    assert series["steps"][1] == compare_plans(rb, rc, ("B", "C"))
+
+
+def test_series_overall_is_head_to_tail():
+    from barndsl import compare_series
+
+    C = B.replace('plan "B"', 'plan "C"')
+    ra, rb, rc = compile_source(A), compile_source(B), compile_source(C)
+    series = compare_series([ra, rb, rc], ["A", "B", "C"])
+    o = series["overall"]
+    assert o["names"] == ["A", "C"]
+    # Score first/last match the endpoints; delta is last − first.
+    assert o["score"]["first"] == series["steps"][0]["a"]["score"]
+    assert o["score"]["last"] == series["steps"][-1]["b"]["score"]
+    assert o["score"]["delta"] == round(o["score"]["last"] - o["score"]["first"], 1)
+    # Both ends compile cleanly here, so a head-to-tail cost is present.
+    assert set(o["cost"]) == {"first", "last", "delta"}
+    assert o["cost"]["delta"] == round(o["cost"]["last"] - o["cost"]["first"], 2)
+
+
+def test_series_text_has_pairwise_headers_and_summary():
+    from barndsl import compare_series, series_text
+
+    C = B.replace('plan "B"', 'plan "C"')
+    series = compare_series(
+        [compile_source(A), compile_source(B), compile_source(C)], ["A", "B", "C"]
+    )
+    text = series_text(series)
+    assert "=== A → B ===" in text
+    assert "=== B → C ===" in text
+    assert "Overall A → C:" in text
+
+
+def test_cli_three_files_emits_steps_json(tmp_path, capsys):
+    fa, fb, fc = (tmp_path / n for n in ("a.barn", "b.barn", "c.barn"))
+    fa.write_text(A, encoding="utf-8")
+    fb.write_text(B, encoding="utf-8")
+    fc.write_text(B.replace('plan "B"', 'plan "C"'), encoding="utf-8")
+    rc = main(["compare", str(fa), str(fb), str(fc), "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert set(out) == {"steps", "overall"}
+    assert len(out["steps"]) == 2
+
+
+def test_cli_two_files_json_stays_flat(tmp_path, capsys):
+    fa, fb = tmp_path / "a.barn", tmp_path / "b.barn"
+    fa.write_text(A, encoding="utf-8")
+    fb.write_text(B, encoding="utf-8")
+    assert main(["compare", str(fa), str(fb), "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "steps" not in out and "a" in out and "b" in out
