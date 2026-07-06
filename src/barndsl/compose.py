@@ -47,9 +47,13 @@ from .elements import (
 from .geometry import shared_edge
 from .validation import Issue, Severity
 
-#: Depth-1 in v1: parts can't ``use``. Instance count and file-size guards keep a
-#: pathological plan from turning into a resource problem (each is a teaching
-#: diagnostic, never a crash — see §8).
+#: Nesting depth (Phase 20): the host is depth 0, a part it ``use``s is depth 1,
+#: a part *that* part uses is depth 2. A ``use`` that would reach depth 3 is the
+#: ``USE_NESTED`` error ("deeper than 2"). Instance count and file-size guards keep
+#: a pathological plan from turning into a resource problem (each is a teaching
+#: diagnostic, never a crash — see §8). The instance cap is **global across all
+#: depths** (a shared budget), so nesting can't multiply past it.
+MAX_USE_DEPTH = 2
 MAX_INSTANCES = 64
 MAX_PART_BYTES = 256 * 1024
 
@@ -106,11 +110,50 @@ class Composition:
     needs to reclassify the composed plan's diagnostics (see :func:`compose_uses`)."""
 
     #: Stamped room id -> ``(local_id, Instance)`` (``local_id`` is the id inside
-    #: the part, without the ``<alias>.`` prefix).
+    #: the part, without the ``<alias>.`` prefix — one level only, so a nested
+    #: stamped room ``outer.inner.room`` maps to ``inner.room``).
     stamped_map: dict[str, tuple[str, Instance]] = field(default_factory=dict)
     #: Resolved part path -> the set of ``(code, local_id)`` its fragment compile
     #: reported — the keys a composed stamped-room diagnostic is deduped against.
     part_keys: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
+
+
+@dataclass
+class _ComposeCtx:
+    """Recursion state threaded through a (possibly nested) composition — the
+    sandbox root, the current depth, the cycle stack, and the *shared* part memo +
+    instance budget (Phase 20). Built once at the top level; each nested part
+    compile gets a child context (:meth:`descend`)."""
+
+    #: The sandbox root — the top-level (host) file's directory, realpath'd. Every
+    #: resolved part, at every depth, must stay under this after realpath. ``None``
+    #: for a source with no home directory (any ``use`` is ``USE_UNRESOLVED``).
+    root: str | None
+    #: Depth of the file whose ``use``s are being composed (host = 0).
+    depth: int
+    #: Realpaths of every ancestor **including the current file** — a resolved
+    #: candidate already in here is a ``USE_CYCLE`` (self-use or mutual use).
+    stack: tuple[str, ...]
+    #: Shared across the whole compile tree, so a part reused at several points (or
+    #: depths) fragment-compiles once. Keyed ``(path, sorted-param-items)``.
+    memo: dict[tuple, PartComponent]
+    #: Single-element mutable [remaining instances] — decremented on every stamp at
+    #: every depth, so the cap is global.
+    budget: list[int]
+
+    @classmethod
+    def top_level(cls, base_dir: str | None, self_path: str | None) -> "_ComposeCtx":
+        root = os.path.realpath(base_dir) if base_dir is not None else None
+        stack = (os.path.realpath(self_path),) if self_path else ()
+        return cls(root=root, depth=0, stack=stack, memo={}, budget=[MAX_INSTANCES])
+
+    def descend(self, child_path: str) -> "_ComposeCtx":
+        """The context a nested part compiles under — one deeper, with the child on
+        the cycle stack; root, memo and budget are shared by reference."""
+        return _ComposeCtx(
+            root=self.root, depth=self.depth + 1,
+            stack=self.stack + (child_path,), memo=self.memo, budget=self.budget,
+        )
 
 
 # --- fragment-compile counter (memoization is observable in tests) ------------
@@ -163,14 +206,22 @@ def normalize_part_origin(plan: Barndominium) -> tuple[float, float]:
 
 
 def _resolve(relpath: str, base_dir: str | None, root: str | None) -> tuple[str | None, str | None]:
-    """Resolve ``relpath`` against the sandbox ``root``. Returns
-    ``(resolved_path, None)`` or ``(None, reason)`` where ``reason`` is one of
-    ``no_base_dir`` / ``absolute`` / ``escape`` / ``missing`` / ``too_big``."""
+    """Resolve ``relpath`` against the **using file's** directory ``base_dir``,
+    then require the result to stay under the sandbox ``root`` (the top-level host
+    directory). Returns ``(resolved_path, None)`` or ``(None, reason)`` where
+    ``reason`` is one of ``no_base_dir`` / ``absolute`` / ``escape`` / ``missing`` /
+    ``too_big``.
+
+    A nested ``use`` (Phase 20) resolves relative to the part that wrote it
+    (``base_dir``), exactly as the host's ``use`` resolves relative to the host —
+    but the containment check is always against the host ``root``, so a nested
+    ``../`` (or a symlink) that leaves the host tree is an ``escape``, never a read
+    outside the sandbox."""
     if base_dir is None or root is None:
         return None, "no_base_dir"
     if not relpath or os.path.isabs(relpath):
         return None, "absolute"
-    candidate = os.path.realpath(os.path.join(root, relpath))
+    candidate = os.path.realpath(os.path.join(base_dir, relpath))
     if candidate != root and not candidate.startswith(root + os.sep):
         return None, "escape"
     if not os.path.isfile(candidate):
@@ -233,27 +284,43 @@ def _unresolved(relpath: str, reason: str, use: UseSpec) -> Issue:
 # --- the loader ---------------------------------------------------------------
 
 
+def _memo_key(path: str, params: dict[str, float]) -> tuple:
+    """The per-instance memo key (Phase 20): a parametric part's compiled result
+    depends on its param values, so key the memo on ``(path, sorted items)`` — two
+    instances with the same params share a compile, different params recompile."""
+    return (path, tuple(sorted(params.items())))
+
+
 def load_part(
     use: UseSpec,
     base_dir: str | None,
-    root: str | None,
-    memo: dict[str, PartComponent],
+    ctx: "_ComposeCtx",
     profile: object | None,
 ) -> tuple[PartComponent | None, Issue | None]:
-    """Resolve + fragment-compile the part named by ``use`` (memoized).
+    """Resolve + fragment-compile the part named by ``use`` (memoized per
+    ``(path, params)``).
 
-    Returns ``(component, None)`` on success or ``(None, issue)`` for an
-    unresolvable path (a ``USE_UNRESOLVED`` anchored to the ``use`` line). The
-    part is compiled at most once per resolved path per top-level compile.
+    Returns ``(component, None)`` on success, ``(None, issue)`` for an unresolvable
+    path / a cycle / an over-deep nesting (each anchored to the ``use`` line). The
+    part is compiled at most once per ``(resolved path, param values)`` per
+    top-level compile; its own nested ``use``s are composed under a child context.
     """
     from .compiler import compile_source
 
-    candidate, reason = _resolve(use.relpath, base_dir, root)
+    candidate, reason = _resolve(use.relpath, base_dir, ctx.root)
     if reason is not None:
         return None, _unresolved(use.relpath, reason, use)
     assert candidate is not None
-    if candidate in memo:
-        return memo[candidate], None
+    # Cycle (self-use or mutual use) before depth, so a→b→a reads as USE_CYCLE
+    # rather than a depth overflow. The candidate resolves (it exists) and is
+    # already an ancestor on the stack.
+    if candidate in ctx.stack:
+        return None, _cycle_issue(use, ctx.stack, candidate)
+    if ctx.depth + 1 > MAX_USE_DEPTH:
+        return None, _nested_issue(use)
+    key = _memo_key(candidate, use.params)
+    if key in ctx.memo:
+        return ctx.memo[key], None
     global _fragment_compiles
     try:
         with open(candidate, encoding="utf-8") as fh:
@@ -264,6 +331,7 @@ def load_part(
     res = compile_source(
         text, name=use.relpath, fragment=True,
         base_dir=os.path.dirname(candidate), profile=profile,  # type: ignore[arg-type]
+        params=use.params, compose_ctx=ctx.descend(candidate),
     )
     plan = res.plan
     width = length = 0.0
@@ -275,8 +343,36 @@ def load_part(
         candidate, use.relpath, plan if plan is not None else Barndominium(name=use.relpath),
         list(res.diagnostics), width, length, has_errors,
     )
-    memo[candidate] = component
+    ctx.memo[key] = component
     return component, None
+
+
+def _cycle_issue(use: UseSpec, stack: tuple[str, ...], candidate: str) -> Issue:
+    """A clean ``USE_CYCLE`` naming the cycle path (files, not full paths) — never a
+    hang or a recursion crash."""
+    names = [os.path.basename(p) for p in stack]
+    # The cycle is the tail of the stack from the first appearance of the
+    # candidate, closed back to it.
+    start = stack.index(candidate)
+    chain = " → ".join(names[start:] + [os.path.basename(candidate)])
+    return Issue(
+        Severity.ERROR, "USE_CYCLE",
+        f"part cycle: {chain}. A part can't `use` itself or an ancestor.",
+        line=use.line, col=use.col, end_col=use.end_col,
+        hint="Break the loop — a part library is a tree, not a ring.",
+    )
+
+
+def _nested_issue(use: UseSpec) -> Issue:
+    """A ``USE_NESTED`` error for a ``use`` nested deeper than depth 2 (Phase 20)."""
+    return Issue(
+        Severity.ERROR, "USE_NESTED",
+        f'use "{use.relpath}" nests deeper than 2 — a part used by a part can\'t '
+        "itself `use` another part.",
+        line=use.line, col=use.col, end_col=use.end_col,
+        hint="Composition is depth-2: host → part → part. Flatten the deepest "
+        "level, or `use` it one level up.",
+    )
 
 
 # --- the transform (§5 remap table) -------------------------------------------
@@ -543,6 +639,19 @@ def stamp_instance(plan: Barndominium, component: PartComponent, use: UseSpec) -
                                   width=nw, length=nl)
         plan.porches.append(npr)
         objects.append(npr)
+    for st in src.stairs:
+        # A multi-level part (Phase 20) may carry a `stair` connecting its own
+        # `level 1` rooms to level 0. The footprint transforms like a room; the
+        # from/to levels lift by the instance level so validation (connectivity,
+        # egress, loft) sees the FINAL levels on the composed plan.
+        stx, sty, stw, stl = xf.rect(st.x, st.y, st.width, st.length, pw, pl)
+        nst = dataclasses.replace(
+            st, id=_pref(alias, st.id), x=stx + dx, y=sty + dy, width=stw, length=stl,
+            from_level=st.from_level + lvl, to_level=st.to_level + lvl,
+            line=None, col=None, end_col=None,
+        )
+        plan.stairs.append(nst)
+        objects.append(nst)
     for ws in src.wall_specs:
         nws = dataclasses.replace(ws, room_a=_pref(alias, ws.room_a),
                                   room_b=_pref(alias, ws.room_b), line=None, col=None, end_col=None)
@@ -661,19 +770,53 @@ def _xform_fixture(xf: _Xform, f: PlacedFixture, alias: str, dims: dict) -> Plac
 # --- the entry point ----------------------------------------------------------
 
 
-def _prefix_part_internal(iss: Issue, component: PartComponent, use: UseSpec) -> Issue:
-    """A copy of a part-internal diagnostic, tagged with the part file and anchored
-    (in the host buffer) to the first ``use`` line that pulls the part in."""
+def _prefix_part_internal(
+    iss: Issue, component: PartComponent, use: UseSpec, prefix_room: bool
+) -> Issue:
+    """A copy of a part-internal diagnostic, chained with the part file and
+    re-anchored (in the *current* buffer) to the ``use`` line that pulls the part
+    in.
+
+    Nesting (Phase 20) composes cleanly:
+
+    * **Message** always prepends ``in part <relpath>:<line> — …``, so a finding
+      that already came from a deeper part accumulates a readable chain
+      (``in part p1.barn:5 — in part p2.barn:3 — <original>``).
+    * **file/part** are *preserved* if already set — the **innermost** part (where
+      the finding actually lives) keeps the attribution; only a finding straight
+      from this part (``file is None``) is tagged with this part.
+    * **room** is re-prefixed with the alias when ``prefix_room`` (i.e. this part
+      is itself being composed into a parent), so a part's stored diagnostics
+      carry that-part-frame ids and the parent's one-level dedup lines up.
+    """
     part_line = iss.line
     where = f"{component.relpath}:{part_line}" if part_line else component.relpath
+    new_room = _pref(use.alias, iss.room) if (prefix_room and iss.room) else iss.room
     return dataclasses.replace(
         iss,
         message=f"in part {where} — {iss.message}",
-        file=component.path,
-        part=component.relpath,
+        file=iss.file if iss.file is not None else component.path,
+        part=iss.part if iss.part is not None else component.relpath,
+        room=new_room,
         line=use.line,
         col=use.col,
         end_col=use.end_col,
+    )
+
+
+def _param_undeclared(use: UseSpec, key: str, declared: dict[str, float]) -> Issue:
+    """A ``PARAM_UNDECLARED`` for a ``with`` key the part doesn't declare, anchored
+    to the ``use`` line (Phase 20)."""
+    from .compiler import _did_you_mean
+
+    known = ", ".join(declared) if declared else "(none)"
+    return Issue(
+        Severity.ERROR, "PARAM_UNDECLARED",
+        f"{_did_you_mean(key, tuple(declared))}"
+        f"part \"{use.relpath}\" declares no param '{key}'.",
+        line=use.line, col=use.col, end_col=use.end_col,
+        hint=f"The part's params are: {known}. Add `param {key} = <number>` to the "
+        "part, or drop it from `with`.",
     )
 
 
@@ -682,6 +825,8 @@ def compose_uses(
     base_dir: str | None,
     diagnostics: list[Issue],
     profile: object | None = None,
+    *,
+    ctx: "_ComposeCtx | None" = None,
 ) -> Composition:
     """Resolve and stamp every ``use`` on ``plan`` (in place), appending
     resolution errors and (deduped) part-internal diagnostics to ``diagnostics``.
@@ -689,13 +834,19 @@ def compose_uses(
     Called by :func:`barndsl.compiler.compile_source` **before** validation, so the
     composed plan is validated as one building. Returns the :class:`Composition`
     the caller uses to reclassify the composed plan's stamped-room diagnostics.
+
+    ``ctx`` (Phase 20) carries the nested-composition recursion state (sandbox
+    root, depth, cycle stack, shared memo + instance budget); ``None`` builds a
+    fresh top-level context from ``base_dir``. A part being composed (``depth ≥
+    1``) folds its parts' findings with the alias re-prefixed onto the room, so the
+    parent's one-level dedup composes across depths.
     """
-    root = os.path.realpath(base_dir) if base_dir is not None else None
-    memo: dict[str, PartComponent] = {}
+    if ctx is None:
+        ctx = _ComposeCtx.top_level(base_dir, None)
+    prefix_room = ctx.depth >= 1
     comp = Composition()
     aliases_seen: set[str] = set()
-    reported_parts: set[str] = set()
-    total = 0
+    reported_parts: set[tuple] = set()
 
     for use in plan.uses:
         if use.alias in aliases_seen:
@@ -708,21 +859,31 @@ def compose_uses(
             continue
         aliases_seen.add(use.alias)
 
-        component, err = load_part(use, base_dir, root, memo, profile)
+        component, err = load_part(use, base_dir, ctx, profile)
         if err is not None:
             diagnostics.append(err)
             continue
         assert component is not None
 
-        # Part-internal diagnostics — reported once per part file, anchored to the
-        # (first) use line, tagged with the part path.
-        if component.path not in reported_parts:
-            reported_parts.add(component.path)
-            keys: set[tuple[str, str]] = set()
+        # Use-site params the part doesn't declare (PARAM_UNDECLARED) — anchored to
+        # the use line, one per unknown key. The unknown key never resolves inside
+        # the part, so the stamp is still valid; this is a teaching error.
+        for key in use.params:
+            if key not in component.plan.params:
+                diagnostics.append(_param_undeclared(use, key, component.plan.params))
+
+        # Part-internal diagnostics — reported once per (part, param-values),
+        # anchored to the (first) use line, tagged with the part path. Keyed by
+        # param values too, so two instances with different params each surface
+        # their own param-dependent findings.
+        report_key = _memo_key(component.path, use.params)
+        keys = comp.part_keys.setdefault(component.path, set())
+        for iss in component.diagnostics:
+            keys.add((iss.code, iss.room or ""))
+        if report_key not in reported_parts:
+            reported_parts.add(report_key)
             for iss in component.diagnostics:
-                keys.add((iss.code, iss.room or ""))
-                diagnostics.append(_prefix_part_internal(iss, component, use))
-            comp.part_keys[component.path] = keys
+                diagnostics.append(_prefix_part_internal(iss, component, use, prefix_room))
 
         if component.has_errors:
             diagnostics.append(Issue(
@@ -734,9 +895,10 @@ def compose_uses(
             ))
             continue
 
-        if total >= MAX_INSTANCES:
+        if ctx.budget[0] <= 0:
             diagnostics.append(_unresolved(use.relpath, "cap", use))
             continue
+        ctx.budget[0] -= 1
 
         inst = stamp_instance(plan, component, use)
         plan.instances.append(inst)
@@ -744,7 +906,6 @@ def compose_uses(
             plan.stamped_rooms.add(rid)
             local = rid[len(use.alias) + 1:]
             comp.stamped_map[rid] = (local, inst)
-        total += 1
 
     return comp
 
@@ -804,6 +965,38 @@ def scan_parts(base_dir: str | None) -> list[dict]:
             if len(out) >= MAX_LISTED_PARTS:
                 return out
     return out
+
+
+def scan_part_params(base_dir: str | None, relpath: str) -> list[str]:
+    """The declared ``param`` names of the part at ``relpath`` (Phase 20), for the
+    ``use ... with `` completion. Cheap and sandboxed: resolve under ``base_dir``
+    (no escape) and *sniff* the ``param`` lines — never a compile, never a read
+    outside the served folder. ``[]`` on any resolution/read failure."""
+    if not base_dir or not relpath:
+        return []
+    root = os.path.realpath(base_dir)
+    candidate, reason = _resolve(relpath, base_dir, root)
+    if reason is not None or candidate is None:
+        return []
+    try:
+        with open(candidate, encoding="utf-8") as fh:
+            text = fh.read(MAX_PART_SNIFF_BYTES)
+    except OSError:
+        return []
+    names: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        head = line.split(None, 1)[0].lower()
+        if head == "plan":
+            return []  # a whole building, not a part
+        if head == "param":
+            rest = line[len("param"):].strip()
+            name = rest.split("=", 1)[0].strip().split()[0] if "=" in rest else ""
+            if name and name not in names:
+                names.append(name)
+    return names
 
 
 def _sniff_part(path: str) -> tuple[str, int] | None:

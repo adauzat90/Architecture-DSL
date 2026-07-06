@@ -198,25 +198,46 @@ everywhere. AUTHORING.md updated.
 
 ---
 
-## Phase 20 — Composition v2 (L)
+## Phase 20 — Composition v2 (L) — **SHIPPED** (3 of 4; `extends` NO-GO)
 
 **Who asked:** the cross-file composition design doc's Futures section
 (docs/design/cross-file-composition.md) — requested capabilities that were
 consciously cut from 7a/7b.
 
-**Scope (pick subset when scheduled)**
-- **Parametric parts:** `use "parts/bath.barn" as b at 0,0 with width=8` —
-  parts declare `param <name> = <default>` and reference params in sizes;
-  stamping substitutes then compiles the fragment.
-- **Nested `use`** (depth 2 with the same sandbox + cycle detection), enabling
-  part libraries composed of parts.
-- **Multi-level parts** (a part carrying `level 1` rooms stamps with its
-  levels intact, offset by the instance's `level n`).
-- **Scheme inheritance:** `plan ... extends "base.barn"` — the host starts
-  from the base's statements and overrides by id.
+**Shipped** — the three required features, each keeping every 7a/7b guarantee
+(resolver sandbox: relative-only, realpath containment under the *host* root at
+every depth, 256 KiB / 64-instance caps; deterministic `alias.id` stamping;
+part-internal diagnostic attribution; read-only stamped members; emit round-trip
+fixpoints; mirror/rotate):
 
-**Acceptance:** per-feature; each keeps the resolver sandbox guarantees
-(relative-only, realpath containment, byte caps) and emit round-trip.
+- **Parametric parts:** `param <name> = <number>` in a part (numbers only —
+  decimal feet or ft-in; mandatory default) + `use ... with k=v[, k=v…]` on the
+  host. Resolved at the **token level** in fragment mode (`_Cursor.number` reads a
+  `param_env` = defaults ⊕ use-site overrides; no textual substitution). Memo keyed
+  `(path, sorted params)`. Diagnostics: `PARAM_UNKNOWN` / `PARAM_UNDECLARED`
+  (did-you-mean) / `PARAM_DUP` / `PARAM_IN_PLAN`.
+- **Nested `use` (depth 2)** — nested paths resolve relative to the using part's
+  dir, containment always against the host root; `USE_NESTED` at depth 3, clean
+  `USE_CYCLE` for self/mutual use (names the cycle, no hang); id-prefixing and
+  mirror/rotate transforms compose; one shared instance budget across depths;
+  diagnostics chain through two levels with innermost `file` attribution.
+- **Multi-level parts** — a part may carry `level 1` rooms + a `stair`; stamping
+  offsets every member's level by the instance `level n`, and whole-building
+  cross-level checks (stair rise/run, `ALARM_LEVEL`, `LOFT_GUARD`, garage
+  separation) run on the composed plan so they see the final levels.
+
+Showcase: `examples/composed/cedar_ridge_v2.barn` (parametric bath + nested guest
+wing + two-level shop/loft — 0 errors, 0 warnings, 6 accepted deviations). The
+existing `cedar_ridge.barn` is unchanged. Tests in `tests/test_compose_v2.py`
+(+ updates to `tests/test_compose.py`). Full design in the composition doc §12.
+
+**`extends` — NO-GO (deferred).** `plan "X" extends "base.barn"` was evaluated and
+deliberately skipped: the "override by id/kind" rule is only clean for id'd rooms
+and singletons — openings/fixtures/devices have no stable identity to merge on — and
+a correct emit round-trip needs new base-vs-host provenance tracking. It deserves
+its own design pass rather than a rushed one at the end of this phase. Rationale +
+an append-only design sketch (reusing the Phase 20 `_ComposeCtx` + nested-diagnostic
+chaining) are in the composition doc §13.
 
 ---
 

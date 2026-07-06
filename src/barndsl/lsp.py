@@ -632,6 +632,24 @@ def completions(
             for p in scan_parts(base_dir)
         ]
 
+    # After `with ` on a `use` line (Phase 20): complete the referenced part's
+    # declared param names as `name=`. Cheap — the relpath is right there in the
+    # line and the part is sniffed (no compile, no extra round-trip); the same
+    # sandbox as the parts browser.
+    sline = before.lstrip()
+    if sline.lower().startswith("use ") and re.search(r"\bwith\b", sline, re.I):
+        mrel = re.search(r'use\s+"([^"]*)"', sline, re.I)
+        if mrel is not None:
+            from .compose import scan_part_params
+
+            already = set(re.findall(r"(\w+)\s*=", sline.split(" with ", 1)[-1]))
+            return [
+                _item(f"{p}=", _KIND_VALUE, "param")
+                for p in scan_part_params(base_dir, mrel.group(1))
+                if p not in already
+            ]
+        return []
+
     _word, wstart, _wend = word_at(src_line, char)
     prefix_text = src_line[:wstart]
     toks = prefix_text.split()

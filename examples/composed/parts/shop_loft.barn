@@ -1,0 +1,15 @@
+# shop_loft — a MULTI-LEVEL part (Phase 20): a ground-floor shop with a storage
+# loft above it, joined by a stair. The part carries its own `level 1` room, a
+# `stair`, loft + shop windows, and a loft alarm; the host `use ... level n`
+# offsets them all, and validation sees the FINAL levels on the composed plan
+# (loft guard, stair rise, per-storey alarm, garage separation all fire against
+# the real levels). Place the south + east walls exterior (they carry the glass).
+param loft_depth = 16
+room shop: shop at 0,0 size 24 x 24
+room loft: loft at 0,0 size 24 x loft_depth level 1
+stair st at 19,0 size 4 x 15 from 0 to 1
+window shop south width 10 offset 4
+window shop east width 10 offset 8
+window loft south width 9 offset 3
+window loft east width 9 offset 4
+alarm smoke in loft

@@ -58,7 +58,7 @@ HOST_ONLY = [
     "program 2 bed", "require adjacent a b", "site 100 x 100",
     "setback front 20", "building at 0,0", "street south", "orientation 90",
     "roof gable", "overhang 1", 'finish siding "metal"', "frame bay 12",
-    "electrical", "stair s at 0,0 size 4 x 8 from 0 to 1",
+    "electrical",
 ]
 
 
@@ -68,9 +68,18 @@ def test_host_only_statement_rejected_in_a_part(stmt):
     assert "PART_HOST_STMT" in _codes(r), r.summary()
 
 
-def test_use_in_a_part_is_nested_error():
+def test_stair_is_legal_in_a_part_now():
+    # Phase 20 — multi-level parts: a part may carry a stair (was PART_HOST_STMT).
+    r = compile_source(BATH + "stair s at 0,0 size 4 x 8 from 0 to 1\n", fragment=True)
+    assert "PART_HOST_STMT" not in _codes(r), r.summary()
+
+
+def test_use_in_a_part_is_allowed_now(tmp_path):
+    # Phase 20 — a part may `use` a nested part (depth 1). With no base_dir it's
+    # merely unresolvable, not the old USE_NESTED (which now means depth > 2).
     r = compile_source(BATH + 'use "x.barn" as z at 0,0\n', fragment=True)
-    assert "USE_NESTED" in _codes(r)
+    assert "USE_NESTED" not in _codes(r)
+    assert "USE_UNRESOLVED" in _codes(r)
 
 
 def test_part_with_no_rooms_is_empty():
@@ -375,13 +384,16 @@ PART_FILES = sorted(PARTS.glob("*.barn"))
 
 def test_parts_library_exists():
     assert {p.stem for p in PART_FILES} == {
-        "bath_core", "master_suite", "kitchen_l", "laundry_core"
+        "bath_core", "master_suite", "kitchen_l", "laundry_core",
+        # Phase 20 showcase parts (parametric / nested / multi-level):
+        "flex_bath", "guest_wing", "shop_loft",
     }
 
 
 @pytest.mark.parametrize("path", PART_FILES, ids=lambda p: p.stem)
 def test_part_compiles_clean_in_fragment_mode(path):
-    r = compile_source(path.read_text(encoding="utf-8"), fragment=True)
+    # base_dir lets a part's own nested `use` resolve (Phase 20 — guest_wing).
+    r = compile_source(path.read_text(encoding="utf-8"), fragment=True, base_dir=str(PARTS))
     active = [d for d in r.diagnostics if not d.accepted]
     assert not active, r.report(path.name)
 

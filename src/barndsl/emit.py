@@ -188,30 +188,45 @@ def _porch_line(p: object) -> str:
     )
 
 
-def emit_dsl(plan: Barndominium, flatten: bool = False) -> str:
+def emit_dsl(plan: Barndominium, flatten: bool = False, fragment: bool = False) -> str:
     """Return canonical DSL source for ``plan``.
 
     Cross-file composition (see :mod:`barndsl.compose`) round-trips two ways:
 
     * default (``flatten=False``) — emit each ``use`` line **verbatim**
-      (path/alias/at/level) and *skip* the elements it stamped, so the composed
-      plan is described by reference (host text + ``use`` lines).
+      (path/alias/at/level/mirror/rotate/with) and *skip* the elements it stamped,
+      so the composed plan is described by reference (host text + ``use`` lines).
     * ``flatten=True`` — drop the ``use`` lines and emit the stamped elements as
       literal host statements (dotted ids kept), inlining every part. Recompiling
       the flattened form reproduces the same composed plan.
+
+    ``fragment=True`` (Phase 20) emits a **part** file: no ``plan``/``envelope``
+    header, its ``param`` declarations first, then its statements — the round-trip
+    form for a part authored on disk (used by ``fmt``-style tooling and the
+    showcase's emit fixpoint).
     """
     stamped = set() if flatten else {id(o) for inst in plan.instances for o in inst.objects}
 
     def keep(objs: list) -> list:
         return objs if flatten else [o for o in objs if id(o) not in stamped]
 
-    out: list[str] = [f"plan {_q(plan.name)}"]
-    out.append(f"envelope {_n(plan.envelope_width)} x {_n(plan.envelope_length)}")
+    out: list[str] = []
+    if fragment:
+        # A part has no plan/envelope; its params lead (Phase 20).
+        for pname, pval in getattr(plan, "params", {}).items():
+            out.append(f"param {pname} = {_n(pval)}")
+    else:
+        out.append(f"plan {_q(plan.name)}")
+        out.append(f"envelope {_n(plan.envelope_width)} x {_n(plan.envelope_length)}")
     for wing in plan.wings:
         out.append(
             f"wing {_n(wing.width)} x {_n(wing.length)} at {_n(wing.x)},{_n(wing.y)}"
         )
-    out.append(f"ceiling {_n(plan.ceiling_height)}")
+    if not fragment:
+        # `ceiling` is host-only (a part borrows the host's); every other header
+        # line below is already guarded by a field a part never sets, so this is
+        # the only unconditional one to skip in fragment mode.
+        out.append(f"ceiling {_n(plan.ceiling_height)}")
     if abs(plan.floor_depth - FLOOR_ASSEMBLY_DEPTH) > 1e-9:
         out.append(f"floor {_n(plan.floor_depth)}")
     if plan.accessible:
@@ -338,6 +353,13 @@ def emit_dsl(plan: Barndominium, flatten: bool = False) -> str:
                 line += f" mirror {u.mirror}"
             if getattr(u, "rotate", 0):
                 line += f" rotate {u.rotate}"
+            uparams = getattr(u, "params", None)
+            if uparams:
+                # Emit exactly the pairs the author passed, in source order (Phase
+                # 20). ft-in values canonicalize to decimal feet; recompiling +
+                # re-emitting is a fixpoint.
+                pairs = ", ".join(f"{k}={_n(v)}" for k, v in uparams.items())
+                line += f" with {pairs}"
             out.append(line)
 
     if keep(plan.rooms):
@@ -430,9 +452,9 @@ def emit_dsl(plan: Barndominium, flatten: bool = False) -> str:
                 f"size {_n(p.width)} x {_n(p.length)} {tag}"
             )
 
-    if plan.stairs:
+    if keep(plan.stairs):
         out.append("")
-        for s in plan.stairs:
+        for s in keep(plan.stairs):
             out.append(
                 f"stair {s.id} at {_n(s.x)},{_n(s.y)} "
                 f"size {_n(s.width)} x {_n(s.length)} from {s.from_level} to {s.to_level}"

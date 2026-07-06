@@ -113,10 +113,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two `use` statements share an `as <alias>`. Every id inside a part is "
            "stamped `<alias>.<id>`, so aliases must be unique across the plan — "
            "give each instance its own (`m`, `m2`, `bath_1`, ...)."),
-        _c("USE_NESTED", E, "Nested use in a part",
-           "A part file contains its own `use` statement. Parts can't compose other "
-           "parts in v1 (`use` depth is 1) — flatten the inner part into this one, "
-           "or `use` both from the host."),
+        _c("USE_NESTED", E, "Use nested deeper than 2",
+           "A part used by a part tries to `use` a third part. Composition is "
+           "depth-2 (host → part → part); a `use` reaching depth 3 is refused. "
+           "Flatten the deepest level, or `use` it one level up."),
+        _c("USE_CYCLE", E, "Part cycle",
+           "A part `use`s itself, or two parts `use` each other (a → b → a). A part "
+           "library is a tree, not a ring — break the loop. The cycle path is named "
+           "in the message; the loader stops cleanly instead of recursing forever."),
         _c("USE_PART_INVALID", E, "Part fails to compile",
            "A used part file doesn't compile cleanly on its own (in fragment mode): "
            "it has one or more errors of its own. The part-internal diagnostics are "
@@ -125,8 +129,24 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A part file uses a statement that describes a whole building, not a "
            "reusable block — `envelope`, `plan`, `wing`, `ceiling`, `program`, "
            "`require`, `site`, `setback`, `building`, `street`, `orientation`, "
-           "`roof`, `overhang`, `finish`, `frame`, `electrical`, `use` or `stair`. "
-           "A part borrows the host's; size it by its rooms and drop the statement."),
+           "`roof`, `overhang`, `finish`, `frame`, or `electrical`. A part borrows "
+           "the host's; size it by its rooms and drop the statement. (`use` and "
+           "`stair` ARE allowed in a part — Phase 20 nested + multi-level parts.)"),
+        _c("PARAM_UNKNOWN", E, "Unknown param name",
+           "A bare name stands where a number is expected inside a part, but it "
+           "isn't a declared `param`. Declare it (`param <name> = <number>`), or use "
+           "a number. Params are numbers only in v1 — no arithmetic."),
+        _c("PARAM_UNDECLARED", E, "Use sets an undeclared param",
+           "A `use ... with <name>=<value>` names a param the part doesn't declare. "
+           "Add `param <name> = <default>` to the part, or drop the pair — the "
+           "part's declared params are listed in the message."),
+        _c("PARAM_DUP", E, "Param declared or set twice",
+           "A `param <name>` is declared more than once in a part, or a `with` "
+           "clause sets the same param twice. Declare/set each param once."),
+        _c("PARAM_IN_PLAN", E, "param in a whole plan",
+           "`param` declares a *part* parameter — a whole plan (a `.barn` with a "
+           "`plan` header) has no use-site to pass values from. Move `param` into a "
+           "part file; the host passes values with `use ... with name=value`."),
         _c("PART_ORIGIN", I, "Part origin normalized",
            "A part's south-west-most corner wasn't at 0,0, so the loader shifted "
            "the whole part to the origin before stamping (the `at` on the `use` "

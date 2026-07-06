@@ -131,7 +131,7 @@ _STATEMENT_KEYWORDS = (
     "street", "overhang", "climate", "orientation", "finish", "site", "setback",
     "roof", "note", "program", "require", "room", "wall", "suite", "zone", "door",
     "open", "entry", "window", "porch", "stair", "frame", "fixture", "alarm",
-    "drive", "walk", "well", "septic", "service", "grade",
+    "drive", "walk", "well", "septic", "service", "grade", "param",
 )
 
 #: Secondary keywords — placement anchors, opening modifiers and option words that
@@ -148,6 +148,7 @@ _MODIFIER_KEYWORDS = (
     "east-of", "west-of", "north-of", "south-of",
     "right-of", "left-of", "above-of", "below-of",
     "gravel", "concrete", "asphalt", "gas", "electric", "water", "field",
+    "with", "mirror", "rotate",
 )
 
 

@@ -90,19 +90,20 @@ _KEYWORDS = (
     "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
     "roof", "orientation", "finish", "accessible", "site", "setback", "building",
     "suite", "zone", "electrical", "street", "overhang", "climate", "fixture",
-    "outlet", "switch", "light", "alarm", "use",
+    "outlet", "switch", "light", "alarm", "use", "param",
     "drive", "walk", "well", "septic", "service", "grade",
 )
 
 #: Statements that describe a whole *building*, not a reusable block — illegal
 #: inside a part file (fragment mode) → ``PART_HOST_STMT``. A part borrows the
-#: host's. ``use`` is host-only too but gets its own ``USE_NESTED`` code (no
-#: nesting in v1); ``stair`` is deferred with multi-level parts. See the design
-#: doc §3.1.
+#: host's. ``use`` is legal in a part (Phase 20 — nested composition, depth ≤ 2,
+#: guarded by :func:`barndsl.compose.compose_uses`); ``stair`` is legal too (Phase
+#: 20 — multi-level parts, a part may carry ``level 1`` rooms + a connecting
+#: stair). See the design doc §3.1.
 _HOST_ONLY = frozenset({
     "plan", "envelope", "wing", "ceiling", "program", "require", "site",
     "setback", "building", "street", "orientation", "roof", "overhang",
-    "finish", "frame", "electrical", "stair",
+    "finish", "frame", "electrical",
     "drive", "walk", "well", "septic", "service", "grade",
 })
 
@@ -132,6 +133,9 @@ def _did_you_mean(word: str, options: tuple[str, ...] | list[str]) -> str:
 
 #: A `use` alias is a plain identifier — no dot (dots namespace stamped ids).
 _ALIAS_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+#: A `param` name is a plain identifier (Phase 20). A bare name matching this that
+#: also names a declared param resolves as a number inside a parametric part.
+_PARAM_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 _DOOR_KINDS = frozenset(DOOR_KINDS)
 _WINDOW_KIND_SET = frozenset(WINDOW_KINDS)
@@ -301,7 +305,7 @@ Statements:
         # alarm (ALARM_BEDROOM), a sleeping area with no adjacent-hall alarm
         # (ALARM_HALL), a level with no smoke alarm (ALARM_LEVEL), and — with
         # bedrooms + a garage/shop — no CO/combo alarm (ALARM_CO, info).
-  use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]
+  use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270] [with k=v[, k=v…]]
         # cross-file composition: stamp a PART (any `.barn` file with no `plan`
         # header — rooms/openings/windows/fixtures/devices in its own local feet)
         # into this plan. `"<relpath>"` is quoted and RELATIVE to the including
@@ -311,14 +315,26 @@ Statements:
         # stamped `<alias>.<id>` (m.bed, m.bath), and host statements reference those
         # namespaced ids like locals (`door great - m.bed`). `at <x>,<y>` places the
         # stamped bounding box's SW corner (ft); `level <n>` lands it on host level n
-        # (default 0). `mirror y` flips the part east↔west, `mirror x` north↔south;
-        # `rotate 90|180|270` turns it counter-clockwise (rooms are axis-aligned, so
-        # only 90° steps). With both, the part is ROTATED FIRST, THEN MIRRORED in its
-        # own local frame; the transformed bounding box's SW corner still lands at
-        # `at`. Wall directions, wall offsets and fixture rotations all remap so the
-        # stamped copy stays code-clean. The part is compiled once and stamped per
-        # use; part-internal diagnostics report once (anchored to the part file),
-        # placement-dependent ones per use (anchored to the `use` line).
+        # (default 0) — a part's own `level 1` rooms lift by n. `mirror y` flips the
+        # part east↔west, `mirror x` north↔south; `rotate 90|180|270` turns it
+        # counter-clockwise (rooms are axis-aligned, so only 90° steps). With both,
+        # the part is ROTATED FIRST, THEN MIRRORED in its own local frame; the
+        # transformed bounding box's SW corner still lands at `at`. `with k=v, …`
+        # passes PARAM values to a parametric part (numbers only; keys the part
+        # doesn't declare are PARAM_UNDECLARED). Wall directions, wall offsets and
+        # fixture rotations all remap so the stamped copy stays code-clean. A part
+        # may itself `use` nested parts (depth ≤ 2; a cycle is USE_CYCLE, depth 3 is
+        # USE_NESTED) and may carry `level 1` rooms + a `stair`. The part is compiled
+        # once per (path, param values) and stamped per use; part-internal
+        # diagnostics report once (anchored to the part file), placement-dependent
+        # ones per use (anchored to the `use` line).
+  param <name> = <number>            # (part files only) declare a part PARAMETER — a
+        # number (decimal feet or ft-in) the host may override with `use ... with
+        # name=value`. The default is mandatory (every param is optional at use).
+        # Inside the part, the bare NAME stands wherever a number stands (sizes,
+        # positions, offsets…). Numbers only in v1 — no strings, no arithmetic. A
+        # bare name that names no param is PARAM_UNKNOWN; `param` in a plan is
+        # PARAM_IN_PLAN.
   frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]
         # auto-place the post-and-beam structural frame over the footprint: bents
         # spaced <= bay ft along the long axis (default 12), each spanning the short
@@ -622,9 +638,15 @@ class _ParseError(Exception):
 
 
 class _Cursor:
-    def __init__(self, tokens: list[_Token]):
+    def __init__(self, tokens: list[_Token], param_env: dict[str, float] | None = None):
         self.toks = tokens
         self.i = 0
+        #: Parametric-part environment (Phase 20). When compiling a part fragment
+        #: with params, a bare identifier standing where a NUMBER is expected
+        #: resolves to its param value (use-site override or declared default).
+        #: ``None`` outside a parametric part — an identifier is then the usual
+        #: ``BAD_NUMBER``. See :meth:`number`.
+        self.param_env = param_env
 
     @property
     def eol_col(self) -> int:
@@ -662,6 +684,24 @@ class _Cursor:
             ft_in = _parse_ft_in(t.text)
             if ft_in is not None:
                 return ft_in
+            # Parametric parts (Phase 20): inside a part fragment, a bare param
+            # NAME stands wherever a number stands — resolve it to the use-site
+            # value or its declared default. Numbers only in v1 (no arithmetic),
+            # so this is a plain name → value lookup at the token level; the source
+            # text is never rewritten. An identifier matching no param is
+            # PARAM_UNKNOWN (with a did-you-mean over the declared names).
+            if self.param_env is not None and _PARAM_NAME_RE.match(t.text):
+                if t.text in self.param_env:
+                    return self.param_env[t.text]
+                raise _ParseError(
+                    "PARAM_UNKNOWN",
+                    f"{_did_you_mean(t.text, tuple(self.param_env))}"
+                    f"'{t.text}' is not a declared param.",
+                    t.col,
+                    end_col=t.end_col,
+                    hint="Declare it with `param " + t.text + " = <number>`, or use a "
+                    "number. Params are numbers only (no arithmetic).",
+                )
             raise _ParseError(
                 "BAD_NUMBER",
                 f"Expected a number for {what}, got '{t.text}'.",
@@ -896,10 +936,46 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
     return kwargs, first_ref
 
 
+def _scan_param_defaults(source: str) -> dict[str, float]:
+    """Best-effort pre-scan of a part's ``param <name> = <number>`` declarations
+    (Phase 20), name → default value, so the resolution environment is ready
+    *before* the statement loop — a bare param name may then be referenced on a
+    line above its own ``param`` line. Silent and tolerant: a malformed ``param``
+    line is skipped here (the authoritative parse in :func:`_parse_statement`
+    reports it). Later duplicate declarations overwrite earlier ones; the
+    authoritative parse flags the duplicate."""
+    defaults: dict[str, float] = {}
+    for raw in source.splitlines():
+        toks = _tokenize_line(raw, 0)
+        if not toks or toks[0].text.lower() != "param":
+            continue
+        rest = "".join(t.text for t in toks[1:])
+        name, sep, val = rest.partition("=")
+        if not sep or not _PARAM_NAME_RE.match(name):
+            continue
+        num = _param_value(val)
+        if num is not None:
+            defaults[name] = num
+    return defaults
+
+
+def _param_value(text: str) -> float | None:
+    """Parse a param default / use-site value literal (Phase 20): a decimal-feet
+    number or a feet-and-inches literal, or ``None`` if it isn't a number. Params
+    are **numbers only** in v1 — no names, no arithmetic — so this never consults a
+    param environment."""
+    try:
+        v = float(text)
+    except ValueError:
+        return _parse_ft_in(text)
+    return v if math.isfinite(v) else None
+
+
 def _parse_statement(
-    tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int
+    tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int,
+    param_env: dict[str, float] | None = None,
 ) -> None:
-    c = _Cursor(tokens)
+    c = _Cursor(tokens, param_env=param_env)
     kw = c.take("a statement keyword")
     key = kw.text.lower()
 
@@ -1968,11 +2044,59 @@ def _parse_statement(
         ulevel = 0
         umirror: str | None = None
         urotate = 0
+        uparams: dict[str, float] = {}
         while (tok := c.peek()) is not None:
             opt = tok.text.lower()
             if opt == "level":
                 c.keyword("level")
                 ulevel = c.level_value()
+            elif opt == "with":
+                # `with k=v[, k=v…]` — use-site param overrides (Phase 20). Each
+                # pair is a single `key=value` token (commas are separators, so
+                # `with w=8, d=7-6` arrives as the tokens `w=8` `d=7-6`); a value
+                # is a number (decimal feet or ft-in). Numbers only in v1. A key
+                # the part doesn't declare is caught later (PARAM_UNDECLARED, at
+                # the use line) once the part's params are known.
+                c.keyword("with")
+                seen_pair = False
+                while (pt := c.peek()) is not None and "=" in pt.text and not pt.quoted:
+                    c.take("a param pair")
+                    seen_pair = True
+                    name, _, val = pt.text.partition("=")
+                    if not _PARAM_NAME_RE.match(name):
+                        raise _ParseError(
+                            "SYNTAX",
+                            f"'{name}' is not a valid param name in `with`.",
+                            pt.col, end_col=pt.end_col,
+                            hint="Write `with width=8, depth=7-6` — a plain name, "
+                            "then `=`, then a number.",
+                        )
+                    num = _param_value(val)
+                    if num is None:
+                        raise _ParseError(
+                            "BAD_NUMBER",
+                            f"`with {name}=` needs a number, got '{val}'.",
+                            pt.col, end_col=pt.end_col,
+                            hint="Params are numbers only (decimal feet or ft-in, "
+                            "e.g. 8 or 7-6) — no names or arithmetic in v1.",
+                        )
+                    if name in uparams:
+                        raise _ParseError(
+                            "PARAM_DUP",
+                            f"param '{name}' is set twice in this `with` clause.",
+                            pt.col, end_col=pt.end_col,
+                            hint="Set each param once per `use`.",
+                        )
+                    uparams[name] = num
+                if not seen_pair:
+                    nxt = c.peek()
+                    raise _ParseError(
+                        "SYNTAX",
+                        "`with` needs at least one `key=value` param pair.",
+                        nxt.col if nxt else kw.col,
+                        end_col=nxt.end_col if nxt else kw.end_col,
+                        hint="e.g. `with width=8, depth=7-6` (no spaces around `=`).",
+                    )
             elif opt == "mirror":
                 c.keyword("mirror")
                 axis_tok = c.take("a mirror axis (x or y)")
@@ -2006,13 +2130,47 @@ def _parse_statement(
                     "BAD_OPTION",
                     f"Unknown use option '{tok.text}'.",
                     tok.col, end_col=tok.end_col,
-                    hint="Options: level <n>, mirror x|y, rotate 90|180|270.",
+                    hint="Options: level <n>, mirror x|y, rotate 90|180|270, "
+                    "with k=v.",
                 )
         plan.uses.append(
             UseSpec(path_tok.text, alias_tok.text, ux, uy, ulevel,
-                    mirror=umirror, rotate=urotate,
+                    mirror=umirror, rotate=urotate, params=uparams,
                     line=lineno, col=kw.col, end_col=kw.end_col)
         )
+    elif key == "param":
+        # `param <name> = <number>` — a part parameter (Phase 20). The default is
+        # mandatory (every param is optional at use). Numbers only in v1. The
+        # authoritative declaration: stores the default on the plan and reports
+        # PARAM diagnostics; the resolution env is built by a pre-scan (see
+        # :func:`_scan_param_defaults`) so a name may be referenced before its
+        # `param` line. Whole line joined so `w = 8` / `w=8` / `w =8` all parse.
+        rest = "".join(t.text for t in tokens[1:])
+        pname, psep, pval = rest.partition("=")
+        if not psep or not _PARAM_NAME_RE.match(pname):
+            raise _ParseError(
+                "SYNTAX",
+                "A param is `param <name> = <number>`.",
+                kw.end_col + 1, end_col=c.eol_col,
+                hint="e.g. `param width = 8` or `param depth = 7-6`.",
+            )
+        pnum = _param_value(pval)
+        if pnum is None:
+            raise _ParseError(
+                "BAD_NUMBER",
+                f"param '{pname}' needs a numeric default, got '{pval}'.",
+                kw.end_col + 1, end_col=c.eol_col,
+                hint="The default is mandatory and a number (decimal feet or "
+                "ft-in, e.g. 8 or 7-6) — no names or arithmetic in v1.",
+            )
+        if pname in plan.params:
+            raise _ParseError(
+                "PARAM_DUP",
+                f"param '{pname}' is declared more than once.",
+                kw.end_col + 1, end_col=c.eol_col,
+                hint="Declare each param once.",
+            )
+        plan.params[pname] = pnum
     else:
         raise _ParseError(
             "UNKNOWN_STMT",
@@ -2141,11 +2299,20 @@ def _finish_fragment(
     smap: "_SourceMap",
     pragmas: list,
     profile: "Profile | None",
+    composition: object | None = None,
 ) -> CompileResult:
     """Finish a fragment (part) compile: PART_EMPTY / origin normalization /
-    local-only validation. See :func:`compile_source` (``fragment=True``)."""
-    from .compose import PART_LOCAL_CODES, normalize_part_origin
+    local-only validation. See :func:`compile_source` (``fragment=True``).
+
+    ``composition`` (Phase 20 — nested parts) carries the part's own stamped
+    nested instances so a local finding on a nested stamped room is deduped
+    against the nested part's already-folded part-internal diagnostics, exactly
+    as the host does for its stamps."""
+    from .compose import Composition, PART_LOCAL_CODES, normalize_part_origin
     from .pragma import apply_pragmas
+
+    stamped_map = composition.stamped_map if isinstance(composition, Composition) else {}
+    part_keys = composition.part_keys if isinstance(composition, Composition) else {}
 
     if not plan.rooms:
         diagnostics.append(Issue(
@@ -2177,6 +2344,18 @@ def _finish_fragment(
         for iss in report.issues:
             if iss.code not in PART_LOCAL_CODES:
                 continue  # whole-building / placement-dependent — skipped in a part
+            # A local finding on a nested stamped room (Phase 20): either a
+            # duplicate of the nested part's already-folded finding (drop it) or a
+            # placement-dependent finding of *this* part (anchor to the nested
+            # `use` line so the part author sees where the block lands).
+            if iss.room is not None and iss.room in stamped_map:
+                local, inst = stamped_map[iss.room]
+                if (iss.code, local) in part_keys.get(inst.part_path, ()):
+                    continue
+                iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
+                iss.message = f"instance {inst.alias}: {iss.message}"
+                diagnostics.append(iss)
+                continue
             if iss.room is not None:
                 if iss.line is None:
                     iss.line = smap.room_line.get(iss.room)
@@ -2194,6 +2373,9 @@ def compile_source(
     *,
     fragment: bool = False,
     base_dir: str | None = None,
+    params: dict[str, float] | None = None,
+    compose_ctx: object | None = None,
+    self_path: str | None = None,
 ) -> CompileResult:
     """Compile DSL ``source`` into a validated plan + diagnostics.
 
@@ -2211,9 +2393,18 @@ def compile_source(
       header): no ``plan``/``envelope`` is required, host-only statements are
       ``PART_HOST_STMT`` errors, at least one ``room`` is required (``PART_EMPTY``),
       the origin is normalized to the SW corner (``PART_ORIGIN`` info), and only
-      *local* checks run (whole-building checks are skipped). This is what the
-      loader calls once per part; ordinary top-level compiles use ``fragment=False``.
+      *local* checks run (whole-building checks are skipped). A part may itself
+      ``use`` nested parts (depth ≤ 2) and may carry ``level 1`` rooms + a stair.
+      This is what the loader calls once per part; ordinary top-level compiles use
+      ``fragment=False``.
+    * ``params`` (Phase 20) are the use-site parameter overrides for a parametric
+      part — merged over the part's declared ``param`` defaults to build the
+      resolution environment a bare param name reads from.
+    * ``compose_ctx`` / ``self_path`` are internal recursion state threaded by the
+      loader for nested composition (the sandbox root, depth, cycle stack, shared
+      memo + instance budget). External callers leave them ``None``.
     """
+    from .compose import _ComposeCtx
     from .pragma import apply_pragmas, parse_pragmas
 
     # Strip a leading UTF-8 BOM for API callers who pass raw file text (the CLI's
@@ -2224,6 +2415,13 @@ def compile_source(
     plan = Barndominium(name=name or "Untitled")
     smap = _SourceMap()
     pragmas = parse_pragmas(source)
+    # Parametric parts (Phase 20): pre-scan `param` defaults so a bare param name
+    # resolves as a number anywhere in a part, then overlay the use-site values.
+    # Only meaningful in a part (fragment); a plan's `param` is a PARAM_IN_PLAN
+    # error and never builds an environment.
+    param_env: dict[str, float] | None = None
+    if fragment:
+        param_env = {**_scan_param_defaults(source), **(params or {})}
     # True once any statement was skipped by parse-error recovery. Tracked at
     # the skip sites themselves (not inferred from ERROR diagnostics later):
     # semantic build errors also record ERRORs but skip nothing, and they must
@@ -2269,31 +2467,32 @@ def compile_source(
                 )
                 skipped = True
             continue
-        if fragment:
-            key = toks[0].text.lower()
-            if key == "use":
-                diagnostics.append(Issue(
-                    Severity.ERROR, "USE_NESTED",
-                    "A part file can't `use` another part (nesting is depth-1 in v1).",
-                    line=lineno, col=toks[0].col, end_col=toks[0].end_col,
-                    hint="Flatten the inner part into this one, or `use` both from "
-                    "the host.",
-                ))
-                skipped = True
-                continue
-            if key in _HOST_ONLY:
-                diagnostics.append(Issue(
-                    Severity.ERROR, "PART_HOST_STMT",
-                    f"`{key}` describes a whole building — a part borrows the "
-                    "host's. Remove it; size the part by its rooms.",
-                    line=lineno, col=toks[0].col, end_col=toks[0].end_col,
-                    hint="A part is any `.barn` file with no `plan` header: rooms, "
-                    "openings, windows, fixtures, devices — in its own local feet.",
-                ))
-                skipped = True
-                continue
+        key = toks[0].text.lower()
+        if fragment and key in _HOST_ONLY:
+            diagnostics.append(Issue(
+                Severity.ERROR, "PART_HOST_STMT",
+                f"`{key}` describes a whole building — a part borrows the "
+                "host's. Remove it; size the part by its rooms.",
+                line=lineno, col=toks[0].col, end_col=toks[0].end_col,
+                hint="A part is any `.barn` file with no `plan` header: rooms, "
+                "openings, windows, fixtures, devices — in its own local feet.",
+            ))
+            skipped = True
+            continue
+        if not fragment and key == "param":
+            # `param` declares a *part* parameter — a whole plan has no use-site to
+            # pass values, so it's the mirror of PART_HOST_STMT.
+            diagnostics.append(Issue(
+                Severity.ERROR, "PARAM_IN_PLAN",
+                "`param` declares a part parameter — a whole plan can't take one.",
+                line=lineno, col=toks[0].col, end_col=toks[0].end_col,
+                hint="Move `param` into a part file (a `.barn` with no `plan` "
+                "header); the host passes values with `use ... with name=value`.",
+            ))
+            skipped = True
+            continue
         try:
-            _parse_statement(toks, plan, smap, lineno)
+            _parse_statement(toks, plan, smap, lineno, param_env=param_env)
         except _ParseError as err:
             diagnostics.append(
                 Issue(
@@ -2308,20 +2507,27 @@ def compile_source(
             )
             skipped = True
 
-    # Fragment mode (a part file): no plan/envelope required, ≥1 room, origin
-    # normalized, only local checks. The loader (compose.load_part) calls this.
-    if fragment:
-        return _finish_fragment(plan, diagnostics, source, smap, pragmas, profile)
-
     # Cross-file composition: resolve + stamp every `use` into `plan` BEFORE
     # validation, so overlap/envelope/egress/adjacency run on the composed plan.
     # Resolution errors and (deduped) part-internal diagnostics are appended now;
     # placement-dependent (instance) findings are reclassified after validate.
+    # This runs in BOTH modes (Phase 20 — a part may `use` nested parts, depth ≤
+    # 2); ``compose_ctx`` carries the recursion state (sandbox root, depth, cycle
+    # stack, shared memo + instance budget), built fresh at the top level.
     composition = None
     if plan.uses:
         from .compose import compose_uses
 
-        composition = compose_uses(plan, base_dir, diagnostics, profile)
+        ctx = compose_ctx if isinstance(compose_ctx, _ComposeCtx) else \
+            _ComposeCtx.top_level(base_dir, self_path)
+        composition = compose_uses(plan, base_dir, diagnostics, profile, ctx=ctx)
+
+    # Fragment mode (a part file): no plan/envelope required, ≥1 room, origin
+    # normalized, only local checks. The loader (compose.load_part) calls this.
+    if fragment:
+        return _finish_fragment(
+            plan, diagnostics, source, smap, pragmas, profile, composition
+        )
 
     # Statement-level error recovery (review §1.3): a statement that failed to
     # parse already recorded its diagnostic and was skipped, but the *surviving*
@@ -2457,4 +2663,5 @@ def compile_file(path: str, profile: "Profile | None" = None) -> CompileResult:
     ``path`` may be ``-`` to read standard input. A file that cannot be read
     raises :class:`SourceReadError` (a clean message, no traceback)."""
     text, base_dir = read_source_file(path)
-    return compile_source(text, profile=profile, base_dir=base_dir)
+    self_path = None if path == "-" else os.path.realpath(path)
+    return compile_source(text, profile=profile, base_dir=base_dir, self_path=self_path)

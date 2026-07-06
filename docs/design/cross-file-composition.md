@@ -1,8 +1,14 @@
 # Cross-file composition (`use`) — design
 
-Status: **Phase 7a + 7b implemented** (translation core + mirror/rotate transform).
-Prereqs shipped: full emit round-trip (every statement family), `barndsl fmt`
-(comment-preserving), accept pragmas, ft-in literals.
+Status: **Phase 7a + 7b + 20 implemented** (translation core + mirror/rotate
+transform + composition v2). Prereqs shipped: full emit round-trip (every statement
+family), `barndsl fmt` (comment-preserving), accept pragmas, ft-in literals.
+
+Phase 20 (composition v2) shipped **parametric parts**, **nested `use` (depth 2)**
+with cycle detection, and **multi-level parts** — all documented in their final
+semantics in §12 below (moved out of the old Futures list). **Scheme inheritance
+(`extends`)** was evaluated and **deferred** — the design sketch and the go/no-go
+rationale are in §13.
 
 7a shipped: `use "<relpath>" as <alias> at <x>,<y> [level <n>]`;
 fragment-mode compile (`compile_source(..., fragment=True)`); the sandboxed
@@ -235,22 +241,32 @@ touches other files.
 The resolver is rooted at the top-level file's directory: resolve, `realpath`,
 then require the result to stay under the root (symlink escapes rejected) —
 `USE_UNRESOLVED` otherwise, never an OS error. No absolute paths, no `..`
-above the root, no network. Limits: `use` depth 1 in v1 (parts can't `use`;
-`USE_NESTED` error), ≤ 64 instances, part file ≤ 256 KiB — each limit has a
-teaching diagnostic, not a crash. The playground server already binds
-localhost-only; the resolver must not widen what it will read.
+above the root, no network. **The root stays the top-level host's directory at
+every nesting depth** (Phase 20): a nested `use` resolves relative to the using
+part's directory but the containment check is always against the host root, so a
+nested `..`, a nested absolute path, a symlinked nested part dir, and a sibling dir
+reached through a nested relative path are all `escape`s — never a read outside the
+sandbox. Limits: `use` depth ≤ 2 (Phase 20; depth 3 is `USE_NESTED`, a cycle is
+`USE_CYCLE`), ≤ 64 instances **across all depths** (one shared budget), part file ≤
+256 KiB — each limit has a teaching diagnostic, not a crash. The playground server
+already binds localhost-only; the resolver must not widen what it will read.
 
 ## 9. New diagnostics
 
 | Code | Sev | Meaning |
 |---|---|---|
-| `USE_UNRESOLVED` | E | path missing / escapes root / no base_dir |
+| `USE_UNRESOLVED` | E | path missing / escapes root / no base_dir / instance cap |
 | `USE_ALIAS_DUP` | E | alias reused |
-| `USE_NESTED` | E | a part contains `use` (v1) |
+| `USE_NESTED` | E | a `use` nested deeper than 2 (Phase 20) |
+| `USE_CYCLE` | E | a part `use`s itself or an ancestor (Phase 20) |
 | `USE_PART_INVALID` | E | part fails fragment compile (nested context attached) |
 | `PART_HOST_STMT` | E | host-only statement inside a part |
 | `PART_ORIGIN` | I | part's SW corner isn't 0,0 (loader normalized it) |
 | `PART_EMPTY` | E | part declares no rooms |
+| `PARAM_UNKNOWN` | E | a bare name is no declared param (Phase 20) |
+| `PARAM_UNDECLARED` | E | a `with` key the part doesn't declare (Phase 20) |
+| `PARAM_DUP` | E | a param declared/passed twice (Phase 20) |
+| `PARAM_IN_PLAN` | E | `param` in a whole plan (Phase 20) |
 
 Placement errors reuse `OVERLAP` / `OUT_OF_BOUNDS` etc., anchored per §4.
 
@@ -269,9 +285,13 @@ idempotence, playground markup + offline guarantee.
 **Phase 7b:** mirror/rotate with the §5 remap table + property tests,
 duplicate-instance, parts browser, optional packet/schedule "Part" columns.
 
-**Future (explicitly deferred):** nested parts (depth > 1), multi-level parts
-(stairs inside parts), parametric parts, scheme inheritance, remote libraries,
-part editing inside the playground (multi-buffer).
+**Phase 20 (composition v2):** parametric parts, nested `use` (depth 2) with
+cycle detection, multi-level parts — see §12. `scheme inheritance` evaluated and
+deferred (§13).
+
+**Future (still deferred):** scheme inheritance (`extends`, §13), remote/URL
+libraries, part editing inside the playground (multi-buffer), string/expression
+params.
 
 ## 11. Alternatives considered
 
@@ -287,3 +307,136 @@ part editing inside the playground (multi-buffer).
 - **Stamping at parse time (macro expansion into the host token stream)** —
   rejected: destroys the once-per-part diagnostic dedupe and re-anchors every
   part diagnostic to synthetic host lines.
+
+## 12. Composition v2 (Phase 20) — shipped semantics
+
+Three capabilities the design consciously cut from 7a/7b landed here, each keeping
+every 7a/7b guarantee (the resolver sandbox, deterministic stamping with `alias.id`
+prefixing, part-internal diagnostic attribution, read-only stamped members, emit
+round-trip fixpoints, mirror/rotate).
+
+### 12.1 Parametric parts
+
+**Grammar.** A part file may declare parameters:
+
+```
+param <name> = <number>          # part files only; the default is mandatory
+```
+
+and a host passes values on the `use` line with a trailing `with` clause:
+
+```
+use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270] [with k=v[, k=v…]]
+```
+
+`<number>` is a decimal-feet number or a ft-in literal (`8`, `7-6`). **Numbers
+only in v1** — no strings, no arithmetic. Every param is *optional* at the use
+site (the declared default applies when it isn't passed).
+
+**Resolution mechanism (where the env lives, how `number()` consumes it).** Params
+resolve at the **token level in fragment mode** — the source text is never
+rewritten. `compile_source(..., fragment=True, params=<overrides>)` builds a
+`param_env: dict[str, float]` = `{**declared-defaults, **use-site-overrides}` from a
+cheap pre-scan (`_scan_param_defaults`, so a bare name may be referenced above its
+own `param` line), and threads it into the parser's `_Cursor`. In `_Cursor.number`,
+when a token is neither a float nor a ft-in literal, an identifier that names a
+param returns its value; an identifier that names no param is `PARAM_UNKNOWN` (with
+a did-you-mean over the declared names). A bare param name therefore stands wherever
+a number stands — sizes, positions, offsets, widths — with no textual substitution.
+
+**Diagnostics.** `PARAM_UNKNOWN` (bare name is no param, in the part),
+`PARAM_UNDECLARED` (a `with` key the part doesn't declare, anchored to the *use*
+line, with a did-you-mean), `PARAM_DUP` (declared/passed twice), `PARAM_IN_PLAN`
+(`param` in a whole plan). A default that makes the part invalid is an ordinary
+part-internal diagnostic.
+
+**Memoization.** The loader memo is keyed `(resolved-path, sorted param items)`, so
+two instances with the same params share one compile and different params recompile
+— the 64-instance cap stays meaningful either way.
+
+**Emit.** Part files emit their `param` lines (values baked into the geometry — the
+symbolic reference is resolved to a literal at compile time, an accepted, documented
+lossiness); hosts emit the `with` clause **exactly as passed, in source order**
+(`with k=v, …`, ft-in canonicalized to decimal feet). Emit → recompile → emit is a
+fixpoint.
+
+### 12.2 Nested `use` (depth 2)
+
+A part may itself `use` nested parts. **Containment root stays the HOST's root** at
+every level; a nested relative path resolves relative to the **using part's**
+directory (`_resolve` joins `base_dir`, then requires the realpath to stay under the
+host `root`). Depth is host = 0, part = 1, part-used-by-part = 2; a `use` that would
+reach depth 3 is `USE_NESTED` ("deeper than 2").
+
+**Cycle detection.** The compose context carries a `stack` of every ancestor's
+realpath (including the file being composed). A resolved candidate already on the
+stack is `USE_CYCLE` (self-use or mutual use), naming the cycle path (`a.barn →
+b.barn → a.barn`) — checked **before** the depth limit so a ring reads as a cycle,
+not a depth overflow, and the loader stops cleanly instead of recursing.
+
+**Composition.** Id prefixing composes: the inner stamp produces `inner.room` in the
+part's frame, the outer stamp re-prefixes to `outer.inner.room`. Transforms compose
+by re-application — the inner `use`'s `_Xform` transforms geometry into the middle
+part's frame, then the outer `use`'s `_Xform` transforms the already-transformed
+geometry into the host (matrix composition via the same `_Xform`). The instance cap
+is a **single shared budget** decremented on every stamp at every depth, and the
+part memo is shared across the whole compile tree.
+
+**Diagnostic attribution through two levels.** A part folds its parts' findings with
+the alias re-prefixed onto the finding's room (so the parent's one-level dedup lines
+up: `outer.inner.room` → strip one alias → `inner.room`, matched against the folded
+`(code, inner.room)` key). The message accumulates a chain — `in part
+outer.barn:5 — in part inner.barn:3 — <original>` — while the `file`/`part` fields
+keep the **innermost** attribution (the first level to set them wins), and the caret
+anchors to the host `use` line the author can act on.
+
+### 12.3 Multi-level parts
+
+A part may carry `level 1` (etc.) rooms and a connecting `stair` (both were
+host-only before). Stamping offsets every member's level by the instance's `level n`
+(rooms, notes, and the stair's `from_level`/`to_level`), so the composed plan
+presents the **final** levels. Whole-building, cross-level validation — stair
+connectivity, per-storey smoke alarms (`ALARM_LEVEL`), loft guards (`LOFT_GUARD`),
+garage separation — is skipped in the part's fragment compile (it can't run across a
+part boundary) and runs on the composed host plan, so it sees the final levels. The
+stair footprint transforms like a room under mirror/rotate.
+
+## 13. Scheme inheritance (`extends`) — deferred (Phase 20 go/no-go: NO-GO)
+
+**Proposed:** `plan "X" extends "base.barn"` — the host starts from the base's
+statements; a host statement with the same id/kind overrides the base's; new
+statements append. Same sandbox as `use`.
+
+**Decision: deferred.** The three required v2 features (parametric / nested /
+multi-level) were prioritized, shipped, and are green; `extends` did not fall out
+cleanly in the remaining budget, and it carries semantic ambiguities that deserve
+their own design pass rather than a rushed one. Specifically:
+
+- **The override key is only clean for id'd entities and singletons.** Rooms
+  override by `id`; `envelope`/`ceiling`/`program`/`site`/`grade` are singletons
+  that replace. But openings (`door`/`open`/`window`/`entry`), fixtures, and devices
+  have **no stable identity** — there is no principled key to decide whether a host
+  `window great north` *replaces* a base one or *adds* a second. `use` sidesteps
+  this entirely (it stamps a namespaced copy, never merges); `extends` cannot.
+- **Emit round-trip needs provenance tracking.** Emitting an `extends` plan must
+  write the `extends` line plus **only the host's own** statements (not the
+  inherited ones), which means threading a base-vs-host provenance tag through the
+  whole compiled model — new machinery every downstream subsystem would have to
+  ignore correctly.
+- **It composes with `use` in the base**, multiplying the edge cases (a base that
+  itself `use`s parts, then is `extend`ed and partially overridden).
+
+**Design sketch (for a future phase).** Parse `extends "<relpath>"` on the `plan`
+line; resolve it through the *same* sandboxed resolver as `use` (relative-only,
+realpath containment, size cap), compiling the base **as a full plan** (not a
+fragment). Merge at the **model** level, not the text level: start from the base
+plan, then for each host statement family apply a family-specific override rule —
+rooms/suites/zones by `id`; the singletons replace; openings/fixtures/devices
+**append** in v1 (a conservative, predictable rule — overriding a non-id'd opening
+would need an explicit `remove`/`replace` verb, a separate feature). Tag every
+element with its origin file so (a) emit writes only host-origin statements after
+the `extends` line and (b) a base-origin diagnostic attributes to the base file with
+the same `in part …` chain machinery Phase 20 already built for nested parts. Cycle
+detection and the instance budget reuse the Phase 20 `_ComposeCtx`. The riskiest
+part is the openings/fixtures merge — ship append-only first, add `remove`/`replace`
+later once real plans show which override verbs are actually wanted.

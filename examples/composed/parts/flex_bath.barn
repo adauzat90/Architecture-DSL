@@ -1,0 +1,9 @@
+# flex_bath — a PARAMETRIC 3-piece bath (Phase 20). The host sizes it at the use
+# site: `use "parts/flex_bath.barn" as b at x,y with width=9, depth=7`. A bathroom
+# auto-seeds its toilet, lavatory and tub, so the seed layout clears IRC R307.1 at
+# the default size; keep width >= 7. As a compact interior core it has no exterior
+# window (mechanical vent — accept BATH_VENT on the host), which keeps the part
+# placeable on any wall.
+param width = 8
+param depth = 6
+room bath: bathroom at 0,0 size width x depth

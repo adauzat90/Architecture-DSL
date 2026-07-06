@@ -1108,6 +1108,14 @@ class UseSpec:
     #: Composition order is rotate-then-mirror in local coords.
     mirror: str | None = None
     rotate: int = 0
+    #: Use-site parameter overrides (Phase 20 — parametric parts): the ``with
+    #: k=v[, k=v…]`` clause. Each value is a number (decimal feet or a ft-in
+    #: literal); numbers only in v1. Insertion order is source order so emit
+    #: round-trips the pairs the author wrote. A key the part doesn't declare is a
+    #: ``PARAM_UNDECLARED`` error anchored to the ``use`` line (see
+    #: :mod:`barndsl.compose`). The compiled part depends on these values, so the
+    #: loader memoizes on ``(path, sorted params)``.
+    params: dict[str, float] = field(default_factory=dict)
     #: Source location of the `use` statement (textual front-end only), so a
     #: placement/instance diagnostic anchors to the `use` line and a surgical edit
     #: can find it.
@@ -1285,6 +1293,12 @@ class Barndominium:
     uses: list[UseSpec] = field(default_factory=list)
     instances: list[Instance] = field(default_factory=list)
     stamped_rooms: set[str] = field(default_factory=set)
+    #: Declared part parameters (Phase 20 — parametric parts): ``param <name> =
+    #: <number>`` lines, name → default value (decimal feet), in declaration order.
+    #: Only meaningful in a *part* (fragment) file; a bare param name may stand
+    #: wherever a number stands inside the part, resolving to the use-site value or
+    #: this default. Empty for a plan or a part with no params.
+    params: dict[str, float] = field(default_factory=dict)
 
     # -- fluent builder API ------------------------------------------------
     # Each method mutates the plan and returns ``self`` so calls chain. This

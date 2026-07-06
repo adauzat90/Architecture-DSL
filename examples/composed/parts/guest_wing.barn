@@ -1,0 +1,10 @@
+# guest_wing — a guest bedroom with its own bath, composed from a NESTED part
+# (Phase 20). The `use` resolves relative to THIS part's folder and stamps
+# flex_bath one level deeper; at the host the bath's id is <alias>.gb.bath. A clean
+# 12 ft-wide strip (bath below, bed above) so a host room on its east wall reaches
+# both, and the bed's west wall carries its egress window (place that wall exterior).
+use "flex_bath.barn" as gb at 0,0 with width=12, depth=7
+room bed: bedroom at 0,7 size 12 x 13
+door bed - gb.bath width 2.5 into gb.bath hinge near
+window bed west casement width 4 offset 4 sill 2
+alarm smoke in bed

@@ -958,7 +958,7 @@ L. The starter library lives in `examples/composed/parts/`.
 Stamp a part into a plan with
 
 ```
-use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]
+use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270] [with k=v[, k=v…]]
 ```
 
 * `"<relpath>"` is quoted and **relative to the including file's directory**.
@@ -1017,6 +1017,68 @@ while the instance itself is first-class — drag it, retarget its `at`/level/mi
 rotate, Delete, Duplicate or Inline from the design panel's **Parts** group. The
 same panel's **▣ Parts** button lists the plan-less `.barn` files beside the served
 plan (and in `parts/`) — click **Insert** to stamp one at the plan centre.
+
+### Parametric parts: `param` + `with`
+
+A part can leave sizes open and let the host fill them in. Declare a parameter in
+the part with a **mandatory default**:
+
+```
+# parts/flex_bath.barn
+param width = 8
+param depth = 6
+room bath: bathroom at 0,0 size width x depth   # the bare NAME stands for a number
+```
+
+A bare param name stands **wherever a number stands** — sizes, positions, offsets,
+widths. Params are **numbers only** (decimal feet or a ft-in literal like `7-6`); no
+strings, no arithmetic. A name that matches no param is a `PARAM_UNKNOWN` error (with
+a did-you-mean). The host passes values with a trailing `with` clause; every param
+is *optional* (the default applies when it isn't passed):
+
+```
+use "parts/flex_bath.barn" as fb at 28,0 with width=9, depth=7-6
+```
+
+Write each pair with **no spaces around `=`** (`width=9`), comma-separated. A `with`
+key the part doesn't declare is a `PARAM_UNDECLARED` error on the `use` line. The
+part is compiled **once per distinct set of param values** (two instances with the
+same values share the compile; different values recompile). Emit round-trips the
+`with` clause exactly as written (ft-in canonicalized to decimal feet).
+
+### Nested parts: a part that `use`s parts
+
+A part may itself `use` other parts, up to **depth 2** (host → part → part). A
+nested path resolves relative to the **using part's** folder (a part in `parts/lib`
+reaches a sibling by bare name), but the sandbox root stays the **host's** folder at
+every level — a nested `..` or symlink that leaves the host tree is still refused.
+Ids namespace all the way down: a `bath` room two levels deep becomes
+`outer.inner.bath`. A `use` that would reach depth 3 is `USE_NESTED`; a part that
+`use`s itself or an ancestor is a clean `USE_CYCLE` (it names the cycle, never
+hangs). The 64-instance cap counts every stamp at every depth against one budget.
+
+### Multi-level parts: `level 1` rooms + a `stair`
+
+A part can carry upper-level rooms and a connecting stair — a shop with a storage
+loft above it, say:
+
+```
+# parts/shop_loft.barn
+room shop: shop at 0,0 size 24 x 24
+room loft: loft at 0,0 size 24 x 16 level 1
+stair st at 19,0 size 4 x 15 from 0 to 1
+```
+
+`use ... level n` offsets **every** member's level by *n* (the loft above lands on
+level `1 + n`, the stair's `from`/`to` shift too). Whole-building, cross-level checks
+— stair rise/run, per-storey smoke alarms, loft guards, garage separation — run on
+the **composed** plan, so they see the final levels (they can't run inside the part
+alone). Place the part's exterior walls where they carry glass; a loft over open
+floor draws a `LOFT_GUARD` you can accept.
+
+See `examples/composed/cedar_ridge_v2.barn` for a plan that uses all three: a
+parametric bath sized with `with`, a nested guest wing (its bath is a nested part),
+and a two-level shop-with-loft.
 
 ## Two front-ends, one core
 
