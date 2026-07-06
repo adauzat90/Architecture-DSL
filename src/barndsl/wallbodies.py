@@ -26,6 +26,7 @@ from .constants import (
 )
 from .elements import Barndominium, Direction, Room
 from .geometry import SharedEdge, opening_endpoints, shared_edge, wall_segment
+from .spatial import RoomIndex
 
 _TOL = 1e-6
 
@@ -201,26 +202,27 @@ def wall_bands(plan: Barndominium, level: int) -> list[WallBand]:
                                  EXTERIOR, "v", room.id, None, side)
                     )
 
-    for i, ra in enumerate(rooms):
-        for rb in rooms[i + 1:]:
-            edge = shared_edge(ra, rb)
-            if edge is None:
-                continue
-            cls = partition_class(plan, ra, rb)
-            ph = THICKNESS[cls] / 2.0
-            opens = _interior_openings(plan, ra, rb, edge)
-            if edge.orientation == "v":
-                for a, b in solid_runs(edge.lo, edge.hi, opens):
-                    bands.append(
-                        WallBand(edge.pos - ph, a, edge.pos + ph, b, "interior",
-                                 cls, "v", ra.id, rb.id, None)
-                    )
-            else:
-                for a, b in solid_runs(edge.lo, edge.hi, opens):
-                    bands.append(
-                        WallBand(a, edge.pos - ph, b, edge.pos + ph, "interior",
-                                 cls, "h", ra.id, rb.id, None)
-                    )
+    index = RoomIndex(rooms)
+    for i, j in index.candidate_pairs():
+        ra, rb = rooms[i], rooms[j]
+        edge = shared_edge(ra, rb)
+        if edge is None:
+            continue
+        cls = partition_class(plan, ra, rb)
+        ph = THICKNESS[cls] / 2.0
+        opens = _interior_openings(plan, ra, rb, edge)
+        if edge.orientation == "v":
+            for a, b in solid_runs(edge.lo, edge.hi, opens):
+                bands.append(
+                    WallBand(edge.pos - ph, a, edge.pos + ph, b, "interior",
+                             cls, "v", ra.id, rb.id, None)
+                )
+        else:
+            for a, b in solid_runs(edge.lo, edge.hi, opens):
+                bands.append(
+                    WallBand(a, edge.pos - ph, b, edge.pos + ph, "interior",
+                             cls, "h", ra.id, rb.id, None)
+                )
     return bands
 
 
@@ -248,18 +250,19 @@ def opening_gaps(plan: Barndominium, level: int) -> list[OpeningGap]:
                     lo, hi = _axis_interval(room, wall, xd.offset, xd.width)
                     gaps.append(OpeningGap(lo, hi, pos, orient, EXTERIOR, "door"))
 
-    for i, ra in enumerate(rooms):
-        for rb in rooms[i + 1:]:
-            edge = shared_edge(ra, rb)
-            if edge is None:
+    index = RoomIndex(rooms)
+    for i, j in index.candidate_pairs():
+        ra, rb = rooms[i], rooms[j]
+        edge = shared_edge(ra, rb)
+        if edge is None:
+            continue
+        cls = partition_class(plan, ra, rb)
+        for door in plan.interior_doors:
+            if {door.room_a, door.room_b} != {ra.id, rb.id}:
                 continue
-            cls = partition_class(plan, ra, rb)
-            for door in plan.interior_doors:
-                if {door.room_a, door.room_b} != {ra.id, rb.id}:
-                    continue
-                if room_by_id.get(door.room_a) is None or room_by_id.get(door.room_b) is None:
-                    continue
-                lo, hi = _interior_opening_interval(door, edge)
-                cat = "opening" if getattr(door, "leaf", True) is False else "door"
-                gaps.append(OpeningGap(lo, hi, edge.pos, edge.orientation, cls, cat))
+            if room_by_id.get(door.room_a) is None or room_by_id.get(door.room_b) is None:
+                continue
+            lo, hi = _interior_opening_interval(door, edge)
+            cat = "opening" if getattr(door, "leaf", True) is False else "door"
+            gaps.append(OpeningGap(lo, hi, edge.pos, edge.orientation, cls, cat))
     return gaps

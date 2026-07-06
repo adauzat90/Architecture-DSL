@@ -58,7 +58,39 @@ they opt in.
 
 ---
 
-## Phase 17 — Compile performance: kill the O(n²) (M)
+## Phase 17 — Compile performance: kill the O(n²) (M) — **SHIPPED**
+
+**Status:** shipped. One shared uniform-grid spatial index over the room
+rectangles (`src/barndsl/spatial.py`, stdlib only) turns the all-pairs room
+loops into candidate-pair lookups, with the candidates handed back in the exact
+ascending `(i, j)` order the old nested loops used — so every diagnostic, wall
+band, DXF and summed length is byte-for-byte unchanged (verified across all nine
+bundled examples plus a 400-room synthetic plan, all four artifact classes:
+diagnostics, emit, SVG, DXF). Profiling picked the targets: `_validate_access`'s
+per-room `geometric_neighbors` scan (4.0 M `shared_edge` calls at 2 k rooms) and
+`_validate_geometry`'s all-pairs `overlaps` (2.0 M). Rerouted through the index:
+`validation.geometric_neighbors`, `validation._validate_geometry`,
+`cost._interior_wall_lf`, and both `wallbodies.wall_bands`/`opening_gaps`
+partition loops. Two secondary quadratics fell too — the `plan.room()` linear
+scan (now an O(1) id→index map on the index) and the DUP_ID `ids.count()` loop
+(now a `Counter`). The index caches on the plan under an O(1) key
+(`id(rooms), len(rooms)`), rebuilt automatically for a new/recompiled plan; it is
+first built *after* the Phase 10 dimension clamp mutates room sizes, so it always
+reflects clamped geometry.
+
+Measured compile time (`compile_file`, grid fixtures):
+
+| rooms  | before   | after   |
+|-------:|---------:|--------:|
+| 250    | 0.21 s   | 0.02 s  |
+| 500    | 0.32 s   | 0.04 s  |
+| 1000   | 1.14 s   | 0.07 s  |
+| 2000   | 4.47 s   | 0.14 s  |
+| 10000  | ~115 s   | 0.77 s  |
+
+The curve is now near-linear (~2× time for 2× rooms). `tests/test_perf_scaling.py`
+pins it with a deterministic candidate-pair operation count (not wall time, so it
+can't flake) plus a generous wall-clock ceiling and a two-run determinism check.
 
 **Who asked:** the developer persona — 10 k lines compiles in ~115 s with a
 measured quadratic curve (5× rooms ⇒ 25× time). Irrelevant at 30 rooms, but

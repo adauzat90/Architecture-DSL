@@ -26,6 +26,7 @@ from .constants import DEFAULT_ROOF_PITCH
 from .elements import Barndominium
 from .fixtures import fixtures_for
 from .geometry import shared_edge
+from .spatial import room_index
 
 #: Shown in both the text and JSON output — this is a budget aid, not a bid.
 DISCLAIMER = (
@@ -133,14 +134,17 @@ def _interior_wall_lf(plan: Barndominium) -> float:
     rooms (each party wall counted once), via the compiler's own ``shared_edge``."""
     total = 0.0
     rooms = plan.rooms
-    for i in range(len(rooms)):
-        for j in range(i + 1, len(rooms)):
-            a, b = rooms[i], rooms[j]
-            if a.level != b.level:
-                continue
-            edge = shared_edge(a, b)
-            if edge is not None:
-                total += edge.length
+    # Only rooms whose bounding boxes touch can share a wall, so sum over the
+    # index's candidate pairs — in the same ascending (i, j) order as the old
+    # nested loop, so the running total accumulates identically to the float.
+    index = room_index(plan)
+    for i, j in index.candidate_pairs():
+        a, b = rooms[i], rooms[j]
+        if a.level != b.level:
+            continue
+        edge = shared_edge(a, b)
+        if edge is not None:
+            total += edge.length
     return total
 
 

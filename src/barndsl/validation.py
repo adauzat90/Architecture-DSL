@@ -13,7 +13,7 @@ review by the authority having jurisdiction.
 from __future__ import annotations
 
 import math
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -62,6 +62,7 @@ from .geometry import (
 )
 from .solar import compass_label, true_azimuth, wall_sector
 from .energy import WWR_CEILING, describe_targets
+from .spatial import room_index
 
 
 class _WallOpening(Protocol):
@@ -364,10 +365,20 @@ def clear_box(plan: Barndominium, room: Room) -> tuple[float, float, float, floa
 
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
     """Ids of rooms that share a wall segment with ``room_id``."""
-    r = plan.room(room_id)
-    if r is None:
+    rooms = plan.rooms
+    index = room_index(plan)
+    i = index.first_index(room_id)
+    if i is None:
         return []
-    return [o.id for o in plan.rooms if o.id != room_id and shared_edge(r, o)]
+    r = rooms[i]
+    # A room can only share a wall with one whose bounding box touches it, so ask
+    # the spatial index for those few candidates (in room-list order) instead of
+    # rescanning every room — same result, no O(n²) full sweep.
+    return [
+        rooms[j].id
+        for j in index.candidates_near(r)
+        if rooms[j].id != room_id and shared_edge(r, rooms[j])
+    ]
 
 
 def _f(value: float) -> str:
@@ -1038,8 +1049,9 @@ def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationRe
         )
         return ValidationReport(issues)
 
-    ids = [r.id for r in plan.rooms]
-    for d in sorted({i for i in ids if ids.count(i) > 1}):
+    # Counter is O(n); the old ``ids.count(i)`` per id was O(n²) on big plans.
+    id_counts = Counter(r.id for r in plan.rooms)
+    for d in sorted({i for i, c in id_counts.items() if c > 1}):
         add(
             Issue(
                 Severity.ERROR,
@@ -1622,43 +1634,48 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                 )
             )
 
-    for i, a in enumerate(plan.rooms):
-        for b in plan.rooms[i + 1 :]:
-            if a.level != b.level:
-                continue  # different floors may share a footprint (e.g. a loft)
-            ov = a.overlaps(b)
-            if ov > 0.5:  # ignore hairline floating-point overlaps
-                # Prefer a fix that keeps 'b' inside the envelope.
-                east_fits = a.x2 + b.width <= plan.envelope_width + EPSILON
-                north_fits = a.y2 + b.length <= plan.envelope_length + EPSILON
-                ox = min(a.x2, b.x2) - max(a.x, b.x)
-                oy = min(a.y2, b.y2) - max(a.y, b.y)
-                prefer_east = (ox <= oy and east_fits) or (not north_fits and east_fits)
-                if prefer_east:
-                    sug = f"move '{b.id}' to x={_f(a.x2)} (east of '{a.id}')"
-                elif north_fits:
-                    sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
-                else:
-                    sug = "shrink one of them or enlarge the envelope"
-                # A collision is often a relative-anchor chain pushing a room onto
-                # one already placed — surface that so the fix is re-anchoring, not
-                # guessing at a shrink.
-                placed = next((r for r in (b, a) if r.placement is not None), None)
-                note = (
-                    f" ('{placed.id}' is placed `{placed.placement}` — re-anchor it "
-                    "one room deep off a spine, or pin it with `at x,y`)"
-                    if placed is not None
-                    else ""
+    # Only rooms whose bounding boxes intersect can overlap, so walk the index's
+    # candidate pairs (in the same ascending (i, j) order the old nested loop
+    # visited) rather than all n²/2 pairs.
+    rooms = plan.rooms
+    index = room_index(plan)
+    for i, j in index.candidate_pairs():
+        a, b = rooms[i], rooms[j]
+        if a.level != b.level:
+            continue  # different floors may share a footprint (e.g. a loft)
+        ov = a.overlaps(b)
+        if ov > 0.5:  # ignore hairline floating-point overlaps
+            # Prefer a fix that keeps 'b' inside the envelope.
+            east_fits = a.x2 + b.width <= plan.envelope_width + EPSILON
+            north_fits = a.y2 + b.length <= plan.envelope_length + EPSILON
+            ox = min(a.x2, b.x2) - max(a.x, b.x)
+            oy = min(a.y2, b.y2) - max(a.y, b.y)
+            prefer_east = (ox <= oy and east_fits) or (not north_fits and east_fits)
+            if prefer_east:
+                sug = f"move '{b.id}' to x={_f(a.x2)} (east of '{a.id}')"
+            elif north_fits:
+                sug = f"move '{b.id}' to y={_f(a.y2)} (north of '{a.id}')"
+            else:
+                sug = "shrink one of them or enlarge the envelope"
+            # A collision is often a relative-anchor chain pushing a room onto
+            # one already placed — surface that so the fix is re-anchoring, not
+            # guessing at a shrink.
+            placed = next((r for r in (b, a) if r.placement is not None), None)
+            note = (
+                f" ('{placed.id}' is placed `{placed.placement}` — re-anchor it "
+                "one room deep off a spine, or pin it with `at x,y`)"
+                if placed is not None
+                else ""
+            )
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OVERLAP",
+                    f"Rooms '{a.id}' and '{b.id}' overlap by {_f(ov)} sq ft.",
+                    room=a.id,
+                    hint=f"Reposition so they don't intersect — e.g. {sug}.{note}",
                 )
-                add(
-                    Issue(
-                        Severity.ERROR,
-                        "OVERLAP",
-                        f"Rooms '{a.id}' and '{b.id}' overlap by {_f(ov)} sq ft.",
-                        room=a.id,
-                        hint=f"Reposition so they don't intersect — e.g. {sug}.{note}",
-                    )
-                )
+            )
 
     # Footprint coverage is a ground-floor (level 0) concept; lofts sit above.
     used = sum(r.area for r in plan.rooms if r.level == 0)
@@ -3163,8 +3180,12 @@ def _validate_access(plan: Barndominium, add) -> None:
         reached.add(cur)
         queue.extend(n for n in adjacency[cur] if n not in reached)
 
+    # O(1) id lookup instead of ``plan.room``'s linear scan — this runs once per
+    # unreachable room, so the scan would be O(n²) on a large disconnected plan.
+    index = room_index(plan)
     for rid in sorted(interior_rooms - reached):
-        room = plan.room(rid)
+        idx = index.first_index(rid)
+        room = plan.rooms[idx] if idx is not None else None
         # A loft reaches the floor by stairs, which aren't modelled yet, so an
         # unreachable loft is a warning, not a hard error (like closets/pantries).
         sev = (
