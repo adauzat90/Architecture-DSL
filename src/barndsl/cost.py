@@ -63,6 +63,7 @@ DEFAULT_UNIT_COSTS: dict[str, float] = {
     "fixture_sink": 950.0,  # kitchen sink + rough-in
     "fixture_range": 1300.0,  # appliance allowance
     "fixture_refrigerator": 1700.0,  # appliance allowance
+    "countertop_lf": 75.0,  # fabricated + installed countertop, per linear foot
     # -- per-conditioned-sqft allowances --
     "electrical_sqft": 9.0,
     "hvac_sqft": 8.0,
@@ -223,6 +224,8 @@ def estimate_cost(
     for kind in _FIXTURE_ORDER:
         add("Plumbing & fixtures", kind.title(), fc.get(kind, 0), "each",
             f"fixture_{kind}", f"fixtures for wet/kitchen rooms ({kind})")
+    add("Plumbing & fixtures", "Countertops", m["counter_linear_ft"], "lf",
+        "countertop_lf", "metrics: counter_linear_ft (placed counter runs)")
 
     # -- Systems (per conditioned interior sqft) --
     cond = m["interior_sqft"]

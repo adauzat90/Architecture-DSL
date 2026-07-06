@@ -31,6 +31,7 @@ _METRIC_KEYS = (
     "roof_area_sqft",
     "beam_linear_ft",
     "post_count",
+    "counter_linear_ft",
 )
 
 

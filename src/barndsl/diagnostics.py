@@ -305,6 +305,23 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "over a bedroom's emergency-escape window, so no one could get out "
            "through it (IRC R310). Keep the egress window clear — move the fixture "
            "to another wall."),
+        _c("COUNTER_DOOR", W, "Counter run crosses a doorway",
+           "A `fixture counter ... along <wall>` run spans a doorway, opening or "
+           "entry on that wall — you can't build countertop across an opening. Stop "
+           "the run short of the opening with `from <a> to <b>` (room-local feet "
+           "along the wall), or move the run to another wall. A full-wall run over a "
+           "door is the usual cause; a broken L/U leg clears it."),
+        _c("COUNTER_ROOM", I, "Counter in an unusual room type",
+           "A counter run sits in a room type where a run of casework reads as odd "
+           "(a bedroom, closet, hallway or loft). Counters belong to a kitchen, "
+           "pantry, bath, laundry, mudroom or shop; if this is a deliberate bar or "
+           "work ledge, ignore the note."),
+        _c("SINK_NO_COUNTER", I, "Kitchen sink not set into a counter",
+           "A kitchen sink isn't set into any counter run — a sink wants countertop "
+           "to each side to work at. Extend a `fixture counter ... along <wall>` run "
+           "past the sink so it drops into the countertop. Only fires once the "
+           "kitchen has counters placed to compare against; a bath lavatory (its own "
+           "vanity) is never judged."),
         _c("RANGE_WINDOW", W, "Range under an operable window",
            "A range/cooktop sits directly under a window that opens. A draft "
            "through the sash can blow out a burner, and a curtain hangs over the "

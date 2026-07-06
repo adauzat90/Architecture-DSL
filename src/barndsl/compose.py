@@ -619,6 +619,27 @@ def _xform_fixture(xf: _Xform, f: PlacedFixture, alias: str, dims: dict) -> Plac
     """
     from .fixtures import FIXTURES, _quarter_turns
 
+    if f.along is not None:
+        # An `along` counter run: remap the run's wall and its span. A full-wall run
+        # (no from/to) stays a full-wall run on the transformed wall; a partial run's
+        # start offset is re-derived from the transformed geometry (§5), exactly as a
+        # door/window offset is, so the run lands on the remapped wall with the
+        # remapped span. The along sugar is preserved (the part file keeps it).
+        new_along = xf.wall(f.along)
+        if f.run_from is None or f.run_to is None:
+            return dataclasses.replace(
+                f, room=_pref(alias, f.room), along=new_along,
+                line=None, col=None, end_col=None,
+            )
+        rw, rl = dims.get(f.room, (0.0, 0.0))
+        span = f.run_to - f.run_from
+        _nw, new_from = _remap_wall_offset(xf, f.along, f.run_from, span, rw, rl)
+        return dataclasses.replace(
+            f, room=_pref(alias, f.room), along=new_along,
+            run_from=new_from, run_to=new_from + span,
+            line=None, col=None, end_col=None,
+        )
+
     new_wall = xf.wall(f.wall) if f.wall is not None else None
     new_rot = xf.fixture_rotation(f.rotation)
     nx, ny = f.x, f.y

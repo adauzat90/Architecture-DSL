@@ -563,7 +563,13 @@ class _Renderer:
         for r in self.plan.rooms:
             if level is not None and r.level != level:
                 continue
-            for f in resolve_room_fixtures(self.plan, r):
+            # Counters draw FIRST (z-under), the drafting convention: a sink or
+            # range set into a run then draws cleanly over the countertop.
+            fixtures = sorted(
+                resolve_room_fixtures(self.plan, r),
+                key=lambda f: 0 if f.kind == "counter" else 1,
+            )
+            for f in fixtures:
                 self._fixture_glyph(f)
 
     def _fx_ellipse(self, cx, cy, rx, ry, sw=0.8, fill="none"):
@@ -656,6 +662,20 @@ class _Renderer:
             self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9, rx=rr)
             bx, by, bw, bh = band(0.24)  # back cushion band
             self._rect(bx, by, bw, bh, "none", FIXTURE_COLOR, 0.7)
+        elif kind == "counter":
+            # A countertop run: a plain casework rectangle plus a subtle second edge
+            # line on the room-facing LONG edge — the bullnose — so a run reads as a
+            # counter, not a box. The room-facing edge is opposite the wall (`back`).
+            self._rect(x, y, w, h, FIXTURE_FILL, FIXTURE_COLOR, 0.9)
+            inset = min(w, h) * 0.16
+            if back == "bottom":  # backs S, faces N (screen top) → line near top
+                self._line(x, y + inset, x + w, y + inset, FIXTURE_COLOR, 0.6)
+            elif back == "top":  # faces screen bottom
+                self._line(x, y + h - inset, x + w, y + h - inset, FIXTURE_COLOR, 0.6)
+            elif back == "left":  # faces screen right
+                self._line(x + w - inset, y, x + w - inset, y + h, FIXTURE_COLOR, 0.6)
+            else:  # back == right, faces screen left
+                self._line(x + inset, y, x + inset, y + h, FIXTURE_COLOR, 0.6)
         else:
             # tables / desk / dresser / wardrobe / counter / island / other:
             # a plain rounded rectangle reads as casework.

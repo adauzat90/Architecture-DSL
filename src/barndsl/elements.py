@@ -397,6 +397,22 @@ class PlacedFixture:
     wall: Direction | None = None
     rotation: float = 0.0
     width: float | None = None  # override the nominal run (resizable fixtures)
+    #: An **along-run** counter (the ``fixture counter in <room> along <wall>``
+    #: sugar). When set, the fixture is a wall-backed countertop spanning ``wall``:
+    #: its footprint is derived from the room's wall at resolve time (SW-corner
+    #: room-local, like every other wall offset), so geometry/validation/render/
+    #: compose all consume the desugared wall + span + depth exactly as for any
+    #: wall-backed piece. The sugar is kept here only so ``emit_dsl`` round-trips the
+    #: ``along`` form the author wrote. Legal for ``counter`` only.
+    along: Direction | None = None
+    #: The run's start/end along ``along``'s wall, room-local feet from the wall's
+    #: south/west start corner. ``None``/``None`` means the full wall. Always given
+    #: as a pair (both or neither); ``run_from <= run_to``.
+    run_from: float | None = None
+    run_to: float | None = None
+    #: The run's depth into the room (ft). ``None`` uses the along-run default
+    #: (:data:`barndsl.fixtures.ALONG_DEFAULT_DEPTH`, the US-standard 25 in).
+    run_depth: float | None = None
     #: Source location of the `fixture` statement (textual front-end only).
     line: int | None = None
     col: int | None = None
@@ -1736,6 +1752,10 @@ class Barndominium:
         wall: Direction | str | None = None,
         rotation: float = 0.0,
         width: float | None = None,
+        along: Direction | str | None = None,
+        run_from: float | None = None,
+        run_to: float | None = None,
+        depth: float | None = None,
     ) -> "Barndominium":
         """Place a fixture/furnishing (the ``fixture`` statement).
 
@@ -1744,8 +1764,14 @@ class Barndominium:
         auto-place against ``wall`` (or the first free spot). ``rotation`` turns it
         in plan (degrees). Authored fixtures add to a room's auto-seeds; one of a
         seeded kind replaces that seed. See :class:`PlacedFixture`.
+
+        ``along`` (``counter`` only) makes a wall-backed countertop run spanning a
+        wall: give ``along`` a direction and, optionally, ``run_from``/``run_to``
+        (room-local feet along the wall from its S/W corner — omit for the full
+        wall) and ``depth`` (into the room; 1–4 ft, default the US-standard 25 in).
+        It is mutually exclusive with ``at``/``wall``/``width``.
         """
-        from .fixtures import FIXTURES
+        from .fixtures import ALONG_DEPTH_MAX, ALONG_DEPTH_MIN, FIXTURES
 
         kind = str(kind)
         if kind not in FIXTURES:
@@ -1753,6 +1779,7 @@ class Barndominium:
                 f"Unknown fixture kind '{kind}'. Known: {', '.join(FIXTURES)}."
             )
         wd = Direction(wall) if isinstance(wall, str) else wall
+        ad = Direction(along) if isinstance(along, str) else along
         if x is not None:
             x = _finite(room, "fixture x", x)
         if y is not None:
@@ -1763,8 +1790,35 @@ class Barndominium:
         w = None if width is None else _finite(room, "fixture width", width)
         if w is not None and w <= 0:
             raise ValueError("A fixture width must be positive.")
+        rf = None if run_from is None else _finite(room, "counter run start", run_from)
+        rt = None if run_to is None else _finite(room, "counter run end", run_to)
+        rd = None if depth is None else _finite(room, "counter depth", depth)
+        if ad is not None:
+            if kind != "counter":
+                raise ValueError(
+                    f"`along` is only for a counter run, not a '{kind}' — every "
+                    "other fixture has a fixed footprint. Use `at`/`wall` instead."
+                )
+            if x is not None or wd is not None or w is not None:
+                raise ValueError(
+                    "An `along` counter run can't also take `at`, `wall` or `width` "
+                    "— the run's wall and length come from `along` and `from`/`to`."
+                )
+            if (rf is None) != (rt is None):
+                raise ValueError("A counter run needs both `from` and `to`, or neither.")
+            if rf is not None and rt is not None and rt <= rf:
+                raise ValueError(
+                    f"A counter run's `to` ({rt:g}) must be past its `from` ({rf:g})."
+                )
+            if rd is not None and not (ALONG_DEPTH_MIN - 1e-9 <= rd <= ALONG_DEPTH_MAX + 1e-9):
+                raise ValueError(
+                    f"A counter depth must be {ALONG_DEPTH_MIN:g}–{ALONG_DEPTH_MAX:g} ft, "
+                    f"got {rd:g}."
+                )
+        elif rf is not None or rt is not None or rd is not None:
+            raise ValueError("`from`/`to`/`depth` need an `along <wall>` counter run.")
         self.fixtures.append(
-            PlacedFixture(kind, str(room), x, y, wd, rot, w)
+            PlacedFixture(kind, str(room), x, y, wd, rot, w, ad, rf, rt, rd)
         )
         return self
 
@@ -2079,6 +2133,20 @@ class Barndominium:
         glaze = {"south": 0.0, "east": 0.0, "west": 0.0, "north": 0.0}
         for w in self.windows:
             glaze[wall_sector(w.wall, theta)] += w.glazed_area
+        # Countertop takeoff: the run length (the wall-parallel dimension) and the
+        # footprint area, summed over every resolved counter (authored + seeds). A
+        # counter's run is its longer footprint side; L/U corner squares are counted
+        # in BOTH meeting runs (not subtracted) — a small, deliberate over-count that
+        # keeps the takeoff a simple sum and errs generous for estimating.
+        from .fixtures import resolve_room_fixtures
+
+        counter_lf = 0.0
+        counter_area = 0.0
+        for r in self.rooms:
+            for f in resolve_room_fixtures(self, r):
+                if f.kind == "counter":
+                    counter_lf += max(f.width, f.length)
+                    counter_area += f.width * f.length
         return {
             "footprint_sqft": self.footprint_area,
             "interior_sqft": self.interior_area,
@@ -2114,4 +2182,7 @@ class Barndominium:
             "glazing_east_sqft": glaze["east"],
             "glazing_west_sqft": glaze["west"],
             "glazing_north_sqft": glaze["north"],
+            # Countertop takeoff (linear feet of run and footprint area).
+            "counter_linear_ft": counter_lf,
+            "counter_area_sqft": counter_area,
         }

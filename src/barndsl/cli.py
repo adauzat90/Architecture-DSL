@@ -202,6 +202,11 @@ def _print_metrics(plan) -> None:
     print(f"  Ext. wall area:   {m['exterior_wall_area_sqft']:.0f} sq ft")
     print(f"  Roof area (≈):    {m['roof_area_sqft']:.0f} sq ft")
     print(f"  Foundation (≈):   {m['foundation_concrete_yd3']:.1f} cu yd concrete")
+    if m.get("counter_linear_ft", 0.0) > 0:
+        print(
+            f"  Countertops:      {m['counter_linear_ft']:.0f} lf / "
+            f"{m['counter_area_sqft']:.0f} sq ft"
+        )
     if plan.frame_spec is not None or plan.posts:
         print(
             f"  Frame:            {int(m['frame_count'])} bents / "

@@ -130,6 +130,13 @@ def _window_line(w: object) -> str:
 
 def _fixture_line(f: object) -> str:
     line = f"fixture {f.kind} in {f.room}"  # type: ignore[attr-defined]
+    if getattr(f, "along", None) is not None:  # an `along` counter run
+        line += f" along {f.along.value[0].upper()}"  # type: ignore[attr-defined]
+        if f.run_from is not None and f.run_to is not None:  # type: ignore[attr-defined]
+            line += f" from {_n(f.run_from)} to {_n(f.run_to)}"  # type: ignore[attr-defined]
+        if f.run_depth is not None:  # type: ignore[attr-defined]
+            line += f" depth {_n(f.run_depth)}"  # type: ignore[attr-defined]
+        return line
     if f.x is not None and f.y is not None:  # type: ignore[attr-defined]
         line += f" at {_n(f.x)},{_n(f.y)}"  # type: ignore[attr-defined]
     if f.wall is not None:  # type: ignore[attr-defined]
@@ -389,16 +396,7 @@ def emit_dsl(plan: Barndominium, flatten: bool = False) -> str:
         # reach here — the emitted source carries exactly what the author wrote.
         out.append("")
         for f in keep(plan.fixtures):
-            line = f"fixture {f.kind} in {f.room}"
-            if f.x is not None and f.y is not None:
-                line += f" at {_n(f.x)},{_n(f.y)}"
-            if f.wall is not None:
-                line += f" wall {f.wall.value[0].upper()}"
-            if f.rotation:
-                line += f" rotate {_n(f.rotation)}"
-            if f.width is not None:
-                line += f" width {_n(f.width)}"
-            out.append(line)
+            out.append(_fixture_line(f))
 
     if keep(plan.porches):
         out.append("")

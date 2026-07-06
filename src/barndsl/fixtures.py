@@ -97,6 +97,23 @@ _LANDING_KINDS: frozenset[str] = frozenset(
     {"counter", "sink", "kitchen_island", "refrigerator"}
 )
 
+#: The default depth of an ``along`` counter run (into the room). 25 in — 2 ft 1 in
+#: — is the US-standard finished countertop depth (24 in cabinet + a 1 in overhang),
+#: so an ``along`` run without a ``depth`` uses it. (The catalog ``counter`` keeps
+#: its nominal 2 ft for an ``at``-placed piece; ``along`` is the run form.)
+ALONG_DEFAULT_DEPTH: float = 25.0 / 12.0
+#: The accepted range for a counter run's ``depth`` (ft) — a shallow bar ledge up to
+#: a deep island-style run.
+ALONG_DEPTH_MIN: float = 1.0
+ALONG_DEPTH_MAX: float = 4.0
+#: Appliances that read as *set into* a counter run (a top-mount sink, a slide-in
+#: range) rather than colliding with it — the FIXTURE_OVERLAP inset exemption. A
+#: refrigerator or dishwasher is not inset (it stands proud), so it isn't here.
+_INSET_KINDS: frozenset[str] = frozenset({"sink", "range"})
+#: How much of an inset appliance's footprint must lie within a counter to read as
+#: set into it (its centre must also fall inside the run).
+_INSET_MIN_FRACTION: float = 0.70
+
 #: ``FIXTURE_ROOM_TYPE`` unusual-map: a kind -> the room types where it reads as
 #: at home. A kind absent from this map is *never* judged, so a desk in a bedroom,
 #: a water heater in a utility/closet/garage, a washer in a mudroom — all pass. The
@@ -112,6 +129,13 @@ _EXPECTED_ROOMS: dict[str, frozenset[RoomType]] = {
     "bed_queen": frozenset({RoomType.BEDROOM, RoomType.LOFT}),
     "bed_twin": frozenset({RoomType.BEDROOM, RoomType.LOFT}),
 }
+
+#: Room types where a counter run reads as odd (``COUNTER_ROOM`` info). Counters
+#: are at home in a kitchen, pantry, bath (vanity), laundry, mudroom, office, shop
+#: — this is the deliberately-small set where one is surprising enough to flag.
+_COUNTER_ODD_ROOMS: frozenset[RoomType] = frozenset(
+    {RoomType.BEDROOM, RoomType.CLOSET, RoomType.HALLWAY, RoomType.LOFT}
+)
 
 #: IRC R307.1 water-closet clearances (feet): 15 in from the centreline to any
 #: wall/fixture on each side, 21 in of clear floor in front.
@@ -205,6 +229,77 @@ def _rects_overlap(a, b, tol: float = 1e-6) -> bool:
     dx = min(ax + aw, bx + bw) - max(ax, bx)
     dy = min(ay + al, by + bl) - max(ay, by)
     return dx > tol and dy > tol
+
+
+def _rect_intersection(a, b):
+    """The overlap rectangle ``(x, y, w, l)`` of two boxes, or ``None`` if they
+    don't overlap."""
+    ax, ay, aw, al = a
+    bx, by, bw, bl = b
+    ix = max(ax, bx)
+    iy = max(ay, by)
+    iw = min(ax + aw, bx + bw) - ix
+    il = min(ay + al, by + bl) - iy
+    if iw <= 1e-9 or il <= 1e-9:
+        return None
+    return (ix, iy, iw, il)
+
+
+def _counter_depth(f: "Fixture") -> float:
+    """A counter's depth into the room — its shorter footprint side (the run is the
+    longer side)."""
+    return min(f.width, f.length)
+
+
+def _is_mitred_corner(a: "Fixture", b: "Fixture") -> bool:
+    """True if counters ``a`` and ``b`` meet only in a corner square — an L/U join,
+    not a collinear double-stack. The overlap must fit within ``depth × depth`` of
+    the deeper run (a corner square), which two parallel runs overlapping along
+    their length never do."""
+    if a.kind != "counter" or b.kind != "counter":
+        return False
+    inter = _rect_intersection(
+        (a.x, a.y, a.width, a.length), (b.x, b.y, b.width, b.length)
+    )
+    if inter is None:
+        return False
+    _ix, _iy, iw, il = inter
+    dmax = max(_counter_depth(a), _counter_depth(b))
+    return iw <= dmax + 1e-6 and il <= dmax + 1e-6
+
+
+def _inset_pair(a: "Fixture", b: "Fixture"):
+    """If one of ``a``/``b`` is an inset appliance (sink/range) set *into* the other
+    counter, return ``(appliance, counter)``; else ``None``. "Set into" means the
+    appliance's centre lies inside the counter and ≥ :data:`_INSET_MIN_FRACTION` of
+    its footprint overlaps."""
+    for app, counter in ((a, b), (b, a)):
+        if app.kind not in _INSET_KINDS or counter.kind != "counter":
+            continue
+        inter = _rect_intersection(
+            (app.x, app.y, app.width, app.length),
+            (counter.x, counter.y, counter.width, counter.length),
+        )
+        if inter is None:
+            continue
+        _ix, _iy, iw, il = inter
+        area = app.width * app.length
+        cx, cy = app.center
+        centre_in = (
+            counter.x - 1e-6 <= cx <= counter.x + counter.width + 1e-6
+            and counter.y - 1e-6 <= cy <= counter.y + counter.length + 1e-6
+        )
+        if centre_in and area > 0 and (iw * il) / area >= _INSET_MIN_FRACTION - 1e-9:
+            return app, counter
+    return None
+
+
+def _overlap_exempt(a: "Fixture", b: "Fixture") -> bool:
+    """Whether an overlap between ``a`` and ``b`` is a legitimate kitchen join —
+    a mitred counter corner (L/U) or an appliance set into a counter run — rather
+    than a real collision. Collinear/parallel double-stacked counters and any
+    non-inset piece over a counter are NOT exempt."""
+    return _is_mitred_corner(a, b) or _inset_pair(a, b) is not None
 
 
 def _rect_gap(a, b) -> float:
@@ -387,11 +482,38 @@ def _quarter_turns(rotation: float) -> int:
     return int(round((rotation or 0.0) / 90.0)) % 4
 
 
+def _place_along(room: Room, pf) -> Fixture:
+    """Resolve an ``along`` counter run to a world :class:`Fixture`.
+
+    The run backs to ``pf.along``'s wall and spans it from ``run_from`` to ``run_to``
+    (room-local feet from the wall's south/west start corner; the full wall when
+    both are ``None``), projecting ``run_depth`` (or :data:`ALONG_DEFAULT_DEPTH`)
+    into the room. The result is an ordinary wall-backed footprint, so every
+    downstream consumer treats it exactly like an ``at``-placed counter."""
+    wall = pf.along.name[0]  # S | N | E | W
+    depth = pf.run_depth if pf.run_depth is not None else ALONG_DEFAULT_DEPTH
+    run = room.width if wall in ("S", "N") else room.length
+    a = 0.0 if pf.run_from is None else float(pf.run_from)
+    b = run if pf.run_to is None else float(pf.run_to)
+    length = max(0.0, b - a)  # the along-wall dimension
+    if wall == "S":
+        fx, fy, fw, fl = room.x + a, room.y, length, depth
+    elif wall == "N":
+        fx, fy, fw, fl = room.x + a, room.y2 - depth, length, depth
+    elif wall == "W":
+        fx, fy, fw, fl = room.x, room.y + a, depth, length
+    else:  # E
+        fx, fy, fw, fl = room.x2 - depth, room.y + a, depth, length
+    return Fixture(pf.kind, fx, fy, fw, fl, wall)
+
+
 def _place_explicit(
     room: Room, pf, x0: float, y0: float, cw: float, cl: float, occupied: list
 ) -> Fixture:
     """Resolve one authored :class:`~barndsl.elements.PlacedFixture` to a world
     :class:`Fixture`, honouring its ``at``/``wall``/``rotate`` (or auto-placing)."""
+    if getattr(pf, "along", None) is not None:
+        return _place_along(room, pf)
     spec = FIXTURES[pf.kind]
     width = float(pf.width) if getattr(pf, "width", None) else spec.width
     depth = spec.depth
@@ -549,7 +671,7 @@ def validate_fixtures(plan: Barndominium, add) -> None:
             for j, other in enumerate(fixtures):
                 if j <= i:
                     continue
-                if _rects_overlap(rects[i], rects[j]):
+                if _rects_overlap(rects[i], rects[j]) and not _overlap_exempt(f, other):
                     add(
                         Issue(
                             Severity.WARNING,
@@ -712,6 +834,44 @@ def _check_placement(plan, room, fixtures, rects, add, Issue, Severity) -> None:
                     )
                 )
 
+        # COUNTER_ROOM — a counter in a room type where it reads as odd.
+        if f.kind == "counter" and room.type in _COUNTER_ODD_ROOMS:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "COUNTER_ROOM",
+                    f"A counter in the {room.type.value} '{room.id}' is unusual — "
+                    "a run of casework reads as a kitchen/utility surface.",
+                    room=room.id,
+                    line=f.source_line,
+                    hint="Counters live in a kitchen, pantry, bath, laundry or shop; "
+                    "if this is a deliberate bar or work ledge, ignore this note.",
+                )
+            )
+
+        # COUNTER_DOOR — a counter run crosses a doorway/opening/entry on its wall.
+        if f.kind == "counter" and f.wall in ("S", "N", "E", "W"):
+            if f.wall in ("S", "N"):
+                clo, chi = f.x, f.x + f.width
+            else:
+                clo, chi = f.y, f.y + f.length
+            for label, olo, ohi in _openings_on_wall(plan, room, f.wall):
+                if min(chi, ohi) - max(clo, olo) > 1e-6:
+                    add(
+                        Issue(
+                            Severity.WARNING,
+                            "COUNTER_DOOR",
+                            f"The counter run in '{room.id}' crosses {label} on its "
+                            f"{f.wall} wall.",
+                            room=room.id,
+                            line=f.source_line,
+                            hint="A run can't span a doorway — stop it short with "
+                            "`from`/`to` so it clears the opening, or move the run to "
+                            "another wall.",
+                        )
+                    )
+                    break
+
         # FIXTURE_EGRESS — a tall piece parked over a bedroom's escape window.
         if room.type is RoomType.BEDROOM and f.kind in _TALL_KINDS:
             for w in windows:
@@ -843,6 +1003,29 @@ def _check_plan_rules(plan, room, fixtures, add, Issue, Severity) -> None:
                         )
                     )
 
+        # SINK_NO_COUNTER — a kitchen sink not set into any counter run. Only fires
+        # once the kitchen has counters (like RANGE_LANDING, we don't nag a bare
+        # seed-only kitchen); a bath lavatory has its own vanity, so it's not judged.
+        counters = [f for f in fixtures if f.kind == "counter"]
+        if counters:
+            for f in fixtures:
+                if f.kind != "sink":
+                    continue
+                if not any(_inset_pair(f, c) is not None for c in counters):
+                    add(
+                        Issue(
+                            Severity.INFO,
+                            "SINK_NO_COUNTER",
+                            f"The sink in '{room.id}' isn't set into any counter run.",
+                            room=room.id,
+                            line=None if f.seed else f.source_line,
+                            hint="A kitchen sink wants counter to each side — extend a "
+                            "`fixture counter ... along <wall>` run past the sink so "
+                            "it drops into the countertop.",
+                        )
+                    )
+                    break
+
         # KITCHEN_TRIANGLE — sink/range/refrigerator scattered too far apart.
         sink = next((f for f in fixtures if f.kind == "sink"), None)
         rng = next((f for f in fixtures if f.kind == "range"), None)
@@ -901,6 +1084,53 @@ def _door_swing_rects(plan: Barndominium, room: Room) -> list:
             inward = edge.pos < room.center[1]
             by = edge.pos if inward else edge.pos - w
             out.append((start, by, w, w))
+    return out
+
+
+def _openings_on_wall(plan: Barndominium, room: Room, wall: str) -> list[tuple[str, float, float]]:
+    """Every doorway/opening/entry on ``room``'s ``wall`` (S/N/E/W), as
+    ``(label, lo, hi)`` world intervals along that wall — x for S/N walls, y for
+    W/E. Used by ``COUNTER_DOOR`` to see when a counter run crosses an opening."""
+    from .geometry import shared_edge
+
+    dir_map = {
+        "S": Direction.SOUTH, "N": Direction.NORTH,
+        "W": Direction.WEST, "E": Direction.EAST,
+    }
+    wd = dir_map[wall]
+    horiz = wall in ("S", "N")
+    wall_pos = {"S": room.y, "N": room.y2, "W": room.x, "E": room.x2}[wall]
+    out: list[tuple[str, float, float]] = []
+    for d in plan.exterior_doors:
+        if d.room != room.id or d.wall is not wd:
+            continue
+        base = room.x if horiz else room.y
+        lo = base + d.offset
+        label = (
+            "the overhead door" if d.overhead
+            else "the entry" if d.egress else "the exterior door"
+        )
+        out.append((label, lo, lo + d.width))
+    for idoor in plan.interior_doors:
+        if room.id not in (idoor.room_a, idoor.room_b):
+            continue
+        other = plan.room(idoor.room_b if idoor.room_a == room.id else idoor.room_a)
+        if other is None:
+            continue
+        edge = shared_edge(room, other)
+        if edge is None:
+            continue
+        want = "h" if horiz else "v"
+        if edge.orientation != want or abs(edge.pos - wall_pos) > 1e-6:
+            continue
+        w = min(idoor.width, edge.length)
+        offset = idoor.offset if idoor.offset is not None else max(0.0, (edge.length - w) / 2.0)
+        lo = edge.lo + max(0.0, min(offset, edge.length - w))
+        label = (
+            "the cased opening" if getattr(idoor, "kind", "swing") == "cased"
+            else f"the door to '{other.id}'"
+        )
+        out.append((label, lo, lo + w))
     return out
 
 

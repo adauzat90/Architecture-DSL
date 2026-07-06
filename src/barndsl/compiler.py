@@ -239,12 +239,20 @@ Statements:
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
         # room on each level so it links them (and makes the upper floor reachable).
   fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>]
+  fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]
         # place a fixture / furnishing (bed_queen, sofa, dining_table, desk,
         # washer, kitchen_island, counter, ...). `at <x>,<y>` is ROOM-LOCAL feet,
         # measured from the room's SW corner (unlike every other statement, which
         # is in world coordinates). Omit `at` to auto-place against `wall`, or omit
         # both for the first free spot. `rotate` turns it in plan (snapped to a
         # quarter-turn); `width` overrides the run of a resizable piece (a counter).
+        # `along <wall>` (COUNTER ONLY) lays a countertop RUN along a wall: the whole
+        # wall, or `from <a> to <b>` (room-local ft from the wall's S/W corner), at
+        # `depth <d>` into the room (1–4 ft; default the US-standard 25 in = 2-1).
+        # It's a wall-backed counter like any other — an L or U is two/three runs
+        # meeting at mitred corners, and a sink/range set into a run doesn't clash
+        # with it. `along` is exclusive with `at`/`wall`/`width`. Other kinds have a
+        # fixed footprint, so `along` on them is an error.
         # Fixtures ADD to a room's auto-seeds; an explicit fixture of a seeded kind
         # (bath toilet/lavatory/tub, kitchen fridge/range/sink, laundry washer/
         # dryer) REPLACES just that seed. Baths, kitchens and laundries auto-seed
@@ -1511,16 +1519,20 @@ def _parse_statement(
         c.keyword("in")
         room_tok = c.ident("a room id")
         fx = fy = wall = width = None
+        along: Direction | None = None
+        run_from: float | None = None
+        run_to: float | None = None
+        run_depth: float | None = None
         rotation = 0.0
         while (tok := c.peek()) is not None:
             opt = c.take("an option").text.lower()
             if opt == "at":
                 fx = c.number("the fixture x offset")
                 fy = c.number("the fixture y offset")
-            elif opt == "wall":
+            elif opt in ("wall", "along"):
                 wt = c.take("a wall (N|S|E|W)")
-                wall = _FIXTURE_WALLS.get(wt.text.lower())
-                if wall is None:
+                wd = _FIXTURE_WALLS.get(wt.text.lower())
+                if wd is None:
                     raise _ParseError(
                         "BAD_WALL",
                         f"Unknown wall '{wt.text}'.",
@@ -1528,6 +1540,16 @@ def _parse_statement(
                         end_col=wt.end_col,
                         hint="Use N, S, E or W (or north/south/east/west).",
                     )
+                if opt == "along":
+                    along = wd
+                else:
+                    wall = wd
+            elif opt == "from":
+                run_from = c.number("the counter run start")
+            elif opt == "to":
+                run_to = c.number("the counter run end")
+            elif opt == "depth":
+                run_depth = c.number("the counter depth")
             elif opt in ("rotate", "rotation"):
                 rotation = c.number("the rotation in degrees")
             elif opt == "width":
@@ -1538,12 +1560,15 @@ def _parse_statement(
                     f"Unknown fixture option '{tok.text}'.",
                     tok.col,
                     end_col=tok.end_col,
-                    hint="Options: at <x>,<y>, wall N|S|E|W, rotate <deg>, width <w>.",
+                    hint="Options: at <x>,<y>, wall N|S|E|W, rotate <deg>, width <w>, "
+                    "or (counter) along N|S|E|W [from <a> to <b>] [depth <d>].",
                 )
         c.expect_end()
         try:
             plan.add_fixture(
-                kind, room_tok.text, x=fx, y=fy, wall=wall, rotation=rotation, width=width
+                kind, room_tok.text, x=fx, y=fy, wall=wall, rotation=rotation,
+                width=width, along=along, run_from=run_from, run_to=run_to,
+                depth=run_depth,
             )
         except ValueError as exc:
             raise _ParseError(

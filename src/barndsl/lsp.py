@@ -414,6 +414,13 @@ def hover(text: str, result: CompileResult, line: int, char: int) -> dict | None
                 "range": _range(line, start, end),
             }
 
+    # 2b. Anywhere on a `fixture counter` line → a run fact card (run in ft-in).
+    if head == "fixture" and result.plan is not None:
+        card = _counter_card(result.plan, line)
+        if card is not None:
+            return {"contents": {"kind": "markdown", "value": card},
+                    "range": _range(line, start, end)}
+
     # 3. An identifier that resolves in the compiled plan.
     if not word or result.plan is None:
         return None
@@ -449,6 +456,24 @@ def hover(text: str, result: CompileResult, line: int, char: int) -> dict | None
     if room is not None:
         value = _room_card(plan, room)
         return {"contents": {"kind": "markdown", "value": value}, "range": _range(line, start, end)}
+    return None
+
+
+def _counter_card(plan: Any, line: int) -> str | None:
+    """A fact card for a counter authored on 0-based ``line`` — its resolved run and
+    depth in feet-and-inches. ``None`` if no counter is placed by that source line."""
+    from .fixtures import resolve_room_fixtures
+
+    for room in plan.rooms:
+        for f in resolve_room_fixtures(plan, room):
+            if f.kind != "counter" or f.source_line != line + 1:
+                continue
+            run = max(f.width, f.length)
+            depth = min(f.width, f.length)
+            return (
+                f"**counter run** — {fmt_ft_in(run)} long × {fmt_ft_in(depth)} deep · "
+                f"along {f.wall} wall of `{room.id}` · {run * depth:.0f} sq ft"
+            )
     return None
 
 
@@ -562,13 +587,21 @@ def completions(
     if head == "fixture" and len(toks) == 1:
         return [_item(k, _KIND_VALUE) for k in sorted(FIXTURES)]
 
+    # `fixture counter in <room> …` option slots: `along` (and `at`/`wall`) after
+    # the room id, then `from`/`to`/`depth` inside an `along` run.
+    if head == "fixture" and "in" in toks and "counter" in toks:
+        if "along" in toks and last != "along":
+            return [_item(k, _KIND_KEYWORD) for k in ("from", "to", "depth")]
+        if len(toks) >= 4 and "along" not in toks and "at" not in toks:
+            return [_item(k, _KIND_KEYWORD) for k in ("along", "at", "wall")]
+
     # `alarm <kind>`.
     if head == "alarm" and len(toks) == 1:
         return [_item(k, _KIND_VALUE) for k in ALARM_KINDS]
 
-    # A wall-direction slot: after the `wall` modifier, or the wall slot of a
-    # `window`/`entry`/exterior `door` statement.
-    if last == "wall":
+    # A wall-direction slot: after the `wall` modifier (or `along` on a counter),
+    # or the wall slot of a `window`/`entry`/exterior `door` statement.
+    if last in ("wall", "along"):
         return [_item(d, _KIND_VALUE) for d in _WALL_DIRS]
     if head in ("window", "entry") and len(toks) == 2 and last not in ("-",):
         return [_item(d, _KIND_VALUE) for d in _WALL_DIRS]

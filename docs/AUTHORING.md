@@ -112,6 +112,7 @@ window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] 
 porch <id> at <x>,<y> size <W> x <L> [covered|open]
 stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]   # vertical circulation
 fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>]   # furnishing
+fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]   # a countertop run
 outlet in <room> wall N|S|E|W offset <ft> [gfci]   # optional; a receptacle on a room wall
 switch in <room> wall N|S|E|W offset <ft>          # optional; a wall switch
 light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]   # optional; a ceiling luminaire (room-local x,y)
@@ -584,6 +585,35 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   `RANGE_LANDING` — no counter/sink/fridge beside the cooktop (NKBA);
   `KITCHEN_TRIANGLE` — a sink–range–fridge triangle over ~26 ft (appliances too
   scattered); `DRYER_VENT` — a dryer more than ~10 ft from any exterior wall.
+- Countertop-run nudges (the `along` form): `COUNTER_DOOR` (warning) — a run spans
+  a doorway/opening/entry on its wall (stop it short with `from`/`to`);
+  `COUNTER_ROOM` (info) — a counter in a room where a run reads as odd (bedroom,
+  closet, hallway, loft); `SINK_NO_COUNTER` (info) — a kitchen sink not set into
+  any counter run (fires only once the kitchen has counters to compare against).
+
+### Countertop runs — `fixture counter ... along <wall>`
+
+A counter is any length, so it has its own placement form: `along` lays a
+countertop **run** down a wall.
+
+```barn
+fixture counter in kitchen along S                 # the whole south wall
+fixture counter in kitchen along S from 2 to 12     # a partial run (room-local ft; ft-in ok)
+fixture counter in kitchen along W depth 2-1         # depth override (default 25 in = 2-1)
+```
+
+- `from <a> to <b>` is room-local feet measured from the wall's **S/W start
+  corner** (the same convention as every other wall offset); omit it for the full
+  wall. `depth <d>` (1–4 ft) projects into the room; the default is the
+  US-standard **25 in** (2′1″).
+- An **L or U** kitchen is just two or three runs that meet at a corner — the
+  compiler treats a mitred corner as a join (no `FIXTURE_OVERLAP`), and a sink or
+  range whose footprint sits inside a run is *set into* it (also no overlap). A
+  refrigerator over a run still warns — it stands proud, it isn't inset.
+- `along` is a counter-only form and is exclusive with `at`/`wall`/`width`. It
+  round-trips through `emit`/`fmt`, transforms under `use` mirror/rotate, and the
+  takeoff reports `counter_linear_ft` / `counter_area_sqft` (and a countertop cost
+  line). Dragging a run in the playground slides it along its wall.
 
 > These checks are approximate (loosely IRC-based) and are **not** a substitute
 > for a licensed designer or the authority having jurisdiction.

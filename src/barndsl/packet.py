@@ -97,8 +97,10 @@ def _cover(result: Any, plan: Any, est: dict[str, Any]) -> str:
         ("Exterior wall area", f"{m['exterior_wall_area_sqft']:.0f} sq ft"),
         ("Roof area (approx)", f"{m['roof_area_sqft']:.0f} sq ft"),
         ("Foundation concrete", f"{m['foundation_concrete_yd3']:.1f} cu yd"),
-        ("Estimated cost", f"${est['total']['expected']:,.0f}"),
     ]
+    if m.get("counter_linear_ft", 0.0) > 0:
+        rows.append(("Countertops", f"{m['counter_linear_ft']:.0f} lf"))
+    rows.append(("Estimated cost", f"${est['total']['expected']:,.0f}"))
     metric_rows = "\n".join(
         f"<tr><td>{_tag(k)}</td><td>{_tag(v)}</td></tr>" for k, v in rows
     )

@@ -43,7 +43,13 @@ import math
 import re
 from dataclasses import dataclass
 
-from .compiler import _PLACEMENT, CompileResult, _tokenize_line, compile_source
+from .compiler import (
+    _PLACEMENT,
+    CompileResult,
+    _parse_ft_in,
+    _tokenize_line,
+    compile_source,
+)
 from .elements import ALARM_KINDS, LIGHT_KINDS, RoomType
 from .geometry import shared_edge, wall_segment
 
@@ -94,9 +100,15 @@ class Edit:
     offset: float | None = None
     #: Fixture edits: ``move_fixture`` uses ``key`` (the ``<room>~<kind>~<i>`` id)
     #: + room-local ``x``/``y``; ``add_fixture`` (a seed materialised by a drag)
-    #: uses ``room``/``fkind``/``wall`` + ``x``/``y``.
+    #: uses ``room``/``fkind``/``wall`` + ``x``/``y``. An ``along`` counter run is
+    #: added with ``along`` (N|S|E|W) and optional ``run_from``/``run_to``/``depth``
+    #: instead of ``x``/``y``/``wall`` (the ``fkind`` is ``counter``).
     fkind: str | None = None
     wall: str | None = None
+    along: str | None = None
+    run_from: float | None = None
+    run_to: float | None = None
+    depth: float | None = None
     #: --- panel (form-control) edit fields, Tier 5 graphical design panel ------
     #: ``set_room_type`` / ``add_room`` room type; ``rename_room`` target id;
     #: ``add_room`` anchor placement (``anchor`` = ``east-of`` …, ``of`` = target
@@ -221,7 +233,10 @@ def edit_from_json(obj: object) -> Edit | EditError:
     if kind == "add_fixture":
         return Edit("add_fixture", room=_as_str(obj.get("room")),
                     fkind=_as_str(obj.get("fkind")), wall=_as_str(obj.get("wall")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
+                    along=_as_str(obj.get("along")),
+                    run_from=_as_num(obj.get("from")), run_to=_as_num(obj.get("to")),
+                    depth=_as_num(obj.get("depth")))
     if kind == "set_room_type":
         return Edit("set_room_type", room=_as_str(obj.get("room")),
                     rtype=_as_str(obj.get("type")))
@@ -346,6 +361,16 @@ def _as_pair(v: object) -> tuple[float | None, float | None]:
 
 
 # --- number formatting (matches emit.py's `_n`, but 2-dp bounded) -------------
+
+
+def _as_feet(text: str) -> float:
+    """Parse a length token (decimal feet or a feet-and-inches literal) to feet,
+    or 0.0 if it isn't a number."""
+    try:
+        return float(text)
+    except ValueError:
+        v = _parse_ft_in(text)
+        return v if v is not None else 0.0
 
 
 def _fmt(value: float) -> str:
@@ -599,6 +624,17 @@ def _validate_shape(edit: Edit) -> EditError | None:
     if edit.kind == "add_fixture":
         if not edit.room or not edit.fkind:
             return EditError("malformed", "add_fixture needs a room and a kind")
+        if edit.along is not None:  # an `along` counter run
+            if _fixture_wall(edit.along) is None:
+                return EditError("bad_value", "add_fixture along must be N|S|E|W")
+            if (edit.run_from is None) != (edit.run_to is None):
+                return EditError("malformed", "add_fixture needs both `from` and `to`")
+            if edit.run_from is not None and (
+                not _finite(edit.run_from) or not _finite(edit.run_to)
+                or edit.run_to <= edit.run_from  # type: ignore[operator]
+            ):
+                return EditError("malformed", "add_fixture `to` must be past `from`")
+            return None
         if not _finite(edit.x) or not _finite(edit.y):
             return EditError("malformed", "add_fixture needs finite x and y")
         return None
@@ -1041,15 +1077,23 @@ def _move_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
     room = result.plan.room(edit.key.split("~", 1)[0])  # type: ignore[union-attr]
     assert room is not None
     tx, ty = float(edit.x), float(edit.y)  # type: ignore[arg-type]
+    lines = _lines(source)
+    raw = lines[line_no - 1]
+    toks = _tokenize_line(raw, line_no)
+
+    along_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "along"), None)
+    if along_idx is not None:
+        # An `along` counter run: dragging slides it ALONG its wall (the sugar is
+        # kept) — the perpendicular drag component is ignored, and the run keeps its
+        # length. A full-wall run gains a `from`/`to`; a partial run's span shifts.
+        return _slide_along_counter(source, lines, toks, line_no, room, f, along_idx, tx, ty)
+
     # The fixture's current room-local position (its world SW minus the room SW).
     cur_lx, cur_ly = f.x - room.x, f.y - room.y
     if _close(tx, cur_lx) and _close(ty, cur_ly):
         return EditResult(source, changed=False, line=line_no,
                           summary=f"{edit.key} already at {_fmt(tx)},{_fmt(ty)}")
 
-    lines = _lines(source)
-    raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
     at_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "at"), None)
     if at_idx is not None and at_idx + 2 < len(toks):
         xt, yt = toks[at_idx + 1], toks[at_idx + 2]
@@ -1067,6 +1111,40 @@ def _move_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
                       summary=f"{edit.key} → at {_fmt(tx)},{_fmt(ty)}")
 
 
+def _slide_along_counter(source, lines, toks, line_no, room, f, along_idx, tx, ty):
+    """Slide an ``along`` counter run along its wall to the dragged position, keeping
+    the run length and the ``along`` sugar. Rewrites (or inserts) the ``from``/``to``
+    span on the run's own line — a single, one-undo edit."""
+    horiz = f.wall in ("S", "N")
+    run_len = f.width if horiz else f.length
+    wall_len = room.width if horiz else room.length
+    new_from = tx if horiz else ty
+    new_from = max(0.0, min(new_from, max(0.0, wall_len - run_len)))
+    new_to = new_from + run_len
+    cur_from = (f.x - room.x) if horiz else (f.y - room.y)
+    if _close(new_from, cur_from):
+        return EditResult(source, changed=False, line=line_no,
+                          summary=f"{f.id} already along {f.wall} at {_fmt(new_from)}")
+    raw = lines[line_no - 1]
+    from_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "from"), None)
+    to_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "to"), None)
+    if from_idx is not None and to_idx is not None and from_idx + 1 < len(toks) \
+            and to_idx + 1 < len(toks):
+        ft, tt = toks[from_idx + 1], toks[to_idx + 1]
+        newraw = _splice(raw, [
+            (ft.col - 1, ft.end_col - 1, _fmt(new_from)),
+            (tt.col - 1, tt.end_col - 1, _fmt(new_to)),
+        ])
+    else:
+        # A full-wall run: insert `from A to B` right after the `along <wall>` token.
+        wall_tok = toks[along_idx + 1]
+        ins = wall_tok.end_col - 1
+        newraw = raw[:ins] + f" from {_fmt(new_from)} to {_fmt(new_to)}" + raw[ins:]
+    lines[line_no - 1] = newraw
+    return EditResult("\n".join(lines), changed=True, line=line_no,
+                      summary=f"{f.id} → along {f.wall} from {_fmt(new_from)} to {_fmt(new_to)}")
+
+
 def _add_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
     """Materialise a dragged auto-seed: insert a new ``fixture`` line just after the
     room's ``room`` statement, carrying the dragged room-local position."""
@@ -1075,11 +1153,18 @@ def _add_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
     if err is not None:
         return EditResult(source, error=err)
     assert line_no is not None
-    wall = f" wall {edit.wall}" if edit.wall else ""
-    stmt = (
-        f"fixture {edit.fkind} in {edit.room} "
-        f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}{wall}"  # type: ignore[arg-type]
-    )
+    if edit.along is not None:  # an `along` counter run
+        stmt = f"fixture {edit.fkind} in {edit.room} along {_fixture_wall(edit.along)}"
+        if edit.run_from is not None and edit.run_to is not None:
+            stmt += f" from {_fmt(float(edit.run_from))} to {_fmt(float(edit.run_to))}"
+        if edit.depth is not None:
+            stmt += f" depth {_fmt(float(edit.depth))}"
+    else:
+        wall = f" wall {edit.wall}" if edit.wall else ""
+        stmt = (
+            f"fixture {edit.fkind} in {edit.room} "
+            f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}{wall}"  # type: ignore[arg-type]
+        )
     lines = _lines(source)
     lines.insert(line_no, stmt)  # after the room line (1-based line_no → index)
     return EditResult("\n".join(lines), changed=True, line=line_no + 1,
@@ -1484,6 +1569,31 @@ def _set_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
     # Authored fixture: rewrite/add the requested clauses on its own line.
     lines = _lines(source)
     raw = lines[f.source_line - 1]
+    toks = _tokenize_line(raw, f.source_line)
+    along_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "along"), None)
+    if along_idx is not None:
+        # An `along` counter run: `width` adjusts the RUN (to = from + width),
+        # preserving the along sugar; wall/rotate don't apply to a run.
+        if edit.width is None:
+            return EditResult(source, changed=False, line=f.source_line,
+                              summary=f"fixture {edit.key} unchanged")
+        run = float(edit.width)
+        from_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "from"), None)
+        to_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "to"), None)
+        if from_idx is not None and to_idx is not None:
+            base = _as_feet(toks[from_idx + 1].text)
+            tt = toks[to_idx + 1]
+            new = _splice(raw, [(tt.col - 1, tt.end_col - 1, _fmt(base + run))])
+        else:  # full-wall run: pin from 0 to width
+            wall_tok = toks[along_idx + 1]
+            ins = wall_tok.end_col - 1
+            new = raw[:ins] + f" from 0 to {_fmt(run)}" + raw[ins:]
+        if new == raw:
+            return EditResult(source, changed=False, line=f.source_line,
+                              summary=f"fixture {edit.key} unchanged")
+        lines[f.source_line - 1] = new
+        return EditResult("\n".join(lines), changed=True, line=f.source_line,
+                          summary=f"set counter run {edit.key} to {_fmt(run)} ft")
     new = raw
     if wall is not None:
         new = _apply_clause(new, f.source_line, "wall", wall)

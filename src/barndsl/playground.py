@@ -2349,8 +2349,10 @@ const EDIT_TIPS = [
   'Measure (⟷ or `m`): drag between any two points for a live distance readout — ' +
     'clearances, walkways, furniture gaps. Esc puts the tape away.',
   'Drag a fixture to move it. An authored fixture rewrites its `at x,y`; a dashed ' +
-    'auto-seed (bath/kitchen/laundry) becomes an authored `fixture` line where you drop it.',
-  'Add fixtures in the DSL: `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]`.',
+    'auto-seed (bath/kitchen/laundry) becomes an authored `fixture` line where you drop it. ' +
+    'Dragging a counter `along` run slides it along its wall (updating `from`/`to`).',
+  'Add fixtures in the DSL: `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]`. ' +
+    'A countertop run: `fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]`.',
   'Every drag is one surgical text edit. Undo and redo (' + MOD + '+Z, ' + MOD +
     '+Shift+Z) span one timeline across typing, smart edits and drags alike.',
 ];
@@ -4658,9 +4660,15 @@ function addFixtureForm(){
     '<label>piece</label><select class="wide" id="nf-kind">' + opts + '</select>' +
     '<label>wall</label><select class="wide" id="nf-wall" title="Back it to a wall, or leave it free-standing">' +
     '<option value="" selected>free-standing</option>' + optList(['N', 'S', 'E', 'W'], '') + '</select>' +
+    '<label>along run</label><select class="wide" id="nf-along" title="Counter only: run a countertop the length of a wall (an L/U is several runs)">' +
+    '<option value="" selected>— not a run —</option>' + optList(['N', 'S', 'E', 'W'], '') + '</select>' +
+    '<label>from</label><input id="nf-from" placeholder="wall start" title="Optional: run start, ft along the wall (ft-in ok, e.g. 2-6)"><span></span>' +
+    '<label>to</label><input id="nf-to" placeholder="wall end" title="Optional: run end, ft along the wall (ft-in ok)"><span></span>' +
     '</div><div class="dp-btns"><button data-btn="fxsubmit">Add fixture</button>' +
     '<button data-btn="formcancel">Cancel</button></div>' +
-    '<div class="dp-note">Lands mid-room — drag it into place on the plan.</div></div>';
+    '<div class="dp-note">Lands mid-room — drag it into place. A <b>counter</b> with an ' +
+    '<b>along run</b> set spans that wall (full wall, or from/to); dragging it later ' +
+    'slides it along the wall.</div></div>';
 }
 function addOpeningForm(p, r){
   const kind = dpForm.op;
@@ -4827,7 +4835,19 @@ function submitFixtureForm(){
   const r = p.rooms.find(x => x.id === dpSel.k); if (!r) return;
   const kind = document.getElementById('nf-kind').value;
   const wall = document.getElementById('nf-wall').value;
+  const along = document.getElementById('nf-along').value;
   dpForm = null;
+  // A counter with an `along run` wall set becomes a wall-length countertop run
+  // (the compiler sizes it from the wall); an optional from/to (ft-in aware) makes
+  // it partial. Everything else lands mid-room and is dragged into place.
+  if (kind === 'counter' && along){
+    const ed = { kind:'add_fixture', room:r.id, fkind:'counter', along:along };
+    const a = parseFtIn(document.getElementById('nf-from').value);
+    const b = parseFtIn(document.getElementById('nf-to').value);
+    if (a != null && b != null && isFinite(a) && isFinite(b) && b > a){ ed.from = a; ed.to = b; }
+    applyEdits([ed], 'add counter run');
+    return;
+  }
   // Room-local drop point: roughly centred (the footprint isn't known here — the
   // compiler sizes the piece), clamped so a tiny room still gets a legal corner.
   const ed = { kind:'add_fixture', room:r.id, fkind:kind,
