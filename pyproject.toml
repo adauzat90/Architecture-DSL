@@ -4,26 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "barndsl"
-version = "0.1.0"
+version = "1.0.0"
 description = "An embedded Python DSL and agentic workflow for designing barndominium floor plans."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Architecture-DSL" }]
 keywords = ["dsl", "floor-plan", "barndominium", "architecture", "agent", "llm"]
-
-dependencies = [
-    "pydantic>=2.6",
-    # Auto-loads a local .env (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL /
-    # BARNDSL_MODEL) so `barndsl serve` and `barndsl design` work without
-    # manually exporting. Loading is soft — the CLI no-ops if it's absent.
-    "python-dotenv>=1.0",
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Software Development :: Compilers",
 ]
+
+# The engine — compiler, validation, SVG/DXF/IFC/glTF exports, schedules, cost,
+# playground, LSP, fmt — is dependency-free by design (stdlib only). Everything
+# else is opt-in via extras.
+dependencies = []
 
 [project.optional-dependencies]
 # The pure engine (DSL + validation + rendering) needs no extras.
-# The agentic workflow needs the Anthropic SDK.
-agent = ["anthropic>=0.49"]
+# The agentic workflow needs the Anthropic SDK, pydantic (its structured briefs),
+# and python-dotenv (`barndsl design`/`serve` pick up a local .env; the CLI
+# soft-imports dotenv and no-ops without it).
+agent = ["anthropic>=0.49", "pydantic>=2.6", "python-dotenv>=1.0"]
 # PNG/PDF rendering (SVG works with no extras).
 raster = ["cairosvg>=2.7"]
 # IFC export needs NO dependency (ifc.py hand-writes STEP/SPF). This extra is only
@@ -32,7 +45,11 @@ raster = ["cairosvg>=2.7"]
 ifc-validate = ["ifcopenshell>=0.7"]
 dev = [
     "pytest>=8.0",
+    # The agent-loop tests import barndsl.agent, which needs the agent extra's
+    # libraries even when the tests stub the API calls.
     "anthropic>=0.49",
+    "pydantic>=2.6",
+    "python-dotenv>=1.0",
     "ruff>=0.6",
     "mypy>=1.10",
 ]

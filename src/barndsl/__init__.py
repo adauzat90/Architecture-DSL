@@ -228,4 +228,4 @@ __all__ = [
     # agent helpers are imported lazily via barndsl.agent to avoid hard deps
 ]
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

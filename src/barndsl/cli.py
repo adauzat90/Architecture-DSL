@@ -479,13 +479,22 @@ def _cmd_layout(args: argparse.Namespace) -> int:
 
 
 def _cmd_design(args: argparse.Namespace) -> int:
-    from .agent import (
-        BarndoAgent,
-        agent_availability,
-        resolve_max_iterations,
-        resolve_model,
-        resolve_target_score,
-    )
+    try:
+        from .agent import (
+            BarndoAgent,
+            agent_availability,
+            resolve_max_iterations,
+            resolve_model,
+            resolve_target_score,
+        )
+    except ImportError:
+        # The base install is dependency-free; the design agent's libraries
+        # (anthropic/pydantic) live in the `agent` extra.
+        print(
+            'error: the design agent needs the agent extra — pip install "barndsl[agent]"',
+            file=sys.stderr,
+        )
+        return 2
 
     available, reason = agent_availability()
     if not available:

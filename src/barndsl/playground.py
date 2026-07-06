@@ -249,6 +249,19 @@ _LAYOUT_EXTRAS: dict[str, tuple[str, int]] = {
 }
 
 
+def _agent_availability() -> tuple[bool, str | None]:
+    """Whether the Claude design loop can run, surviving a trimmed install.
+
+    The base package is dependency-free; the agent's libraries (anthropic,
+    pydantic) live in the ``agent`` extra, so the import itself may fail — that
+    is an ordinary "not available" answer, never a traceback."""
+    try:
+        from .agent import agent_availability
+    except ImportError:
+        return False, 'the design agent needs the agent extra — pip install "barndsl[agent]"'
+    return agent_availability()
+
+
 def _clamp_int(value: object, lo: int, hi: int, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return default
@@ -815,9 +828,7 @@ class _Handler(BaseHTTPRequestHandler):
             if server.designer is not None:  # an injected loop needs no anthropic/key
                 self._json({"available": True, "reason": None})
             else:
-                from .agent import agent_availability
-
-                available, reason = agent_availability()
+                available, reason = _agent_availability()
                 self._json({"available": available, "reason": reason})
         else:
             self._json({"error": "not found"}, status=404)
@@ -1132,9 +1143,14 @@ class _Handler(BaseHTTPRequestHandler):
         seed_source = seed or None  # empty editor → a fresh generation, no seed
         # Default round count comes from $BARNDSL_MAX_ITERATIONS (else 3), clamped
         # to the playground's 1..8 safety range; an explicit request value wins.
-        from .agent import resolve_max_iterations
+        # A trimmed install (no agent extra) just uses the default — the SSE
+        # handler below reports the loop unavailable before anything runs.
+        try:
+            from .agent import resolve_max_iterations
 
-        default_rounds = min(8, max(1, resolve_max_iterations()))
+            default_rounds = min(8, max(1, resolve_max_iterations()))
+        except ImportError:
+            default_rounds = 3
         rounds = data.get("iterations", default_rounds)
         if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 8:
             rounds = default_rounds
@@ -1184,9 +1200,7 @@ class _Handler(BaseHTTPRequestHandler):
         if server.designer is not None:  # an injected loop needs no anthropic/key
             available, reason = True, None
         else:
-            from .agent import agent_availability
-
-            available, reason = agent_availability()
+            available, reason = _agent_availability()
         self._open_sse()
         self._sse(cancel, "status", {"job": job_id, "phase": "starting",
                                      "round": 0, "rounds": rounds})
