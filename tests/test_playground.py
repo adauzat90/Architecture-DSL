@@ -222,6 +222,24 @@ def test_compile_payload_is_pure_and_never_raises():
     assert good["ok"] is True and good["scene"]["nodes"]
 
 
+def test_compile_payload_carries_the_faces_dim_variant():
+    # Phase 18: the face-of-stud dimension variant rides in the payload as a
+    # baked SVG (like electrical_svg), so the "Dims" toggle swaps it in with no
+    # re-compile and no client-side dimension math.
+    p = compile_payload(CLEAN)
+    assert "<svg" in p["faces_svg"]
+    assert p["faces_svg"] != p["svg"]  # it really is the alternate convention
+
+
+def test_app_wires_the_dims_toggle():
+    # The SPA has the Dims toggle button, its state, and the shared variant picker
+    # that routes nominal/faces/electrical off the one payload — no re-request.
+    html = render_app(CLEAN)
+    assert 'id="dims-btn"' in html
+    assert "dimsMode" in html and "faces_svg" in html
+    assert "function planVariant" in html
+
+
 def test_compile_payload_scene_carries_the_walk_block():
     # First-person walk mode reads its collision/floor/stair/spawn data from the
     # scene JSON the playload ships, so it must ride along automatically.

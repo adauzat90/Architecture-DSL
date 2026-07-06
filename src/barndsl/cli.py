@@ -178,6 +178,19 @@ def _add_profile_flag(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dims_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dims",
+        choices=("nominal", "faces"),
+        default="nominal",
+        help="dimension convention: 'nominal' (default) measures to the model's "
+        "room lines — interior-partition centrelines and the nominal envelope "
+        "face; 'faces' is the professional face-of-stud convention (overall dims "
+        "outside-face to outside-face, interior breaks double-ticked at the wall "
+        "faces). Default output is unchanged.",
+    )
+
+
 def _cmd_profiles(args: argparse.Namespace) -> int:
     """List the built-in jurisdiction profiles and their thresholds."""
     from .profiles import profiles_text
@@ -281,9 +294,11 @@ def _strict_rc(result, args) -> int:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
-    from .render import save_render
+    from .render import RenderConfig, save_render
 
     profile = _resolve_profile(args)
+    dim_mode = getattr(args, "dims", "nominal")
+    render_cfg = RenderConfig(dim_mode=dim_mode)
     result = compile_file(args.file, profile=profile)
     if result.plan is not None and getattr(args, "frame", False) and result.plan.frame_spec is None:
         # `--frame` auto-places a default post-and-beam frame even when the source
@@ -311,7 +326,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 payload["render_error"] = "parse-error recovery: partial plan not rendered"
             else:
                 try:
-                    save_render(result.plan, out, fmt)
+                    save_render(result.plan, out, fmt, render_cfg)
                     payload["out"] = out
                 except (ImportError, ValueError) as exc:
                     payload["out"] = None
@@ -327,7 +342,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     print()
     _print_metrics(result.plan)
     try:
-        save_render(result.plan, out, fmt)
+        save_render(result.plan, out, fmt, render_cfg)
     except (ImportError, ValueError) as exc:
         print(f"\nerror: {exc}", file=sys.stderr)
         return 2
@@ -685,7 +700,7 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
     print(result.report(os.path.basename(args.file)))
     if result.plan is None or result.recovered:
         return 1
-    save_dxf(result.plan, args.out)
+    save_dxf(result.plan, args.out, dim_mode=getattr(args, "dims", "nominal"))
     n_open = len(result.plan.windows) + len(result.plan.exterior_doors)
     print(f"\nDXF: {len(result.plan.rooms)} room(s), {n_open} opening(s)")
     print(f"Wrote {args.out}")
@@ -979,7 +994,8 @@ def _cmd_packet(args: argparse.Namespace) -> int:
 
     out = args.out or "packet.html"
     try:
-        save_packet(result, out, costs=overrides, multiplier=args.multiplier)
+        save_packet(result, out, costs=overrides, multiplier=args.multiplier,
+                    dim_mode=getattr(args, "dims", "nominal"))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -1108,6 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
         help="auto-place a default post-and-beam frame if the source has none",
     )
     _add_profile_flag(p_build)
+    _add_dims_flag(p_build)
     p_build.set_defaults(func=_cmd_build)
 
     p_score = sub.add_parser(
@@ -1248,6 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
     p_dxf = sub.add_parser("dxf", help="export a plan to DXF (CAD interchange)")
     p_dxf.add_argument("file", help="path to a .barn DSL file")
     p_dxf.add_argument("--out", default="plan.dxf", help="output DXF path")
+    _add_dims_flag(p_dxf)
     p_dxf.set_defaults(func=_cmd_dxf)
 
     p_ifc = sub.add_parser(
@@ -1406,6 +1424,7 @@ def main(argv: list[str] | None = None) -> int:
     p_packet.add_argument(
         "--multiplier", type=float, default=1.0, help="regional cost factor for the estimate"
     )
+    _add_dims_flag(p_packet)
     p_packet.set_defaults(func=_cmd_packet)
 
     p_rlog = sub.add_parser(

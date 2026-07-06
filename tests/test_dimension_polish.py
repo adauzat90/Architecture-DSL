@@ -23,8 +23,17 @@ def test_fmt_ft_in_whole_feet_drop_the_inch_part():
 
 def test_fmt_ft_in_fractional_uses_feet_dash_inches():
     assert fmt_ft_in(18.5) == "18′-6″"
-    assert fmt_ft_in(21.7) == "21′-8″"  # rounds to the nearest inch (260.4 → 260)
-    assert fmt_ft_in(2.67) == "2′-8″"  # a 2'-8" door
+    assert fmt_ft_in(2.67) == "2′-8″"  # a 2'-8" door (whole inch, unchanged)
+
+
+def test_fmt_ft_in_rounds_to_the_eighth_inch_with_vulgar_fractions():
+    # Phase 18: sub-inch remainders render as the architect's vulgar fraction
+    # (to the nearest 1/8 in) — the face-of-stud convention needs 11′-7½″, 4½″.
+    # Nominal dims land on whole inches, so their labels are unchanged.
+    assert fmt_ft_in(11.625) == "11′-7½″"   # 12′ room less a 4½″ partition, clear
+    assert fmt_ft_in(4.5 / 12) == "4½″"     # a 4½″ interior wall thickness
+    assert fmt_ft_in(3.25 / 12) == "3¼″"    # half a 6½″ exterior wall
+    assert fmt_ft_in(21.7) == "21′-8⅜″"     # 260.4 in → nearest eighth 260⅜
 
 
 def test_fmt_ft_in_sub_foot_is_inches_alone():
@@ -34,9 +43,12 @@ def test_fmt_ft_in_sub_foot_is_inches_alone():
 
 def test_fmt_ft_in_zero_and_rounding_up_to_a_foot():
     assert fmt_ft_in(0) == "0′"
-    # 11.99 ft rounds to 144 inches → a clean 12′, never "11′-12″".
-    assert fmt_ft_in(11.99) == "12′"
-    assert fmt_ft_in(0.96) == "1′"  # 11.52 in → 12 in → 1′
+    # A value within an eighth of a whole foot carries cleanly to it — never an
+    # illegal "11′-12″". 11.999 ft → 1152 eighths → 144 in → a clean 12′.
+    assert fmt_ft_in(11.999) == "12′"
+    assert fmt_ft_in(1.0 - 1e-4) == "1′"  # 11.9988 in → 96 eighths → 12 in → 1′
+    # The inch part never reaches 12: it always carries into the feet.
+    assert "-12″" not in fmt_ft_in(11.96)
 
 
 def test_fmt_ft_in_negative_does_not_crash():

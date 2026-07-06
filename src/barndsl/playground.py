@@ -418,6 +418,12 @@ def compile_payload(source: str, base_dir: str | None = None) -> dict:
             payload["electrical_svg"] = render_svg(
                 plan, RenderConfig(show_electrical=True)
             )
+            # The face-of-stud dimension variant — the plan toolbar's "Dims"
+            # toggle swaps to it without a re-compile (Phase 18, in-payload like
+            # the electrical variant; one server-rendered knob, no client math).
+            payload["faces_svg"] = render_svg(
+                plan, RenderConfig(dim_mode="faces")
+            )
             # A schematic site plan, rendered only when a `site` is declared, shown
             # on the Elevations tab beside the elevations.
             if plan.site_spec is not None and plan.site_spec.has_dims:
@@ -2093,6 +2099,8 @@ _APP_HTML = r"""<!doctype html>
             title="Measure — drag between two points on the plan (M, edit mode)">⟷ Measure</button>
           <button id="elec-btn"
             title="Electrical layer — show outlets, switches &amp; ceiling lights">⚡ Electrical</button>
+          <button id="dims-btn"
+            title="Dimension convention — nominal room lines vs face-of-stud">⟺ Dims: nominal</button>
           <span class="level-switch" id="level-switch" hidden></span>
           <span class="multi-count" id="multi-count"></span>
           <span class="align-tools" id="align-tools" hidden>
@@ -2166,6 +2174,16 @@ const diagEl = document.getElementById('diagnostics');
 const planSvg = document.getElementById('plan-svg');
 const elecBtn = document.getElementById('elec-btn');
 let elecMode = false;  // ⚡ toggle: show the electrical layer on the plan SVG
+const dimsBtn = document.getElementById('dims-btn');
+let dimsMode = 'nominal';  // ⟺ toggle: 'nominal' room lines vs 'faces' (face-of-stud)
+// Which baked plan-SVG variant to show: the electrical overlay wins (a distinct
+// layer); otherwise the face-of-stud variant when the Dims toggle is on; else the
+// default nominal render. All three ride in the payload — no client re-computation.
+function planVariant(p){
+  if (elecMode && p.electrical_svg) return p.electrical_svg;
+  if (dimsMode === 'faces' && p.faces_svg) return p.faces_svg;
+  return p.svg;
+}
 const viewsPane = document.getElementById('pane-views');
 const reportWrap = document.getElementById('report-wrap');
 const titleEl = document.getElementById('plan-title');
@@ -2473,7 +2491,7 @@ function applyResult(p){
   if (good){
     lastGood = p; scene3d = p.scene; sceneLoaded = false;
     viewport.classList.remove('stale');
-    planSvg.innerHTML = (elecMode && p.electrical_svg) ? p.electrical_svg : p.svg;
+    planSvg.innerHTML = planVariant(p);
     if (currentTab === 'plan') planZoom.refit(); else planNeedsFit = true;
     renderViews(p);
     renderReport(p);
@@ -4020,8 +4038,16 @@ function initEdit(){
     elecBtn.classList.toggle('on', elecMode);
     // Swap the plan SVG in place — the electrical variant rides in the payload,
     // so no re-compile and nothing leaves the page (offline).
-    if (lastGood) planSvg.innerHTML =
-      (elecMode && lastGood.electrical_svg) ? lastGood.electrical_svg : lastGood.svg;
+    if (lastGood) planSvg.innerHTML = planVariant(lastGood);
+  });
+  dimsBtn.addEventListener('click', () => {
+    // Toggle the dimension convention. The face-of-stud variant is baked into
+    // the payload (like the electrical layer), so this is a pure in-page swap —
+    // one server-rendered knob, no client-side dimension math.
+    dimsMode = (dimsMode === 'faces') ? 'nominal' : 'faces';
+    dimsBtn.classList.toggle('on', dimsMode === 'faces');
+    dimsBtn.textContent = (dimsMode === 'faces') ? '⟺ Dims: faces' : '⟺ Dims: nominal';
+    if (lastGood) planSvg.innerHTML = planVariant(lastGood);
   });
   undoBtn.addEventListener('click', doUndo);
   redoBtn.addEventListener('click', doRedo);

@@ -276,3 +276,49 @@ def test_room_dims_can_be_disabled():
     plan = compile_source(CLEAN).plan
     svg = render_svg(plan, RenderConfig(show_room_dims=False))
     assert "18′ × 14′" not in svg
+
+
+# -- dimension convention flag (--dims nominal|faces, Phase 18) ------------
+
+
+def test_build_dims_faces_flag_changes_the_svg(tmp_path):
+    p = _write(tmp_path, "d.barn", CLEAN)
+    nominal = tmp_path / "nom.svg"
+    faces = tmp_path / "faces.svg"
+    assert main(["build", str(p), "--out", str(nominal)]) == 0
+    assert main(["build", str(p), "--out", str(faces), "--dims", "faces"]) == 0
+    # Default (nominal) matches an explicit --dims nominal; faces genuinely differs.
+    nom2 = tmp_path / "nom2.svg"
+    assert main(["build", str(p), "--out", str(nom2), "--dims", "nominal"]) == 0
+    assert nominal.read_text() == nom2.read_text()
+    assert faces.read_text() != nominal.read_text()
+
+
+def test_build_dims_rejects_an_unknown_convention(tmp_path):
+    p = _write(tmp_path, "d.barn", CLEAN)
+    try:
+        main(["build", str(p), "--dims", "centreline"])
+    except SystemExit as exc:
+        assert exc.code != 0
+    else:
+        raise AssertionError("expected argparse to reject the dims mode")
+
+
+def test_dxf_dims_faces_flag_changes_the_dxf(tmp_path):
+    p = _write(tmp_path, "d.barn", CLEAN)
+    nominal = tmp_path / "nom.dxf"
+    faces = tmp_path / "faces.dxf"
+    assert main(["dxf", str(p), "--out", str(nominal)]) == 0
+    assert main(["dxf", str(p), "--out", str(faces), "--dims", "faces"]) == 0
+    assert faces.read_text() != nominal.read_text()
+    assert faces.read_text().isascii()  # the vulgar fractions fold to ASCII
+
+
+def test_packet_dims_faces_states_the_convention(tmp_path):
+    p = _write(tmp_path, "d.barn", CLEAN)
+    nom = tmp_path / "nom.html"
+    fac = tmp_path / "fac.html"
+    assert main(["packet", str(p), "--out", str(nom)]) == 0
+    assert main(["packet", str(p), "--out", str(fac), "--dims", "faces"]) == 0
+    assert "Dimensions to nominal room lines (partition centrelines)" in nom.read_text()
+    assert "Dimensions to face of stud" in fac.read_text()

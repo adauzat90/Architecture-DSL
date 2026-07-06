@@ -114,7 +114,7 @@ scaling test pins the new curve (e.g. 2× rooms ≤ ~2.5× time).
 
 ---
 
-## Phase 18 — Dimension convention: face-of-stud mode (M)
+## Phase 18 — Dimension convention: face-of-stud mode (M) — SHIPPED
 
 **Who asked:** the architect persona — pros dimension to face-of-stud or
 centerline, not to nominal room lines. Phases 10/12 kept dims nominal (the
@@ -138,6 +138,19 @@ available without changing the default.
 **Acceptance:** the two modes agree with hand math on a fixture plan (nominal
 12′0″ room with 4.5 in partitions reads 11′7½″ clear in faces mode); default
 output byte-identical to today; SVG/DXF stay in parity in both modes.
+
+**Shipped:** `RenderConfig.dim_mode = "nominal" | "faces"` (default nominal,
+byte-identical); face offsets sourced from the shared `wallbodies` bands (a
+face tick lands pixel-exact on the drawn poché edge, plumbing walls read their
+real 6½″); overall dims go outside-face to outside-face; interior breaks
+double-tick to clear-width / wall-thickness / clear-width and still sum to the
+overall; opening jambs unchanged. `to_dxf(plan, dim_mode=…)` shares the
+renderer's break computation (SVG/DXF parity in both modes). CLI `--dims
+nominal|faces` on `build` / `dxf` / `packet`; playground *Dims* toggle (baked
+`faces_svg` payload variant, no client re-computation); packet scale note states
+the convention. `fmt_ft_in` now renders to the nearest 1/8 in so faces labels
+read `11′-7½″` / `4½″` (nominal dims are whole inches, unchanged). AUTHORING.md
+updated.
 
 ---
 

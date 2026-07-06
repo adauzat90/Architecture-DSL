@@ -133,7 +133,15 @@ def _cover(result: Any, plan: Any, est: dict[str, Any]) -> str:
 _FT_GLYPH, _IN_GLYPH = "′", "″"
 
 
-def _floor_plan(plan: Any, sheet: str = "Letter") -> str:
+def _dim_convention_note(dim_mode: str) -> str:
+    """The dimension-convention line for the title block / scale note — states
+    which reference every dimension is measured to (Phase 18)."""
+    if dim_mode == "faces":
+        return "Dimensions to face of stud"
+    return "Dimensions to nominal room lines (partition centrelines)"
+
+
+def _floor_plan(plan: Any, sheet: str = "Letter", dim_mode: str = "nominal") -> str:
     # render_svg draws the dimensioned plan (overall dimension lines + per-room
     # W x L, and one stacked block per level for a multi-story plan). For the
     # permit sheet — the drawing an architect submits — pick the largest standard
@@ -142,7 +150,8 @@ def _floor_plan(plan: Any, sheet: str = "Letter") -> str:
     # draw a graphic scale bar (which survives any reprographic resize).
     ipf, label, css_w = sheet_scale(plan, sheet=sheet)
     statement = f"SCALE: {label} = 1{_FT_GLYPH}-0{_IN_GLYPH} ({sheet})"
-    cfg = RenderConfig(scale_bar=True, scale_note=statement)
+    convention = _dim_convention_note(dim_mode)
+    cfg = RenderConfig(scale_bar=True, scale_note=statement, dim_mode=dim_mode)
     svg = render_svg(plan, cfg)
     levels = plan.levels()
     note = (
@@ -156,7 +165,7 @@ def _floor_plan(plan: Any, sheet: str = "Letter") -> str:
     return f"""
 <section class="page">
   <h2>Floor Plan</h2>
-  <p class="sub">{_tag(statement)}</p>
+  <p class="sub">{_tag(statement)} · {_tag(convention)}</p>
   <div class="svgwrap scaled" style="width:{css_w:.2f}in; max-width:100%;">{svg}</div>
   <p class="note">{_tag(note)} Verify against the graphic scale bar and stated
      dimensions.</p>
@@ -182,13 +191,15 @@ def _has_electrical(plan: Any) -> bool:
     return _has_devices(plan) or _has_alarms(plan)
 
 
-def _electrical_plan(plan: Any, sheet: str = "Letter") -> str:
+def _electrical_plan(plan: Any, sheet: str = "Letter", dim_mode: str = "nominal") -> str:
     """The Electrical Plan sheet: the floor plan with the electrical layer on, a
     small legend, and an outlet/switch/light count table. Only included when the
     plan declares electrical items."""
     ipf, label, css_w = sheet_scale(plan, sheet=sheet)
     statement = f"SCALE: {label} = 1{_FT_GLYPH}-0{_IN_GLYPH} ({sheet})"
-    cfg = RenderConfig(scale_bar=True, scale_note=statement, show_electrical=True)
+    cfg = RenderConfig(
+        scale_bar=True, scale_note=statement, show_electrical=True, dim_mode=dim_mode
+    )
     svg = render_svg(plan, cfg)
     n_out = len(plan.outlets)
     n_gfci = sum(1 for o in plan.outlets if o.gfci)
@@ -458,6 +469,7 @@ def build_packet(
     costs: dict[str, float] | None = None,
     multiplier: float = 1.0,
     sheet: str = "Letter",
+    dim_mode: str = "nominal",
 ) -> str:
     """Return the full permit-sketch packet as a self-contained HTML string.
 
@@ -467,7 +479,9 @@ def build_packet(
     ``sheet`` selects the print sheet the floor plan is scaled to fit — one of
     :data:`~barndsl.render.SHEETS` (``"Letter"`` default, ``"Tabloid"`` for
     11×17); the largest standard architectural scale that fits is chosen and
-    stated on the sheet with a graphic scale bar.
+    stated on the sheet with a graphic scale bar. ``dim_mode`` picks the
+    dimension convention (``"nominal"`` room lines or face-of-stud ``"faces"``);
+    the floor-plan sheet states which on its scale-note line.
     """
     plan = getattr(result, "plan", None)
     if plan is None:
@@ -475,8 +489,9 @@ def build_packet(
     est = estimate_cost(plan, overrides=costs, multiplier=multiplier)
     sections = (
         _cover(result, plan, est)
-        + _floor_plan(plan, sheet=sheet)
-        + (_electrical_plan(plan, sheet=sheet) if _has_electrical(plan) else "")
+        + _floor_plan(plan, sheet=sheet, dim_mode=dim_mode)
+        + (_electrical_plan(plan, sheet=sheet, dim_mode=dim_mode)
+           if _has_electrical(plan) else "")
         + (
             _site_plan(plan)
             if plan.site_spec is not None and plan.site_spec.has_dims
@@ -502,9 +517,12 @@ def save_packet(
     costs: dict[str, float] | None = None,
     multiplier: float = 1.0,
     sheet: str = "Letter",
+    dim_mode: str = "nominal",
 ) -> str:
     """Write :func:`build_packet` to ``path``. Returns the path."""
-    html = build_packet(result, costs=costs, multiplier=multiplier, sheet=sheet)
+    html = build_packet(
+        result, costs=costs, multiplier=multiplier, sheet=sheet, dim_mode=dim_mode
+    )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(html)
     return path

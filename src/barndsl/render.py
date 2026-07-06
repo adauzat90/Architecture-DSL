@@ -12,33 +12,43 @@ import math
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
-from .constants import EPSILON, EXTERIOR_WALL_THICKNESS
+from .constants import EPSILON, EXTERIOR_WALL_THICKNESS, INTERIOR_WALL_THICKNESS
 from .elements import Barndominium, Direction, RoomType
 from .geometry import opening_endpoints, shared_edge
-from .wallbodies import wall_bands
+from .wallbodies import WallBand, wall_bands
 
 # US architectural feet-and-inches glyphs: prime (feet) and double-prime (inches).
 _FT = "′"  # ′
 _IN = "″"  # ″
 
 
-def fmt_ft_in(feet: float) -> str:
-    """Format a decimal-feet length as US feet-and-inches (rounded to the inch).
+#: Eighth-inch remainders → the vulgar-fraction glyph an architect writes.
+_EIGHTHS = {1: "⅛", 2: "¼", 3: "⅜", 4: "½", 5: "⅝", 6: "¾", 7: "⅞"}
 
-    Whole feet drop the inch part (``18′``, never ``18′-0″``); a fractional value
+
+def fmt_ft_in(feet: float) -> str:
+    """Format a decimal-feet length as US feet-and-inches, to the nearest 1/8 in.
+
+    Whole feet drop the inch part (``18′``, never ``18′-0″``); a whole-inch value
     reads ``18′-6″``; a sub-foot value reads as inches alone (``9″``); zero is
-    ``0′``. Negatives shouldn't occur in a plan, but are formatted from their
-    magnitude with a leading ``-`` rather than crashing.
+    ``0′``. A sub-inch remainder adds the architectural vulgar fraction —
+    ``11′-7½″``, ``4½″``, ``3¼″`` — which the face-of-stud dimension convention
+    (Phase 18) needs (half an interior partition is 2¼″, an exterior wall 3¼″).
+    Nominal dimensions land on whole inches, so their labels are unchanged.
+    Negatives shouldn't occur in a plan, but are formatted from their magnitude
+    with a leading ``-`` rather than crashing.
     """
     neg = feet < 0
-    total_inches = round(abs(feet) * 12.0)
-    ft, inch = divmod(int(total_inches), 12)
-    if inch == 0:
+    total_eighths = round(abs(feet) * 96.0)
+    whole_inches, eighths = divmod(total_eighths, 8)
+    ft, inch = divmod(whole_inches, 12)
+    frac = _EIGHTHS.get(eighths, "")
+    if inch == 0 and not frac:
         s = f"{ft}{_FT}"
     elif ft == 0:
-        s = f"{inch}{_IN}"
+        s = f"{inch}{frac}{_IN}" if inch else f"{frac}{_IN}"
     else:
-        s = f"{ft}{_FT}-{inch}{_IN}"
+        s = f"{ft}{_FT}-{inch}{frac}{_IN}"
     return f"-{s}" if neg else s
 
 #: Standard US architectural plan scales, as (inches-of-paper per foot, label),
@@ -177,6 +187,17 @@ class RenderConfig:
     #: plan. Off by default so the screen/permit floor plan stays uncluttered;
     #: the playground's ⚡ toggle and the packet's Electrical Plan sheet turn it on.
     show_electrical: bool = False
+    #: Dimension convention. ``"nominal"`` (default) measures every chain and
+    #: overall dimension to the model's coordinate truth — interior-partition
+    #: centrelines and the nominal envelope face. ``"faces"`` is the professional
+    #: face-of-stud convention: overall dims run outside-face to outside-face
+    #: (nominal + one exterior thickness per axis) and each interior room break
+    #: becomes the two faces of the wall crossing there (a clear-width segment
+    #: flanked by thin wall-thickness segments), sourced pixel-exact from the
+    #: shared :mod:`barndsl.wallbodies` band geometry. Opening jambs are already
+    #: face-of-opening and stay put. ``"nominal"`` output is byte-for-byte the
+    #: historical drawing; only ``"faces"`` shifts the ticks.
+    dim_mode: str = "nominal"
 
 
 def render_svg(plan: Barndominium, config: RenderConfig | None = None) -> str:
@@ -237,6 +258,8 @@ class _Renderer:
         self.plan = plan
         self.c = config
         self.parts: list[str] = []
+        #: Per-level wall-body band cache for the faces dim mode (lazy).
+        self._dim_band_cache: dict[int, list[WallBand]] = {}
 
         # World bounding box (whole footprint — incl. wings — plus out-of-envelope
         # porches).
@@ -1210,16 +1233,30 @@ class _Renderer:
         # Overall dimensions span the whole footprint (incl. wings), not just the
         # primary envelope block.
         fx0, fy0, fx1, fy1 = self.plan.bounds()
+        # In faces mode the overall runs outside-face to outside-face (nominal +
+        # one exterior thickness per axis); nominal mode leaves the span untouched.
+        wx0, wx1 = self._overall_span(fx0, fx1)
+        wy0, wy1 = self._overall_span(fy0, fy1)
         # Overall width dimension below the plan.
         y = self.top + self.content_h + 28
         self._dim_line(
-            self.sx(fx0), y, self.sx(fx1), y, fmt_ft_in(fx1 - fx0), horizontal=True
+            self.sx(wx0), y, self.sx(wx1), y, fmt_ft_in(wx1 - wx0), horizontal=True
         )
         # Overall length dimension left of the plan.
         x = self.c.margin_left - 34
         self._dim_line(
-            x, self.sy(fy0), x, self.sy(fy1), fmt_ft_in(fy1 - fy0), horizontal=False
+            x, self.sy(wy0), x, self.sy(wy1), fmt_ft_in(wy1 - wy0), horizontal=False
         )
+
+    def _overall_span(self, lo: float, hi: float) -> tuple[float, float]:
+        """The overall-dimension endpoints for the active dim mode. Nominal keeps
+        the bounds (byte-identical); faces pushes each end out by half an exterior
+        wall so the string reads outside face to outside face — matching the drawn
+        poché, which straddles the same nominal envelope line by the same half."""
+        if self.c.dim_mode == "faces":
+            ext = EXTERIOR_WALL_THICKNESS / 2.0
+            return lo - ext, hi + ext
+        return lo, hi
 
     def _draw_post_dims(self) -> None:
         """When the plan carries a placed frame, print ONE dimension string along
@@ -1511,6 +1548,98 @@ class _Renderer:
         """Rough pixel run a size-9 segment label needs (skip it below this)."""
         return len(label) * 5.5
 
+    # -- face-of-stud dimension convention (Phase 18) ----------------------
+
+    def _dim_bands(self, level: int) -> list[WallBand]:
+        """The shared wall-body bands for ``level``, cached — the same rectangles
+        the poché and DXF draw, so a face tick lands pixel-exact on a band edge."""
+        if level not in self._dim_band_cache:
+            self._dim_band_cache[level] = wall_bands(self.plan, level)
+        return self._dim_band_cache[level]
+
+    def _wall_faces(
+        self, side: str, coord: float, bands: list[WallBand], tol: float = 1e-6,
+    ) -> tuple[float, float]:
+        """The two face coordinates (on the chain axis) of the wall crossing the
+        chain at nominal interior break ``coord``.
+
+        The crossing wall is perpendicular to the chain, so a S/N chain reads a
+        vertical band's ``x`` faces and a W/E chain a horizontal band's ``y``
+        faces — straight off the shared :mod:`barndsl.wallbodies` geometry, which
+        already carries the real class thickness (a plumbing wall is the thicker
+        2x6). An interior partition is preferred over an exterior return that
+        happens to align. Falls back to ±half an ordinary partition when no band
+        sits on the line (a break with no framed wall — rare)."""
+        want = "v" if side in ("S", "N") else "h"
+        best: tuple[float, float] | None = None
+        best_interior = False
+        for b in bands:
+            if b.orientation != want:
+                continue
+            f0, f1 = (b.x0, b.x1) if want == "v" else (b.y0, b.y1)
+            if abs((f0 + f1) / 2.0 - coord) > tol:
+                continue
+            interior = b.kind == "interior"
+            if best is None or (interior and not best_interior):
+                best = (min(f0, f1), max(f0, f1))
+                best_interior = interior
+                if interior:
+                    break
+        if best is not None:
+            return best
+        half = INTERIOR_WALL_THICKNESS / 2.0
+        return (coord - half, coord + half)
+
+    def _chain_ticks(
+        self,
+        side: str,
+        room_pts: list[float],
+        jamb_pts: list[float],
+        lo: float,
+        hi: float,
+        level: int = 0,
+        tol: float = 1e-6,
+    ) -> list[float]:
+        """Final chain tick coordinates for the active dim mode.
+
+        ``room_pts`` are the nominal room-edge breaks including the two span
+        endpoints (``room_pts[0] == lo``, ``room_pts[-1] == hi``); ``jamb_pts``
+        the opening jambs. In ``"nominal"`` mode this is exactly the historical
+        ``_with_jambs(room_pts, jamb_pts)`` — byte-identical.
+
+        In ``"faces"`` mode the two span ends move OUT to the outside envelope
+        face (± half an exterior wall), each interior room break becomes the TWO
+        faces of the wall crossing there (a thin wall-thickness segment), and the
+        opening jambs stay exactly where they are (already face-of-opening). The
+        ticks partition ``[lo-ext, hi+ext]``, so the segments always sum to the
+        faces-mode overall."""
+        if self.c.dim_mode != "faces":
+            return self._with_jambs(room_pts, jamb_pts)
+        ext = EXTERIOR_WALL_THICKNESS / 2.0
+        bands = self._dim_bands(level)
+        ticks: list[float] = []
+        for p in room_pts:
+            if abs(p - lo) <= tol:
+                ticks.append(lo - ext)  # outside face, low end
+            elif abs(p - hi) <= tol:
+                ticks.append(hi + ext)  # outside face, high end
+            else:
+                near, far = self._wall_faces(side, p, bands)
+                ticks.append(near)
+                ticks.append(far)
+        # Jambs stay put; drop only those that would collapse against a room break
+        # (same rule the nominal chain uses so the two modes agree on which slivers
+        # are worth a tick).
+        for j in sorted(jamb_pts):
+            if all(abs(j - p) >= self._MIN_JAMB_SEG_FT for p in room_pts):
+                ticks.append(j)
+        ticks.sort()
+        out: list[float] = []
+        for c in ticks:
+            if not out or c - out[-1] > tol:
+                out.append(c)
+        return out
+
     def _draw_chain_dims(self, level: int | None = None) -> None:
         """Draw a chained dimension string along each exterior side that has an
         interior break — a run of tick-to-tick segments between the wall and the
@@ -1520,26 +1649,27 @@ class _Renderer:
         boundary *and* no opening is left to the overall dimension (no duplicated
         single-segment string)."""
         fx0, fy0, fx1, fy1 = self.plan.bounds()
+        lvl = level or 0
         rooms = [r for r in self.plan.rooms if level is None or r.level == level]
         if self.plan.wings:
             # L/T/U footprint: chain along each notched exterior run at its own
             # wall offset, not the rectangular bounds.
             for side in ("S", "N", "W", "E"):
                 for offset, lo, hi in self._exterior_runs(side):
-                    pts = self._with_jambs(
-                        self._run_breaks(side, rooms, offset, lo, hi),
-                        self._opening_jambs(side, rooms, offset, lo, hi),
-                    )
+                    room_pts = self._run_breaks(side, rooms, offset, lo, hi)
+                    jambs = self._opening_jambs(side, rooms, offset, lo, hi)
+                    pts = self._chain_ticks(side, room_pts, jambs, lo, hi, lvl)
                     if len(pts) <= 2:
                         continue
                     self._chain_string(side, pts, offset)
             return
         for side in ("S", "N", "W", "E"):
-            pts, _, _ = self._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
+            room_pts, lo, hi = self._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
             wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
-            pts = self._with_jambs(pts, self._opening_jambs(side, rooms, wall, fx0, fx1)
-                                   if side in ("S", "N") else
-                                   self._opening_jambs(side, rooms, wall, fy0, fy1))
+            jambs = (self._opening_jambs(side, rooms, wall, fx0, fx1)
+                     if side in ("S", "N") else
+                     self._opening_jambs(side, rooms, wall, fy0, fy1))
+            pts = self._chain_ticks(side, room_pts, jambs, lo, hi, lvl)
             if len(pts) <= 2:
                 continue  # no interior break and no opening — overall dim covers it
             self._chain_string(side, pts, wall)

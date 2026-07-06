@@ -80,12 +80,36 @@ nominal figure `program area` does. Requirements never block a compile.
 - **Rooms tile on wall centrelines**, so those `x,y,W,L` coordinates are the
   *nominal* room lines, not built wall faces. The floor plan draws walls as real
   bodies (poché bands at nominal thickness, straddling each centreline) and the
-  DXF export matches them exactly, but **every dimension still measures to the
-  nominal room lines** — the centreline of an interior partition and the outside
-  face of the nominal envelope — because that is the model's coordinate truth. A
-  room's *clear* (built) interior is its nominal rectangle minus half of each
-  bounding wall; that reduction drives the clear-dimension checks, but the drawn
-  dimension strings report the nominal grid.
+  DXF export matches them exactly. A room's *clear* (built) interior is its
+  nominal rectangle minus half of each bounding wall; that reduction drives the
+  clear-dimension checks and the schedule's clear sizes.
+- **Dimension convention (`dim_mode`, two options).** By default every drawn
+  dimension — the overall strings and the per-side chains — measures to the
+  **nominal room lines**: the centreline of an interior partition and the
+  nominal envelope face. That is the model's coordinate truth (chosen in Phases
+  10/12), and it is the default so existing drawings are byte-for-byte unchanged.
+  Set `dim_mode = "faces"` (`--dims faces` on `build` / `dxf` / `packet`, or the
+  playground's *Dims* toggle) for the professional **face-of-stud** convention:
+  - the overall dims run **outside face to outside face** (nominal + one exterior
+    wall thickness per axis — the ends move out by half an exterior wall to the
+    drawn poché edge);
+  - each interior room break becomes **two ticks**, the two faces of the wall
+    crossing there, so the chain strings **clear width / wall thickness / clear
+    width** — e.g. a nominal 12′0″ room between two 4½″ partitions reads
+    **11′-7½″ clear** flanked by two **4½″** thickness segments, and the segments
+    still sum to the overall. The face offsets come straight from the shared
+    `wallbodies` band geometry, so a plumbing (2×6) wall reads its real 6½″ and a
+    tick lands pixel-exact on the drawn band edge;
+  - **opening jambs are unchanged** — already face-of-opening.
+
+  The thin wall-thickness segments are **ticked but labelled only when the label
+  fits** (the same tiny-segment rule the chain uses everywhere — the tick is
+  never dropped, only its text when the segment is too narrow); at a typical
+  plan scale a 4½″ segment shows its two ticks without a crowded number. Both
+  the SVG and the DXF honour `dim_mode`, and the permit packet states the active
+  convention on its floor-plan scale note ("Dimensions to face of stud" vs
+  "Dimensions to nominal room lines (partition centrelines)"). Schedules always
+  report clear dimensions regardless of mode.
 
 ## Statements
 

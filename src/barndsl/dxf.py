@@ -75,12 +75,24 @@ _FIXT_H = 0.3
 _NOTE_H = 0.4
 
 
+#: Vulgar-fraction glyphs (face-of-stud labels) → the ASCII fraction a DXF
+#: TEXT carries cleanly ("11'-7 1/2\"").
+_ASCII_FRAC = {
+    "⅛": " 1/8", "¼": " 1/4", "⅜": " 3/8", "½": " 1/2",
+    "⅝": " 5/8", "¾": " 3/4", "⅞": " 7/8",
+}
+
+
 def _dim_label(feet: float) -> str:
     """A feet-and-inches dimension label in ASCII feet/inch marks (``18'-6"``).
 
     Same measurement text the SVG chain dims draw, with the unicode prime glyphs
-    (``′``/``″``) folded to the ASCII ``'``/``"`` a DXF TEXT carries cleanly."""
-    return fmt_ft_in(feet).replace("′", "'").replace("″", '"')
+    (``′``/``″``) folded to ASCII ``'``/``"`` and any vulgar fraction (the
+    face-of-stud ``½``/``¼``) spelled out (``1/2``) so a DXF TEXT stays ASCII."""
+    s = fmt_ft_in(feet).replace("′", "'").replace("″", '"')
+    for glyph, ascii_frac in _ASCII_FRAC.items():
+        s = s.replace(glyph, ascii_frac)
+    return s
 
 
 def _num(v: float) -> str:
@@ -94,15 +106,16 @@ def _num(v: float) -> str:
 class _DxfWriter:
     """Assembles a deterministic AC1015 document, tracking a drawing extent."""
 
-    def __init__(self, plan: Barndominium) -> None:
+    def __init__(self, plan: Barndominium, dim_mode: str = "nominal") -> None:
         self.plan = plan
         self._handle = 0x100
         self._ents: list[str] = []
         self.minx = self.miny = math.inf
         self.maxx = self.maxy = -math.inf
         # A throwaway renderer supplies the (world-coordinate) chain-dimension
-        # break computation, so the DXF chain matches the SVG's exactly.
-        self._r = _Renderer(plan, RenderConfig())
+        # break computation, so the DXF chain matches the SVG's exactly — in
+        # whichever dimension mode (nominal room lines vs face-of-stud).
+        self._r = _Renderer(plan, RenderConfig(dim_mode=dim_mode))
 
     # -- low-level ---------------------------------------------------------
 
@@ -664,27 +677,27 @@ class _DxfWriter:
         if self.plan.wings:
             for side in ("S", "N", "W", "E"):
                 for offset, lo, hi in self._r._exterior_runs(side):
-                    pts = self._r._with_jambs(
-                        self._r._run_breaks(side, rooms, offset, lo, hi),
-                        self._r._opening_jambs(side, rooms, offset, lo, hi),
-                    )
+                    room_pts = self._r._run_breaks(side, rooms, offset, lo, hi)
+                    jambs = self._r._opening_jambs(side, rooms, offset, lo, hi)
+                    pts = self._r._chain_ticks(side, room_pts, jambs, lo, hi, level=0)
                     if len(pts) > 2:
                         self._chain(side, pts, offset, layer)
             return
         for side in ("S", "N", "W", "E"):
-            pts, _, _ = self._r._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
+            room_pts, lo, hi = self._r._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
             wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
             span = (fx0, fx1) if side in ("S", "N") else (fy0, fy1)
-            pts = self._r._with_jambs(
-                pts, self._r._opening_jambs(side, rooms, wall, *span)
-            )
+            jambs = self._r._opening_jambs(side, rooms, wall, *span)
+            pts = self._r._chain_ticks(side, room_pts, jambs, lo, hi, level=0)
             if len(pts) > 2:
                 self._chain(side, pts, wall, layer)
 
     def _overall(self, side: str, lo: float, hi: float, wall: float, layer: str) -> None:
         """The overall dimension string for one principal span, ``_OVERALL_GAP``
-        outside its wall: extension lines, a dim line, ticks and a centred label."""
-        self._dim_run(side, [lo, hi], wall, _OVERALL_GAP, layer, _DIM_H, ext=True)
+        outside its wall: extension lines, a dim line, ticks and a centred label.
+        In faces mode the span runs outside-face to outside-face (Phase 18)."""
+        lo2, hi2 = self._r._overall_span(lo, hi)
+        self._dim_run(side, [lo2, hi2], wall, _OVERALL_GAP, layer, _DIM_H, ext=True)
 
     def _chain(self, side: str, pts: list[float], wall: float, layer: str) -> None:
         self._dim_run(side, pts, wall, _CHAIN_GAP, layer, _DIM_H * 0.8, ext=False)
@@ -719,13 +732,18 @@ class _DxfWriter:
         self.line(x - _TICK, y - _TICK, x + _TICK, y + _TICK, layer)
 
 
-def to_dxf(plan: Barndominium) -> str:
-    """Return ``plan`` as a DXF R2000 (AC1015) document string."""
-    return _DxfWriter(plan).build()
+def to_dxf(plan: Barndominium, dim_mode: str = "nominal") -> str:
+    """Return ``plan`` as a DXF R2000 (AC1015) document string.
+
+    ``dim_mode`` picks the dimension convention (``"nominal"`` room lines or
+    face-of-stud ``"faces"``); the dim geometry comes from the same renderer
+    helpers the SVG uses, so the two exports stay in parity in both modes. The
+    default is byte-identical to the historical output."""
+    return _DxfWriter(plan, dim_mode=dim_mode).build()
 
 
-def save_dxf(plan: Barndominium, path: str) -> str:
+def save_dxf(plan: Barndominium, path: str, dim_mode: str = "nominal") -> str:
     """Write ``plan`` as DXF to ``path``. Returns the path."""
     with open(path, "w", encoding="ascii", errors="replace") as fh:
-        fh.write(to_dxf(plan))
+        fh.write(to_dxf(plan, dim_mode=dim_mode))
     return path
