@@ -768,6 +768,52 @@ def test_end_to_end_subprocess():
     assert hov["result"] is not None
 
 
+# -- headerless-fragment detection (Phase 22 item 7) -------------------------
+
+
+def test_headerless_buffer_is_compiled_as_a_fragment():
+    # A part file (no `plan` statement) must not publish whole-plan noise
+    # (ENVELOPE / NO_ENTRY / OUT_OF_BOUNDS) — only its part-internal findings.
+    frag = "room lounge: office at 0,0 size 24 x 7\n"
+    r = _compile("file:///pod.barn", frag)
+    codes = {d.code for d in r.diagnostics}
+    assert "ROOM_PROPORTION" in codes  # the part-internal finding is kept
+    assert not (codes & {"NO_ENTRY", "OUT_OF_BOUNDS"})
+    assert not any(c.startswith("ENVELOPE") for c in codes)
+
+
+def test_buffer_with_a_plan_statement_keeps_full_plan_behavior():
+    full = 'plan "P"\nenvelope 40 x 30\nroom a: living at 0,0 size 40 x 30\n'
+    r = _compile("file:///p.barn", full)
+    # No exterior door → NO_ENTRY still fires for a real (headed) plan.
+    assert any(d.code == "NO_ENTRY" for d in r.diagnostics)
+
+
+def test_is_fragment_buffer_ignores_comments_and_blanks():
+    assert lsp._is_fragment_buffer("# just a note\n\nroom a: living at 0,0 size 10 x 10\n")
+    assert not lsp._is_fragment_buffer('# lead comment\nplan "P"\nenvelope 10 x 10\n')
+
+
+def test_open_headerless_part_publishes_no_whole_plan_noise(tmp_path):
+    # Lifecycle: opening a part file directly in the editor must not flood it
+    # with whole-plan diagnostics it can never satisfy.
+    (tmp_path / "pod.barn").write_text("room lounge: office at 0,0 size 24 x 7\n")
+    part_uri = path_to_uri(str(tmp_path / "pod.barn"))
+    replies = _run_server([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": part_uri,
+                             "text": (tmp_path / "pod.barn").read_text(), "version": 1}}},
+        {"jsonrpc": "2.0", "method": "exit"},
+    ])
+    pubs = _publishes_to(replies, part_uri)
+    assert pubs, "the part should get at least one publish"
+    all_codes = {d["code"] for pub in pubs for d in pub}
+    assert "ROOM_PROPORTION" in all_codes
+    assert not (all_codes & {"NO_ENTRY", "OUT_OF_BOUNDS"})
+    assert not any(str(c).startswith("ENVELOPE") for c in all_codes)
+
+
 # -- part-file diagnostics: mirror a host's part-internal findings onto an
 #    open part file (Phase 8 deferral, now shipped) ---------------------------
 

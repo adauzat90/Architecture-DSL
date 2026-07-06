@@ -78,6 +78,7 @@ source is broken.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -758,14 +759,26 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     # -- response helpers --
+    def _client_gone(self, exc: BaseException) -> None:
+        """A client that closes the socket mid-response must never crash the
+        server thread. Mark the connection unreusable and drop it quietly —
+        ``log_message`` is the handler's own (silenced) channel, so this is
+        logged-and-ignored rather than fatal (BrokenPipeError/ConnectionReset)."""
+        self.close_connection = True
+        with contextlib.suppress(Exception):
+            self.log_message("client disconnected mid-response: %r", exc)
+
     def _send(self, status: int, body: bytes, ctype: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._client_gone(exc)
 
     def _json(self, obj: object, status: int = 200) -> None:
         self._send(status, json.dumps(obj).encode("utf-8"),
@@ -776,14 +789,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _download(self, body: bytes, ctype: str, filename: str) -> None:
         """Send ``body`` as a file download (attachment ``Content-Disposition``)."""
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self._client_gone(exc)
 
     # -- routing --
     def do_GET(self) -> None:
@@ -987,6 +1003,7 @@ class _Handler(BaseHTTPRequestHandler):
         payload["line"] = result.line
         payload["changed"] = result.changed
         payload["summary"] = result.summary
+        payload["placed"] = result.placed  # add_room: "auto" | "fallback" | None
         self._json(payload)
 
     def _handle_compare(self, data: object) -> None:
@@ -1665,6 +1682,14 @@ _APP_HTML = r"""<!doctype html>
     border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer; }
   .design-panel button:hover { border-color:var(--accent); color:var(--accent); }
   .design-panel button.danger:hover { border-color:var(--err); color:var(--err); }
+  /* the variable-length room/opening list scrolls in its own capped region so
+     the ＋ Room action row + Add-room form stay reachable on a short viewport */
+  .dp-scroll { max-height:34vh; overflow-y:auto; overflow-x:hidden; margin:0 -4px;
+    padding:0 4px; }
+  /* the primary action row sticks to the panel bottom so it never scrolls away */
+  .dp-actions { position:sticky; bottom:0; z-index:2; margin-top:6px;
+    padding-top:8px; background:var(--panel);
+    border-top:1px solid var(--line); }
   .dp-form { margin-top:8px; padding:8px; border:1px solid var(--line); border-radius:8px;
     background:var(--bg); }
   .dp-note { margin-top:6px; font-size:11px; color:var(--faint); }
@@ -1681,6 +1706,10 @@ _APP_HTML = r"""<!doctype html>
   .ov-room.ov-stamped { cursor:move; }   /* a stamped member drags the whole instance */
   .ov-open { cursor:grab; }
   .ov-handle { fill:var(--accent2); stroke:#fff; }
+  /* an invisible, finger-sized grab halo behind each resize handle on coarse
+     pointers — the visible handle stays small, the tap target grows to ~40px
+     (same trick the nudge chevrons use). */
+  .ov-handle-hit { fill:transparent; }
   /* fixtures/furniture — draggable; a seed is dashed until a drag authors it */
   .ov-fixture { cursor:move; fill:rgba(90,90,90,.08); stroke:#5a5a5a; stroke-width:1; }
   .ov-fixture.seed { fill:rgba(90,90,90,.04); stroke:#9a9a9a; stroke-dasharray:2 2; }
@@ -4397,7 +4426,20 @@ function buildOverlay(){
     const pts = [['sw', r.x, r.y], ['s', r.x + r.w / 2, r.y], ['se', r.x + r.w, r.y],
       ['e', r.x + r.w, r.y + r.l / 2], ['ne', r.x + r.w, r.y + r.l], ['n', r.x + r.w / 2, r.y + r.l],
       ['nw', r.x, r.y + r.l], ['w', r.x, r.y + r.l / 2]];
+    // On coarse pointers the visible handle stays small (hs) but an invisible
+    // halo sits behind it sized to ~44 SCREEN px (via the live CTM, so it holds
+    // at any zoom), giving a comfortable >=40px grab without changing the desktop
+    // look. Same data-handle → the drag logic (e.target.closest('[data-handle]'))
+    // treats a halo tap as a handle grab.
+    let pxPerUnit = 1;
+    try { const m = svgEl.getScreenCTM(); if (m && m.a) pxPerUnit = m.a; } catch (_){}
+    const hhit = COARSE ? Math.max(hs, 44 / pxPerUnit) : hs;
     for (const p of pts){
+      if (COARSE){
+        s += '<rect class="ov-handle-hit" data-handle="' + p[0] + '" data-room="' + esc(r.id) +
+          '" x="' + (p[1] - hhit / 2) + '" y="' + (Y(p[2]) - hhit / 2) + '" width="' + hhit +
+          '" height="' + hhit + '"/>';
+      }
       s += '<rect class="ov-handle h-' + p[0] + '" data-handle="' + p[0] + '" data-room="' + esc(r.id) +
         '" x="' + (p[1] - hs / 2) + '" y="' + (Y(p[2]) - hs / 2) + '" width="' + hs + '" height="' + hs +
         '" vector-effect="non-scaling-stroke"/>';
@@ -4916,7 +4958,29 @@ async function applyEdits(edits, label){
   if (p.line) flashLine(p.line);
   editNote('');
   dpNote(p.summary || '');
+  // add_room with a full envelope: the room was dropped at the origin (overlapping)
+  // rather than refused — offer a one-tap envelope grow so it has somewhere to go.
+  if (p.placed === 'fallback')
+    offerEnvelopeGrow(edits.find(e => e && e.kind === 'add_room'));
   return true;
+}
+// Envelope is fully tiled: a just-added room fell back to the origin. Offer to
+// enlarge the envelope (reusing the set_plan edit) so a free strip opens up.
+function offerEnvelopeGrow(ed){
+  const p = lastGood; if (!p) return;
+  const env = (p.settings && p.settings.envelope) || [0, 0];
+  const grow = Math.max(8, (ed && isFinite(ed.l)) ? Math.ceil(ed.l) : 10);
+  const newW = env[0], newL = Math.ceil(env[1]) + grow;
+  dpNote('No free space — the envelope is full; the room landed at the origin.', true);
+  showNotice('No free space — the envelope is full. Enlarge it so the new room fits?',
+    [{ label: 'Grow envelope to ' + trimNum(newW) + '×' + trimNum(newL) + '′',
+       fn: () => growEnvelope(newW, newL) },
+     { label: 'Leave as is', ghost: true }]);
+}
+function growEnvelope(w, l){
+  applyEdits([{ kind:'set_plan', envelope:[w, l] }], 'grow envelope').then(ok => {
+    if (ok) dpNote('Enlarged the envelope — drag the new room into the new space.');
+  });
 }
 function flashLine(ln){
   const el = gutter.children[ln - 1]; if (!el) return;
@@ -4998,6 +5062,10 @@ function renderPanel(){
   (p.instances || []).forEach(inst => inst.rooms.forEach(rr => stampedSet.add(rr)));
   const opStamped = o => o.kind === 'interior'
     ? (stampedSet.has(o.a) || stampedSet.has(o.b)) : stampedSet.has(o.room);
+  // The room/opening list is variable-length; cap it in its own scroll region so
+  // the primary actions below (＋ Room and the Add-room form) stay on-screen on a
+  // short (tablet, 768px) viewport instead of being pushed below the fold.
+  h += '<div class="dp-scroll">';
   h += '<h5>Rooms</h5>';
   const levels = p.levels || [0];
   for (const lv of levels){
@@ -5061,7 +5129,8 @@ function renderPanel(){
       }
     }
   }
-  h += '<div class="dp-btns"><button data-btn="addroom">＋ Room</button>' +
+  h += '</div>';  // close .dp-scroll (the capped room/opening list)
+  h += '<div class="dp-btns dp-actions"><button data-btn="addroom">＋ Room</button>' +
     '<button data-btn="addnote" title="Add a positioned note — a leader callout on the plan">＋ Note</button>' +
     '<button data-btn="parts" title="Insert a reusable part (a plan-less .barn file beside this plan)">▣ Parts</button></div>';
   if (dpForm === 'room') h += addRoomForm(p);

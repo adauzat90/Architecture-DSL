@@ -56,6 +56,36 @@ def test_drive_bad_surface_is_a_bad_option():
     assert "BAD_OPTION" in _codes(r, "error")
 
 
+def test_two_overlapping_drives_warn_site_overlap():
+    # The persona's exact case: two overlapping gravel drives silently
+    # double-count their shared paving in the cost estimate.
+    r = _compile(
+        "drive at 10,10 size 20 x 20 gravel\n"
+        "drive at 20,20 size 20 x 20 gravel"
+    )
+    assert "SITE_OVERLAP" in _codes(r, "warning")
+    ov = next(d for d in r.warnings if d.code == "SITE_OVERLAP")
+    assert "100" in ov.message  # 10 ft × 10 ft overlap = 100 sqft
+
+
+def test_non_overlapping_drives_do_not_warn():
+    r = _compile(
+        "drive at 5,5 size 15 x 15 gravel\n"
+        "drive at 60,60 size 15 x 15 gravel"
+    )
+    assert "SITE_OVERLAP" not in _codes(r, "warning")
+
+
+def test_a_walk_meeting_a_drive_does_not_warn_overlap():
+    # A walk is auto-routed to terminate at a drive, so a walk-drive overlap is
+    # by design and must not fire SITE_OVERLAP (drive-drive only).
+    r = _compile(
+        "drive at 20,10 size 20 x 40 gravel\n"
+        "walk from living to drive"
+    )
+    assert "SITE_OVERLAP" not in _codes(r, "warning")
+
+
 def test_walk_parses_room_and_default_width():
     ss = _compile("drive at 80,10 size 20 x 40\nwalk from living to drive").plan.site_spec
     assert ss.walks[0].room == "living" and ss.walks[0].width == 4.0
@@ -326,6 +356,23 @@ def test_packet_has_a_clearance_table_and_site_notes():
     assert "Site notes" in html
     assert "Driveway: 22" in html
     assert "✓" in html  # every side clears its setback here
+
+
+def test_packet_prints_actual_well_septic_separation():
+    # Item 11: the site sheet prints the compiler's actual well↔septic
+    # separation against the 100 ft rule, not just a pass/fail flag.
+    src = _SRC.replace("building at 40,30", "building at 40,30")
+    html = build_packet(compile_source(src.format(
+        extra="well at 10,80\nseptic at 90,55 field 20 x 20"
+    )))
+    assert "Feature clearances" in html
+    assert "Well ↔ septic" in html
+    assert "≥ 100′" in html  # the required minimum is stated
+
+
+def test_packet_has_no_feature_clearance_table_without_well_and_septic():
+    html = build_packet(compile_source(_SRC.format(extra="")))
+    assert "Well ↔ septic" not in html
 
 
 def test_packet_clearance_marks_a_short_yard():

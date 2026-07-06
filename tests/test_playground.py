@@ -164,6 +164,24 @@ def test_unknown_path_is_404_and_serves_no_files(server):
         assert json.loads(data)["error"]
 
 
+def test_client_disconnect_mid_response_does_not_crash_the_server(server):
+    # Item 10: a client that sends a request and closes the socket before
+    # reading the (large) response must not take down the handler thread — the
+    # next request still succeeds.
+    import socket
+
+    addr = ("127.0.0.1", server.server_address[1])
+    for _ in range(5):
+        s = socket.create_connection(addr, timeout=10)
+        # Ask for the big app HTML, then close immediately without reading it.
+        s.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        s.close()
+    # The server survived: a fresh request still gets served.
+    status, data = _request(server, "GET", "/api/examples")
+    assert status == 200
+    assert json.loads(data)
+
+
 def test_get_root_serves_the_app_with_no_external_references(server):
     status, data = _request(server, "GET", "/")
     assert status == 200

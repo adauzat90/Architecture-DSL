@@ -307,6 +307,50 @@ All six items below landed together (each with tests; suite/ruff/mypy green).
   editor* — never to an unopened URI (the Phase 8 rule), cleared when the part
   closes. Works regardless of the order host/part were opened.
 
+## Phase 22 — Second persona-panel round-2 findings (S/M batch) — **SHIPPED**
+
+Eleven confirmed findings from a second persona-panel review, landed together
+(each with tests; full suite + ruff + mypy green). Closes:
+
+1. **Gable-end cost bug (HIGH — a 4× overcharge).** `cost.py` computed the
+   gable-end triangle base from `envelope_width` unconditionally, but the ridge
+   runs the **long** axis (per `structure.py` / `revit._roof_block`), so the
+   triangles stand on the **short** dimension. Fixed to `min(width, length)`;
+   pinned with a rotation-symmetry property test (`40×20` == `20×40`). Bundled
+   examples with a wider-than-long gable roof re-priced downward (e.g. cedar_ridge
+   `600 → 266.67` sq ft of gable wall, −$6,000).
+2. **Zero/negative opening widths** now a proper `OPENING_SIZE` **error** (windows,
+   interior + exterior + overhead doors), so the cost path never prices a
+   non-buildable opening.
+3. **Overlapping site features** draw a `SITE_OVERLAP` **warning** (drive↔drive;
+   the cost sums each drive's area, so an overlap double-counts) — the honest fix,
+   no silent math change. Walks are auto-routed to meet a drive, so excluded.
+4. **Schedule mark tags on the plan.** One shared helper
+   (`schedule.door_marks`/`window_marks`/`opening_tag_points`) numbers the D1…/W1…
+   marks; the SVG plan draws bubbles and the DXF writes TEXT on `A-ANNO-NOTE` from
+   it, so tags and schedules can never disagree (parity test). Packet inherits.
+5. **R304 habitable-room minimums** — new `ROOM_HABITABLE` warning (living, dining,
+   office/den, loft ≥ 70 sq ft and ≥ 7 ft) with bedrooms (hard error) and kitchens
+   (R304.2 exempt) excluded; zero diagnostic delta on every bundled example.
+6. **Tablet ergonomics** — the Design panel's room list scrolls independently and
+   the action row is sticky (primary actions reachable at 768 px); resize handles
+   get a ~44 px invisible hit halo on coarse pointers (visual size unchanged);
+   `add_room` on a full envelope returns `placed:"fallback"` so the UI offers a
+   one-tap envelope grow instead of silently overlapping at the origin.
+7. **LSP headerless-fragment detection** — a buffer with no `plan` statement (an
+   opened part file) compiles as a fragment, so it gets its part-internal findings
+   without whole-plan noise (ENVELOPE/NO_ENTRY/OUT_OF_BOUNDS). Reuses the
+   `_sniff_part` header heuristic; a buffer *with* `plan` keeps full behavior.
+8. **`cost --print-keys --json`** emits a machine shape `[{key, default, unit,
+   meaning}, …]`; the text table is unchanged.
+9. **`-q`/`--quiet`** on `compile`/`fmt`/`score`/`cost` — nothing on success,
+   errors to stderr, exit code unchanged (Makefile/CI use).
+10. **Playground BrokenPipe guard** — the response writers ignore a client that
+    disconnects mid-response instead of crashing the handler thread.
+11. **Site-sheet actual clearance** — the packet's Site Plan prints the compiler's
+    real well↔septic separation vs the 100 ft rule (and each drive's distance to
+    the nearest lot line) whenever the features exist.
+
 ## Explicitly rejected (recorded so they aren't re-litigated)
 
 - **Flat 12-riser stair-landing trigger** — would flag every normal

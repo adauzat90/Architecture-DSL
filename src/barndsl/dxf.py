@@ -76,6 +76,8 @@ _ROOM_AREA_H = 0.5
 _DIM_H = 0.45
 _FIXT_H = 0.3
 _NOTE_H = 0.4
+_TAG_H = 0.42       # D1/W1 opening-mark text height (ft)
+_TAG_R = 0.6        # opening-mark bubble radius (ft)
 
 
 #: Vulgar-fraction glyphs (face-of-stud labels) → the ASCII fraction a DXF
@@ -487,6 +489,7 @@ class _DxfWriter:
         self._doors(level, rooms, sfx)
         self._fixtures(rooms, sfx)
         self._room_text(rooms, sfx)
+        self._opening_tags(level, sfx)
         self._structure(level, sfx)
         self._notes(level, sfx)
         if level == 0:
@@ -765,6 +768,19 @@ class _DxfWriter:
             cx, cy = r.center
             self.text(cx, cy + 0.2, r.display_name.upper(), _ROOM_NAME_H, layer, center=True)
             self.text(cx, cy - 0.8, f"{r.area:.0f} SF", _ROOM_AREA_H, layer, center=True)
+
+    def _opening_tags(self, level: int, sfx: str) -> None:
+        """Draw the D1…/W1… opening marks — a bubble + centred TEXT on each door
+        and window, on the annotation-note layer. Marks and positions come from
+        the SAME shared helper the SVG plan and the schedules use
+        (:func:`barndsl.schedule.opening_tag_points`), so the DXF, the drawing and
+        the schedule never disagree."""
+        from .schedule import opening_tag_points
+
+        layer = "A-ANNO-NOTE" + sfx
+        for mark, wx, wy in opening_tag_points(self.plan, level):
+            self.circle(wx, wy, _TAG_R, layer)
+            self.text(wx, wy - _TAG_H / 2.0, mark, _TAG_H, layer, center=True)
 
     def _notes(self, level: int, sfx: str) -> None:
         layer = "A-ANNO-NOTE" + sfx

@@ -231,6 +231,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A septic tank or its drain field falls inside a required yard setback "
            "band. Septic components are usually held out of the setbacks too; "
            "confirm the allowed septic setback with the county health department."),
+        _c("SITE_OVERLAP", W, "Site features of the same kind overlap",
+           "Two declared driveways overlap on the lot. The cost takeoff sums each "
+           "drive's area independently, so an overlap double-counts the shared "
+           "paving in the estimate (and the drawing paints it twice). Only drives "
+           "are checked: a `walk` is auto-routed to terminate at a drive, so a "
+           "walk-drive overlap is by design and a walk-walk overlap of two thin "
+           "auto-routed paths isn't a meaningful double-count. Merge or separate "
+           "the overlapping drives so each patch of paving is declared once."),
         _c("PORCH_GUARD", W, "Porch needs a guard (R312.1)",
            "The declared `grade` puts the finish floor more than 30 in above "
            "finished grade, so every porch is a walking surface that needs a 36 in "
@@ -261,6 +269,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A bedroom is below the ~70 sq ft IRC minimum habitable area (R304)."),
         _c("BEDROOM_DIM", E, "Bedroom too narrow",
            "A bedroom's smallest dimension is below the 7 ft minimum (R304)."),
+        _c("ROOM_HABITABLE", W, "Habitable room below the R304 minimum",
+           "A habitable room (living, dining, office/den, loft) is below the IRC "
+           "R304 minimum — 70 sq ft of floor area (R304.1) and 7 ft in every "
+           "horizontal dimension (R304.2). Bedrooms carry the same rule as a hard "
+           "error via BEDROOM_AREA/BEDROOM_DIM (not repeated here); a kitchen is "
+           "exempt from both (R304.2). The thresholds follow the active profile's "
+           "habitable-room minimums."),
         _c("HALL_WIDTH", E, "Hallway too narrow",
            "A hallway is below the 3 ft (36 in) minimum width (R311.6)."),
         _c("ROOM_TIGHT", I, "Room below a workable size",
@@ -477,6 +492,12 @@ REGISTRY: dict[str, CodeInfo] = dict(
         # --- openings -------------------------------------------------------
         _c("WINDOW_REF", E, "Window references unknown room",
            "A window names a room id that doesn't exist."),
+        _c("OPENING_SIZE", E, "Non-positive opening width",
+           "A window, interior door, or exterior door (including an overhead "
+           "door) was declared with `width <= 0`. A zero- or negative-width "
+           "opening isn't a buildable opening, and it misprices in the estimate "
+           "(an overhead line vanishes; an entry still bills a full leaf). Give "
+           "it a positive width, e.g. `width 3`."),
         _c("OPENING_OOB", E, "Opening runs off the wall",
            "A window/entry's offset+width exceeds the wall it sits on."),
         _c("OPENING_CLASH", E, "Openings overlap",

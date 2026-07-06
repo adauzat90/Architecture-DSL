@@ -206,6 +206,11 @@ class EditResult:
     line: int | None = None
     summary: str | None = None
     error: EditError | None = None
+    #: ``add_room`` auto-placement outcome: ``"auto"`` when a free spot was found,
+    #: ``"fallback"`` when the envelope was full and the room was dropped at the
+    #: origin (the UI offers to enlarge the envelope). ``None`` for every other edit
+    #: and for explicit (``at``/``anchor``) placements.
+    placed: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -1332,6 +1337,7 @@ def _add_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
     rtype = RoomType(edit.rtype.lower()).value  # type: ignore[union-attr]
     level = int(edit.level) if edit.level is not None else 0
     w, l = float(edit.w), float(edit.l)  # type: ignore[arg-type]
+    placed: str | None = None
     has_at = edit.x is not None or edit.y is not None
     if edit.anchor is not None:  # relative placement — the target must exist
         if plan.room(edit.of) is None:  # type: ignore[arg-type]
@@ -1353,7 +1359,13 @@ def _add_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
             if shrunk is not None:
                 spot, w, l = shrunk, sw, sl
         if spot is None:
+            # No free spot at all (the envelope is fully tiled). Drop it at the
+            # origin so the compiler's overlap diagnostic can teach — but flag the
+            # fallback so the UI can offer to enlarge the envelope.
             spot = (0.0, 0.0)
+            placed = "fallback"
+        else:
+            placed = "auto"
         placement = f"at {_fmt(spot[0])},{_fmt(spot[1])}"
     stmt = (f"room {edit.room}: {rtype} {placement} "
             f"size {_fmt(w)} x {_fmt(l)}")
@@ -1371,7 +1383,7 @@ def _add_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
         after = _envelope_line(lines) or len(lines)
     lines.insert(after, stmt)
     return EditResult("\n".join(lines), changed=True, line=after + 1,
-                      summary=f"added room {edit.room} ({rtype})")
+                      summary=f"added room {edit.room} ({rtype})", placed=placed)
 
 
 def _rects_overlap(ax: float, ay: float, aw: float, al: float, r) -> bool:

@@ -68,6 +68,7 @@ PART_LOCAL_CODES = frozenset({
     "DUP_ID",
     # room geometry (a room's own shape/size — independent of placement)
     "ROOM_SIZE", "ROOM_TIGHT", "ROOM_PROPORTION", "ROOM_GEOMETRY", "ROOM_CLEAR",
+    "ROOM_HABITABLE",
     "BEDROOM_AREA", "BEDROOM_DIM", "CLOSET_SHAPE", "BATH_CLEARANCE",
     "BATH_OVERSIZE", "OPEN_BATH", "BATH_DISTANCE",
     # fixtures & furniture clearances (room-local)
@@ -76,7 +77,7 @@ PART_LOCAL_CODES = frozenset({
     "FIXTURE_ROOM_TYPE", "FIXTURE_EGRESS", "BED_CLEARANCE", "DINING_CLEARANCE",
     "KITCHEN_TRIANGLE", "KITCHEN_FIT", "RANGE_LANDING", "DRYER_VENT",
     # openings that clash with the part's own geometry/fixtures
-    "OPENING_CLASH", "DOOR_HITS_FIXTURE", "DOOR_SWING_CLASH",
+    "OPENING_CLASH", "OPENING_SIZE", "DOOR_HITS_FIXTURE", "DOOR_SWING_CLASH",
     # room overlaps within the part
     "OVERLAP",
     # devices (room-local rules)

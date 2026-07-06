@@ -152,6 +152,22 @@ def unit_cost_key_table() -> str:
     return "\n".join(rows)
 
 
+def unit_cost_key_rows() -> list[dict[str, Any]]:
+    """The overridable unit-cost sheet as a machine-readable list — one dict per
+    key ``{key, default, unit, meaning}`` in pricing order.
+
+    Backs ``barndsl cost --print-keys --json``; the text form is
+    :func:`unit_cost_key_table`.
+    """
+    rows: list[dict[str, Any]] = []
+    for key, default in DEFAULT_UNIT_COSTS.items():
+        unit, meaning = UNIT_COST_META[key]
+        rows.append(
+            {"key": key, "default": float(default), "unit": unit, "meaning": meaning}
+        )
+    return rows
+
+
 #: Fixture kind (see :data:`barndsl.fixtures.FIXTURES`) → unit-cost key, in the
 #: order lines are emitted (deterministic).
 _FIXTURE_ORDER = (
@@ -291,14 +307,18 @@ def estimate_cost(
     add("Shell", "Exterior walls", m["exterior_wall_area_sqft"], "sqft",
         "exterior_wall_sqft", "metrics: exterior_wall_area_sqft")
     # A gable roof adds a triangle of wall at each gable end (the two walls the
-    # ridge runs *between*): base = envelope width, rise = half-span × pitch, so
-    # one triangle is width²·pitch/4 and the pair is width²·pitch/2. Sheathed and
-    # sided like the rest of the shell, so priced at the exterior-wall rate.
+    # ridge runs *between*). The ridge runs along the building's *long* axis (see
+    # structure.py / revit._roof_block: ``span = min(w, l)``), so the gable-end
+    # triangles stand on the *short* dimension: base = min(width, length), rise =
+    # half-span × pitch. One triangle is base²·pitch/4 and the pair is base²·pitch/2.
+    # (Identical for a square plan; rotation-symmetric — 40×20 and 20×40 match.)
+    # Sheathed and sided like the rest of the shell, so priced at the exterior-wall rate.
     if plan.roof_style == "gable":
         pitch = plan.roof_pitch if plan.roof_pitch is not None else DEFAULT_ROOF_PITCH
-        gable_area = plan.envelope_width * plan.envelope_width * pitch / 2.0
+        gable_base = min(plan.envelope_width, plan.envelope_length)
+        gable_area = gable_base * gable_base * pitch / 2.0
         add("Shell", "Gable-end walls", gable_area, "sqft", "exterior_wall_sqft",
-            "gable ends: envelope width & roof pitch")
+            "gable ends: short envelope side & roof pitch")
     add("Shell", "Roof", m["roof_area_sqft"], "sqft", "roof_sqft",
         "metrics: roof_area_sqft (sloped)")
     # Covered porches carry their own roof (already sloped by the pitch), at the

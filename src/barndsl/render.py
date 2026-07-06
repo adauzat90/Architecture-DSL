@@ -151,6 +151,13 @@ TEXT_COLOR = "#222222"
 # Positioned annotations (leader-line notes): a muted, print-friendly accent —
 # distinct from the dimension grey and the room ink, in the drafting-note family.
 NOTE_COLOR = "#7A6A55"
+# Opening mark tags (D1/W1 bubbles) — a slate-ink annotation accent, distinct
+# from the window blue and the dimension grey so a bubble reads as a schedule
+# reference, not a construction line.
+TAG_COLOR = "#334E68"
+#: Mark-bubble radius (px). The world-feet inset that places the bubble on the
+#: room side lives in :data:`barndsl.schedule.TAG_INSET_FT` (shared with the DXF).
+TAG_RADIUS_PX = 7.5
 # Fixtures/furniture: thin dark outlines, drafting style — subtle so the plan
 # stays readable (no fill, or a whisper of one).
 FIXTURE_COLOR = "#5a5a5a"
@@ -201,6 +208,11 @@ class RenderConfig:
     #: face-of-opening and stay put. ``"nominal"`` output is byte-for-byte the
     #: historical drawing; only ``"faces"`` shifts the ticks.
     dim_mode: str = "nominal"
+    #: Draw the D1…/W1… mark bubbles beside each door/window glyph — the same
+    #: marks the door/window schedules assign (shared numbering, see
+    #: :func:`barndsl.schedule.door_marks`). On by default so the plan, the
+    #: schedules and the DXF agree; the packet inherits it.
+    opening_tags: bool = True
 
 
 def render_svg(plan: Barndominium, config: RenderConfig | None = None) -> str:
@@ -413,6 +425,8 @@ class _Renderer:
             self._draw_structure()
             self._draw_windows()
             self._draw_doors()
+            if self.c.opening_tags:
+                self._draw_opening_tags()
             self._draw_notes()
             self._draw_chain_dims()
             self._draw_dimensions()
@@ -445,6 +459,8 @@ class _Renderer:
         self._draw_structure(level=lvl)
         self._draw_windows(level=lvl)
         self._draw_doors(level=lvl)
+        if self.c.opening_tags:
+            self._draw_opening_tags(level=lvl)
         self._draw_notes(level=lvl)
         self._draw_stairs(lvl)
         self._draw_guards(level=lvl)
@@ -1032,6 +1048,32 @@ class _Renderer:
                     self._door_symbol(x1, lo + half, "v", half, hinge_far=True)
                 else:
                     self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
+
+    def _draw_opening_tags(self, level: int | None = None) -> None:
+        """Draw a D1…/W1… mark bubble on the room side of each door/window glyph.
+        The marks and their world positions come from the SAME shared helper the
+        schedules use (:func:`barndsl.schedule.opening_tag_points`), so a plan tag
+        and its schedule row — and the DXF tag — can never disagree. On the
+        annotation layer, inside the room, clear of the exterior dim chains."""
+        from .schedule import opening_tag_points
+
+        self.parts.append('<g data-layer="opening-tags" pointer-events="none">')
+        for mark, wx, wy in opening_tag_points(self.plan, level):
+            self._mark_bubble(mark, wx, wy)
+        self.parts.append("</g>")
+
+    def _mark_bubble(self, mark: str, wx: float, wy: float) -> None:
+        """A small hollow tag bubble with the mark text, centred at world ``(wx, wy)``."""
+        cx, cy = self.sx(wx), self.sy(wy)
+        r = TAG_RADIUS_PX
+        self.parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="#ffffff" '
+            f'fill-opacity="0.85" stroke="{TAG_COLOR}" stroke-width="0.8" />'
+        )
+        self._text(
+            cx, cy + r * 0.36, mark, size=r * 1.15, anchor="middle",
+            fill=TAG_COLOR, weight="bold",
+        )
 
     @staticmethod
     def _swing_sgn(door, a, b, edge) -> float | None:

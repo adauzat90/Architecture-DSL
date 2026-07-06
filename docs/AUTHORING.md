@@ -30,7 +30,14 @@ barndsl compile plan.barn                  # diagnostics + a one-line program re
 barndsl compile plan.barn --show-coords    # + each room's resolved rectangle
 barndsl compile plan.barn --metrics        # + full area/material takeoff
 barndsl build   plan.barn --out plan.svg   # compile + render if valid
+barndsl compile plan.barn -q               # Makefile mode: silent on success
 ```
+
+**`-q` / `--quiet`** (on `compile`, `fmt`, `score`, `cost`) is the Unix-clean
+mode for a Makefile or CI step: it prints **nothing on success**, sends the
+diagnostic report to **stderr** on failure, and leaves the **exit code
+unchanged** (so `barndsl compile plan.barn -q && …` gates cleanly). It suppresses
+the human-readable stdout, not the exit signal.
 
 **A clean compile does not mean you built the right plan.** It checks the code is
 valid, not that you met the brief — you can compile `0/0/0` while having dropped a
@@ -266,7 +273,11 @@ the features sit in the same drawing as the lot and building:
   (surface defaults to `gravel`; concrete/asphalt cost more). `walk from <room> to
   drive [width <ft>]` runs a walkway (default 4 ft) from that room's exterior door
   to the nearest drive edge. A drive with **no** walk or drive edge reaching a
-  door draws a `DRIVE_DOOR` info ("guests arrive and have no path to a door").
+  door draws a `DRIVE_DOOR` info ("guests arrive and have no path to a door"). Two
+  declared drives that **overlap** draw a `SITE_OVERLAP` warning (the cost takeoff
+  sums each drive's area, so an overlap double-counts the shared paving — merge or
+  separate them). Only drive↔drive is checked; a `walk` is auto-routed to meet a
+  drive, so a walk↔drive overlap is by design.
 - `well at <x>,<y>` places a water well; `septic at <x>,<y> [field <W> x <L>]` a
   septic tank (drawn ~5×8 ft) with an optional drain field just north of it. A
   well closer than **100 ft** to the septic tank/field warns (`WELL_SEPTIC_CLEAR`
@@ -285,8 +296,11 @@ the features sit in the same drawing as the lot and building:
 The site render adds recognisable symbols (drive hatch, circled-W well, septic
 tank + drain-field lattice, service arrows), a **legend**, and dimensions of the
 building's *actual* distance to each lot line; the permit packet's Site Plan sheet
-adds a **yard-clearance table** (required setback vs actual, pass/fail) and site
-notes. See `examples/gallery/homestead.barn` for the full vocabulary, clean.
+adds a **yard-clearance table** (required setback vs actual, pass/fail), a
+**feature-clearance table** (the actual well↔septic separation vs the 100 ft
+rule, e.g. `Well ↔ septic: 116′-7⅜″ ≥ 100′ ✓`, plus each drive's distance to the
+nearest lot line — printed whenever the features exist), and site notes. See
+`examples/gallery/homestead.barn` for the full vocabulary, clean.
 - The **electrical layer** is opt-in and drawn per statement:
   `outlet in <room> wall N|S|E|W offset <ft> [gfci]` places a receptacle on a
   wall (offset from its south/west start corner; `gfci` = ground-fault),
@@ -530,6 +544,9 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - Every interior room is **reachable** from an `entry` through interior doors.
 - An `entry` must be on an **exterior** wall (it can't open onto another room).
 - Openings fit on their wall (`offset + width <= wall length`).
+- An opening's `width` is **positive** (`OPENING_SIZE`) — a window, interior door
+  or exterior door (including an overhead door) with `width <= 0` isn't buildable
+  and would misprice the estimate, so it's rejected (a positive `width` is required).
 - A `wall` statement names two existing rooms (`WALL_REF`) that really share a
   wall (`WALL_NOADJ`) — it declares an attribute of a wall that must exist.
 - A bedroom whose only exterior windows are `fixed` has **no escape opening**
@@ -558,6 +575,12 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   landing. With porches drawn anywhere, every uncovered entry warns; on a plan
   with *no* porches it's a single INFO nudge on the primary entry.
 - A `window` on an interior wall (gives no daylight/egress).
+- `ROOM_HABITABLE` — a habitable room (`living`, `dining`, `office`/den, `loft`)
+  below the **IRC R304** minimum: 70 sq ft of floor area (R304.1) and 7 ft in
+  every horizontal dimension (R304.2). **Bedrooms** carry the same rule as a hard
+  *error* (`BEDROOM_AREA`/`BEDROOM_DIM`, above) and aren't repeated here; a
+  **kitchen** is exempt from both (R304.2). Thresholds follow the active profile's
+  habitable-room minimums.
 - Hallway ≥ 3 ft; interior door ≥ 30 in; at least one egress door ≥ 32 in; a
   bathroom exists.
 - `OPEN_BATH` — a bathroom connected by an `open` walk-through instead of a
@@ -1215,6 +1238,11 @@ Every porch carries a **slab** line in `barndsl cost`; a `covered` porch adds a
   side. The 2D plan's outermost chain dimension also **breaks at exterior opening
   jambs** (wall-segment / opening-width / wall-segment); interior doors get the
   schedule offset only, no plan leader.
+- **The 2D plan (and the packet + DXF) tag every door and window** with the
+  **same D1…/W1… marks the schedules assign** — a small bubble on the room side
+  of each opening, numbered from one shared helper so a plan tag and its schedule
+  row can never disagree (interior doors first, then exterior doors; windows in
+  source order). The DXF writes them as TEXT on `A-ANNO-NOTE`.
 - **`barndsl cost`** itemizes the shell (including **gable-end wall triangles**
   for a gable roof), foundation, partitions, openings, plumbing fixtures **and
   laundry washer/dryer**, systems (electrical + HVAC allowances) and finishes,
@@ -1222,7 +1250,13 @@ Every porch carries a **slab** line in `barndsl cost`; a `covered` porch adds a
   unless itemized, GC overhead & profit). Every unit cost is overridable with
   `--costs FILE.json`. Run **`barndsl cost --print-keys`** (no plan needed) to
   dump the full overridable key table — every key with its default, unit and a
-  one-line meaning — so you know exactly what an override touches.
+  one-line meaning — so you know exactly what an override touches. Add `--json`
+  to get that same table as a machine shape (`[{key, default, unit, meaning}, …]`).
+  - **Gable-end wall triangles** stand on the building's **short** dimension: the
+    ridge always runs the **long** axis, so each gable triangle's base is
+    `min(width, length)` and the pair is `min(width, length)² × pitch / 2` sq ft
+    (priced at the exterior-wall rate). It's rotation-symmetric — `envelope 40 x 20`
+    and `envelope 20 x 40` cost the same.
   - **Openings are priced by size, not a flat per-each** (so a picture window
     costs more than a bathroom awning and a 16 ft garage door costs more than a
     9 ft one):

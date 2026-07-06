@@ -128,6 +128,14 @@ ACCESSIBLE_TURN = 5.0  # 60 in wheelchair turning circle (A117.1 §304)
 # NATURAL_LIGHT_RATIO and the stair constants below live in constants.py (the
 # single source of truth) and are imported above; re-stated here in prose only.
 _WINDOW_TYP_HEIGHT = 3.67  # head - sill for a typical window, ft
+#: Habitable rooms subject to the R304 area/dimension minimums as a WARNING
+#: (ROOM_HABITABLE). Bedrooms are excluded — they carry the same rule as a hard
+#: ERROR (BEDROOM_AREA/BEDROOM_DIM) and must not double-fire. Kitchens are
+#: excluded — R304.2 exempts them from both the area floor and the 7 ft dimension.
+R304_HABITABLE_TYPES: frozenset[RoomType] = HABITABLE_TYPES - {
+    RoomType.BEDROOM,
+    RoomType.KITCHEN,
+}
 MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
 #: Minimum plan overlap (sq ft) between an upper-floor wet room and a wet room
@@ -1485,6 +1493,29 @@ def _validate_site_features(plan: Barndominium, add, profile) -> None:
                 )
             )
 
+    # SITE_OVERLAP — two declared drives that overlap on the lot. The cost takeoff
+    # sums each drive's area independently, so an overlap double-counts the shared
+    # paving; the warning is the honest fix (we don't silently subtract it). Only
+    # drive-drive is checked: a walk is auto-routed to meet a drive (overlap by
+    # design) and two thin auto-routed walks aren't a meaningful double-count.
+    for i, d1 in enumerate(ss.drives):
+        for d2 in ss.drives[i + 1:]:
+            ox = min(d1.x2, d2.x2) - max(d1.x, d2.x)
+            oy = min(d1.y2, d2.y2) - max(d1.y, d2.y)
+            if ox > EPSILON and oy > EPSILON:
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "SITE_OVERLAP",
+                        f"Two driveways overlap by {_f(ox * oy)} sqft "
+                        f"({d1.surface} & {d2.surface}); the cost estimate "
+                        "double-counts the shared paving.",
+                        line=d2.line, col=d2.col, end_col=d2.end_col,
+                        hint="Merge the drives into one rectangle, or move them "
+                        "apart so each patch of paving is declared once.",
+                    )
+                )
+
     # SEPTIC_SETBACK — a septic tank/field inside a required setback band.
     lot_w, lot_l = ss.width, ss.length
     front, rear, side = ss.front or 0.0, ss.rear or 0.0, ss.side or 0.0
@@ -1962,6 +1993,42 @@ def _validate_room_programs(plan: Barndominium, add, profile: Profile = DEFAULT)
                         hint=f"Make both dimensions >= {bed_dim:g} ft.",
                     )
                 )
+        elif room.type in R304_HABITABLE_TYPES:
+            # R304 habitable-room minimums (WARNING): 70 sq ft floor + 7 ft in
+            # every horizontal dimension. Bedrooms are handled above as errors and
+            # kitchens are exempt (R304.2), so neither reaches here.
+            kind = room.type.value.replace("_", " ").capitalize()
+            if room.area < bed_area:
+                need_len = _suggest_int(bed_area / max(room.width, EPSILON))
+                sizing = (
+                    f" e.g. `size {_f(room.width)} x {need_len}`"
+                    if need_len is not None else ""
+                )
+                tag = _profile_tag(profile, "min_bedroom_area", f"{MIN_BEDROOM_AREA:.0f} sq ft")
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "ROOM_HABITABLE",
+                        f"{kind} '{room.id}' is {_f(room.area)} sq ft; the R304 "
+                        f"minimum habitable area is {bed_area:g} sq ft{tag}.",
+                        room=room.id,
+                        hint=f"Enlarge it to >= {bed_area:g} sq ft{sizing}.",
+                    )
+                )
+            if room.min_dimension < bed_dim:
+                tag = _profile_tag(
+                    profile, "min_bedroom_dimension", f"{MIN_BEDROOM_DIMENSION:.0f} ft"
+                )
+                add(
+                    Issue(
+                        Severity.WARNING,
+                        "ROOM_HABITABLE",
+                        f"{kind} '{room.id}' is {_f(room.min_dimension)} ft on its "
+                        f"smallest dimension; the R304 minimum is {bed_dim:g} ft{tag}.",
+                        room=room.id,
+                        hint=f"Make both dimensions >= {bed_dim:g} ft.",
+                    )
+                )
         if room.type is RoomType.HALLWAY and room.min_dimension < hall_w:
             tag = _profile_tag(profile, "min_hallway_width", f"{MIN_HALLWAY_WIDTH:.0f} ft")
             add(
@@ -2094,6 +2161,19 @@ def _validate_doors(plan: Barndominium, add) -> None:
     room_ids = {r.id for r in plan.rooms}
     for door in plan.interior_doors:
         loc = _door_loc(door)
+        if door.width <= 0:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OPENING_SIZE",
+                    f"Interior door between '{door.room_a}' and '{door.room_b}' has "
+                    f"non-positive width ({_f(door.width)} ft).",
+                    room=door.room_a,
+                    hint="Give it a positive width, e.g. `width 3`.",
+                    **loc,
+                )
+            )
+            continue
         if door.room_a == door.room_b:
             add(
                 Issue(
@@ -2342,6 +2422,20 @@ def _validate_doors(plan: Barndominium, add) -> None:
                 )
             )
             continue
+        if xdoor.width <= 0:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OPENING_SIZE",
+                    f"Exterior door on '{xdoor.room}' has non-positive width "
+                    f"({_f(xdoor.width)} ft).",
+                    room=xdoor.room,
+                    hint="Give it a positive width, e.g. `width 3` (or `width 9` "
+                    "for an overhead door).",
+                    **_door_loc(xdoor),
+                )
+            )
+            continue
         room = plan.room(xdoor.room)
         if xdoor.overhead:
             _check_overhead_door(xdoor, room, add)
@@ -2440,6 +2534,18 @@ def _validate_openings(plan: Barndominium, add) -> None:
             continue
         room = plan.room(w.room)
         assert room is not None  # guaranteed: w.room was checked against room_ids
+        if w.width <= 0:
+            add(
+                Issue(
+                    Severity.ERROR,
+                    "OPENING_SIZE",
+                    f"Window on '{w.room}' has non-positive width ({_f(w.width)} ft).",
+                    room=w.room,
+                    hint="Give it a positive width, e.g. `width 3`.",
+                    **_door_loc(w),
+                )
+            )
+            continue
         if w.head_height <= w.sill_height + EPSILON:
             add(
                 Issue(

@@ -278,6 +278,39 @@ def _site_clearance_rows(plan: Any) -> list[tuple[str, str, str, bool]]:
     return rows
 
 
+def _site_feature_clearance_rows(plan: Any) -> list[tuple[str, str, str, bool]]:
+    """``(measure, required, actual, ok)`` for the site-feature health clearances
+    the compiler already computes: the actual well↔septic separation (vs the
+    100 ft rule), and each drive's proximity to the nearest lot line (contractor
+    ask — the number the site sheet should print, not just a pass/fail flag).
+    Empty unless the relevant features are declared."""
+    from .constants import WELL_SEPTIC_MIN_SEPARATION
+    from .render import fmt_ft_in
+    from .validation import _pt_rect_dist
+
+    ss = plan.site_spec
+    rows: list[tuple[str, str, str, bool]] = []
+    # Well ↔ septic separation — only when both a well and a septic exist.
+    sep = WELL_SEPTIC_MIN_SEPARATION
+    for wi, wl in enumerate(ss.wells):
+        for si, sp in enumerate(ss.septics):
+            dist = min(_pt_rect_dist(wl.x, wl.y, rect) for rect in sp.rects())
+            label = "Well ↔ septic"
+            if len(ss.wells) > 1 or len(ss.septics) > 1:
+                label += f" (#{wi + 1}↔#{si + 1})"
+            rows.append(
+                (label, f"≥ {fmt_ft_in(sep)}", fmt_ft_in(dist), dist >= sep - 1e-6)
+            )
+    # Drive → nearest lot line (cheap: rect-to-boundary). Informational, so it
+    # always "passes" (no code minimum) but prints the real number.
+    lot_w, lot_l = ss.width, ss.length
+    for di, d in enumerate(ss.drives):
+        gap = min(d.x, d.y, lot_w - d.x2, lot_l - d.y2)
+        label = "Drive → lot line" + (f" (#{di + 1})" if len(ss.drives) > 1 else "")
+        rows.append((label, "—", fmt_ft_in(gap), gap >= -1e-6))
+    return rows
+
+
 def _site_plan(plan: Any) -> str:
     """The Site Plan sheet: the lot, setback lines, site features (drive/well/
     septic/service) and building footprint placed on the lot, with dimensions, a
@@ -314,6 +347,22 @@ def _site_plan(plan: Any) -> str:
             f"<th>Actual</th><th>OK</th></tr>{body}</table>"
         )
 
+    # Feature clearances: the actual well↔septic separation and drive→lot-line
+    # proximity the compiler computes (contractor ask — print the real number).
+    feature_rows = _site_feature_clearance_rows(plan)
+    feature_html = ""
+    if feature_rows:
+        body = "\n".join(
+            f"<tr><td>{_tag(m)}</td><td>{_tag(req)}</td><td>{_tag(act)}</td>"
+            f"<td>{'✓' if ok else '✗ short'}</td></tr>"
+            for m, req, act, ok in feature_rows
+        )
+        feature_html = (
+            "<h3>Feature clearances</h3>"
+            "<table class='metrics'><tr><th>Measure</th><th>Required</th>"
+            f"<th>Actual</th><th>OK</th></tr>{body}</table>"
+        )
+
     # Site-feature notes (drive/well/septic/service), only when present.
     notes = []
     for d in ss.drives:
@@ -342,6 +391,7 @@ def _site_plan(plan: Any) -> str:
   <h3>Lot &amp; setbacks</h3>
   <table class="metrics">{dim_rows}</table>
   {clearance_html}
+  {feature_html}
   {notes_html}
   <p class="note">Schematic, fit-to-page — not drawn to a fixed engineering scale
      (a limitation; the floor-plan sheet carries the true architectural scale).

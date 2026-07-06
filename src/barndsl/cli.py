@@ -254,6 +254,12 @@ def _print_coords(plan) -> None:
 
 def _cmd_compile(args: argparse.Namespace) -> int:
     result = compile_file(args.file, profile=_resolve_profile(args))
+    if getattr(args, "quiet", False):
+        # Makefile contract: nothing on success, the diagnostic report to stderr
+        # on failure, exit code unchanged. (JSON/summary/metrics are suppressed.)
+        if not result.ok:
+            print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return _strict_rc(result, args, quiet=True)
     if getattr(args, "json", False):
         import json
 
@@ -274,22 +280,25 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     return _strict_rc(result, args)
 
 
-def _strict_rc(result, args) -> int:
+def _strict_rc(result, args, quiet: bool = False) -> int:
     """Exit code honouring --strict / --strict-info (warnings/infos → failure).
 
     A hard error always fails. With ``--strict`` a clean-but-warned plan also
     fails (CI gate: "this plan must stay warning-free"); ``--strict-info`` extends
-    that to the design-quality info nudges too.
+    that to the design-quality info nudges too. ``quiet`` suppresses the
+    explanatory stdout line (the exit code still carries the signal).
     """
     if not result.ok:
         return 1
     strict = getattr(args, "strict", False)
     strict_info = getattr(args, "strict_info", False)
     if strict_info and (result.warnings or result.infos):
-        print("\nstrict: failing on warning/info diagnostics (--strict-info).")
+        if not quiet:
+            print("\nstrict: failing on warning/info diagnostics (--strict-info).")
         return 1
     if strict and result.warnings:
-        print("\nstrict: failing on warning diagnostics (--strict).")
+        if not quiet:
+            print("\nstrict: failing on warning diagnostics (--strict).")
         return 1
     return 0
 
@@ -356,6 +365,12 @@ def _cmd_score(args: argparse.Namespace) -> int:
 
     result = compile_file(args.file, profile=_resolve_profile(args))
     report = design_score(result)
+    if getattr(args, "quiet", False):
+        # Makefile contract: nothing on success; the report to stderr when there
+        # is no plan at all (score's only failure), exit code unchanged.
+        if result.plan is None:
+            print(result.report(os.path.basename(args.file)), file=sys.stderr)
+        return 0 if result.plan is not None else 1
     if getattr(args, "json", False):
         import json
 
@@ -613,6 +628,7 @@ def _cmd_fmt(args: argparse.Namespace) -> int:
     breakage."""
     from .fmt import format_source
 
+    quiet = getattr(args, "quiet", False)
     rc = 0
     changed_any = False
     for path in args.files:
@@ -620,6 +636,7 @@ def _cmd_fmt(args: argparse.Namespace) -> int:
         # Refuse to format a file with parse errors — fmt must never mask breakage.
         result = compile_source(original)
         if result.plan is None or result.recovered:
+            # Errors go to stderr regardless of --quiet.
             print(f"{path}: cannot format — fix parse errors first", file=sys.stderr)
             print(result.report(os.path.basename(path)), file=sys.stderr)
             rc = 2
@@ -628,14 +645,16 @@ def _cmd_fmt(args: argparse.Namespace) -> int:
         changed = formatted != original
         if args.check:
             if changed:
-                print(f"would reformat {path}")
+                if not quiet:
+                    print(f"would reformat {path}")
                 changed_any = True
         elif args.write and path != "-":
             if changed:
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(formatted)
-                print(f"reformatted {path}")
-        else:
+                if not quiet:
+                    print(f"reformatted {path}")
+        elif not quiet:
             # stdin (or no --write): emit the formatted source to stdout.
             print(formatted, end="")
     if rc:
@@ -938,12 +957,23 @@ def _cmd_revit_diff(args: argparse.Namespace) -> int:
 
 def _cmd_cost(args: argparse.Namespace) -> int:
     """Assembly-based construction cost estimate from the plan's takeoff."""
-    from .cost import cost_text, estimate_cost, unit_cost_key_table
+    from .cost import (
+        cost_text,
+        estimate_cost,
+        unit_cost_key_rows,
+        unit_cost_key_table,
+    )
 
     # `--print-keys` is a reference dump, not an estimate — it needs no plan, so
-    # the positional file is optional when it's set.
+    # the positional file is optional when it's set. `--json` gives a machine
+    # shape [{key, default, unit, meaning}, ...]; otherwise the text table.
     if getattr(args, "print_keys", False):
-        print(unit_cost_key_table())
+        if getattr(args, "json", False):
+            import json
+
+            print(json.dumps(unit_cost_key_rows(), indent=2))
+        else:
+            print(unit_cost_key_table())
         return 0
     if args.file is None:
         print("error: the following arguments are required: file", file=sys.stderr)
@@ -979,6 +1009,10 @@ def _cmd_cost(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    if getattr(args, "quiet", False):
+        # Makefile contract: a clean estimate prints nothing; a compile failure
+        # already returned 2 with its report on stderr above.
+        return 0
     if getattr(args, "json", False):
         import json
 
@@ -1119,6 +1153,11 @@ def main(argv: list[str] | None = None) -> int:
         help="exit non-zero on warnings AND info nudges",
     )
     _add_profile_flag(p_compile)
+    p_compile.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
+    )
     p_compile.set_defaults(func=_cmd_compile)
 
     p_build = sub.add_parser("build", help="compile and render a .barn file to SVG/PNG/PDF")
@@ -1159,6 +1198,11 @@ def main(argv: list[str] | None = None) -> int:
         help="emit the score report as machine-readable JSON",
     )
     _add_profile_flag(p_score)
+    p_score.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
+    )
     p_score.set_defaults(func=_cmd_score)
 
     p_inspect = sub.add_parser(
@@ -1256,6 +1300,11 @@ def main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="don't write; exit non-zero if any file isn't already formatted",
+    )
+    p_fmt.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
     )
     p_fmt.set_defaults(func=_cmd_fmt)
 
@@ -1453,6 +1502,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=1.0,
         help="regional cost factor scaling every unit cost (e.g. 1.15)",
+    )
+    p_cost.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="suppress informational stdout; print nothing on success, errors to "
+        "stderr, exit code unchanged (for Makefile/CI use)",
     )
     p_cost.set_defaults(func=_cmd_cost)
 

@@ -6,11 +6,15 @@ import csv
 import io
 
 from barndsl import compile_source
+from barndsl.render import render_svg
 from barndsl.schedule import (
+    door_marks,
     door_rows,
+    opening_tag_points,
     room_rows,
     schedules_csv,
     schedules_markdown,
+    window_marks,
     window_rows,
 )
 
@@ -61,6 +65,26 @@ def test_door_rows_number_interior_then_exterior():
     ext = [r for r in rows if r["kind"].startswith("exterior")]
     assert len(ext) == 2
     assert "exterior" in ext[0]["to"]
+
+
+def test_plan_tags_and_schedule_marks_are_the_same_and_in_order():
+    # Item 4 (mandatory parity): the D1…/W1… bubbles drawn on the plan and the
+    # marks in the door/window schedules come from the ONE shared helper, so they
+    # are identical and in the same order. If they ever diverge, this fails.
+    plan = _plan()
+    sched_doors = [r["mark"] for r in door_rows(plan)]
+    sched_windows = [r["mark"] for r in window_rows(plan)]
+    assert sched_doors == [m for m, _ in door_marks(plan)]
+    assert sched_windows == [m for m, _ in window_marks(plan)]
+
+    # Every schedule mark is drawn on the plan exactly once, same label set.
+    tag_marks = [m for m, _x, _y in opening_tag_points(plan)]
+    assert tag_marks == sched_doors + sched_windows
+
+    # And each mark's text actually appears in the rendered SVG bubble layer.
+    svg = render_svg(plan)
+    for mark in sched_doors + sched_windows:
+        assert f">{mark}<" in svg
 
 
 def test_window_rows_have_height_and_glazed_area():

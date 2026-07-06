@@ -355,13 +355,39 @@ def quickfix_snippet(hint: str | None) -> str | None:
 # --- compile helper ----------------------------------------------------------
 
 
+def _is_fragment_buffer(text: str) -> bool:
+    """True when the buffer carries no top-level ``plan`` statement — a headerless
+    part fragment rather than a whole building.
+
+    Mirrors :func:`barndsl.compose._sniff_part`'s header heuristic (the parts
+    scanner uses the same rule to list a file as a part), so the LSP and the
+    scanner never disagree about what counts as a part. A buffer *with* a ``plan``
+    statement keeps full-plan behavior."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.split(None, 1)[0].lower() == "plan":
+            return False
+    return True
+
+
 def compile_document(text: str, base_dir: str | None) -> CompileResult:
     """Compile a document's text the way the editor sees it (full-document sync).
+
+    A headerless buffer (no ``plan`` statement — an opened *part* file) is
+    compiled as a fragment (``fragment=True``), so it gets only its correct
+    part-internal findings instead of whole-plan noise (ENVELOPE / NO_ENTRY /
+    OUT_OF_BOUNDS) it can't satisfy on its own. A buffer with a ``plan`` header
+    keeps full-plan behavior. Every downstream feature (diagnostics, hover,
+    symbols) funnels through here, so all three inherit the fragment view.
 
     Never raises — a source that doesn't parse still returns a ``CompileResult``
     with diagnostics (and possibly a recovered partial plan), exactly as the CLI
     and playground use it.
     """
+    if _is_fragment_buffer(text):
+        return compile_source(text, base_dir=base_dir, fragment=True)
     return compile_source(text, base_dir=base_dir)
 
 

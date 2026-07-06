@@ -486,6 +486,35 @@ def test_add_room_rejects_nonpositive_size():
     assert not r.ok and r.error.kind == "bad_value"
 
 
+def test_add_room_auto_reports_placed_auto_when_space_exists():
+    r = apply_edit(PANEL, Edit("add_room", room="den", rtype="office", w=8, l=8,
+                               auto=True))
+    assert r.ok and r.changed
+    assert r.placed == "auto"
+
+
+def test_add_room_auto_on_a_full_envelope_falls_back_and_flags_it():
+    # A fully tiled envelope leaves no free spot: add_room drops the room at the
+    # origin (never refuses) but flags placed="fallback" so the UI can offer to
+    # enlarge the envelope (Phase 22 item 6c).
+    full = (
+        'plan "Full"\nenvelope 20 x 20\nceiling 9\n'
+        "room living: living at 0,0 size 20 x 20\n"
+        "entry living south width 3 offset 8\n"
+    )
+    r = apply_edit(full, Edit("add_room", room="den", rtype="office", w=10, l=10,
+                              auto=True))
+    assert r.ok and r.changed
+    assert r.placed == "fallback"
+    assert "at 0,0" in _line(r.source, r.line)
+
+
+def test_explicit_add_room_has_no_placed_flag():
+    r = apply_edit(PANEL, Edit("add_room", room="office", rtype="office", w=10, l=10,
+                               x=0, y=26))
+    assert r.placed is None  # only auto-placement sets it
+
+
 # --- delete_room -------------------------------------------------------------
 
 

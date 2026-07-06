@@ -37,6 +37,63 @@ def _write(tmp_path, name, src):
     return p
 
 
+# -- cost --print-keys --json (item 8) ------------------------------------
+
+
+def test_cost_print_keys_json_is_a_machine_shape(capsys):
+    from barndsl.cost import DEFAULT_UNIT_COSTS
+
+    rc = main(["cost", "--print-keys", "--json"])
+    assert rc == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert isinstance(rows, list) and len(rows) == len(DEFAULT_UNIT_COSTS)
+    first = rows[0]
+    assert set(first) == {"key", "default", "unit", "meaning"}
+    # Keys/order/defaults match the canonical table.
+    assert [r["key"] for r in rows] == list(DEFAULT_UNIT_COSTS)
+    assert first["default"] == DEFAULT_UNIT_COSTS[first["key"]]
+
+
+def test_cost_print_keys_text_still_works(capsys):
+    assert main(["cost", "--print-keys"]) == 0
+    out = capsys.readouterr().out
+    assert "slab_sqft" in out and "MEANING" in out
+
+
+# -- --quiet (item 9) ------------------------------------------------------
+
+
+def test_quiet_compile_prints_nothing_on_success(tmp_path, capsys):
+    p = _write(tmp_path, "ok.barn", CLEAN)
+    assert main(["compile", str(p), "-q"]) == 0
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err == ""
+
+
+def test_quiet_compile_errors_go_to_stderr(tmp_path, capsys):
+    bad = "plan \"x\"\nenvelope 20 x 20\nroom a: living at 0,0 size 30 x 30\n"
+    p = _write(tmp_path, "bad.barn", bad)
+    assert main(["compile", str(p), "-q"]) == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""  # nothing on stdout
+    assert cap.err.strip() != ""  # the diagnostic report on stderr
+
+
+def test_quiet_cost_and_score_print_nothing_on_success(tmp_path, capsys):
+    p = _write(tmp_path, "ok.barn", CLEAN)
+    assert main(["cost", str(p), "-q"]) == 0
+    assert capsys.readouterr().out == ""
+    assert main(["score", str(p), "-q"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_quiet_fmt_check_is_silent_but_keeps_exit_code(tmp_path, capsys):
+    p = _write(tmp_path, "p.barn", CLEAN)
+    rc = main(["fmt", "--check", "-q", str(p)])
+    assert rc == 1  # needs reformat → exit code preserved
+    assert capsys.readouterr().out == ""  # but no "would reformat" chatter
+
+
 # -- new ------------------------------------------------------------------
 
 

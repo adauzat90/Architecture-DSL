@@ -224,13 +224,30 @@ def test_porch_slab_and_covered_porch_roof_lines():
 def test_gable_end_triangles_added_only_for_a_gable_roof():
     est = estimate_cost(compile_source(_COMPLETE))
     gable = _named_line(est, "Gable-end walls")
-    # Two triangles, base = envelope width 40, rise = 20 * (4/12): total
-    # 40**2 * (4/12) / 2 = 266.67 sqft, sheathed at the exterior-wall rate.
-    assert abs(gable["quantity"] - round(40 * 40 * (4.0 / 12.0) / 2.0, 2)) < 0.01
+    # Envelope 40x30: the ridge runs the long (40) axis, so the gable ends stand
+    # on the SHORT dimension (30). Two triangles, base = 30, rise = 15 * (4/12):
+    # total 30**2 * (4/12) / 2 = 150.0 sqft, sheathed at the exterior-wall rate.
+    assert abs(gable["quantity"] - round(30 * 30 * (4.0 / 12.0) / 2.0, 2)) < 0.01
     assert gable["cost_key"] == "exterior_wall_sqft"
     # A shed roof has no gable ends → no such line.
     shed = estimate_cost(compile_source(_COMPLETE.replace("roof gable", "roof shed")))
     assert not any(ln["item"] == "Gable-end walls" for ln in shed["assemblies"])
+
+
+def test_gable_area_is_rotation_symmetric():
+    # An identical building authored 40x20 vs 20x40 must produce identical gable
+    # lines and identical totals: the ridge always runs the long axis, so the
+    # gable base is min(width, length) either way (item 1 regression guard).
+    src_wide = 'plan "R"\nenvelope 40 x 20\nroom a: living at 0,0 size 40 x 20\n'
+    src_tall = 'plan "R"\nenvelope 20 x 40\nroom a: living at 0,0 size 20 x 40\n'
+    est_w = estimate_cost(compile_source(src_wide))
+    est_t = estimate_cost(compile_source(src_tall))
+    gable_w = _named_line(est_w, "Gable-end walls")
+    gable_t = _named_line(est_t, "Gable-end walls")
+    # base = min(40, 20) = 20 → 20**2 * (4/12) / 2 = 133.33 sqft, both ways.
+    assert abs(gable_w["quantity"] - round(20 * 20 * (4.0 / 12.0) / 2.0, 2)) < 0.01
+    assert gable_w["quantity"] == gable_t["quantity"]
+    assert est_w["total"]["expected"] == est_t["total"]["expected"]
 
 
 def test_exclusions_footer_present_and_overridable_costs_still_work():
