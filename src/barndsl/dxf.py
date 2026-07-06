@@ -13,10 +13,13 @@ What it emits (see :data:`LAYERS` for the layer table):
   each shared room edge — with door and window openings **cut out** of the band.
 * **Doors** as a leaf line + a 90° swing ``ARC`` (mirroring the SVG's hinge/swing
   convention); **windows** as the classic sill / head / centre-glazing symbol.
-* **Dimensions** as *drawing geometry* — overall dims per side plus the exterior
-  chain strings with jamb breaks (the same breaks the SVG draws) rendered as dim
-  lines, extension lines, ticks and ``TEXT``. These are exploded geometry, **not**
-  associative ``DIMENSION`` entities (deliberately — see ``docs/AUTHORING.md``).
+* **Dimensions** in one of two flavors (``dims=``): the default ``"geometry"`` is
+  *drawing geometry* — overall dims per side plus the exterior chain strings with
+  jamb breaks (the same breaks the SVG draws) as dim lines, extension lines, ticks
+  and ``TEXT`` on ``A-ANNO-DIMS``; ``"associative"`` emits real rotated-linear
+  ``DIMENSION`` entities (one per segment) each backed by an anonymous ``*D<n>``
+  block of that same exploded geometry, so a regenerating reader gets live dims
+  and everyone else sees today's picture (see ``docs/AUTHORING.md``).
 * **Fixtures**, **frame posts**, **porches/stairs**, **room name/area** and
   **notes**, each on its own layer.
 
@@ -106,10 +109,23 @@ def _num(v: float) -> str:
 class _DxfWriter:
     """Assembles a deterministic AC1015 document, tracking a drawing extent."""
 
-    def __init__(self, plan: Barndominium, dim_mode: str = "nominal") -> None:
+    def __init__(
+        self, plan: Barndominium, dim_mode: str = "nominal", dims: str = "geometry"
+    ) -> None:
         self.plan = plan
         self._handle = 0x100
         self._ents: list[str] = []
+        # Entity primitives append to `_sink` owned by `_owner`; both default to
+        # model space, but while capturing an anonymous dimension block's exploded
+        # geometry they retarget the block's body list and its BLOCK_RECORD handle.
+        self._sink = self._ents
+        self._owner = ""  # set to the model-space handle in build()
+        # Associative (`dims="associative"`) emits real DIMENSION entities backed by
+        # anonymous `*D<n>` geometry blocks; "geometry" (default) explodes the dims
+        # to loose lines/ticks/TEXT — byte-identical to the historical output.
+        self._dims = dims
+        self._dim_blocks: list[tuple[str, str, str, str, str]] = []
+        self._dimno = 0
         self.minx = self.miny = math.inf
         self.maxx = self.maxy = -math.inf
         # A throwaway renderer supplies the (world-coordinate) chain-dimension
@@ -135,29 +151,42 @@ class _DxfWriter:
 
     # -- entity primitives (world feet; y-up, no flip) ---------------------
 
-    def line(self, x1: float, y1: float, x2: float, y2: float, layer: str) -> None:
+    def line(
+        self, x1: float, y1: float, x2: float, y2: float, layer: str,
+        *, linetype: str | None = None,
+    ) -> None:
         self._bbox(x1, y1)
         self._bbox(x2, y2)
         g = self._g
-        self._ents.append(
-            g(0, "LINE") + g(5, self._h()) + g(330, self._msp) + g(100, "AcDbEntity")
-            + g(8, layer) + g(100, "AcDbLine")
+        lt = g(6, linetype) if linetype else ""
+        self._sink.append(
+            g(0, "LINE") + g(5, self._h()) + g(330, self._owner) + g(100, "AcDbEntity")
+            + g(8, layer) + lt + g(100, "AcDbLine")
             + g(10, _num(x1)) + g(20, _num(y1)) + g(30, "0.0")
             + g(11, _num(x2)) + g(21, _num(y2)) + g(31, "0.0")
+        )
+
+    def point(self, x: float, y: float, layer: str) -> None:
+        """A POINT — used only for a DIMENSION block's definition points."""
+        g = self._g
+        self._sink.append(
+            g(0, "POINT") + g(5, self._h()) + g(330, self._owner) + g(100, "AcDbEntity")
+            + g(8, layer) + g(100, "AcDbPoint")
+            + g(10, _num(x)) + g(20, _num(y)) + g(30, "0.0")
         )
 
     def polyline(self, pts: list[tuple[float, float]], layer: str) -> None:
         """A *closed* LWPOLYLINE (flag 1) — a hatchable wall/footprint polygon."""
         g = self._g
         body = (
-            g(0, "LWPOLYLINE") + g(5, self._h()) + g(330, self._msp)
+            g(0, "LWPOLYLINE") + g(5, self._h()) + g(330, self._owner)
             + g(100, "AcDbEntity") + g(8, layer) + g(100, "AcDbPolyline")
             + g(90, len(pts)) + g(70, 1)
         )
         for x, y in pts:
             self._bbox(x, y)
             body += g(10, _num(x)) + g(20, _num(y))
-        self._ents.append(body)
+        self._sink.append(body)
 
     def rect(self, x0: float, y0: float, x1: float, y1: float, layer: str) -> None:
         """A closed rectangle polyline from opposite corners."""
@@ -172,8 +201,8 @@ class _DxfWriter:
         self._bbox(cx - r, cy - r)
         self._bbox(cx + r, cy + r)
         g = self._g
-        self._ents.append(
-            g(0, "ARC") + g(5, self._h()) + g(330, self._msp) + g(100, "AcDbEntity")
+        self._sink.append(
+            g(0, "ARC") + g(5, self._h()) + g(330, self._owner) + g(100, "AcDbEntity")
             + g(8, layer) + g(100, "AcDbCircle")
             + g(10, _num(cx)) + g(20, _num(cy)) + g(30, "0.0") + g(40, _num(r))
             + g(100, "AcDbArc") + g(50, _num(start)) + g(51, _num(end))
@@ -183,8 +212,8 @@ class _DxfWriter:
         self._bbox(cx - r, cy - r)
         self._bbox(cx + r, cy + r)
         g = self._g
-        self._ents.append(
-            g(0, "CIRCLE") + g(5, self._h()) + g(330, self._msp) + g(100, "AcDbEntity")
+        self._sink.append(
+            g(0, "CIRCLE") + g(5, self._h()) + g(330, self._owner) + g(100, "AcDbEntity")
             + g(8, layer) + g(100, "AcDbCircle")
             + g(10, _num(cx)) + g(20, _num(cy)) + g(30, "0.0") + g(40, _num(r))
         )
@@ -213,7 +242,7 @@ class _DxfWriter:
             self._bbox(x + w, y + height)
         g = self._g
         body = (
-            g(0, "TEXT") + g(5, self._h()) + g(330, self._msp) + g(100, "AcDbEntity")
+            g(0, "TEXT") + g(5, self._h()) + g(330, self._owner) + g(100, "AcDbEntity")
             + g(8, layer) + g(100, "AcDbText")
             + g(10, _num(x)) + g(20, _num(y)) + g(30, "0.0") + g(40, _num(height))
             + g(1, safe)
@@ -223,7 +252,7 @@ class _DxfWriter:
         if center:
             # Group 72=1 (centre) makes the alignment point (11/21) the anchor.
             body += g(72, 1) + g(100, "AcDbText") + g(11, _num(x)) + g(21, _num(y))
-        self._ents.append(body)
+        self._sink.append(body)
 
     # -- document assembly -------------------------------------------------
 
@@ -241,11 +270,22 @@ class _DxfWriter:
         self._t_blkrec = self._h()
         self._msp = self._h()
         self._psp = self._h()
+        self._owner = self._msp
 
         layer_names = self._layer_names()
-        tables = self._tables(layer_names)
-        blocks = self._blocks()
-        self._draw()
+        if self._dims == "associative":
+            # Draw first so the anonymous `*D<n>` dimension blocks discovered while
+            # annotating are known before the table/block strings are assembled.
+            # (Handles here follow model-space entities rather than preceding them;
+            # this flavor is never held to the geometry flavor's byte layout.)
+            self._draw()
+            tables = self._tables(layer_names)
+            blocks = self._blocks()
+        else:
+            # Geometry flavor: the historical order, byte-for-byte.
+            tables = self._tables(layer_names)
+            blocks = self._blocks()
+            self._draw()
         objects = self._objects()
         seed = f"{self._handle + 1:X}"
 
@@ -276,6 +316,10 @@ class _DxfWriter:
             if lvl == 0:
                 continue
             names += [f"{n}{self._suffix(lvl)}" for n in LAYERS]
+        if self._dims == "associative":
+            # The AutoCAD convention layer that carries a DIMENSION's definition
+            # points — non-plotting, so the defpoints never print.
+            names.append("Defpoints")
         return names
 
     @staticmethod
@@ -323,13 +367,18 @@ class _DxfWriter:
 
         lay_body = ""
         for lname in layer_names:
-            color = 7 if lname == "0" else LAYERS[lname.split("-L")[0] if "-L" in lname else lname]
             base = lname.rsplit("-L", 1)[0] if lname.startswith(tuple(LAYERS)) else lname
+            if lname == "0" or lname == "Defpoints":
+                color = 7
+            else:
+                color = LAYERS[lname.split("-L")[0] if "-L" in lname else lname]
             lt = "DASHED" if base in _DASHED_LAYERS else "Continuous"
             lay_body += (
                 g(0, "LAYER") + g(5, self._h()) + g(330, self._t_layer)
                 + g(100, "AcDbSymbolTableRecord") + g(100, "AcDbLayerTableRecord")
                 + g(2, lname) + g(70, 0) + g(62, color) + g(6, lt)
+                # Defpoints never plots (290=0) — the AutoCAD non-printing convention.
+                + (g(290, 0) if lname == "Defpoints" else "")
                 + g(370, -3) + g(390, "F")
             )
 
@@ -356,6 +405,13 @@ class _DxfWriter:
                 + g(100, "AcDbSymbolTableRecord") + g(100, "AcDbBlockTableRecord")
                 + g(2, bname)
             )
+        # Anonymous dimension geometry blocks (`*D<n>`), in draw order.
+        for name, rec, _begin, _end, _body in self._dim_blocks:
+            blkrec += (
+                g(0, "BLOCK_RECORD") + g(5, rec) + g(330, self._t_blkrec)
+                + g(100, "AcDbSymbolTableRecord") + g(100, "AcDbBlockTableRecord")
+                + g(2, name)
+            )
 
         return (
             g(0, "SECTION") + g(2, "TABLES")
@@ -370,7 +426,7 @@ class _DxfWriter:
                 "DIMSTYLE", self._t_dimstyle, 1, dimstyle,
                 extra=g(100, "AcDbDimStyleTable") + g(71, 0),
             )
-            + table("BLOCK_RECORD", self._t_blkrec, 2, blkrec)
+            + table("BLOCK_RECORD", self._t_blkrec, 2 + len(self._dim_blocks), blkrec)
             + g(0, "ENDSEC")
         )
 
@@ -386,10 +442,24 @@ class _DxfWriter:
                 + g(8, "0") + g(100, "AcDbBlockEnd")
             )
 
+        def dim_block(name: str, rec: str, begin: str, end: str, body: str) -> str:
+            # An anonymous block (flag 70=1) holding a dimension's exploded
+            # geometry — the same lines/ticks/TEXT the geometry flavor draws, so a
+            # non-regenerating viewer shows exactly today's picture.
+            return (
+                g(0, "BLOCK") + g(5, begin) + g(330, rec) + g(100, "AcDbEntity")
+                + g(8, "0") + g(100, "AcDbBlockBegin") + g(2, name) + g(70, 1)
+                + g(10, "0.0") + g(20, "0.0") + g(30, "0.0") + g(3, name) + g(1, "")
+                + body
+                + g(0, "ENDBLK") + g(5, end) + g(330, rec) + g(100, "AcDbEntity")
+                + g(8, "0") + g(100, "AcDbBlockEnd")
+            )
+
         return (
             g(0, "SECTION") + g(2, "BLOCKS")
             + block("*Model_Space", self._msp)
             + block("*Paper_Space", self._psp)
+            + "".join(dim_block(*b) for b in self._dim_blocks)
             + g(0, "ENDSEC")
         )
 
@@ -422,6 +492,26 @@ class _DxfWriter:
         if level == 0:
             self._porches(sfx)
         self._stairs(level, sfx)
+        self._guards(level, sfx)
+
+    def _guards(self, level: int, sfx: str) -> None:
+        """Draw a guard rail along each open loft edge on ``level`` — the
+        double-height edges the ``LOFT_GUARD`` check flags (IRC R312), as a thin
+        double line on the outline layer. Segments come from the same
+        :func:`barndsl.validation.loft_guard_edges` the SVG and the check use."""
+        from .validation import loft_guard_edges
+
+        layer = "A-FLOR-OTLN" + sfx
+        off = 0.12  # ft between the doubled rail lines
+        for lvl, x1, y1, x2, y2 in loft_guard_edges(self.plan):
+            if lvl != level:
+                continue
+            if abs(x1 - x2) < abs(y1 - y2):  # vertical edge → offset in x
+                self.line(x1 - off, y1, x2 - off, y2, layer)
+                self.line(x1 + off, y1, x2 + off, y2, layer)
+            else:                             # horizontal edge → offset in y
+                self.line(x1, y1 - off, x2, y2 - off, layer)
+                self.line(x1, y1 + off, x2, y2 + off, layer)
 
     # -- wall bodies -------------------------------------------------------
 
@@ -589,14 +679,24 @@ class _DxfWriter:
         self, ox: float, oy: float, orientation: str, w: float, wall: Direction,
         layer: str,
     ) -> None:
-        """An overhead/sectional garage door: a track line just inside the room."""
-        d = 0.5
+        """An overhead/sectional garage door glyph — the plan convention: the door
+        panel drawn as a dashed line pair across the opening (the closed sectional
+        leaf), plus a dashed track line just inside the room. Mirrors the SVG's
+        :meth:`barndsl.render._Renderer._overhead_symbol` (dashed, no swing) as
+        closely as the DXF vocabulary allows."""
+        d = 0.5      # track offset inside the room, ft
+        panel = 0.1  # half-thickness of the drawn panel across the opening, ft
+        dash = "DASHED"
         if orientation == "h":
             s = d if wall is Direction.SOUTH else -d
-            self.line(ox, oy + s, ox + w, oy + s, layer)
+            self.line(ox, oy - panel, ox + w, oy - panel, layer, linetype=dash)  # panel
+            self.line(ox, oy + panel, ox + w, oy + panel, layer, linetype=dash)
+            self.line(ox, oy + s, ox + w, oy + s, layer, linetype=dash)          # track
         else:
             s = d if wall is Direction.WEST else -d
-            self.line(ox + s, oy, ox + s, oy + w, layer)
+            self.line(ox - panel, oy, ox - panel, oy + w, layer, linetype=dash)
+            self.line(ox + panel, oy, ox + panel, oy + w, layer, linetype=dash)
+            self.line(ox + s, oy, ox + s, oy + w, layer, linetype=dash)
 
     # -- fixtures / structure / outlines / text ----------------------------
 
@@ -605,14 +705,27 @@ class _DxfWriter:
 
         layer = "A-FLOR-FIXT" + sfx
         for room in rooms:
-            for f in resolve_room_fixtures(self.plan, room):
-                if f.width <= 0.05 or f.length <= 0.05:
+            fixtures = list(resolve_room_fixtures(self.plan, room))
+            counters = [f for f in fixtures if f.kind == "counter"]
+            # Reuse the SVG renderer's counter-mitre computation (do NOT re-derive
+            # the trim math): counters meeting in an L/U corner are trimmed to abut
+            # along their run axis, with a 45° miter joint across the corner square.
+            # With no mitred corner, `trimmed` is the counters unchanged and
+            # `miters` is empty — so a plan without corner counters is byte-identical
+            # to the historical output.
+            trimmed, miters = self._r._miter_counters(room, counters)
+            tmap = {id(c): t for c, t in zip(counters, trimmed)}
+            for f in fixtures:
+                d = tmap.get(id(f), f)
+                if d.width <= 0.05 or d.length <= 0.05:
                     continue
-                self.rect(f.x, f.y, f.x + f.width, f.y + f.length, layer)
+                self.rect(d.x, d.y, d.x + d.width, d.y + d.length, layer)
                 self.text(
-                    f.x + 0.1, f.y + f.length / 2.0, f.kind.upper().replace("_", " "),
+                    d.x + 0.1, d.y + d.length / 2.0, d.kind.upper().replace("_", " "),
                     _FIXT_H, layer,
                 )
+            for x1, y1, x2, y2 in miters:
+                self.line(x1, y1, x2, y2, layer)
 
     def _structure(self, level: int, sfx: str) -> None:
         layer = "S-COLS" + sfx
@@ -709,6 +822,9 @@ class _DxfWriter:
         horizontal = side in ("S", "N")
         outward = -1.0 if side in ("S", "W") else 1.0
         dpos = wall + outward * gap
+        if self._dims == "associative":
+            self._assoc_run(pts, wall, dpos, outward, layer, h, ext, horizontal)
+            return
         lo, hi = pts[0], pts[-1]
         if horizontal:
             self.line(lo, dpos, hi, dpos, layer)  # dimension line
@@ -731,19 +847,116 @@ class _DxfWriter:
         """A 45° architectural dimension tick centred on (x, y)."""
         self.line(x - _TICK, y - _TICK, x + _TICK, y + _TICK, layer)
 
+    # -- associative dimensions (real DIMENSION entities) -------------------
 
-def to_dxf(plan: Barndominium, dim_mode: str = "nominal") -> str:
+    def _assoc_run(
+        self, pts: list[float], wall: float, dpos: float, outward: float,
+        layer: str, h: float, ext: bool, horizontal: bool,
+    ) -> None:
+        """Emit one rotated-linear ``DIMENSION`` per segment of the run, each backed
+        by an anonymous ``*D<n>`` block holding that segment's exploded geometry —
+        the same dim line, ticks, extension lines and TEXT the geometry flavor
+        draws, so a non-regenerating viewer sees today's picture while a
+        regenerating one (AutoCAD/BricsCAD) gets a live, editable dimension.
+
+        The blocks (and their ``*D<n>`` names) are created in draw order, so both
+        the names and the handles stay deterministic across runs."""
+        for a, b in zip(pts, pts[1:]):
+            self._dimno += 1
+            name = f"*D{self._dimno}"
+            rec = self._h()      # BLOCK_RECORD handle
+            begin = self._h()    # BLOCK begin handle
+            label = _dim_label(b - a)
+            body: list[str] = []
+            save_sink, save_owner = self._sink, self._owner
+            self._sink, self._owner = body, rec
+            if horizontal:
+                self.line(a, dpos, b, dpos, layer)          # dim line segment
+                self._tick(a, dpos, layer)
+                self._tick(b, dpos, layer)
+                if ext:
+                    self.line(a, wall, a, dpos + outward * _TICK, layer)
+                    self.line(b, wall, b, dpos + outward * _TICK, layer)
+                self.text((a + b) / 2.0, dpos + 0.15, label, h, layer, center=True)
+                self.point(a, dpos, "Defpoints")            # definition points
+                self.point(a, wall, "Defpoints")
+                self.point(b, wall, "Defpoints")
+                base, p1, p2 = (a, dpos), (a, wall), (b, wall)
+                tmid, angle = ((a + b) / 2.0, dpos), 0.0
+            else:
+                self.line(dpos, a, dpos, b, layer)
+                self._tick(dpos, a, layer)
+                self._tick(dpos, b, layer)
+                if ext:
+                    self.line(wall, a, dpos + outward * _TICK, a, layer)
+                    self.line(wall, b, dpos + outward * _TICK, b, layer)
+                self.text(
+                    dpos - 0.15, (a + b) / 2.0, label, h, layer,
+                    rotation=90.0, center=True,
+                )
+                self.point(dpos, a, "Defpoints")
+                self.point(wall, a, "Defpoints")
+                self.point(wall, b, "Defpoints")
+                base, p1, p2 = (dpos, a), (wall, a), (wall, b)
+                tmid, angle = (dpos, (a + b) / 2.0), 90.0
+            self._sink, self._owner = save_sink, save_owner
+            end = self._h()      # ENDBLK handle
+            self._dim_blocks.append((name, rec, begin, end, "".join(body)))
+            self._dimension(name, base, p1, p2, tmid, angle, label, layer)
+
+    def _dimension(
+        self, block: str, base: tuple[float, float], p1: tuple[float, float],
+        p2: tuple[float, float], tmid: tuple[float, float], angle: float,
+        text: str, layer: str,
+    ) -> None:
+        """A rotated-linear ``DIMENSION`` entity (dimtype 32 — the anonymous-block
+        flavor). Group 2 names its ``*D<n>`` geometry block; 10/20 is a point on
+        the dim line; 13/23 & 14/24 are the two measured points (extension-line
+        origins); 50 is the run rotation; 1 is our explicit ft-in text, which
+        overrides the value a regenerating reader would recompute so the displayed
+        label always matches ours."""
+        g = self._g
+        safe = "".join(ch if ord(ch) < 128 else "'" for ch in text)
+        for x, y in (base, p1, p2, tmid):
+            self._bbox(x, y)
+        self._ents.append(
+            g(0, "DIMENSION") + g(5, self._h()) + g(330, self._msp)
+            + g(100, "AcDbEntity") + g(8, layer) + g(100, "AcDbDimension")
+            + g(2, block) + g(3, "Standard")
+            + g(10, _num(base[0])) + g(20, _num(base[1])) + g(30, "0.0")
+            + g(11, _num(tmid[0])) + g(21, _num(tmid[1])) + g(31, "0.0")
+            + g(70, 32) + g(71, 5) + g(1, safe)
+            + g(100, "AcDbAlignedDimension")
+            + g(13, _num(p1[0])) + g(23, _num(p1[1])) + g(33, "0.0")
+            + g(14, _num(p2[0])) + g(24, _num(p2[1])) + g(34, "0.0")
+            + g(50, _num(angle))
+            + g(100, "AcDbRotatedDimension")
+        )
+
+
+def to_dxf(
+    plan: Barndominium, dim_mode: str = "nominal", dims: str = "geometry"
+) -> str:
     """Return ``plan`` as a DXF R2000 (AC1015) document string.
 
     ``dim_mode`` picks the dimension convention (``"nominal"`` room lines or
     face-of-stud ``"faces"``); the dim geometry comes from the same renderer
-    helpers the SVG uses, so the two exports stay in parity in both modes. The
-    default is byte-identical to the historical output."""
-    return _DxfWriter(plan, dim_mode=dim_mode).build()
+    helpers the SVG uses, so the two exports stay in parity in both modes.
+
+    ``dims`` picks the dimension *flavor*: ``"geometry"`` (default) explodes the
+    dims to loose lines/ticks/TEXT on ``A-ANNO-DIMS`` — byte-identical to the
+    historical output and rendered by every viewer; ``"associative"`` emits real
+    rotated-linear ``DIMENSION`` entities, each backed by an anonymous ``*D<n>``
+    block of that same exploded geometry, so a regenerating reader gets live dims
+    while a non-regenerating one still sees today's picture."""
+    return _DxfWriter(plan, dim_mode=dim_mode, dims=dims).build()
 
 
-def save_dxf(plan: Barndominium, path: str, dim_mode: str = "nominal") -> str:
+def save_dxf(
+    plan: Barndominium, path: str, dim_mode: str = "nominal",
+    dims: str = "geometry",
+) -> str:
     """Write ``plan`` as DXF to ``path``. Returns the path."""
     with open(path, "w", encoding="ascii", errors="replace") as fh:
-        fh.write(to_dxf(plan, dim_mode=dim_mode))
+        fh.write(to_dxf(plan, dim_mode=dim_mode, dims=dims))
     return path

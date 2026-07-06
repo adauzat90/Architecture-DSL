@@ -700,7 +700,10 @@ def _cmd_dxf(args: argparse.Namespace) -> int:
     print(result.report(os.path.basename(args.file)))
     if result.plan is None or result.recovered:
         return 1
-    save_dxf(result.plan, args.out, dim_mode=getattr(args, "dims", "nominal"))
+    save_dxf(
+        result.plan, args.out, dim_mode=getattr(args, "dims", "nominal"),
+        dims=getattr(args, "dxf_dims", "geometry"),
+    )
     n_open = len(result.plan.windows) + len(result.plan.exterior_doors)
     print(f"\nDXF: {len(result.plan.rooms)} room(s), {n_open} opening(s)")
     print(f"Wrote {args.out}")
@@ -1266,6 +1269,17 @@ def main(argv: list[str] | None = None) -> int:
     p_dxf.add_argument("file", help="path to a .barn DSL file")
     p_dxf.add_argument("--out", default="plan.dxf", help="output DXF path")
     _add_dims_flag(p_dxf)
+    p_dxf.add_argument(
+        "--dxf-dims",
+        choices=("geometry", "associative"),
+        default="geometry",
+        dest="dxf_dims",
+        help="dimension flavor: 'geometry' (default) explodes dims to loose "
+        "lines/ticks/TEXT that every viewer renders — byte-identical to the "
+        "historical output; 'associative' emits real DIMENSION entities backed by "
+        "anonymous *D<n> geometry blocks, so a regenerating reader (AutoCAD, "
+        "BricsCAD) gets live dims while others still see the same picture.",
+    )
     p_dxf.set_defaults(func=_cmd_dxf)
 
     p_ifc = sub.add_parser(

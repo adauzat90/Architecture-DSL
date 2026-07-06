@@ -154,7 +154,7 @@ updated.
 
 ---
 
-## Phase 19 — DXF v2: associative dimensions + glyph polish (M/L)
+## Phase 19 — DXF v2: associative dimensions + glyph polish (M/L) — SHIPPED
 
 **Who asked:** the architect persona (DXF should carry real `DIMENSION`
 entities); plus two small Phase 11/12 deferrals.
@@ -174,6 +174,27 @@ entities); plus two small Phase 11/12 deferrals.
 **Acceptance:** ezdxf audit stays zero-error; a regenerating viewer shows true
 associative dims; non-regenerating render matches today's geometry pixel-wise;
 byte-determinism preserved.
+
+**Shipped:** `--dxf-dims geometry|associative` (default `geometry`, byte-identical
+to Phase 11) and `to_dxf(plan, dims=…)`. Associative emits one rotated-linear
+`DIMENSION` (dimtype 32) per overall/chain segment, each backed by an anonymous
+`*D<n>` block holding exactly the exploded geometry the geometry flavor draws —
+so a non-regenerating viewer is pixel-identical and a regenerating one gets live
+dims; our ft-in label rides group 1 (overrides the recomputed measurement), and
+the definition points sit on the non-plotting `Defpoints` layer. `*D<n>` names
+and all handles are assigned in draw order (deterministic twice-in-process).
+ezdxf `readfile`+`audit` is zero error/zero fix on cedar_ridge + the whole
+gallery in both dim modes, and every parsed `DIMENSION` resolves its geometry
+block. Counter mitring reuses the renderer's `_miter_counters` (no re-derived
+trim) — trimmed rects + 45° miter `LINE`s on `A-FLOR-FIXT`, SVG byte-unchanged.
+Overhead doors draw a dashed panel-line pair across the opening plus a dashed
+track line (matching the SVG's dashed convention). Loft guard lines come from a
+shared `loft_guard_pairs`/`loft_guard_edges` in `validation.py` that the
+`LOFT_GUARD` check and both exports consume, so a flagged edge is always the
+drawn edge; SVG draws a thin double line (level-aware), DXF a double line on
+`A-FLOR-OTLN`. Default DXF bytes change only for plans that actually use the new
+glyphs (overhead doors, corner counters, guarded lofts); determinism holds
+everywhere. AUTHORING.md updated.
 
 ---
 

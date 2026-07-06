@@ -155,6 +155,9 @@ NOTE_COLOR = "#7A6A55"
 # stays readable (no fill, or a whisper of one).
 FIXTURE_COLOR = "#5a5a5a"
 FIXTURE_FILL = "#00000008"
+# Loft/balcony guard rail (IRC R312) drawn along an open edge over a
+# double-height void — a thin double line, in the structural-safety accent.
+GUARD_COLOR = "#8a3a3a"
 # Electrical overlay (outlets / switches / lights) — a muted violet, distinct
 # from the fixture grey and the structural rust so the layer reads as its own.
 ELEC_COLOR = "#8A5FB0"
@@ -444,6 +447,7 @@ class _Renderer:
         self._draw_doors(level=lvl)
         self._draw_notes(level=lvl)
         self._draw_stairs(lvl)
+        self._draw_guards(level=lvl)
         self._draw_chain_dims(level=lvl)
 
     def _draw_street(self):
@@ -1177,6 +1181,29 @@ class _Renderer:
                 self._text(cx, cy, f"{s.display_name} ↑{s.to_level}", size=9, fill="#6b5d3a")
             else:
                 self._text(cx, cy, f"{s.display_name} ↓{s.from_level}", size=9, fill="#8a7f63")
+
+    def _draw_guards(self, level: int):
+        """Draw a guard rail along each open loft edge on ``level`` — the
+        double-height edges the ``LOFT_GUARD`` check flags (IRC R312).
+
+        A guard reads as a thin double line (two parallel strokes a hair apart,
+        the rail and its balusters) sitting just inside the loft floor, on the
+        void side. Segments come from :func:`barndsl.validation.loft_guard_edges`,
+        the same computation the check uses, so a drawn rail and a flagged edge
+        never disagree."""
+        from .validation import loft_guard_edges
+
+        off = 1.6  # px gap between the doubled rail strokes
+        for lvl, x1, y1, x2, y2 in loft_guard_edges(self.plan):
+            if lvl != level:
+                continue
+            sx1, sy1, sx2, sy2 = self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2)
+            if abs(sx1 - sx2) < abs(sy1 - sy2):  # vertical edge → offset in x
+                self._line(sx1 - off, sy1, sx2 - off, sy2, GUARD_COLOR, 0.8)
+                self._line(sx1 + off, sy1, sx2 + off, sy2, GUARD_COLOR, 0.8)
+            else:                                 # horizontal edge → offset in y
+                self._line(sx1, sy1 - off, sx2, sy2 - off, GUARD_COLOR, 0.8)
+                self._line(sx1, sy1 + off, sx2, sy2 + off, GUARD_COLOR, 0.8)
 
     def _draw_notes(self, level: int = 0):
         """Draw positioned notes on ``level`` as small italic leader callouts.

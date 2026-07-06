@@ -1176,11 +1176,27 @@ plan always yields an identical file.
   partitions centred on each shared room edge, with door and window openings
   **cut out** of the band.
 - **Doors** draw a leaf line plus a 90° swing `ARC` (the SVG's hinge/swing side);
-  **windows** draw the classic sill / head / centre-glazing symbol.
-- **Dimensions are drawing geometry, not associative `DIMENSION` entities** — the
-  overall dims per side plus the exterior chain strings with jamb breaks are
-  emitted as dim lines, extension lines, ticks and `TEXT`. Every viewer renders
-  them; a drafter can explode and re-associate if needed.
+  **windows** draw the classic sill / head / centre-glazing symbol. An
+  **overhead/sectional** door draws the plan glyph — a dashed panel line pair
+  across the opening plus a dashed track line inside — mirroring the SVG.
+- **Countertops** meeting in an L/U corner are drawn trimmed to abut, with a 45°
+  miter joint across the corner square (the same computation the SVG uses), so a
+  wrap-around kitchen reads as one continuous surface, not crossing boxes.
+- **Loft/balcony guard lines** — where an upper room only partly covers the room
+  below, its open edge over the double-height void (the same edge `LOFT_GUARD`
+  flags) draws as a thin double line on `A-FLOR-OTLN`, on the loft's level.
+- **Dimensions ship two flavors — pick with `--dxf-dims`** (or `to_dxf(plan,
+  dims=…)`). The **default `geometry`** flavor emits the overall dims per side plus
+  the exterior chain strings (with jamb breaks) as loose dim lines, extension
+  lines, ticks and `TEXT` on `A-ANNO-DIMS` — every viewer renders them, a drafter
+  can explode/re-associate, and the bytes are identical to the historical output.
+  The **`associative`** flavor emits real rotated-linear `DIMENSION` entities —
+  one per overall/chain segment — each backed by an anonymous `*D<n>` block that
+  holds *exactly* that exploded geometry: a regenerating reader (AutoCAD,
+  BricsCAD) gets live, editable dims, while a non-regenerating viewer still shows
+  today's picture. Our ft-in label rides on the entity (group 1) so it survives a
+  regen even though the reader recomputes the raw measurement; the definition
+  points sit on the non-plotting `Defpoints` layer, the AutoCAD convention.
 - **Multi-level plans** draw every floor at true model coordinates, with each
   floor above the ground on `-L{n}`-suffixed copies of the layers (`A-WALL-L1`,
   …) — toggle a level's layers to isolate it. Dimensions annotate the ground
@@ -1199,6 +1215,7 @@ The geometry lands on AIA-style, discipline-prefixed layers:
 | `A-ANNO-DIMS` | 2 | Dimension lines, ticks and text |
 | `A-ANNO-NOTE` | 4 | Leader notes |
 | `S-COLS` | 6 | Structural frame posts and beams |
+| `Defpoints` | 7 | Dimension definition points — non-plotting (`--dxf-dims associative` only) |
 
 For a full BIM hand-off (walls with voided openings, spaces, roof, stairs) use
 `barndsl ifc` (IFC4) instead — DXF is the 2D-drafting deliverable.

@@ -2948,16 +2948,16 @@ def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> Non
                       hint="Position it so its footprint overlaps a room on each level."))
 
 
-def _validate_guards(plan: Barndominium, add) -> None:
-    """Flag an open loft/balcony edge that overlooks a double-height space and
-    needs a guard (IRC R312).
+def loft_guard_pairs(plan: Barndominium):
+    """Yield ``(upper, lower)`` room pairs where ``upper``'s floor only *partially*
+    covers ``lower`` a storey below, leaving the uncovered remainder of ``lower``
+    open to ``upper``'s floor — a double-height void whose loft edge needs a guard
+    (IRC R312).
 
-    An upper-level room that only *partially* covers a room below leaves the
-    uncovered part of that lower room open to the floor above — a double-height
-    void. The upper room's edge along that void is a walking surface more than a
-    storey up, so it needs a 36 in guard. (An upper room that fully covers the one
-    below has a solid floor to its edge — no void — so it isn't flagged; that's
-    why a loft sized to its great room below doesn't nag.)
+    This is the single source of truth for "which loft edge is open": the
+    ``LOFT_GUARD`` check and the drawing exports (SVG/DXF guard lines) both consume
+    it, so a plan is never flagged without a guard line drawn, or vice versa. One
+    pair per ``upper`` (the first lower it overlooks), mirroring the check.
     """
     if len(plan.levels()) < 2:
         return
@@ -2978,21 +2978,64 @@ def _validate_guards(plan: Barndominium, add) -> None:
                 continue  # not above this room at all
             # Partially above it → the rest of `lower` is open to `upper`'s floor.
             if cov + 0.5 < lower.area:
-                add(
-                    Issue(
-                        Severity.INFO,
-                        "LOFT_GUARD",
-                        f"'{upper.id}' (level {upper.level}) overlooks the "
-                        f"double-height space of '{lower.id}' below; its open edge is "
-                        f"~{_f(drop)} ft up and needs a {GUARD_HEIGHT * 12:.0f} in guard "
-                        "(IRC R312).",
-                        room=upper.id,
-                        hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard/railing along the "
-                        "open edge (with balusters spaced so a 4 in sphere can't pass).",
-                    )
-                )
                 flagged.add(upper.id)
+                yield upper, lower
                 break
+
+
+def loft_guard_edges(plan: Barndominium) -> list[tuple[int, float, float, float, float]]:
+    """Guard-line segments ``(level, x1, y1, x2, y2)`` along every open loft edge
+    :func:`loft_guard_pairs` flags — drawn on the loft's own level.
+
+    The open edge is the boundary of the loft's floor (its overlap with the room
+    below) that lies strictly *inside* that lower room: where a segment of the
+    overlap rectangle's perimeter is interior to ``lower``, the lower room keeps
+    going past it as open void, so the loft floor ends there over a drop. Edges
+    that coincide with ``lower``'s own wall have no void beyond them and are
+    skipped."""
+    tol = 1e-6
+    segs: list[tuple[int, float, float, float, float]] = []
+    for upper, lower in loft_guard_pairs(plan):
+        ix0, iy0 = max(upper.x, lower.x), max(upper.y, lower.y)
+        ix1, iy1 = min(upper.x2, lower.x2), min(upper.y2, lower.y2)
+        lvl = upper.level
+        if ix0 > lower.x + tol:              # void to the west
+            segs.append((lvl, ix0, iy0, ix0, iy1))
+        if ix1 < lower.x2 - tol:             # void to the east
+            segs.append((lvl, ix1, iy0, ix1, iy1))
+        if iy0 > lower.y + tol:              # void to the south
+            segs.append((lvl, ix0, iy0, ix1, iy0))
+        if iy1 < lower.y2 - tol:             # void to the north
+            segs.append((lvl, ix0, iy1, ix1, iy1))
+    return segs
+
+
+def _validate_guards(plan: Barndominium, add) -> None:
+    """Flag an open loft/balcony edge that overlooks a double-height space and
+    needs a guard (IRC R312).
+
+    An upper-level room that only *partially* covers a room below leaves the
+    uncovered part of that lower room open to the floor above — a double-height
+    void. The upper room's edge along that void is a walking surface more than a
+    storey up, so it needs a 36 in guard. (An upper room that fully covers the one
+    below has a solid floor to its edge — no void — so it isn't flagged; that's
+    why a loft sized to its great room below doesn't nag.)
+    """
+    for upper, lower in loft_guard_pairs(plan):
+        drop = plan.level_elevation(upper.level) - plan.level_elevation(upper.level - 1)
+        add(
+            Issue(
+                Severity.INFO,
+                "LOFT_GUARD",
+                f"'{upper.id}' (level {upper.level}) overlooks the "
+                f"double-height space of '{lower.id}' below; its open edge is "
+                f"~{_f(drop)} ft up and needs a {GUARD_HEIGHT * 12:.0f} in guard "
+                "(IRC R312).",
+                room=upper.id,
+                hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard/railing along the "
+                "open edge (with balusters spaced so a 4 in sphere can't pass).",
+            )
+        )
 
 
 def _validate_life_safety(plan: Barndominium, add) -> None:
