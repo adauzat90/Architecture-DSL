@@ -117,6 +117,46 @@ class FakeClient:
         return _FakeStream(f"```barn\n{self._sources.pop(0)}```")
 
 
+class _FakeDeltaStream(_FakeStream):
+    """An *iterable* stream — like the SDK's `MessageStream` — that yields a
+    thinking delta then a text delta, so `write_source`/`critique` can pump a
+    live activity feed. `get_final_message()` still returns the accumulated text,
+    exactly as when the stream is consumed without iterating."""
+
+    def __init__(self, text: str, thinking: str = ""):
+        super().__init__(text)
+        self._thinking = thinking
+
+    def __iter__(self):
+        if self._thinking:
+            yield SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="thinking_delta", thinking=self._thinking),
+            )
+        yield SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="text_delta", text=self._text),
+        )
+
+
+class _DeltaClient:
+    """A `.messages.stream(...)` that streams thinking + text deltas for both the
+    generation and the critique call, so `on_activity` sees a live feed on each."""
+
+    def __init__(self, source: str, thinking: str = "", critique: CritiqueSpec | None = None):
+        self._source = source
+        self._thinking = thinking
+        self._critique = critique
+        self.messages = self
+
+    def stream(self, **kwargs):
+        if "senior architect" in kwargs.get("system", ""):  # the critique call
+            crit = self._critique or _satisfied()
+            reply = "```json\n" + crit.model_dump_json() + "\n```"
+            return _FakeDeltaStream(reply, thinking="weighing the plan against the score")
+        return _FakeDeltaStream(f"```barn\n{self._source}```", thinking=self._thinking)
+
+
 def _agent(client: FakeClient) -> BarndoAgent:
     return BarndoAgent(client=client)
 
@@ -658,6 +698,63 @@ def test_on_phase_narrates_writing_compiling_and_critiquing():
     assert ("writing", 1) in phases
     assert ("compiling", 1) in phases
     assert ("critiquing", 1) in phases  # CLEAN builds a plan, so the critic runs
+
+
+# -- the live activity feed (on_activity) -------------------------------------
+# The writing and critiquing LLM calls stream; `_pump_activity` forwards each
+# text/thinking delta to `on_activity` *before* `get_final_message()` (which
+# still returns the full reply), so a UI can watch the agent think and write.
+
+
+def test_write_source_streams_thinking_and_text_to_on_activity():
+    client = _DeltaClient(CLEAN, thinking="the living wing should face south")
+    seen: list[tuple[str, str]] = []
+    src = BarndoAgent(client=client).write_source(
+        "a cottage", on_activity=lambda channel, delta: seen.append((channel, delta))
+    )
+    channels = {c for c, _ in seen}
+    assert channels == {"thinking", "text"}
+    # both channels arrived intact…
+    assert "".join(d for c, d in seen if c == "thinking") == "the living wing should face south"
+    assert "plan" in "".join(d for c, d in seen if c == "text")
+    # …and the accumulated reply is still parsed into the final source
+    assert 'plan "' in src and compile_source(src).ok
+
+
+def test_write_source_without_on_activity_does_not_iterate_the_stream():
+    """Back-compat: the stream is only iterated when a caller asks for activity,
+    so today's callers (CLI, the non-iterable FakeClient) are untouched. `_FakeStream`
+    has no `__iter__`, so an unconditional iteration would raise here."""
+    src = _agent(FakeClient(sources=[CLEAN])).write_source("a cottage")
+    assert 'plan "' in src
+
+
+def test_design_forwards_phase_round_channel_delta_to_on_activity():
+    client = _DeltaClient(CLEAN, thinking="north-south axis", critique=_satisfied())
+    events: list[tuple[str, int, str]] = []
+    BarndoAgent(client=client).design(
+        "a cottage", max_iterations=1, target_score=None,
+        on_activity=lambda phase, rnd, channel, delta: events.append((phase, rnd, channel)),
+    )
+    seen = set(events)
+    assert ("writing", 1, "thinking") in seen
+    assert ("writing", 1, "text") in seen
+    # the critic streams its reasoning too, tagged to the critiquing phase
+    assert ("critiquing", 1, "thinking") in seen
+
+
+def test_pump_activity_swallows_a_broken_stream():
+    """A stream that dies mid-iteration must never abort the design — the feed is
+    best-effort; `get_final_message()` remains the source of the result."""
+    from barndsl.agent import _pump_activity
+
+    class _Boom:
+        def __iter__(self):
+            raise RuntimeError("stream died")
+
+    calls: list = []
+    _pump_activity(_Boom(), lambda channel, delta: calls.append((channel, delta)))
+    assert calls == []  # no crash, nothing forwarded
 
 
 # -- availability probe -------------------------------------------------------

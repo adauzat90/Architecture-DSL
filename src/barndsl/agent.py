@@ -392,6 +392,41 @@ def _critique_from_text(text: str) -> CritiqueSpec | None:
         return None
 
 
+def _pump_activity(stream: Any, on_activity: Callable[[str, str], None]) -> None:
+    """Forward a message stream's text/thinking deltas to ``on_activity``.
+
+    Iterated *before* ``stream.get_final_message()`` (which still returns the
+    fully accumulated reply), so a UI can watch the model reason and write the
+    DSL live instead of staring at a spinner until the round lands.
+    ``on_activity(channel, delta)`` is called with ``channel`` one of
+    ``"thinking"`` (extended-reasoning text) or ``"text"`` (the visible reply —
+    the DSL being written, or the critic's JSON).
+
+    Tolerant by design: only the two known delta shapes are forwarded, and any
+    streaming hiccup is swallowed — the live feed is a nicety, never a reason to
+    fail a design round (``get_final_message`` below still produces the result,
+    or raises the same error it would have without streaming). A compat gateway
+    (DeepSeek) that never emits ``thinking_delta`` events simply streams the
+    ``text`` channel; the loop and the UI both degrade cleanly.
+    """
+    try:
+        for event in stream:
+            if getattr(event, "type", None) != "content_block_delta":
+                continue
+            delta = getattr(event, "delta", None)
+            kind = getattr(delta, "type", None)
+            if kind == "text_delta":
+                piece = getattr(delta, "text", "") or ""
+                if piece:
+                    on_activity("text", piece)
+            elif kind == "thinking_delta":
+                piece = getattr(delta, "thinking", "") or ""
+                if piece:
+                    on_activity("thinking", piece)
+    except Exception:  # never let a streaming glitch abort the design loop
+        pass
+
+
 def render_feedback(
     result: CompileResult,
     score: ScoreReport | None = None,
@@ -591,6 +626,7 @@ class BarndoAgent:
         prior: str | None = None,
         diagnostics: str | None = None,
         seed: str | None = None,
+        on_activity: Callable[[str, str], None] | None = None,
     ) -> str:
         prompt = f"Design brief:\n{brief}\n"
         if seed and not prior:
@@ -638,6 +674,8 @@ class BarndoAgent:
                 messages=[{"role": "user", "content": prompt}],
                 thinking={"type": "adaptive"},
             ) as stream:
+                if on_activity is not None:
+                    _pump_activity(stream, on_activity)
                 msg = stream.get_final_message()
             text = "".join(b.text for b in msg.content if b.type == "text")
             if text.strip():
@@ -654,7 +692,12 @@ class BarndoAgent:
             "BARNDSL_MAX_TOKENS leaves a reasoning model room to think AND emit."
         )
 
-    def critique(self, result: CompileResult, score: ScoreReport | None = None) -> CritiqueSpec:
+    def critique(
+        self,
+        result: CompileResult,
+        score: ScoreReport | None = None,
+        on_activity: Callable[[str, str], None] | None = None,
+    ) -> CritiqueSpec:
         if score is None:
             score = design_score(result)
         prompt = (
@@ -701,7 +744,10 @@ class BarndoAgent:
                 max_tokens=self.max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": content}],
+                thinking={"type": "adaptive"},
             ) as stream:
+                if on_activity is not None:
+                    _pump_activity(stream, on_activity)
                 msg = stream.get_final_message()
         except Exception as exc:
             logger.warning(
@@ -742,6 +788,7 @@ class BarndoAgent:
         seed_source: str | None = None,
         cancel: Callable[[], bool] | None = None,
         on_phase: Callable[[str, int], None] | None = None,
+        on_activity: Callable[[str, int, str, str], None] | None = None,
     ) -> DesignResult:
         """Run the write → compile → score → critique → revise loop.
 
@@ -778,7 +825,13 @@ class BarndoAgent:
         ``on_phase`` (keyword-only) is called with ``(phase, round)`` — phase one
         of ``"writing" | "compiling" | "critiquing"`` — as each round advances,
         so a UI can narrate the loop between the coarser ``on_step`` results.
-        Both default ``None`` (no behaviour change, no calls).
+        ``on_activity`` (keyword-only) is finer still: called with ``(phase,
+        round, channel, delta)`` for each streamed token chunk of the writing and
+        critiquing LLM calls — ``phase`` is ``"writing"`` or ``"critiquing"`` and
+        ``channel`` is ``"thinking"`` (the model's reasoning) or ``"text"`` (the
+        DSL being written / the critic's reply). It lets a UI show the agent
+        think and write live instead of waiting for the round to land. All three
+        default ``None`` (no behaviour change, no calls).
         """
         # Resolve the environment-backed defaults (an explicit arg always wins;
         # target_score=None stays "gate disabled" — only _UNSET means "default").
@@ -811,13 +864,23 @@ class BarndoAgent:
             _fold_program_nudge(seed_result)
             feedback = render_feedback(seed_result)
 
+        # A 2-arg (channel, delta) adapter that stamps each streamed token with
+        # the phase and round the design-level ``on_activity`` contract carries.
+        # ``None`` when no activity was requested, so ``write_source``/``critique``
+        # never iterate the stream (today's callers pay nothing).
+        def activity_for(phase: str, rnd: int) -> Callable[[str, str], None] | None:
+            if on_activity is None:
+                return None
+            return lambda channel, delta: on_activity(phase, rnd, channel, delta)
+
         for i in range(1, max_iterations + 1):
             if cancel is not None and cancel():
                 break
             if on_phase is not None:
                 on_phase("writing", i)
             source = self.write_source(
-                brief, prior=source, diagnostics=feedback, seed=solver_seed
+                brief, prior=source, diagnostics=feedback, seed=solver_seed,
+                on_activity=activity_for("writing", i),
             )
             if on_phase is not None:
                 on_phase("compiling", i)
@@ -831,7 +894,7 @@ class BarndoAgent:
             if critique and result.plan is not None:
                 if on_phase is not None:
                     on_phase("critiquing", i)
-                crit = self.critique(result, score)
+                crit = self.critique(result, score, on_activity=activity_for("critiquing", i))
             # Fold the architect's review into the diagnostic stream as INFO, so
             # design feedback travels the same channel as the compiler's errors.
             # (After scoring: the critique is model-driven, the score is not.)
@@ -1039,6 +1102,7 @@ def design(
     seed_source: str | None = None,
     cancel: Callable[[], bool] | None = None,
     on_phase: Callable[[str, int], None] | None = None,
+    on_activity: Callable[[str, int, str, str], None] | None = None,
 ) -> DesignResult:
     """Convenience: run :class:`BarndoAgent` end-to-end on ``brief``.
 
@@ -1054,4 +1118,5 @@ def design(
         seed_source=seed_source,
         cancel=cancel,
         on_phase=on_phase,
+        on_activity=on_activity,
     )

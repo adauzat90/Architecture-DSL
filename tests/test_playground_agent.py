@@ -83,6 +83,7 @@ class FakeDesigner:
         on_step,
         on_phase,
         cancel,
+        on_activity=None,
     ) -> DesignResult:
         self.record.update(
             brief=brief, seed_source=seed_source, max_iterations=max_iterations
@@ -92,6 +93,9 @@ class FakeDesigner:
             if cancel():
                 break
             on_phase("writing", i)
+            if on_activity is not None:  # a scripted live feed, like the real loop
+                on_activity("writing", i, "thinking", "weighing the adjacencies")
+                on_activity("writing", i, "text", src[:24])
             on_phase("compiling", i)
             step = _step(i, src)
             history.append(step)
@@ -109,7 +113,8 @@ class BlockingFakeDesigner:
     def __init__(self) -> None:
         self.started = threading.Event()
 
-    def __call__(self, brief, *, seed_source, max_iterations, on_step, on_phase, cancel):
+    def __call__(self, brief, *, seed_source, max_iterations, on_step, on_phase, cancel,
+                 on_activity=None):
         on_phase("writing", 1)
         self.started.set()
         while not cancel():
@@ -214,6 +219,30 @@ def test_design_streams_status_iterations_and_done(monkeypatch):
     assert done["round"] == 1
     assert done["source"].strip() == CLEAN.strip()
     assert done["payload"]["ok"] is True
+
+
+def test_design_streams_live_reasoning_and_draft_tokens(monkeypatch):
+    """The writing/critiquing LLM deltas reach the client as `token` frames, so
+    the UI can show the agent think and write live — not just the round result."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    fake = FakeDesigner([CLEAN])
+    with running(fake) as srv:
+        status, _ctype, events = _design(srv, {"brief": "a cottage"})
+
+    assert status == 200
+    toks = [d for e, d in events if e == "token"]
+    assert toks, "expected live token frames between status and iteration"
+    for t in toks:  # each frame is routable: round + phase + channel + a delta
+        assert t["round"] == 1
+        assert t["phase"] in ("writing", "critiquing")
+        assert t["channel"] in ("thinking", "text")
+        assert isinstance(t["delta"], str) and t["delta"]
+    seen = {(t["phase"], t["channel"]) for t in toks}
+    assert ("writing", "thinking") in seen and ("writing", "text") in seen
+
+    # a round's tokens arrive before that round's iteration frame closes it
+    kinds = _kinds(events)
+    assert kinds.index("token") < kinds.index("iteration")
 
 
 def test_design_refinement_seeds_the_designer(monkeypatch):
