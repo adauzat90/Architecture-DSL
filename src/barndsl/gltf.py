@@ -387,7 +387,6 @@ def _door_record(wall: RevitWall, o: RevitOpening, a: float, b: float,
     leaf opens onto. The viewer rotates a swing leaf about ``hinge`` toward ``out``,
     slides a panel along ``dir``, or lifts an overhead panel; all deterministic.
     """
-    vertical = wall.orientation == "v"
     # Anchor at the low-coordinate end unless hinged "far"; dir points to the latch.
     if hinge_far:
         hx, hy = _slab_at(b, 0.0, wall)
