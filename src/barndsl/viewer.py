@@ -369,7 +369,30 @@ def scene_json(scene: Scene) -> dict:
             entry["door"] = n.door
         nodes.append(entry)
     layers = [ly for ly in Scene.LAYERS if any(nd["layer"] == ly for nd in nodes)]
-    return {"nodes": nodes, "layers": layers, "walk": _walk_block(scene)}
+    return {"nodes": nodes, "layers": layers, "walk": _walk_block(scene),
+            "sun": _sun_block(scene)}
+
+
+#: Fixed default site latitude (deg N) for the sun-study model. The DSL carries no
+#: site latitude, so a mid-latitude default gives a representative sun arc; it is a
+#: viewer-only render input, never exported. ~35 deg N is the US "Sun Belt" band.
+_SUN_DEFAULT_LATITUDE = 35.0
+
+
+def _sun_block(scene: Scene) -> dict:
+    """Sun-study inputs for the renderer: plan orientation + a default latitude.
+
+    ``orientation`` is the plan's true-north azimuth (degrees clockwise from true
+    north that plan-north points), ``0.0`` when the plan declares none, so the
+    renderer's solar-position model honours the compass. ``latitude`` is a fixed
+    default (:data:`_SUN_DEFAULT_LATITUDE`) — the DSL has no site latitude. This
+    block is **viewer-JSON only**; it never reaches the glTF/IFC exporters.
+    """
+    orientation = scene.plan.orientation
+    return {
+        "orientation": round(float(orientation), 4) if orientation is not None else 0.0,
+        "latitude": _SUN_DEFAULT_LATITUDE,
+    }
 
 
 #: Back-compat/internal alias — :func:`scene_json` was ``_scene_json``.
@@ -491,7 +514,15 @@ function mountScene(canvas, labels, togglesEl) {
     + ' uniform float uRough; uniform float uMetal;'
     + ' uniform float uPatScale; uniform float uHasTex; uniform sampler2D uTex;'
     + ' uniform float uFill;'
+    // uLightDir is the sun direction (world, surface->sun) the JS derives from the
+    // time/season/latitude sun model; uSunWarmth (0..1) rises as the sun sinks, so
+    // low sun tints the direct term warm and cools/dims the ambient. uClipY is a
+    // section-cut plane in world-Y feet: fragments above it are discarded for a
+    // dollhouse cutaway (default a huge value = no clip, so orbit's normal render
+    // and walk mode both stay costless).
+    + ' uniform vec3 uLightDir; uniform float uSunWarmth; uniform float uClipY;'
     + ' void main(){'
+    + '   if(vWorld.y > uClipY) discard;'
     + '   vec3 n=normalize(vN); vec3 an=abs(n); vec2 uv;'
     // Project world coords onto the plane facing the dominant axis. Vertical
     // surfaces (walls, roof faces) keep world-up as V so ribs/courses read upright.
@@ -501,12 +532,16 @@ function mountScene(canvas, labels, togglesEl) {
     + '   float detail=1.0;'
     + '   if(uHasTex>0.5) detail=texture2D(uTex, uv/uPatScale).r;'
     + '   vec3 albedo=uColor*(0.4+0.6*detail);'
-    + '   vec3 L=normalize(vec3(0.4,0.9,0.5));'
+    + '   vec3 L=uLightDir;'
     + '   vec3 V=normalize(uEye-vWorld); vec3 H=normalize(L+V);'
     + '   float diff=max(dot(n,L),0.0);'
-    + '   float amb=0.28+0.22*(0.5+0.5*n.y);'
+    // Warm the direct term toward a low-sun tint and dim+cool the sky ambient as
+    // warmth rises (dusk/dawn). At uSunWarmth=0 (high sun) this is a no-op.
+    + '   vec3 sunCol=mix(vec3(1.0),vec3(1.0,0.85,0.7),uSunWarmth);'
+    + '   float amb=(0.28+0.22*(0.5+0.5*n.y))*(1.0-0.22*uSunWarmth);'
+    + '   vec3 ambCol=mix(vec3(1.0),vec3(0.82,0.86,1.0),uSunWarmth*0.6);'
     // Metals carry little diffuse; fade it out as metallic rises.
-    + '   vec3 col=albedo*(amb+diff*0.72)*(1.0-0.65*uMetal);'
+    + '   vec3 col=albedo*(amb*ambCol+diff*0.72*sunCol)*(1.0-0.65*uMetal);'
     // Eye-attached fill (walk mode only; uFill=0 in orbit is a true no-op): lights
     // surfaces facing the camera so first-person interiors don't read flat and
     // dim. A gentle distance falloff keeps far walls from glowing.
@@ -539,6 +574,9 @@ function mountScene(canvas, labels, togglesEl) {
   const uHasTex = gl.getUniformLocation(prog, 'uHasTex');
   const uTex = gl.getUniformLocation(prog, 'uTex');
   const uFill = gl.getUniformLocation(prog, 'uFill');
+  const uLightDir = gl.getUniformLocation(prog, 'uLightDir');
+  const uSunWarmth = gl.getUniformLocation(prog, 'uSunWarmth');
+  const uClipY = gl.getUniformLocation(prog, 'uClipY');
   gl.getExtension('OES_element_index_uint');
   gl.enable(gl.DEPTH_TEST);
 
@@ -659,6 +697,115 @@ function mountScene(canvas, labels, togglesEl) {
   try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); }
   catch (e) { coarse = false; }
 
+  // --- sun study + section cut ---------------------------------------------
+  // The sun model turns (time-of-day, season) into a world-space light direction
+  // + a warmth term, honoring the plan's compass orientation and a fixed default
+  // latitude (scene.sun). Defaults are equinox 10:30 — the (season, hour) whose
+  // world direction is closest to the OLD hard-coded L=normalize(0.4,0.9,0.5), so
+  // an out-of-the-box render barely changes from before this control existed.
+  const NO_CLIP = 1e9;                 // uClipY sentinel: no section cut
+  const SUN_MIN_ALT = 5 * Math.PI / 180;   // never let the sun fully set (stay lit)
+  const SEASONS = [                        // solar declination per season (deg)
+    { key: 'winter', label: 'Winter', decl: -23.44 },
+    { key: 'equinox', label: 'Equinox', decl: 0.0 },
+    { key: 'summer', label: 'Summer', decl: 23.44 },
+  ];
+  let sunLat = 35.0;                    // site latitude (deg) from scene.sun
+  let sunOrient = 0.0;                  // plan orientation (deg CW from true north)
+  let sunHours = 10.5;                  // time of day (6..18) — default 10:30
+  let sunSeasonIdx = 1;                 // index into SEASONS — default equinox
+  let lightDir = [0.383, 0.757, 0.530];// world dir to the sun (seeded to the default)
+  let sunWarmth = 0.0;                  // 0 high sun .. 1 low sun (warm tint)
+  let sceneMaxY = 10;                   // top of the scene bounds (ft) for the section slider
+  let sceneMinY = 0;                    // bottom of the scene bounds (ft)
+  let clipY = NO_CLIP;                  // section-cut plane (world Y ft); NO_CLIP = off
+  let levelIdx = null;                  // isolated level index, or null = all levels
+  let floorElevs = [];                  // sorted per-level elevations (ft) from walk.floors
+
+  // Compute lightDir + sunWarmth from the current (hours, season, latitude,
+  // orientation). Standard simplified solar-position model: declination for the
+  // season, hour angle 15 deg/hr from solar noon, then altitude/azimuth; the
+  // azimuth is a compass bearing (0=N,90=E,180=S,270=W) which we rotate by the
+  // plan orientation into the plan frame, then map plan (x east, y north, z up) to
+  // the glTF frame (x, z_up, -y). Altitude is clamped to SUN_MIN_ALT so the model
+  // never goes fully dark. Result: at solar noon on a 0-orientation plan the sun is
+  // due plan-south -> world dir has a +Z component (world +Z = plan south).
+  function computeSun() {
+    const D2R = Math.PI / 180;
+    const lat = sunLat * D2R, decl = SEASONS[sunSeasonIdx].decl * D2R;
+    const H = (sunHours - 12) * 15 * D2R;            // hour angle from solar noon
+    let sinAlt = Math.sin(lat) * Math.sin(decl)
+      + Math.cos(lat) * Math.cos(decl) * Math.cos(H);
+    sinAlt = Math.max(-1, Math.min(1, sinAlt));
+    let alt = Math.asin(sinAlt);
+    // Azimuth from north, clockwise. acos gives 0..pi (morning east side); the
+    // afternoon (H>0) mirrors to the west side.
+    const cosAz = (Math.sin(decl) - Math.sin(alt) * Math.sin(lat))
+      / ((Math.cos(alt) * Math.cos(lat)) || 1e-6);
+    let az = Math.acos(Math.max(-1, Math.min(1, cosAz)));
+    if (H > 0) az = 2 * Math.PI - az;
+    if (alt < SUN_MIN_ALT) alt = SUN_MIN_ALT;        // keep a little light at dusk
+    // Sun bearing in the plan frame: compass azimuth minus the orientation that
+    // plan-north points. Bearing 0 -> +y (north), 90 -> +x (east).
+    const bearing = az - sunOrient * D2R;
+    const ca = Math.cos(alt), sa = Math.sin(alt);
+    const px = Math.sin(bearing) * ca;               // plan east
+    const py = Math.cos(bearing) * ca;               // plan north
+    lightDir = [px, sa, -py];                        // plan (x,y,z) -> gltf (x,z,-y)
+    // Warmth rises as the sun sinks: 0 above ~40 deg, ramping to 1 near the horizon.
+    const altDeg = alt / D2R;
+    sunWarmth = Math.max(0, Math.min(1, (40 - altDeg) / 35));
+  }
+  computeSun();
+  // A "10:30" style clock label for the sun time-of-day slider (ASCII only).
+  function clockLabel(h) {
+    const hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+    return hh + ':' + (mm < 10 ? '0' + mm : String(mm));
+  }
+
+  // Set the sun from (hours 6..18, season key/index) and redraw — the test hook.
+  function setSun(hours, season) {
+    if (hours != null) sunHours = Math.max(6, Math.min(18, hours));
+    if (season != null) {
+      const i = (typeof season === 'number')
+        ? season : SEASONS.findIndex(s => s.key === season || s.label === season);
+      if (i >= 0) sunSeasonIdx = i;
+    }
+    computeSun();
+    if (sunTime) sunTime.value = String(sunHours);
+    if (sunTimeLbl) sunTimeLbl.textContent = clockLabel(sunHours);
+    syncSeasonBtns();
+    draw();
+  }
+
+  // Set the section-cut plane directly (world-Y ft); null / >= the scene top
+  // disables clipping. Clears any active level isolation (a manual drag wins).
+  // The test hook for the slider.
+  function setSection(y) {
+    levelIdx = null;
+    if (y == null || y >= sceneMaxY + 1 - 1e-6) clipY = NO_CLIP;
+    else clipY = y;
+    syncSectionUI();
+    draw();
+  }
+
+  // Isolate a level (index into the sorted floor elevations) or null for all.
+  // Pure clip-plane isolation: clipY drops to just under the next level's floor
+  // (top level: its floor + a storey height), nothing else is filtered. The test
+  // hook for the level pills.
+  function setLevel(idx) {
+    if (idx == null || !floorElevs.length) { levelIdx = null; clipY = NO_CLIP; }
+    else {
+      idx = Math.max(0, Math.min(floorElevs.length - 1, idx));
+      levelIdx = idx;
+      const base = floorElevs[idx];
+      const next = (idx + 1 < floorElevs.length) ? floorElevs[idx + 1] : null;
+      clipY = (next != null) ? next - 0.1 : base + (walkFF || 10);
+    }
+    syncSectionUI();
+    draw();
+  }
+
   function setScene(scene) {
     for (const nd of nodes) {
       gl.deleteBuffer(nd.pb); gl.deleteBuffer(nd.nb); gl.deleteBuffer(nd.ib);
@@ -688,6 +835,9 @@ function mountScene(canvas, labels, togglesEl) {
       center = [(bmin[0] + bmax[0]) / 2, (bmin[1] + bmax[1]) / 2, (bmin[2] + bmax[2]) / 2];
       radius = Math.max(1, Math.hypot(bmax[0] - bmin[0], bmax[1] - bmin[1],
         bmax[2] - bmin[2]) / 2);
+      // Vertical scene bounds drive the section-cut slider range (just above the
+      // ground floor up to above the ridge). World Y is up in the glTF frame.
+      sceneMinY = bmin[1]; sceneMaxY = bmax[1];
     }
     if (!framed && nodes.length) {  // frame once, then keep the user's view
       target[0] = center[0]; target[1] = center[1]; target[2] = center[2];
@@ -735,8 +885,23 @@ function mountScene(canvas, labels, togglesEl) {
     } else {
       walkDoors = []; walkFixtures = []; walkRooms = []; curRoomIdx = -1;
     }
+    // Sun model params: the plan's compass orientation (0 when unset) + a fixed
+    // default latitude ship in scene.sun. Re-seed the light so a swap re-lights
+    // with the new plan's orientation.
+    const sun = scene.sun || {};
+    sunOrient = (sun.orientation == null) ? 0.0 : sun.orientation;
+    sunLat = (sun.latitude == null) ? 35.0 : sun.latitude;
+    computeSun();
+    // Floor elevations (sorted, deduped) for level-isolation clip planes; map each
+    // plan floor elevation to world Y (plan z_up -> world y, so they are equal).
+    const fe = (walk && walk.floors ? walk.floors.map(f => f.elevation) : [])
+      .slice().sort((a, b) => a - b);
+    floorElevs = fe.filter((v, i) => i === 0 || v - fe[i - 1] > 0.5);
+    // Reset section state on a scene swap so a recompile isn't left mid-cut.
+    clipY = NO_CLIP; levelIdx = null;
     updateWalkUI();
     buildToggles(scene.layers || []);
+    updateSunUI(); updateSectionUI();
     resize(); draw();
   }
 
@@ -827,6 +992,9 @@ function mountScene(canvas, labels, togglesEl) {
       gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
       gl.uniform3fv(uEye, new Float32Array(eye));
       gl.uniform1f(uFill, WALK_FILL);   // eye-attached interior fill (walk only)
+      gl.uniform3fv(uLightDir, new Float32Array(lightDir));
+      gl.uniform1f(uSunWarmth, sunWarmth);
+      gl.uniform1f(uClipY, NO_CLIP);    // no section cut inside the model (walk)
       drawNodes();
       return;
     }
@@ -839,6 +1007,9 @@ function mountScene(canvas, labels, togglesEl) {
     gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
     gl.uniform3fv(uEye, new Float32Array(eye));
     gl.uniform1f(uFill, 0.0);           // orbit: fill is a true no-op (identical pixels)
+    gl.uniform3fv(uLightDir, new Float32Array(lightDir));
+    gl.uniform1f(uSunWarmth, sunWarmth);
+    gl.uniform1f(uClipY, clipY);        // section cut applies in orbit only
     drawNodes();
   }
 
@@ -955,6 +1126,182 @@ function mountScene(canvas, labels, togglesEl) {
     mapDpr = dpr;
     minimap.width = Math.round(MAP_CSS * dpr);
     minimap.height = Math.round(MAP_CSS * dpr);
+  }
+
+  // --- sun-study + section-cut controls (top-right, both modes) -------------
+  // A compact "Sun" pill and a "Section" pill sit under the mini-map region in the
+  // top-right. Each expands a small popover styled like the Layers panel. They show
+  // in BOTH orbit and walk mode; the mini-map (walk-only) sits above them, so at
+  // MAP_CSS + 12 px top the two pills clear it when both are visible. Section-cut
+  // clipping only bites in orbit mode (walk forces no-clip), but the pill stays
+  // reachable so you can set a cut before stepping inside.
+  const CTRL_PILL = 'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",'
+    + 'Helvetica,Arial,sans-serif;padding:6px 13px;border-radius:20px;'
+    + 'border:1px solid rgba(0,0,0,.14);background:rgba(255,255,255,.88);'
+    + 'color:#1d2530;cursor:pointer;box-shadow:0 2px 10px rgba(20,30,50,.18);'
+    + '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);';
+  const POPOVER = 'margin-top:6px;padding:10px 12px;border-radius:10px;'
+    + 'background:rgba(255,255,255,.92);border:1px solid rgba(0,0,0,.10);'
+    + 'box-shadow:0 4px 18px rgba(20,30,50,.14);-webkit-backdrop-filter:blur(6px);'
+    + 'backdrop-filter:blur(6px);font:12px -apple-system,BlinkMacSystemFont,'
+    + '"Segoe UI",Helvetica,Arial,sans-serif;color:#1d2530;display:none;min-width:172px;';
+  const POP_HD = 'font-size:11px;text-transform:uppercase;letter-spacing:.6px;'
+    + 'color:#8791a1;margin-bottom:6px;';
+  // A 3-way / cycle mini-button inside a popover row.
+  const SEG_BTN = 'font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",'
+    + 'Helvetica,Arial,sans-serif;padding:4px 9px;border-radius:14px;'
+    + 'border:1px solid rgba(0,0,0,.14);background:rgba(255,255,255,.6);'
+    + 'color:#566072;cursor:pointer;margin-right:5px;';
+
+  // A container stacked in the top-right, below the mini-map. Each control is a
+  // wrapper holding its pill + its (hidden) popover so the popover tracks the pill.
+  const sunWrap = document.createElement('div');
+  sunWrap.style.cssText = 'position:absolute;top:' + (MAP_CSS + 24) + 'px;right:12px;'
+    + 'z-index:6;display:flex;flex-direction:column;align-items:flex-end;';
+  const sunBtn = document.createElement('button');
+  sunBtn.type = 'button';
+  sunBtn.title = 'Sun study: time of day + season';
+  sunBtn.style.cssText = CTRL_PILL;
+  const sunPop = document.createElement('div');
+  sunPop.style.cssText = POPOVER;
+  // Time-of-day row: a 6..18 slider (step 0.25 h) + a live "10:30" label.
+  const sunTimeHd = document.createElement('div');
+  sunTimeHd.style.cssText = POP_HD; sunTimeHd.textContent = 'Time of day';
+  const sunTimeRow = document.createElement('div');
+  sunTimeRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+  const sunTime = document.createElement('input');
+  sunTime.type = 'range'; sunTime.min = '6'; sunTime.max = '18'; sunTime.step = '0.25';
+  sunTime.value = String(sunHours);
+  sunTime.style.cssText = 'flex:1;accent-color:#d1873f;';
+  const sunTimeLbl = document.createElement('span');
+  sunTimeLbl.style.cssText = 'min-width:38px;text-align:right;font-variant-numeric:'
+    + 'tabular-nums;color:#566072;';
+  sunTimeLbl.textContent = clockLabel(sunHours);
+  sunTime.addEventListener('input', () => {
+    sunHours = parseFloat(sunTime.value);
+    sunTimeLbl.textContent = clockLabel(sunHours);
+    computeSun(); draw();
+  });
+  sunTimeRow.appendChild(sunTime); sunTimeRow.appendChild(sunTimeLbl);
+  // Season row: a Winter / Equinox / Summer 3-way.
+  const sunSeasonHd = document.createElement('div');
+  sunSeasonHd.style.cssText = POP_HD + 'margin-top:9px;'; sunSeasonHd.textContent = 'Season';
+  const sunSeasonRow = document.createElement('div');
+  const seasonBtns = SEASONS.map((s, i) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = s.label; b.style.cssText = SEG_BTN;
+    b.addEventListener('click', e => {
+      e.preventDefault(); sunSeasonIdx = i; computeSun();
+      syncSeasonBtns(); draw();
+    });
+    sunSeasonRow.appendChild(b);
+    return b;
+  });
+  sunPop.appendChild(sunTimeHd); sunPop.appendChild(sunTimeRow);
+  sunPop.appendChild(sunSeasonHd); sunPop.appendChild(sunSeasonRow);
+  sunWrap.appendChild(sunBtn); sunWrap.appendChild(sunPop);
+  host.appendChild(sunWrap);
+  let sunOpen = false;
+  sunBtn.addEventListener('click', e => {
+    e.preventDefault(); sunOpen = !sunOpen;
+    sunPop.style.display = sunOpen ? '' : 'none';
+  });
+  // Highlight the active season chip so the 3-way reads as selected.
+  function syncSeasonBtns() {
+    seasonBtns.forEach((b, i) => {
+      const on = i === sunSeasonIdx;
+      b.style.background = on ? 'rgba(209,135,63,.9)' : 'rgba(255,255,255,.6)';
+      b.style.color = on ? '#fff' : '#566072';
+      b.style.borderColor = on ? 'rgba(209,135,63,.9)' : 'rgba(0,0,0,.14)';
+    });
+  }
+  function updateSunUI() {
+    sunBtn.textContent = 'Sun ' + clockLabel(sunHours);
+    sunTime.value = String(sunHours);
+    sunTimeLbl.textContent = clockLabel(sunHours);
+    syncSeasonBtns();
+  }
+
+  // Section-cut control: a horizontal slider (compact) from ~3 ft above the ground
+  // floor to above the ridge; at max it disables clipping. Plus level-isolation
+  // pills (All / L1 / L2 ...) when the model has more than one storey.
+  const secWrap = document.createElement('div');
+  secWrap.style.cssText = 'position:absolute;top:' + (MAP_CSS + 62) + 'px;right:12px;'
+    + 'z-index:6;display:flex;flex-direction:column;align-items:flex-end;';
+  const secBtn = document.createElement('button');
+  secBtn.type = 'button';
+  secBtn.title = 'Section cut (dollhouse) + level isolation';
+  secBtn.style.cssText = CTRL_PILL;
+  const secPop = document.createElement('div');
+  secPop.style.cssText = POPOVER;
+  const secHd = document.createElement('div');
+  secHd.style.cssText = POP_HD; secHd.textContent = 'Section cut';
+  const secRow = document.createElement('div');
+  secRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+  const secSlide = document.createElement('input');
+  secSlide.type = 'range'; secSlide.step = '0.5';
+  secSlide.style.cssText = 'flex:1;accent-color:#d1873f;';
+  const secLbl = document.createElement('span');
+  secLbl.style.cssText = 'min-width:44px;text-align:right;font-variant-numeric:'
+    + 'tabular-nums;color:#566072;';
+  secSlide.addEventListener('input', () => {
+    const v = parseFloat(secSlide.value);
+    setSection(v);   // clears level isolation; NO_CLIP at the top of the range
+  });
+  secRow.appendChild(secSlide); secRow.appendChild(secLbl);
+  // Level-isolation pills, populated in updateSectionUI when multi-storey.
+  const lvlHd = document.createElement('div');
+  lvlHd.style.cssText = POP_HD + 'margin-top:9px;'; lvlHd.textContent = 'Isolate level';
+  const lvlRow = document.createElement('div');
+  let lvlBtns = [];
+  secPop.appendChild(secHd); secPop.appendChild(secRow);
+  secPop.appendChild(lvlHd); secPop.appendChild(lvlRow);
+  secWrap.appendChild(secBtn); secWrap.appendChild(secPop);
+  host.appendChild(secWrap);
+  let secOpen = false;
+  secBtn.addEventListener('click', e => {
+    e.preventDefault(); secOpen = !secOpen;
+    secPop.style.display = secOpen ? '' : 'none';
+  });
+  // Push the current section state into the slider + label + the section pill text.
+  function syncSectionUI() {
+    const top = sceneMaxY + 1;
+    const clipping = clipY < NO_CLIP - 1;
+    secBtn.textContent = clipping ? ('Cut ' + fmtFt(clipY) + ' ft') : 'Section';
+    secSlide.value = String(clipping ? clipY : top);
+    secLbl.textContent = clipping ? (fmtFt(clipY) + ' ft') : 'Off';
+    lvlBtns.forEach((b, i) => {
+      const on = (i === 0) ? (levelIdx == null) : (levelIdx === i - 1);
+      b.style.background = on ? 'rgba(209,135,63,.9)' : 'rgba(255,255,255,.6)';
+      b.style.color = on ? '#fff' : '#566072';
+      b.style.borderColor = on ? 'rgba(209,135,63,.9)' : 'rgba(0,0,0,.14)';
+    });
+  }
+  // Rebuild the slider range + the level pills for the current scene. The slider
+  // spans ~3 ft above the ground floor to the scene top + 1 (max = no clip). Level
+  // pills appear only for a multi-storey model (All + one per floor elevation).
+  function updateSectionUI() {
+    const lo = Math.min(sceneMinY + 3, sceneMaxY);
+    const hi = sceneMaxY + 1;
+    secSlide.min = String(lo); secSlide.max = String(hi);
+    lvlRow.textContent = '';
+    lvlBtns = [];
+    if (floorElevs.length > 1) {
+      lvlHd.style.display = ''; lvlRow.style.display = '';
+      const labels = ['All'].concat(floorElevs.map((e, i) => 'L' + (i + 1)));
+      labels.forEach((lab, i) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = lab; b.style.cssText = SEG_BTN;
+        b.addEventListener('click', e => {
+          e.preventDefault();
+          setLevel(i === 0 ? null : i - 1);
+        });
+        lvlRow.appendChild(b); lvlBtns.push(b);
+      });
+    } else {
+      lvlHd.style.display = 'none'; lvlRow.style.display = 'none';
+    }
+    syncSectionUI();
   }
 
   // --- walk-mode control pills (eye height + furniture), shown only in walk ---
@@ -1477,6 +1824,19 @@ function mountScene(canvas, labels, togglesEl) {
       furniture, coarse, minimap: minimapOn,
       room: rm ? rm.name : null, roomLabel: rm ? rm.label : null };
   }
+  // `sunState` reports the live sun + section state so a headless test can assert
+  // the direction moves with time/season, warmth rises toward dusk, and the clip
+  // plane responds to the section slider / level isolation. `clipActive` is false
+  // when nothing is cut (clipY at the no-clip sentinel).
+  function sunState() {
+    return {
+      hours: sunHours, season: SEASONS[sunSeasonIdx].key,
+      lightDir: lightDir.slice(), warmth: sunWarmth,
+      orientation: sunOrient, latitude: sunLat,
+      clipY: clipY, clipActive: clipY < NO_CLIP - 1, level: levelIdx,
+      walking: walking,
+    };
+  }
   function walkTeleport(x, y, yaw) {
     if (!walking) return;
     wpos[0] = x; wpos[1] = y;
@@ -1497,7 +1857,8 @@ function mountScene(canvas, labels, togglesEl) {
   }
 
   return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport,
-    walkStick, cycleEye, toggleFurniture, toggleMinimap };
+    walkStick, cycleEye, toggleFurniture, toggleMinimap,
+    setSun, setSection, setLevel, sunState };
 }
 """
 

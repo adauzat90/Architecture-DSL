@@ -2719,6 +2719,14 @@ const THREE_TIPS = [
     'into a room its name, size and area toast briefly (e.g. "Primary Bedroom - ' +
     '14 x 16 ft - 224 sq ft").',
   'Walk up the stairs to reach the upper floor; Esc (or leaving the tab) exits back to orbit.',
+  'Sun study (Sun pill, top-right): a time-of-day slider (6:00-18:00) and a ' +
+    'Winter / Equinox / Summer season toggle move the sun through the sky, honoring ' +
+    'the plan orientation, so you can check daylight and shadow angles. It works in ' +
+    'both orbit and walk mode.',
+  'Section cut (Section pill, top-right): a slider lowers a horizontal cut plane for ' +
+    'a dollhouse view of the interior; at the top of the range clipping is off. On a ' +
+    'multi-storey plan the All / L1 / L2 pills isolate a single level. The cut only ' +
+    'applies in orbit view (you are inside the model in walk mode).',
 ];
 
 //: Edit-mode direct-manipulation tips (drag behaviours), shown in the help panel.

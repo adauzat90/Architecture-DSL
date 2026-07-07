@@ -493,3 +493,91 @@ def test_renderer_has_the_room_name_toast_hooks():
     assert "curRoomIdx" in RENDERER_JS           # tracks the current room (no re-toast)
     assert "sq ft" in RENDERER_JS                # the ASCII area label
     assert "fmtFt" in RENDERER_JS                # one-decimal dimension formatting
+
+
+# --- Phase 4: sun-study block + section-cut / level-isolation hooks -----------
+
+SUN_PLAN = """\
+plan "Sun Sited"
+envelope 40 x 30
+orientation 30
+ceiling 10
+room living: living at 0,0 size 24 x 30
+room bedroom: bedroom at 24,0 size 16 x 30
+entry living south width 3 offset 10
+window bedroom east width 4 offset 4
+"""
+
+
+def test_scene_json_ships_a_sun_block_with_orientation_and_latitude():
+    # scene_json ships `sun` carrying the plan's compass orientation and a fixed
+    # default latitude, so the renderer's solar-position model honours plan north.
+    data = scene_json(build_scene(_plan(SUN_PLAN)))
+    assert "sun" in data
+    sun = data["sun"]
+    assert {"orientation", "latitude"} <= set(sun)
+    assert sun["orientation"] == 30.0        # the plan's declared orient 30
+    assert sun["latitude"] == 35.0           # the fixed default latitude
+
+
+def test_sun_orientation_defaults_to_zero_when_plan_is_unsited():
+    # A plan with no `orient` statement ships orientation 0.0 (a declared 0, not
+    # None), so the sun model always has a definite compass anchor.
+    data = scene_json(build_scene(_plan(WALK_PLAN)))  # WALK_PLAN has no orient
+    assert _plan(WALK_PLAN).orientation is None
+    assert data["sun"]["orientation"] == 0.0
+
+
+def test_sun_block_is_deterministic_across_two_builds():
+    plan = _plan(SUN_PLAN)
+    a = json.dumps(scene_json(build_scene(plan))["sun"], sort_keys=True)
+    b = json.dumps(scene_json(build_scene(plan))["sun"], sort_keys=True)
+    assert a == b
+
+
+def test_full_scene_json_stays_byte_identical_with_the_sun_block():
+    # The whole blob (nodes + walk + sun) serialises byte-for-byte the same twice.
+    plan = _plan(SUN_PLAN)
+    a = json.dumps(scene_json(build_scene(plan)))
+    b = json.dumps(scene_json(build_scene(plan)))
+    assert a == b
+
+
+def test_sun_block_does_not_leak_into_glb_or_ifc_bytes():
+    # The sun block is viewer-JSON only: exported glb/ifc bytes are untouched by
+    # building (and re-building) the scene JSON — the pinned-determinism invariant.
+    import hashlib
+
+    from barndsl.gltf import to_glb
+    from barndsl.ifc import to_ifc
+
+    plan = _plan(SUN_PLAN)
+    g1 = hashlib.sha256(to_glb(plan)).hexdigest()
+    i1 = hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest()
+    scene_json(build_scene(plan))  # exercises the sun path
+    assert hashlib.sha256(to_glb(plan)).hexdigest() == g1
+    assert hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest() == i1
+
+
+def test_renderer_has_the_sun_study_hooks():
+    # The sun model: a uLightDir uniform replacing the old constant, a warmth term,
+    # the setSun test hook, and the three season labels driving the 3-way.
+    assert "uLightDir" in RENDERER_JS            # sun direction uniform (was a constant)
+    assert "uSunWarmth" in RENDERER_JS           # low-sun warm-tint term
+    assert "setSun" in RENDERER_JS               # the test/UI hook
+    assert "computeSun" in RENDERER_JS           # the solar-position model
+    for label in ("Winter", "Equinox", "Summer"):
+        assert label in RENDERER_JS              # the season 3-way labels
+    # The old hard-coded light direction is gone (now driven by the uniform).
+    assert "normalize(vec3(0.4,0.9,0.5))" not in RENDERER_JS
+
+
+def test_renderer_has_the_section_cut_and_level_isolation_hooks():
+    # The section cut: a uClipY uniform + the discard, the setSection/setLevel hooks,
+    # and a Section pill.
+    assert "uClipY" in RENDERER_JS               # section-cut plane uniform
+    assert "vWorld.y > uClipY" in RENDERER_JS    # the fragment discard
+    assert "setSection" in RENDERER_JS           # the slider hook
+    assert "setLevel" in RENDERER_JS             # the level-isolation hook
+    assert "Section" in RENDERER_JS              # the pill label
+    assert "sunState" in RENDERER_JS             # the state reporter for tests
