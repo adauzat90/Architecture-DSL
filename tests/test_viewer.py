@@ -581,3 +581,83 @@ def test_renderer_has_the_section_cut_and_level_isolation_hooks():
     assert "setLevel" in RENDERER_JS             # the level-isolation hook
     assert "Section" in RENDERER_JS              # the pill label
     assert "sunState" in RENDERER_JS             # the state reporter for tests
+
+
+# --- Phase 5: material display names + views / tour / measure / identify -------
+
+
+def test_scene_json_nodes_carry_a_material_display_name():
+    # Every node ships a `mat` string — the material's human display name — so
+    # click-to-identify can name the finish without a JS material catalogue. It is a
+    # non-empty ASCII string, and a known node reports its known finish.
+    nodes = scene_json(build_scene(_plan(SIMPLE)))["nodes"]
+    for n in nodes:
+        assert "mat" in n
+        assert isinstance(n["mat"], str) and n["mat"]
+        assert n["mat"].isascii()
+    # The ground-floor slab is concrete: a stable, known material name.
+    slab = next(n for n in nodes if n["name"].startswith("slab:"))
+    assert slab["mat"] == "concrete slab"
+
+
+def test_scene_json_mat_field_is_deterministic():
+    # The whole blob (now carrying `mat` per node) serialises byte-for-byte twice.
+    plan = _plan(WALK_PLAN)
+    a = json.dumps(scene_json(build_scene(plan)))
+    b = json.dumps(scene_json(build_scene(plan)))
+    assert a == b
+
+
+def test_mat_field_does_not_leak_into_glb_or_ifc_bytes():
+    # The `mat` display name is viewer-JSON only: exported glb/ifc bytes are
+    # untouched by building (and re-building) the scene JSON — the pinned invariant.
+    import hashlib
+
+    from barndsl.gltf import to_glb
+    from barndsl.ifc import to_ifc
+
+    plan = _plan(WALK_PLAN)
+    g1 = hashlib.sha256(to_glb(plan)).hexdigest()
+    i1 = hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest()
+    scene_json(build_scene(plan))  # exercises the mat path
+    assert hashlib.sha256(to_glb(plan)).hexdigest() == g1
+    assert hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest() == i1
+
+
+def test_renderer_has_the_camera_bookmark_and_share_hooks():
+    # Views: save/restore named cameras, a compact hash state, and copy-link.
+    assert "saveView" in RENDERER_JS             # snapshot the current camera
+    assert "restoreView" in RENDERER_JS          # jump back to a saved camera
+    assert "currentCamera" in RENDERER_JS        # orbit/walk camera snapshot
+    assert "encodeHash" in RENDERER_JS and "parseHash" in RENDERER_JS  # #v= round-trip
+    assert "location.hash" in RENDERER_JS        # the share-link target
+    assert "copyLink" in RENDERER_JS             # writes the hash + copies the URL
+    assert "Views" in RENDERER_JS                # the pill label
+    assert "Save view" in RENDERER_JS            # the save button
+
+
+def test_renderer_has_the_guided_tour_hooks():
+    # The tour state machine: play/stop, an auto room tour, and the dwell/ease timing.
+    assert "playTour" in RENDERER_JS and "stopTour" in RENDERER_JS
+    assert "autoTourStops" in RENDERER_JS        # default walk tour from walk.rooms
+    assert "TOUR_DWELL" in RENDERER_JS           # the walk-leg dwell
+    assert "shortAngle" in RENDERER_JS           # orbit yaw eases the short way
+
+
+def test_renderer_has_the_measure_hooks():
+    # Measure: a pill, a two-point tape, ray picking, and the 3D + plan readout.
+    assert "setMeasure" in RENDERER_JS           # arm/disarm (test hook)
+    assert "measurePts" in RENDERER_JS           # the two picked points
+    assert "measureDistances" in RENDERER_JS     # 3D + horizontal/plan feet
+    assert "ft plan" in RENDERER_JS              # the "(11.8 ft plan)" label suffix
+    assert "Measure" in RENDERER_JS              # the pill label
+
+
+def test_renderer_has_the_ray_picking_and_identify_hooks():
+    # Picking + click-to-identify: Moller-Trumbore, the pick() test hook, and the
+    # surface-identity labeller reading node names + the `mat` display name.
+    assert "rayTri" in RENDERER_JS               # Moller-Trumbore ray/triangle
+    assert "function pick" in RENDERER_JS        # the picking test hook
+    assert "rayFromPixel" in RENDERER_JS         # camera-derived ray
+    assert "identityOf" in RENDERER_JS           # the "Wall / Roof / Door: <id>" labeller
+    assert "CLICK_SLOP" in RENDERER_JS           # drag-vs-click movement threshold

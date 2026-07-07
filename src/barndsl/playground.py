@@ -2727,6 +2727,18 @@ const THREE_TIPS = [
     'a dollhouse view of the interior; at the top of the range clipping is off. On a ' +
     'multi-storey plan the All / L1 / L2 pills isolate a single level. The cut only ' +
     'applies in orbit view (you are inside the model in walk mode).',
+  'Views (Views pill, top-right): Save view snapshots the current orbit or walk ' +
+    'camera into a named list you can rename, delete or click to jump back to; Copy ' +
+    'link writes a compact camera state into the URL and copies it so you can share ' +
+    'the exact shot.',
+  'Guided tour (in the Views popover): with 2+ saved views it plays them in order, ' +
+    'easing orbit cameras and dwelling in walk views with a slow look-around; with no ' +
+    'saved views Auto tour walks the rooms largest-first. Esc or any input stops it.',
+  'Measure (Measure pill, both modes): click two points on the model for the distance ' +
+    'in feet, plus the horizontal component when the ends differ in height; Esc or the ' +
+    'pill clears it.',
+  'Click any surface (when Measure is off, in orbit) to identify it - a brief toast ' +
+    'names the wall, roof, door, fixture or room floor and its material.',
 ];
 
 //: Edit-mode direct-manipulation tips (drag behaviours), shown in the help panel.

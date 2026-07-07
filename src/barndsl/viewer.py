@@ -352,6 +352,11 @@ def scene_json(scene: Scene) -> dict:
         entry = {
             "name": n.name,
             "layer": n.layer,
+            # A short display name for the material ("metal siding", "drywall") so
+            # click-to-identify can name the surface's finish without the JS having a
+            # material catalogue. Viewer-JSON only — the glTF/IFC exporters never see
+            # it — and small (one ASCII string per node).
+            "mat": mat.name,
             "color": effective_linear(mat, n.tint)[:3],
             "roughness": round(mat.roughness, 3),
             "metallic": round(mat.metallic, 3),
@@ -824,11 +829,16 @@ function mountScene(canvas, labels, togglesEl) {
       const pattern = n.pattern || 'none';
       // A leaf carries its `door` record + a runtime {open, target} the walk step
       // eases; static nodes have door=null and always draw at the identity model.
-      return { layer: n.layer, color: n.color,
+      // `pos` + `idx` are retained on the CPU (the same world-frame arrays the GL
+      // buffers hold) so ray picking (measure + click-to-identify) can Moller-
+      // Trumbore against the triangles without reading them back from WebGL; `name`
+      // + `mat` name the surface for the identify toast.
+      return { layer: n.layer, color: n.color, name: n.name || '', mat: n.mat || '',
         rough: n.roughness == null ? 0.8 : n.roughness,
         metal: n.metallic == null ? 0.0 : n.metallic,
         patScale: n.patternScale || 1.0, tex: patternTexture(pattern),
         door: n.door || null, open: 0, target: 0, pinned: false,
+        pos: pos, idx: n.indices,
         pb, nb, ib, count: n.indices.length };
     });
     if (nodes.length) {
@@ -1856,9 +1866,662 @@ function mountScene(canvas, labels, togglesEl) {
     stickRun = !!run;
   }
 
+  // === Phase 5: ray picking, measure, bookmarks, tour, identify =============
+  // A single 2D overlay canvas stretched over the WebGL canvas carries the measure
+  // line + its distance pill and (when a click lands) nothing else — the identify
+  // and room toasts reuse the dark-pill DOM. It never eats input (pointer-events
+  // off) so orbit drag / walk look pass straight through to the GL canvas.
+  const overlay = document.createElement('canvas');
+  overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;'
+    + 'z-index:5;pointer-events:none;display:none;';
+  host.appendChild(overlay);
+  const ovCtx = overlay.getContext('2d');
+  let ovDpr = 0;
+  function sizeOverlay() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (overlay.width !== w || overlay.height !== h || ovDpr !== dpr) {
+      overlay.width = w; overlay.height = h; ovDpr = dpr;
+    }
+  }
+
+  // --- camera ray from a canvas pixel --------------------------------------
+  // The renderer builds its own proj/view each frame, so rather than invert them we
+  // rebuild the same camera basis (eye, forward, right, up) the draw step uses and
+  // fire a ray through the pixel's normalised device coords, scaled by the FOV's
+  // half-tangent. Works for both cameras: orbit (yaw/pitch/dist/target, 0.9 fovy)
+  // and walk (wpos/wElev + wYaw/wPitch, 1.05 fovy). Returns {o, d} in world feet.
+  function cameraBasis() {
+    const aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
+    if (walking) {
+      const cp = Math.cos(wPitch);
+      const eye = [wpos[0], wElev + walkEye, -wpos[1]];
+      const fwd = norm([cp * Math.sin(wYaw), Math.sin(wPitch), -cp * Math.cos(wYaw)]);
+      return { eye, fwd, fovy: 1.05, aspect };
+    }
+    const eye = [
+      target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
+      target[1] + dist * Math.sin(pitch),
+      target[2] + dist * Math.cos(pitch) * Math.cos(yaw)];
+    const fwd = norm(sub(target, eye));
+    return { eye, fwd, fovy: 0.9, aspect };
+  }
+  function rayFromPixel(pxCss, pyCss) {
+    const b = cameraBasis();
+    const wCss = canvas.clientWidth || 1, hCss = canvas.clientHeight || 1;
+    // NDC in [-1, 1], y up. A pixel at the canvas centre fires straight along fwd.
+    const nx = (pxCss / wCss) * 2 - 1, ny = 1 - (pyCss / hCss) * 2;
+    const up0 = [0, 1, 0];
+    const right = norm(cross(b.fwd, up0));
+    const up = cross(right, b.fwd);
+    const t = Math.tan(b.fovy / 2);
+    const d = norm([
+      b.fwd[0] + right[0] * nx * t * b.aspect + up[0] * ny * t,
+      b.fwd[1] + right[1] * nx * t * b.aspect + up[1] * ny * t,
+      b.fwd[2] + right[2] * nx * t * b.aspect + up[2] * ny * t]);
+    return { o: b.eye.slice(), d };
+  }
+
+  // Moller-Trumbore ray/triangle: returns the ray parameter t (>0) of the hit, or
+  // -1. Positions are already world-frame; a door leaf's runtime transform is
+  // ignored (leaves closed at rest, and identify/measure target the built model).
+  function rayTri(o, d, ax, ay, az, bx, by, bz, cx, cy, cz) {
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+    const px = d[1] * e2z - d[2] * e2y, py = d[2] * e2x - d[0] * e2z,
+      pz = d[0] * e2y - d[1] * e2x;
+    const det = e1x * px + e1y * py + e1z * pz;
+    if (det > -1e-9 && det < 1e-9) return -1;   // ray parallel to the triangle
+    const inv = 1 / det;
+    const tx = o[0] - ax, ty = o[1] - ay, tz = o[2] - az;
+    const u = (tx * px + ty * py + tz * pz) * inv;
+    if (u < -1e-6 || u > 1 + 1e-6) return -1;
+    const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+    const v = (d[0] * qx + d[1] * qy + d[2] * qz) * inv;
+    if (v < -1e-6 || u + v > 1 + 1e-6) return -1;
+    return (e2x * qx + e2y * qy + e2z * qz) * inv;
+  }
+
+  // Pick the nearest triangle under a canvas pixel across every *visible* node
+  // (hidden layers skipped), honouring the section clip (a hit above uClipY when
+  // clipping is active is ignored, matching the fragment discard). Returns
+  // {point:[x,y,z], node, name, mat, layer, dist} or null. This is the headless
+  // test hook too: `ctrl.pick(px, py)` returns the same object.
+  function pick(pxCss, pyCss) {
+    if (!hasScene) return null;
+    const { o, d } = rayFromPixel(pxCss, pyCss);
+    const clip = (!walking && clipY < NO_CLIP - 1) ? clipY : NO_CLIP;
+    let bestT = Infinity, best = null;
+    for (const nd of nodes) {
+      if (hidden[nd.layer]) continue;
+      const p = nd.pos, ix = nd.idx;
+      for (let i = 0; i + 2 < ix.length; i += 3) {
+        const a = ix[i] * 3, b2 = ix[i + 1] * 3, c = ix[i + 2] * 3;
+        const t = rayTri(o, d,
+          p[a], p[a + 1], p[a + 2], p[b2], p[b2 + 1], p[b2 + 2],
+          p[c], p[c + 1], p[c + 2]);
+        if (t > 1e-4 && t < bestT) {
+          const hy = o[1] + d[1] * t;
+          if (hy > clip) continue;               // above the section cut: not visible
+          bestT = t; best = nd;
+        }
+      }
+    }
+    if (!best) return null;
+    return { point: [o[0] + d[0] * bestT, o[1] + d[1] * bestT, o[2] + d[2] * bestT],
+      node: best, name: best.name, mat: best.mat, layer: best.layer, dist: bestT };
+  }
+
+  // A world (glTF-frame) point -> a canvas CSS pixel, or null when behind the eye.
+  // Used to place the measure endpoints + label on the 2D overlay. Rebuilds the
+  // same basis rayFromPixel uses so the projection round-trips.
+  function worldToCss(wp) {
+    const b = cameraBasis();
+    const rel = sub(wp, b.eye);
+    const up0 = [0, 1, 0];
+    const right = norm(cross(b.fwd, up0));
+    const up = cross(right, b.fwd);
+    const z = dot(rel, b.fwd);
+    if (z <= 1e-4) return null;                   // behind (or on) the camera plane
+    const t = Math.tan(b.fovy / 2);
+    const ndcx = dot(rel, right) / (z * t * b.aspect);
+    const ndcy = dot(rel, up) / (z * t);
+    const wCss = canvas.clientWidth || 1, hCss = canvas.clientHeight || 1;
+    return [(ndcx * 0.5 + 0.5) * wCss, (1 - (ndcy * 0.5 + 0.5)) * hCss];
+  }
+
+  // --- identify + measure helpers ------------------------------------------
+  // Human name for a picked node from its name prefix (walls, roof, doors, ...),
+  // falling back to the room display name from walk.rooms for a room floor. ASCII.
+  function roomNameById(id) {
+    for (const r of walkRooms) if (r.id === id) return r.name;
+    return null;
+  }
+  function titleCase(s) {
+    return s.replace(/[_~]+/g, ' ').trim()
+      .replace(/\b\w/g, c => c.toUpperCase());
+  }
+  function identityOf(hit) {
+    const nm = hit.name || '', mat = hit.mat || '';
+    let label;
+    if (nm.startsWith('wall:')) label = 'Wall';
+    else if (nm.startsWith('roof') || hit.layer === 'roof') label = 'Roof';
+    else if (nm.startsWith('door:')) {
+      const id = nm.split(':')[1] || '';
+      label = id ? ('Door: ' + id) : 'Door';
+    } else if (nm.startsWith('cased:')) label = 'Opening';
+    else if (nm.startsWith('window:') || nm.startsWith('glazing:')) label = 'Window';
+    else if (nm.startsWith('opening:')) label = 'Opening';
+    else if (nm.startsWith('fixture:')) {
+      // Names read "fixture:<room>~<kind>~<index>[:<part>]" — the kind is the middle
+      // tilde-part; fall back to the whole tail if the shape differs.
+      const tail = nm.slice('fixture:'.length).split(':')[0];
+      const bits = tail.split('~');
+      const kind = titleCase(bits.length >= 2 ? bits[1] : tail);
+      label = kind ? ('Fixture: ' + kind) : 'Fixture';
+    } else if (nm.startsWith('room:')) {
+      const rn = roomNameById(nm.slice(5));
+      label = rn ? ('Room floor: ' + rn) : 'Room floor';
+    } else if (nm.startsWith('slab:') || hit.layer === 'floors') label = 'Floor';
+    else if (nm.startsWith('stair:') || hit.layer === 'stairs') label = 'Stair';
+    else if (hit.layer === 'frame') label = 'Frame';
+    else if (hit.layer === 'porches') label = 'Porch';
+    else label = titleCase(nm.split(':')[0]) || 'Surface';
+    return mat ? (label + ' (' + mat + ')') : label;
+  }
+
+  // A transient identify toast reusing the dark-pill look. It lives bottom-center
+  // like the room toast but a touch higher so a walk-mode room toast + an identify
+  // never sit on the exact same line; in orbit only this one shows.
+  const idToast = document.createElement('div');
+  idToast.style.cssText = 'position:absolute;bottom:52px;left:50%;'
+    + 'transform:translateX(-50%);z-index:6;pointer-events:none;opacity:0;'
+    + 'transition:opacity .3s;font:600 12px -apple-system,BlinkMacSystemFont,'
+    + '"Segoe UI",Helvetica,Arial,sans-serif;padding:7px 15px;border-radius:20px;'
+    + 'background:rgba(20,24,30,.84);color:#eef1f4;white-space:nowrap;';
+  host.appendChild(idToast);
+  let idTimer = null;
+  function showIdentify(text) {
+    idToast.textContent = text; idToast.style.opacity = '1';
+    if (idTimer) clearTimeout(idTimer);
+    idTimer = setTimeout(() => { idToast.style.opacity = '0'; }, 2200);
+  }
+
+  // --- measure mode --------------------------------------------------------
+  // Armed by the Measure pill (both cameras). Click/tap two points on the model to
+  // lay a tape: a thin line on the overlay + a floating distance pill at the
+  // midpoint reading feet to 0.1, with the horizontal (plan) component when the
+  // ends differ in height. Esc or the pill clears + disarms. A third click starts a
+  // fresh pair.
+  let measuring = false;
+  const measurePts = [];              // 0..2 world-frame points
+  function setMeasure(on) {
+    measuring = (on == null) ? !measuring : !!on;
+    measurePts.length = 0;
+    measBtn.textContent = measuring ? 'Measuring' : 'Measure';
+    measBtn.style.background = measuring ? 'rgba(209,135,63,.9)' : 'rgba(255,255,255,.88)';
+    measBtn.style.color = measuring ? '#fff' : '#1d2530';
+    canvas.style.cursor = measuring ? 'crosshair' : '';
+    drawOverlay();
+    return measuring;
+  }
+  function addMeasurePoint(pxCss, pyCss) {
+    const hit = pick(pxCss, pyCss);
+    if (!hit) return false;
+    if (measurePts.length >= 2) measurePts.length = 0;   // third click restarts
+    measurePts.push(hit.point);
+    drawOverlay();
+    return true;
+  }
+  // 3D distance (glTF frame, so world y is height); plus the horizontal/plan
+  // component (drop the y term). Both in feet.
+  function measureDistances() {
+    if (measurePts.length < 2) return null;
+    const a = measurePts[0], b = measurePts[1];
+    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+    return { d3: Math.hypot(dx, dy, dz), plan: Math.hypot(dx, dz), dh: Math.abs(dy) };
+  }
+  // Redraw the overlay: the measure line + endpoints + the distance pill. Cheap and
+  // only invoked on interaction / camera move while measuring (not per orbit frame).
+  function drawOverlay() {
+    const show = measuring && measurePts.length > 0;
+    if (!show) { overlay.style.display = 'none'; return; }
+    overlay.style.display = ''; sizeOverlay();
+    const S = ovDpr, ctx = ovCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const sp = measurePts.map(worldToCss);
+    ctx.fillStyle = 'rgba(209,135,63,1)';
+    for (const p of sp) if (p) {
+      ctx.beginPath(); ctx.arc(p[0] * S, p[1] * S, 4 * S, 0, 2 * Math.PI); ctx.fill();
+    }
+    if (sp.length === 2 && sp[0] && sp[1]) {
+      ctx.strokeStyle = 'rgba(209,135,63,.95)'; ctx.lineWidth = Math.max(1.5, 2 * S);
+      ctx.beginPath(); ctx.moveTo(sp[0][0] * S, sp[0][1] * S);
+      ctx.lineTo(sp[1][0] * S, sp[1][1] * S); ctx.stroke();
+      const dd = measureDistances();
+      let txt = dd.d3.toFixed(1) + ' ft';
+      if (dd.dh > 0.1) txt += ' (' + dd.plan.toFixed(1) + ' ft plan)';
+      const mx = (sp[0][0] + sp[1][0]) / 2 * S, my = (sp[0][1] + sp[1][1]) / 2 * S;
+      ctx.font = (13 * S) + 'px -apple-system,BlinkMacSystemFont,"Segoe UI",'
+        + 'Helvetica,Arial,sans-serif';
+      const w = ctx.measureText(txt).width, padx = 9 * S, pady = 5 * S, h = 20 * S;
+      ctx.fillStyle = 'rgba(20,24,30,.9)';
+      roundRect(ctx, mx - w / 2 - padx, my - h / 2 - pady, w + 2 * padx, h + 2 * pady, 10 * S);
+      ctx.fill();
+      ctx.fillStyle = '#eef1f4'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(txt, mx, my);
+    }
+  }
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  }
+
+  // --- camera bookmarks (Views) --------------------------------------------
+  // Session-only saved cameras (no persistence beyond the copyable hash links). Each
+  // is {name, mode, ...} where an orbit view stores yaw/pitch/dist/target and a walk
+  // view stores x/y/yaw/pitch. Restoring enters/exits walk as needed.
+  const views = [];                   // saved cameras, in save order
+  let viewSeq = 0;                    // running counter for default "View N" names
+  function currentCamera() {
+    if (walking) {
+      return { mode: 'w', x: wpos[0], y: wpos[1], yaw: wYaw, pitch: wPitch };
+    }
+    return { mode: 'o', yaw, pitch, dist,
+      target: [target[0], target[1], target[2]] };
+  }
+  // Save the current camera as a named view. Returns the new view (test hook).
+  function saveView(name) {
+    const cam = currentCamera();
+    cam.name = name || ('View ' + (++viewSeq));
+    views.push(cam);
+    renderViews();
+    return cam;
+  }
+  // Apply a saved (or ad-hoc) camera. Orbit restores immediately; a walk camera
+  // enters walk mode (hash-restore / programmatic entry never grabs pointer lock —
+  // it goes through enterWalk which skips lock on coarse pointers; here we force a
+  // no-lock entry by teleporting after enter) and teleports + sets the look angles.
+  function restoreView(cam) {
+    if (!cam) return;
+    if (cam.mode === 'w') {
+      if (!walking) { enterWalk(); }
+      if (walking) {
+        walkTeleport(cam.x, cam.y, cam.yaw);
+        if (cam.pitch != null) wPitch = cam.pitch;
+        draw();
+      }
+    } else {
+      if (walking) exitWalk();
+      yaw = cam.yaw; pitch = cam.pitch; dist = cam.dist;
+      if (cam.target) { target[0] = cam.target[0]; target[1] = cam.target[1];
+        target[2] = cam.target[2]; }
+      draw();
+    }
+  }
+
+  // --- shareable hash state ------------------------------------------------
+  // A compact camera string in location.hash: "#v=o,yaw,pitch,dist,tx,ty,tz" for an
+  // orbit view or "#v=w,x,y,yaw,pitch" for a walk view. Round-trips through
+  // parseHash / encodeHash so a copied link restores the same shot.
+  function encodeHash(cam) {
+    const r = n => Math.round(n * 1000) / 1000;
+    if (cam.mode === 'w') return 'v=w,' + [cam.x, cam.y, cam.yaw, cam.pitch].map(r).join(',');
+    const t = cam.target || [0, 0, 0];
+    return 'v=o,' + [cam.yaw, cam.pitch, cam.dist, t[0], t[1], t[2]].map(r).join(',');
+  }
+  function parseHash(h) {
+    if (!h) return null;
+    h = h.replace(/^#/, '');
+    const m = /(?:^|&)v=([^&]+)/.exec(h);
+    if (!m) return null;
+    const parts = m[1].split(',');
+    const f = parts.map(Number);
+    if (parts[0] === 'o' && parts.length >= 7 && f.slice(1, 7).every(v => !isNaN(v))) {
+      return { mode: 'o', yaw: f[1], pitch: f[2], dist: f[3],
+        target: [f[4], f[5], f[6]] };
+    }
+    if (parts[0] === 'w' && parts.length >= 5 && f.slice(1, 5).every(v => !isNaN(v))) {
+      return { mode: 'w', x: f[1], y: f[2], yaw: f[3], pitch: f[4] };
+    }
+    return null;
+  }
+  // Write the camera into location.hash and copy the full URL. Clipboard may be
+  // blocked (file:// viewers), so fall back to a readonly, pre-selected input the
+  // user can copy by hand. Never throws.
+  function copyLink(cam) {
+    let url = '';
+    try {
+      if (typeof location !== 'undefined') {
+        location.hash = encodeHash(cam);
+        url = location.href;
+      }
+    } catch (e) { url = ''; }
+    if (!url) return;
+    let done = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url); done = true;
+      }
+    } catch (e) { done = false; }
+    if (done) { flashViewMsg('Link copied'); return; }
+    // Fallback: a selectable readonly field so the user can copy manually.
+    linkField.value = url; linkField.style.display = '';
+    try { linkField.focus(); linkField.select(); } catch (e) {}
+    flashViewMsg('Copy the link below');
+  }
+
+  // --- guided tour ---------------------------------------------------------
+  // Plays saved views in order. Orbit legs ease yaw/pitch/dist/target over ~2 s; a
+  // walk leg teleports then dwells ~2.5 s with a slow ~30-degree look pan. With no
+  // saved views, an "Auto tour" builds a default walk tour from walk.rooms (spawn,
+  // then each room centre by area descending, max ~6). Esc or any user input stops
+  // it. A small state machine driven from its own RAF loop.
+  let tour = null;                    // {stops, i, phase, t0, from, dwellPan} or null
+  const TOUR_DWELL = 2.5, TOUR_EASE = 2.0, TOUR_PAN = 30 * Math.PI / 180;
+  function tourNow() { return (window.performance || Date).now(); }
+  function stopTour() {
+    if (!tour) return;
+    tour = null;
+    if (tourRAF) { cancelAnimationFrame(tourRAF); tourRAF = null; }
+    tourBtn.textContent = views.length >= 2 ? 'Play tour' : 'Auto tour';
+  }
+  let tourRAF = null;
+  // The default walk tour from rooms: spawn first, then room centres by area desc,
+  // capped at ~6 stops. Each stop is a walk camera aimed toward the plan centroid.
+  function autoTourStops() {
+    if (!walk || !walkRooms.length) return [];
+    const g0 = (walk.floors && walk.floors[0]) ? walk.floors[0].elevation : 0;
+    const ground = walkRooms.filter(r => Math.abs(r.elevation - g0) < 0.5);
+    const rooms = (ground.length ? ground : walkRooms).slice()
+      .sort((a, b) => b.area - a.area).slice(0, 5);
+    const cx = rooms.reduce((s, r) => s + (r.x + r.w / 2), 0) / (rooms.length || 1);
+    const cy = rooms.reduce((s, r) => s + (r.y + r.l / 2), 0) / (rooms.length || 1);
+    const stops = [];
+    if (walk.spawn) stops.push({ mode: 'w', x: walk.spawn.x, y: walk.spawn.y,
+      yaw: Math.atan2((walk.spawn.face || [0, 1])[0], (walk.spawn.face || [0, 1])[1]),
+      pitch: 0 });
+    for (const r of rooms) {
+      const rx = r.x + r.w / 2, ry = r.y + r.l / 2;
+      stops.push({ mode: 'w', x: rx, y: ry, yaw: Math.atan2(cx - rx, cy - ry), pitch: 0 });
+    }
+    return stops.slice(0, 6);
+  }
+  function playTour(stops) {
+    stopTour();
+    stops = stops || (views.length >= 2 ? views.slice() : autoTourStops());
+    if (!stops || stops.length < 1) return false;
+    if (stops.length < 2 && views.length >= 2) return false;
+    tour = { stops, i: -1, phase: 'advance', t0: 0, from: null };
+    tourBtn.textContent = 'Stop tour';
+    if (viewsPop) { viewsPop.style.display = 'none'; viewsOpen = false; }
+    tourRAF = requestAnimationFrame(tourStep);
+    return true;
+  }
+  function tourStep() {
+    if (!tour) return;
+    const now = tourNow();
+    if (tour.phase === 'advance') {
+      tour.i += 1;
+      if (tour.i >= tour.stops.length) { stopTour(); return; }
+      const cam = tour.stops[tour.i];
+      if (cam.mode === 'w') {
+        if (!walking) enterWalk();
+        if (walking) { walkTeleport(cam.x, cam.y, cam.yaw);
+          if (cam.pitch != null) wPitch = cam.pitch; }
+        tour.baseYaw = cam.yaw != null ? cam.yaw : wYaw;
+        tour.phase = 'dwell'; tour.t0 = now;
+      } else {
+        if (walking) exitWalk();
+        tour.from = { yaw, pitch, dist, target: target.slice() };
+        tour.to = cam; tour.phase = 'ease'; tour.t0 = now;
+      }
+      tourRAF = requestAnimationFrame(tourStep); return;
+    }
+    if (tour.phase === 'ease') {
+      const u = Math.min(1, (now - tour.t0) / (TOUR_EASE * 1000));
+      const s = u * u * (3 - 2 * u);                 // smoothstep
+      const a = tour.from, b = tour.to;
+      yaw = a.yaw + shortAngle(a.yaw, b.yaw) * s;
+      pitch = a.pitch + (b.pitch - a.pitch) * s;
+      dist = a.dist + (b.dist - a.dist) * s;
+      const bt = b.target || a.target;
+      for (let k = 0; k < 3; k++) target[k] = a.target[k] + (bt[k] - a.target[k]) * s;
+      draw();
+      if (u >= 1) { tour.phase = 'dwell'; tour.t0 = now; }
+      tourRAF = requestAnimationFrame(tourStep); return;
+    }
+    if (tour.phase === 'dwell') {
+      const u = Math.min(1, (now - tour.t0) / (TOUR_DWELL * 1000));
+      if (walking && tour.baseYaw != null) {         // slow look pan on a walk leg
+        wYaw = tour.baseYaw - TOUR_PAN / 2 + TOUR_PAN * u; draw();
+      }
+      if (u >= 1) tour.phase = 'advance';
+      tourRAF = requestAnimationFrame(tourStep); return;
+    }
+  }
+  // Signed smallest angular delta a->b (radians), so an ease never spins the long
+  // way round.
+  function shortAngle(a, b) {
+    let d = (b - a) % (2 * Math.PI);
+    if (d > Math.PI) d -= 2 * Math.PI;
+    if (d < -Math.PI) d += 2 * Math.PI;
+    return d;
+  }
+
+  // --- Views pill + popover (top-right, under Section) ----------------------
+  // The Views control: save/rename/delete saved cameras, copy a shareable link for
+  // each (and the current camera), and play a guided tour. Sits below the Section
+  // pill in the top-right stack. Same pill/popover styling as Sun/Section.
+  const viewsWrap = document.createElement('div');
+  viewsWrap.style.cssText = 'position:absolute;top:' + (MAP_CSS + 100) + 'px;right:12px;'
+    + 'z-index:6;display:flex;flex-direction:column;align-items:flex-end;';
+  const viewsBtn = document.createElement('button');
+  viewsBtn.type = 'button'; viewsBtn.textContent = 'Views';
+  viewsBtn.title = 'Saved camera views + shareable links + guided tour';
+  viewsBtn.style.cssText = CTRL_PILL;
+  const viewsPop = document.createElement('div');
+  viewsPop.style.cssText = POPOVER + 'min-width:210px;max-width:260px;';
+  const viewsHd = document.createElement('div');
+  viewsHd.style.cssText = POP_HD; viewsHd.textContent = 'Saved views';
+  const viewsList = document.createElement('div');   // one row per saved view
+  const viewsMsg = document.createElement('div');     // transient status line
+  viewsMsg.style.cssText = 'font-size:11px;color:#8791a1;min-height:14px;margin:4px 0;';
+  // A readonly fallback field for when the clipboard is unavailable.
+  const linkField = document.createElement('input');
+  linkField.type = 'text'; linkField.readOnly = true;
+  linkField.style.cssText = 'display:none;width:100%;margin:2px 0 6px;padding:4px 6px;'
+    + 'font:11px monospace;border:1px solid rgba(0,0,0,.14);border-radius:6px;'
+    + 'background:rgba(255,255,255,.7);color:#1d2530;';
+  const viewsBtnRow = document.createElement('div');
+  viewsBtnRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button'; saveBtn.textContent = 'Save view'; saveBtn.style.cssText = SEG_BTN;
+  saveBtn.addEventListener('click', e => { e.preventDefault(); saveView(); });
+  const copyCurBtn = document.createElement('button');
+  copyCurBtn.type = 'button'; copyCurBtn.textContent = 'Copy link'; copyCurBtn.style.cssText = SEG_BTN;
+  copyCurBtn.title = 'Copy a link to the current camera';
+  copyCurBtn.addEventListener('click', e => { e.preventDefault(); copyLink(currentCamera()); });
+  const tourBtn = document.createElement('button');
+  tourBtn.type = 'button'; tourBtn.textContent = 'Auto tour'; tourBtn.style.cssText = SEG_BTN;
+  tourBtn.title = 'Play the saved views in order (or an auto room tour)';
+  tourBtn.addEventListener('click', e => { e.preventDefault();
+    if (tour) { stopTour(); } else { playTour(); } });
+  viewsBtnRow.appendChild(saveBtn); viewsBtnRow.appendChild(copyCurBtn);
+  viewsBtnRow.appendChild(tourBtn);
+  viewsPop.appendChild(viewsHd); viewsPop.appendChild(viewsList);
+  viewsPop.appendChild(linkField); viewsPop.appendChild(viewsMsg);
+  viewsPop.appendChild(viewsBtnRow);
+  viewsWrap.appendChild(viewsBtn); viewsWrap.appendChild(viewsPop);
+  host.appendChild(viewsWrap);
+  let viewsOpen = false;
+  viewsBtn.addEventListener('click', e => {
+    e.preventDefault(); viewsOpen = !viewsOpen;
+    viewsPop.style.display = viewsOpen ? '' : 'none';
+    if (viewsOpen) renderViews();
+  });
+  let viewsMsgTimer = null;
+  function flashViewMsg(t) {
+    viewsMsg.textContent = t;
+    if (viewsMsgTimer) clearTimeout(viewsMsgTimer);
+    viewsMsgTimer = setTimeout(() => { viewsMsg.textContent = ''; }, 2600);
+  }
+  // Rebuild the saved-views list: each row is [name -> restore][rename][link][x].
+  function renderViews() {
+    viewsList.textContent = '';
+    if (!views.length) {
+      const e = document.createElement('div');
+      e.style.cssText = 'font-size:11px;color:#8791a1;padding:2px 0 4px;';
+      e.textContent = 'No saved views yet.';
+      viewsList.appendChild(e);
+    }
+    views.forEach((v, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:4px;padding:2px 0;';
+      const nameBtn = document.createElement('button');
+      nameBtn.type = 'button'; nameBtn.textContent = v.name;
+      nameBtn.title = 'Restore this view';
+      nameBtn.style.cssText = 'flex:1;text-align:left;font:600 12px -apple-system,'
+        + 'BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;padding:3px 6px;'
+        + 'border-radius:6px;border:1px solid rgba(0,0,0,.10);cursor:pointer;'
+        + 'background:rgba(255,255,255,.6);color:#1d2530;overflow:hidden;'
+        + 'text-overflow:ellipsis;white-space:nowrap;'
+        + (v.mode === 'w' ? '' : '');
+      nameBtn.addEventListener('click', e => { e.preventDefault(); restoreView(v); });
+      const renBtn = miniIcon('Rename', 'aa');
+      renBtn.addEventListener('click', e => { e.preventDefault(); renameView(i, row, v); });
+      const linkBtn = miniIcon('Copy link', 'link');
+      linkBtn.addEventListener('click', e => { e.preventDefault(); copyLink(v); });
+      const delBtn = miniIcon('Delete', 'x');
+      delBtn.addEventListener('click', e => { e.preventDefault();
+        views.splice(i, 1); renderViews(); });
+      row.appendChild(nameBtn); row.appendChild(renBtn);
+      row.appendChild(linkBtn); row.appendChild(delBtn);
+      viewsList.appendChild(row);
+    });
+    tourBtn.textContent = tour ? 'Stop tour'
+      : (views.length >= 2 ? 'Play tour' : 'Auto tour');
+    tourBtn.disabled = false;
+  }
+  // A tiny square icon button (rename/link/delete). ASCII glyphs only.
+  function miniIcon(title, kind) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.title = title;
+    b.textContent = kind === 'x' ? 'x' : (kind === 'link' ? '@' : 'Aa');
+    b.style.cssText = 'flex:0 0 auto;font:600 11px -apple-system,BlinkMacSystemFont,'
+      + '"Segoe UI",Helvetica,Arial,sans-serif;padding:3px 7px;border-radius:6px;'
+      + 'border:1px solid rgba(0,0,0,.12);cursor:pointer;'
+      + 'background:rgba(255,255,255,.6);color:#566072;';
+    return b;
+  }
+  // Inline-rename: swap the row's name button for a text input; Enter/blur commits.
+  function renameView(i, row, v) {
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.value = v.name;
+    inp.style.cssText = 'flex:1;font:600 12px -apple-system,BlinkMacSystemFont,'
+      + '"Segoe UI",Helvetica,Arial,sans-serif;padding:3px 6px;border-radius:6px;'
+      + 'border:1px solid rgba(209,135,63,.7);background:rgba(255,255,255,.9);'
+      + 'color:#1d2530;min-width:0;';
+    const commit = () => { const t = inp.value.trim(); if (t) v.name = t; renderViews(); };
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); renderViews(); }
+      e.stopPropagation();
+    });
+    inp.addEventListener('blur', commit);
+    row.replaceChild(inp, row.firstChild);
+    try { inp.focus(); inp.select(); } catch (e) {}
+  }
+
+  // --- Measure pill (bottom-right, both modes) ------------------------------
+  // Sits left of the Walk pill along the bottom-right so it's reachable in orbit and
+  // walk. Toggling arms/disarms measure; the pill highlights while armed.
+  const measBtn = document.createElement('button');
+  measBtn.type = 'button'; measBtn.textContent = 'Measure';
+  measBtn.title = 'Measure: click two points for a distance in feet (Esc clears)';
+  measBtn.style.cssText = CTRL_PILL + 'position:absolute;bottom:52px;right:14px;z-index:6;';
+  measBtn.addEventListener('click', e => { e.preventDefault(); setMeasure(); });
+  host.appendChild(measBtn);
+
+  // --- canvas click routing (measure point / identify) ----------------------
+  // A plain click (not a drag) is distinguished by a small movement threshold so it
+  // never fights orbit dragging or walk look. When measuring, a click adds a measure
+  // point; otherwise (measure off, no tour, not walking) it identifies the surface.
+  let clkStart = null;                // {x, y} at pointerdown, or null
+  const CLICK_SLOP = 5;               // px of movement still counted as a click
+  canvas.addEventListener('pointerdown', e => {
+    clkStart = { x: e.clientX, y: e.clientY };
+  }, true);
+  canvas.addEventListener('pointerup', e => {
+    const st = clkStart; clkStart = null;
+    if (!st) return;
+    if (Math.hypot(e.clientX - st.x, e.clientY - st.y) > CLICK_SLOP) return;  // a drag
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left, py = e.clientY - rect.top;
+    if (measuring) { addMeasurePoint(px, py); return; }
+    if (tour || walking) return;      // suppress identify mid-tour and while walking
+    const hit = pick(px, py);
+    if (hit) showIdentify(identityOf(hit));
+  }, true);
+
+  // Esc clears/disarms measure and stops a tour (in addition to walk's own Esc,
+  // which exits walk). Registered once, capturing, so it works in both cameras.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (tour) { stopTour(); }
+    if (measuring) { setMeasure(false); }
+  }, true);
+
+  // While measuring, keep the overlay projection in sync as the camera moves; hook
+  // the existing draw by redrawing the overlay right after each draw() when active.
+  const _drawBase = draw;
+  draw = function () { _drawBase(); if (measuring && measurePts.length) drawOverlay(); };
+
+  // Any user input stops a running tour (per the spec). A single capturing listener
+  // on the host covers pointer + key; the tour's own key/pointer handlers still run.
+  function stopTourOnInput() { if (tour) stopTour(); }
+  document.addEventListener('pointerdown', stopTourOnInput, true);
+  document.addEventListener('wheel', stopTourOnInput, true);
+  document.addEventListener('keydown', e => {
+    if (tour && e.key !== 'Escape') stopTour();     // Esc already handled above
+  }, true);
+
+  // On mount, apply a "#v=" camera from location.hash after the first setScene. A
+  // walk state enters walk mode without pointer lock (like a touch entry). Guarded:
+  // read once here, never written except on an explicit Copy-link action.
+  function applyHashOnce() {
+    let h = '';
+    try { h = (typeof location !== 'undefined' && location.hash) || ''; } catch (e) { h = ''; }
+    const cam = parseHash(h);
+    if (!cam) return;
+    // Hash-restored walk entry must not request pointer lock; temporarily latch
+    // coarse so enterWalk skips it, matching a touch entry, then restore the flag.
+    if (cam.mode === 'w') {
+      const wasCoarse = coarse; coarse = true;
+      restoreView(cam);
+      coarse = wasCoarse;
+    } else {
+      restoreView(cam);
+    }
+  }
+  // Defer to after the host's initial setScene: wrap setScene so the first call
+  // frames the scene, then applies the hash camera on top.
+  const _setSceneBase = setScene;
+  let hashApplied = false;
+  setScene = function (s) {
+    _setSceneBase(s);
+    if (!hashApplied) { hashApplied = true; applyHashOnce(); }
+  };
+
   return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport,
     walkStick, cycleEye, toggleFurniture, toggleMinimap,
-    setSun, setSection, setLevel, sunState };
+    setSun, setSection, setLevel, sunState,
+    saveView, restoreView, playTour, stopTour, setMeasure, pick,
+    parseHash, encodeHash, currentCamera, autoTourStops };
 }
 """
 
