@@ -268,3 +268,123 @@ def test_scene_json_is_byte_identical_across_two_builds():
     a = json.dumps(scene_json(build_scene(plan)))
     b = json.dumps(scene_json(build_scene(plan)))
     assert a == b
+
+
+# --- Phase 2: fixture collision block ----------------------------------------
+
+FURN_PLAN = """\
+plan "Furnished"
+envelope 30 x 20
+ceiling 9
+room a: living at 0,0 size 15 x 20
+room b: bedroom at 15,0 size 15 x 20
+door a - b width 3 offset 8
+entry a south width 3 offset 4
+fixture sofa in a at 5,10
+fixture bed_queen in b at 20,10
+"""
+
+
+def test_walk_block_ships_a_fixtures_entry_per_model_fixture():
+    from barndsl.revit import to_revit_model
+
+    plan = _plan(FURN_PLAN)
+    model = to_revit_model(plan)
+    w = scene_json(build_scene(plan))["walk"]
+    assert "fixtures" in w
+    # One walk.fixtures entry per model fixture, in model order.
+    assert len(w["fixtures"]) == len(model.fixtures)
+    for fx, jf in zip(model.fixtures, w["fixtures"]):
+        assert jf["kind"] == fx.kind
+        assert jf["level"] == fx.level
+
+
+def test_walk_fixture_carries_footprint_and_elevation_fields():
+    w = scene_json(build_scene(_plan(FURN_PLAN)))["walk"]
+    assert w["fixtures"], "a furnished plan carries fixture rects"
+    for jf in w["fixtures"]:
+        assert {"x", "y", "w", "l", "elevation", "level", "kind"} <= set(jf)
+        assert jf["w"] > 0 and jf["l"] > 0          # a real footprint rect
+        # coordinates rounded to 4 places (deterministic serialisation)
+        for k in ("x", "y", "w", "l", "elevation"):
+            assert round(jf[k], 4) == jf[k]
+
+
+def test_walk_fixture_rect_matches_the_model_footprint():
+    from barndsl.revit import to_revit_model
+
+    plan = _plan(FURN_PLAN)
+    model = to_revit_model(plan)
+    w = scene_json(build_scene(plan))["walk"]
+    fx0, jf0 = model.fixtures[0], w["fixtures"][0]
+    assert abs(jf0["x"] - fx0.x) < 1e-3 and abs(jf0["y"] - fx0.y) < 1e-3
+    assert abs(jf0["w"] - fx0.width) < 1e-3 and abs(jf0["l"] - fx0.length) < 1e-3
+
+
+def test_walk_block_still_ships_eyeheight_and_is_deterministic():
+    # The standing eye height stays the shipped authority, and adding fixtures
+    # keeps the whole walk block byte-identical across two builds.
+    from barndsl.viewer import WALK_EYE_HEIGHT
+
+    plan = _plan(FURN_PLAN)
+    w = scene_json(build_scene(plan))["walk"]
+    assert w["eyeHeight"] == WALK_EYE_HEIGHT
+    a = json.dumps(scene_json(build_scene(plan)), sort_keys=True)
+    b = json.dumps(scene_json(build_scene(plan)), sort_keys=True)
+    assert a == b
+
+
+def test_fixtures_do_not_leak_into_glb_or_ifc_bytes():
+    # The fixtures walk data is viewer-only: the exported glb/ifc bytes are
+    # untouched by building (and re-building) the scene JSON.
+    import hashlib
+
+    from barndsl.gltf import to_glb
+    from barndsl.ifc import to_ifc
+
+    plan = _plan(FURN_PLAN)
+    g1 = hashlib.sha256(to_glb(plan)).hexdigest()
+    i1 = hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest()
+    scene_json(build_scene(plan))  # exercises the fixtures walk path
+    assert hashlib.sha256(to_glb(plan)).hexdigest() == g1
+    assert hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest() == i1
+
+
+# --- Phase 2: renderer control hooks (JS is exercised in a node harness) ------
+
+from barndsl.viewer import RENDERER_JS  # noqa: E402
+
+
+def test_renderer_has_the_touch_joystick_hooks():
+    # The virtual thumbstick: a base + knob element, coarse-pointer detection, and
+    # a per-pointer stick id so one thumb steers while another looks.
+    assert "stickBase" in RENDERER_JS and "stickKnob" in RENDERER_JS
+    assert "pointer: coarse" in RENDERER_JS      # touch detection
+    assert "stickId" in RENDERER_JS              # per-pointer tracking
+    assert "updateStick" in RENDERER_JS          # folds the stick into move keys
+
+
+def test_renderer_has_eye_height_presets_and_the_c_key():
+    # Three presets (5.5 / 4.0 / 3.5), a cycle entry point, and the C binding.
+    assert "EYE_PRESETS" in RENDERER_JS
+    assert "cycleEye" in RENDERER_JS
+    assert "4.0" in RENDERER_JS and "3.5" in RENDERER_JS
+    assert "KeyC" in RENDERER_JS                 # C cycles the eye height
+    assert "walkEyeTarget" in RENDERER_JS        # eased, not snapped
+
+
+def test_renderer_has_the_furniture_collision_toggle():
+    assert "furniture" in RENDERER_JS
+    assert "toggleFurniture" in RENDERER_JS
+    assert "walkFixtures" in RENDERER_JS         # the flattened rects it collides
+
+
+def test_renderer_has_the_eye_attached_fill_uniform():
+    # uFill is the eye-attached fill; it must be a real uniform the shader folds in.
+    assert "uFill" in RENDERER_JS
+    assert "WALK_FILL" in RENDERER_JS
+
+
+def test_renderer_does_not_request_pointer_lock_on_touch():
+    # Entering walk on a coarse pointer must skip pointer lock (no Esc on iPad).
+    assert "!coarse && canvas.requestPointerLock" in RENDERER_JS

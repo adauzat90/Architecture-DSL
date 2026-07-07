@@ -2708,6 +2708,12 @@ const THREE_TIPS = [
   'Walk mode: on the 3D tab, click Walk (or press Enter) to step inside at eye height.',
   'WASD or the arrow keys move relative to where you look; the mouse looks around; ' +
     'Shift runs. You slide along walls and pass through doorways.',
+  'On a touch device (iPad), a thumbstick appears bottom-left to move while a ' +
+    'second finger drags to look; push the stick to its rim to run. Tap the Exit ' +
+    'pill to leave (there is no Esc).',
+  'Eye-height pill (or the C key) cycles Standing / Seated (ADA sightlines) / ' +
+    'Child so you can check what each sees. The Furniture pill toggles whether you ' +
+    'bump into fixtures or ghost through them.',
   'Walk up the stairs to reach the upper floor; Esc (or leaving the tab) exits back to orbit.',
 ];
 

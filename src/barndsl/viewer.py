@@ -126,6 +126,11 @@ def _walk_block(scene: Scene) -> dict:
       toElevation, dir}`` — the footprint, the two floor elevations and an uphill
       unit direction, enough for the JS to lerp eye height across the footprint so
       you can walk up.
+    * ``fixtures`` — one ``{x, y, w, l, elevation, level, kind}`` per model
+      fixture (its axis-aligned footprint rect, the level floor elevation, and the
+      catalog kind). The JS collides the player circle against these rects when the
+      furniture-collision toggle is on, using the same storey-elevation filter as
+      the walls, so bumping into a sofa or kitchen island is felt.
     * ``spawn`` — ``{x, y, elevation, face}`` a start point just inside the main
       entry door (facing into the house) if one exists, else the centroid of the
       largest ground-floor room.
@@ -221,6 +226,22 @@ def _walk_block(scene: Scene) -> dict:
             }
         )
 
+    # --- fixtures: footprint rects for optional furniture collision -----------
+    # One rect per model fixture, in model order (deterministic). The width/length
+    # already bake in the fixture's quarter-turn rotation, so the rect is
+    # axis-aligned and the JS collides its player circle against it directly. The
+    # elevation is the fixture's level floor, so the same storey filter the walls
+    # use keeps you from bumping into a sofa on the floor above.
+    fixtures = [
+        {
+            "x": round(fx.x, 4), "y": round(fx.y, 4),
+            "w": round(fx.width, 4), "l": round(fx.length, 4),
+            "elevation": round(elev.get(fx.level, 0.0), 4),
+            "level": fx.level, "kind": fx.kind,
+        }
+        for fx in model.fixtures
+    ]
+
     return {
         "eyeHeight": WALK_EYE_HEIGHT,
         "spawn": _walk_spawn(model, elev),
@@ -228,6 +249,7 @@ def _walk_block(scene: Scene) -> dict:
         "doors": doors,
         "floors": floors,
         "stairs": stairs,
+        "fixtures": fixtures,
     }
 
 
@@ -437,6 +459,7 @@ function mountScene(canvas, labels, togglesEl) {
     + ' uniform vec3 uColor; uniform vec3 uEye;'
     + ' uniform float uRough; uniform float uMetal;'
     + ' uniform float uPatScale; uniform float uHasTex; uniform sampler2D uTex;'
+    + ' uniform float uFill;'
     + ' void main(){'
     + '   vec3 n=normalize(vN); vec3 an=abs(n); vec2 uv;'
     // Project world coords onto the plane facing the dominant axis. Vertical
@@ -453,6 +476,12 @@ function mountScene(canvas, labels, togglesEl) {
     + '   float amb=0.28+0.22*(0.5+0.5*n.y);'
     // Metals carry little diffuse; fade it out as metallic rises.
     + '   vec3 col=albedo*(amb+diff*0.72)*(1.0-0.65*uMetal);'
+    // Eye-attached fill (walk mode only; uFill=0 in orbit is a true no-op): lights
+    // surfaces facing the camera so first-person interiors don't read flat and
+    // dim. A gentle distance falloff keeps far walls from glowing.
+    + '   if(uFill>0.0){ float fd=length(uEye-vWorld);'
+    + '     float fall=1.0/(1.0+0.04*fd);'
+    + '     col+=albedo*uFill*max(dot(n,V),0.0)*fall; }'
     + '   float sh=mix(10.0,90.0,1.0-uRough);'
     + '   float spec=pow(max(dot(n,H),0.0),sh);'
     + '   vec3 specCol=mix(vec3(0.05),uColor,uMetal);'
@@ -478,6 +507,7 @@ function mountScene(canvas, labels, togglesEl) {
   const uPatScale = gl.getUniformLocation(prog, 'uPatScale');
   const uHasTex = gl.getUniformLocation(prog, 'uHasTex');
   const uTex = gl.getUniformLocation(prog, 'uTex');
+  const uFill = gl.getUniformLocation(prog, 'uFill');
   gl.getExtension('OES_element_index_uint');
   gl.enable(gl.DEPTH_TEST);
 
@@ -563,8 +593,10 @@ function mountScene(canvas, labels, togglesEl) {
   let walk = null;                 // the walk-support data (segments/floors/stairs/spawn)
   let walkSegs = [];               // [x0,y0,x1,y1,elevation] collision segments (flat, fast)
   let walkDoors = [];              // per door: {id, seg:[x0,y0,x1,y1,elev], mid:[x,y], node}
+  let walkFixtures = [];           // [x,y,w,l,elevation] fixture footprint rects (flat, fast)
   let walkFF = 10;                 // floor-to-floor (ft) — filters walls to the current storey
   let walkEye = 5.5, walkSpeed = 4;
+  let walkEyeTarget = 5.5;         // eased eye-height target (preset cycling)
   let walking = false;
   const wpos = [0, 0];             // player plan position (x, y)
   let wElev = 0;                   // current floor elevation (eased for smooth steps)
@@ -573,7 +605,25 @@ function mountScene(canvas, labels, togglesEl) {
   let walkRAF = null, walkLast = 0;
   let usePointerLock = false, walkDrag = false, wpx = 0, wpy = 0;
   let savedCam = null;             // orbit camera snapshot to restore on exit
+  let furniture = true;            // collide against fixtures (toggle; default ON)
   const WALK_R = 0.75;             // player collision radius (ft)
+  const WALK_FILL = 0.35;          // eye-attached fill strength in walk mode
+  // Eye-height presets cycled by the pill / the C key: standing (the shipped
+  // walk.eyeHeight), a seated wheelchair/ADA sightline, and a child's eye level.
+  // The standing default is set from walk.eyeHeight on setScene, so viewer.py
+  // stays the single authority for the shipped height.
+  const EYE_PRESETS = [
+    { label: 'Standing', ft: 5.5 },
+    { label: 'Seated', ft: 4.0 },
+    { label: 'Child', ft: 3.5 },
+  ];
+  let eyeIdx = 0;                  // index into EYE_PRESETS (0 = standing default)
+  // Coarse-pointer / touch: show the virtual thumbstick and skip pointer lock.
+  // Latched true on the first touch too, so a hybrid laptop that gets a real
+  // touch reveals the stick. matchMedia may be absent in a headless host.
+  let coarse = false;
+  try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); }
+  catch (e) { coarse = false; }
 
   function setScene(scene) {
     for (const nd of nodes) {
@@ -616,11 +666,17 @@ function mountScene(canvas, labels, togglesEl) {
     walk = scene.walk || null;
     if (walk) {
       walkSegs = (walk.segments || []).map(s => [s.x0, s.y0, s.x1, s.y1, s.elevation]);
+      // Fixture footprints for optional furniture collision: [x, y, w, l, elev].
+      walkFixtures = (walk.fixtures || []).map(f => [f.x, f.y, f.w, f.l, f.elevation]);
       const evs = (walk.floors || []).map(f => f.elevation).sort((a, b) => a - b);
       walkFF = 10;
       for (let i = 1; i < evs.length; i++) { const g = evs[i] - evs[i - 1];
         if (g > 0.5) { walkFF = g; break; } }
+      // The shipped standing eye height is the walk.eyeHeight authority; seed the
+      // Standing preset from it so the pill and viewer.py never disagree.
       walkEye = walk.eyeHeight || 5.5;
+      EYE_PRESETS[0].ft = walkEye;
+      eyeIdx = 0; walkEyeTarget = walkEye;
       // Link each walk.doors span to the leaf node(s) that share its id — a
       // double/french door has two leaves, so a door drives every matching node.
       // The span segment collides while the door is < half open; its midpoint is
@@ -632,7 +688,7 @@ function mountScene(canvas, labels, togglesEl) {
         leaves: nodes.filter(n => n.door && n.door.id === d.id),
       }));
     } else {
-      walkDoors = [];
+      walkDoors = []; walkFixtures = [];
     }
     updateWalkUI();
     buildToggles(scene.layers || []);
@@ -653,21 +709,38 @@ function mountScene(canvas, labels, togglesEl) {
 
   // --- interaction ----------------------------------------------------------
   let dragging = false, panning = false, px = 0, py = 0;
+  let lookId = null;   // pointerId of the canvas look-drag in walk mode (per-pointer)
+  // A touch anywhere latches coarse-pointer mode (matchMedia can miss a hybrid
+  // device); if we're mid-walk when the first touch lands, reveal the thumbstick.
+  function markTouch() {
+    if (coarse) return;
+    coarse = true;
+    if (walking) stickBase.style.display = '';
+  }
   canvas.addEventListener('pointerdown', e => {
-    if (walking) {  // walk mode: drag looks around when pointer lock isn't held
-      if (!usePointerLock) { walkDrag = true; wpx = e.clientX; wpy = e.clientY;
-        canvas.setPointerCapture(e.pointerId); }
+    if (e.pointerType === 'touch') markTouch();
+    if (walking) {  // walk mode: a canvas drag looks around when no pointer lock
+      // Per-pointer: the first canvas pointer owns look; a second touch (e.g. the
+      // stick thumb, on its own element) is untouched here, so look + move run at
+      // once. Pointer lock (fine pointers) uses a document mousemove instead.
+      if (!usePointerLock && lookId === null) {
+        lookId = e.pointerId; walkDrag = true; wpx = e.clientX; wpy = e.clientY;
+        try { canvas.setPointerCapture(e.pointerId); } catch (er) {}
+      }
       return;
     }
     dragging = true;
     panning = e.button === 2 || e.shiftKey; px = e.clientX; py = e.clientY;
     canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener('pointerup', () => { if (walking) { walkDrag = false; return; }
+  canvas.addEventListener('pointerup', e => {
+    if (walking) { if (e.pointerId === lookId) { lookId = null; walkDrag = false; } return; }
     dragging = false; });
+  canvas.addEventListener('pointercancel', e => {
+    if (walking && e.pointerId === lookId) { lookId = null; walkDrag = false; } });
   canvas.addEventListener('contextmenu', e => e.preventDefault());
   canvas.addEventListener('pointermove', e => {
     if (walking) {  // drag-look fallback (pointer lock uses a document mousemove)
-      if (walkDrag && !usePointerLock) {
+      if (walkDrag && !usePointerLock && e.pointerId === lookId) {
         applyLook(e.clientX - wpx, e.clientY - wpy); wpx = e.clientX; wpy = e.clientY; draw(); }
       return;
     }
@@ -708,6 +781,7 @@ function mountScene(canvas, labels, togglesEl) {
       view = lookAt(eye, tgt, [0, 1, 0]);
       gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
       gl.uniform3fv(uEye, new Float32Array(eye));
+      gl.uniform1f(uFill, WALK_FILL);   // eye-attached interior fill (walk only)
       drawNodes();
       return;
     }
@@ -719,6 +793,7 @@ function mountScene(canvas, labels, togglesEl) {
     view = lookAt(eye, target, [0, 1, 0]);
     gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
     gl.uniform3fv(uEye, new Float32Array(eye));
+    gl.uniform1f(uFill, 0.0);           // orbit: fill is a true no-op (identical pixels)
     drawNodes();
   }
 
@@ -792,12 +867,128 @@ function mountScene(canvas, labels, togglesEl) {
     + 'transition:opacity .3s;font:600 12px -apple-system,BlinkMacSystemFont,'
     + '"Segoe UI",Helvetica,Arial,sans-serif;padding:7px 15px;border-radius:20px;'
     + 'background:rgba(20,24,30,.84);color:#eef1f4;white-space:nowrap;';
-  walkHint.textContent = 'WASD move · mouse look · E opens doors · Shift run · Esc exit';
+  walkHint.textContent = 'WASD / joystick move · look · E doors · C eye height · '
+    + 'Shift run · Esc exit';
   if (host.style && getComputedStyle(host).position === 'static') host.style.position = 'relative';
   host.appendChild(walkBtn); host.appendChild(walkHint);
   let hintTimer = null;
 
-  function updateWalkUI() { walkBtn.style.display = (walk && walk.spawn) ? '' : 'none'; }
+  // --- walk-mode control pills (eye height + furniture), shown only in walk ---
+  // Same pill look as walkBtn (see its cssText); they sit just left of the
+  // Walk/Exit pill along the bottom-right so touch users can reach them, and stay
+  // hidden until walk mode is entered so orbit view is uncluttered.
+  const PILL = 'position:absolute;bottom:12px;z-index:6;'
+    + 'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;'
+    + 'padding:7px 13px;border-radius:20px;border:1px solid rgba(0,0,0,.14);'
+    + 'background:rgba(255,255,255,.88);color:#1d2530;cursor:pointer;'
+    + 'box-shadow:0 2px 10px rgba(20,30,50,.18);-webkit-backdrop-filter:blur(6px);'
+    + 'backdrop-filter:blur(6px);display:none;';
+  const eyeBtn = document.createElement('button');
+  eyeBtn.type = 'button';
+  eyeBtn.title = 'Eye height: Standing / Seated / Child (C)';
+  eyeBtn.style.cssText = PILL + 'right:150px;';
+  eyeBtn.addEventListener('click', e => { e.preventDefault(); cycleEye(); });
+  const furnBtn = document.createElement('button');
+  furnBtn.type = 'button';
+  furnBtn.title = 'Furniture collision: bump into fixtures, or ghost through';
+  furnBtn.style.cssText = PILL + 'right:264px;';
+  furnBtn.addEventListener('click', e => { e.preventDefault(); toggleFurniture(); });
+  host.appendChild(eyeBtn); host.appendChild(furnBtn);
+
+  // --- virtual thumbstick (touch/coarse-pointer only) -----------------------
+  // A semi-transparent base circle anchored bottom-left with a draggable knob.
+  // The stick vector feeds the same forward/strafe move logic as WASD; pushing
+  // past ~85% of the radius engages run. Hidden until walk mode on a coarse
+  // pointer. `stickId` tracks which pointer owns the stick so a second thumb can
+  // look at the same time (per-pointer, via Pointer Events).
+  const STICK_R = 52, KNOB_R = 26;   // base + knob radii (css px)
+  const stickBase = document.createElement('div');
+  stickBase.style.cssText = 'position:absolute;left:20px;bottom:20px;z-index:6;'
+    + 'width:' + (STICK_R * 2) + 'px;height:' + (STICK_R * 2) + 'px;border-radius:50%;'
+    + 'background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.35);'
+    + 'box-shadow:0 2px 10px rgba(20,30,50,.18);touch-action:none;display:none;';
+  const stickKnob = document.createElement('div');
+  stickKnob.style.cssText = 'position:absolute;left:' + (STICK_R - KNOB_R) + 'px;'
+    + 'top:' + (STICK_R - KNOB_R) + 'px;width:' + (KNOB_R * 2) + 'px;'
+    + 'height:' + (KNOB_R * 2) + 'px;border-radius:50%;'
+    + 'background:rgba(255,255,255,.62);border:1px solid rgba(0,0,0,.12);'
+    + 'box-shadow:0 1px 6px rgba(20,30,50,.28);';
+  stickBase.appendChild(stickKnob);
+  host.appendChild(stickBase);
+  let stickId = null;                // pointerId owning the stick (null = idle)
+  const stickVec = [0, 0];           // [fwd, strafe] in -1..1, y up = forward
+  let stickRun = false;              // pushed past the run threshold this frame
+
+  function updateWalkUI() {
+    walkBtn.style.display = (walk && walk.spawn) ? '' : 'none';
+    eyeBtn.textContent = eyeLabel();
+  }
+  function eyeLabel() { return 'Eye ' + EYE_PRESETS[eyeIdx].ft.toFixed(1) + ' ft'; }
+  function furnLabel() { return furniture ? 'Furniture on' : 'Furniture off'; }
+
+  // Cycle the eye-height preset (click / tap / C). Eases toward the new height in
+  // walkStep; standing (index 0) is seeded from walk.eyeHeight on setScene.
+  function cycleEye() {
+    eyeIdx = (eyeIdx + 1) % EYE_PRESETS.length;
+    walkEyeTarget = EYE_PRESETS[eyeIdx].ft;
+    eyeBtn.textContent = eyeLabel();
+  }
+  function toggleFurniture() {
+    furniture = !furniture;
+    furnBtn.textContent = furnLabel();
+  }
+
+  // --- thumbstick pointer handling ------------------------------------------
+  // A pointer that lands on the stick base owns the stick (its id in `stickId`);
+  // dragging it sets `stickVec` (forward/strafe, clamped to the base radius) and
+  // engages run past ~85% of the radius. A stick pointer is fully independent of
+  // the canvas look pointers, so one thumb steers while another looks. Captured on
+  // the base so a drag that slides off it still tracks.
+  function centreKnob() {
+    stickKnob.style.left = (STICK_R - KNOB_R) + 'px';
+    stickKnob.style.top = (STICK_R - KNOB_R) + 'px';
+  }
+  function stickMove(e) {
+    const r = stickBase.getBoundingClientRect();
+    let dx = e.clientX - (r.left + STICK_R), dy = e.clientY - (r.top + STICK_R);
+    const len = Math.hypot(dx, dy) || 1;
+    const cl = Math.min(len, STICK_R);            // clamp knob to the base
+    const kx = dx / len * cl, ky = dy / len * cl;
+    stickKnob.style.left = (STICK_R - KNOB_R + kx) + 'px';
+    stickKnob.style.top = (STICK_R - KNOB_R + ky) + 'px';
+    stickVec[0] = -ky / STICK_R;                  // up (screen -y) = forward
+    stickVec[1] = kx / STICK_R;                   // right = strafe right
+    stickRun = (cl / STICK_R) > 0.85;             // pushed to the rim = run
+  }
+  stickBase.addEventListener('pointerdown', e => {
+    if (!walking || stickId !== null) return;
+    e.preventDefault();
+    stickId = e.pointerId;
+    try { stickBase.setPointerCapture(e.pointerId); } catch (er) {}
+    stickMove(e);
+  });
+  stickBase.addEventListener('pointermove', e => {
+    if (stickId !== e.pointerId) return;
+    e.preventDefault(); stickMove(e);
+  });
+  function stickEnd(e) {
+    if (stickId !== e.pointerId) return;
+    stickId = null; stickVec[0] = stickVec[1] = 0; stickRun = false; centreKnob();
+  }
+  stickBase.addEventListener('pointerup', stickEnd);
+  stickBase.addEventListener('pointercancel', stickEnd);
+
+  // Fold the live stick vector into the held-key move state each tick, so the
+  // stick and WASD share one movement path (updateMove reads `keys`). run is the
+  // Shift equivalent. Called from walkStep before updateMove.
+  function updateStick(dt) {
+    if (!coarse) return;
+    const fwd = stickVec[0], str = stickVec[1];
+    const dead = 0.12;                             // ignore tiny thumb wobble
+    keys.f = fwd > dead; keys.b = fwd < -dead;
+    keys.r = str > dead; keys.l = str < -dead;
+    if (stickId !== null) keys.run = stickRun;     // stick drives run while held
+  }
 
   function applyLook(dx, dy) {
     wYaw += dx * 0.0025;                                     // drag right → turn right
@@ -820,12 +1011,20 @@ function mountScene(canvas, labels, togglesEl) {
       lf.open = 0; lf.target = 0; lf.pinned = false;         // start every door shut
     }
     walkBtn.textContent = 'Exit';
+    eyeBtn.textContent = eyeLabel(); furnBtn.textContent = furnLabel();
+    eyeBtn.style.display = ''; furnBtn.style.display = '';
+    stickId = null; stickVec[0] = stickVec[1] = 0; stickRun = false; centreKnob();
+    if (coarse) stickBase.style.display = '';   // thumbstick on touch devices
     showWalkHint();
     document.addEventListener('keydown', onWalkKey, true);
     document.addEventListener('keyup', onWalkKeyUp, true);
     document.addEventListener('mousemove', onLockMouse);
     document.addEventListener('pointerlockchange', onPLChange);
-    if (canvas.requestPointerLock) { try { canvas.requestPointerLock(); } catch (e) {} }
+    // Touch/coarse pointers have no Esc and pointer lock hijacks the whole
+    // screen, so don't request it there — drag-look + the joystick drive walk.
+    if (!coarse && canvas.requestPointerLock) {
+      try { canvas.requestPointerLock(); } catch (e) {}
+    }
     walkLast = (window.performance || Date).now();
     walkRAF = requestAnimationFrame(walkStep);
   }
@@ -840,9 +1039,12 @@ function mountScene(canvas, labels, togglesEl) {
     document.removeEventListener('pointerlockchange', onPLChange);
     if (document.pointerLockElement === canvas && document.exitPointerLock)
       document.exitPointerLock();
-    usePointerLock = false; walkDrag = false;
+    usePointerLock = false; walkDrag = false; lookId = null;
     for (const k in keys) delete keys[k];
     walkBtn.textContent = 'Walk';
+    eyeBtn.style.display = 'none'; furnBtn.style.display = 'none';
+    stickBase.style.display = 'none'; stickId = null;
+    stickVec[0] = stickVec[1] = 0; stickRun = false; centreKnob();
     hideWalkHint();
     if (savedCam) { yaw = savedCam.yaw; pitch = savedCam.pitch; dist = savedCam.dist;
       target[0] = savedCam.target[0]; target[1] = savedCam.target[1];
@@ -862,6 +1064,7 @@ function mountScene(canvas, labels, togglesEl) {
   function onWalkKey(e) {
     if (e.key === 'Escape') { e.preventDefault(); exitWalk(); return; }
     if (e.code === 'KeyE') { e.preventDefault(); toggleNearestDoor(); return; }
+    if (e.code === 'KeyC') { e.preventDefault(); cycleEye(); return; }
     const m = WALK_KEYS[e.code];
     if (m) { keys[m] = true; e.preventDefault(); }
     if (e.key === 'Shift') keys.run = true;
@@ -897,7 +1100,11 @@ function mountScene(canvas, labels, togglesEl) {
     if (!walking) return;
     const dt = Math.min(0.05, (now - walkLast) / 1000) || 0; walkLast = now;
     updateDoors(dt);   // resolve door open fractions first so collision agrees
+    updateStick(dt);   // fold the virtual thumbstick into the held-key state
     updateMove(dt);
+    // Ease the eye height toward the active preset over ~0.25 s so cycling glides.
+    walkEye += (walkEyeTarget - walkEye) * Math.min(1, dt * 4);
+    if (Math.abs(walkEye - walkEyeTarget) < 1e-3) walkEye = walkEyeTarget;
     draw();
     walkRAF = requestAnimationFrame(walkStep);
   }
@@ -966,8 +1173,9 @@ function mountScene(canvas, labels, togglesEl) {
     return live;
   }
 
-  // Slide a circle (radius WALK_R) out of every nearby wall/closed-door segment.
-  // Two passes so an inside corner resolves cleanly; only segments near the
+  // Slide a circle (radius WALK_R) out of every nearby wall/closed-door segment,
+  // then (when furniture collision is on) out of every fixture footprint rect.
+  // Two passes so an inside corner resolves cleanly; only segments/rects near the
   // current storey count.
   function collide(x, y) {
     const segs = liveSegments();
@@ -981,6 +1189,29 @@ function mountScene(canvas, labels, togglesEl) {
         let dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy);
         if (d < WALK_R) { if (d < 1e-6) { dx = 1; dy = 0; d = 1; }
           x = cx + dx / d * WALK_R; y = cy + dy / d * WALK_R; }
+      }
+      if (furniture) for (const r of walkFixtures) {
+        if (Math.abs(r[4] - wElev) > walkFF * 0.75) continue;
+        // Closest point on the axis-aligned rect [x,y,w,l], then push the circle
+        // out along the vector to it. Deep inside the rect (the player is already
+        // overlapping a fixture when collision toggles on) the push-out would jump
+        // more than ~2 ft — skip it so toggling furniture on never traps you.
+        const rx0 = r[0], ry0 = r[1], rx1 = r[0] + r[2], ry1 = r[1] + r[3];
+        const qx = Math.max(rx0, Math.min(x, rx1)), qy = Math.max(ry0, Math.min(y, ry1));
+        let dx = x - qx, dy = y - qy, d = Math.hypot(dx, dy);
+        if (d >= WALK_R) continue;             // circle clears the rect
+        if (d < 1e-6) {                        // centre inside: push to nearest edge
+          const dl = x - rx0, dr = rx1 - x, db = y - ry0, dtp = ry1 - y;
+          const m = Math.min(dl, dr, db, dtp);
+          if (m > 2.0) continue;               // deep inside — don't trap the player
+          if (m === dl) { dx = -1; dy = 0; } else if (m === dr) { dx = 1; dy = 0; }
+          else if (m === db) { dx = 0; dy = -1; } else { dx = 0; dy = 1; }
+          d = 1;
+          x = (dx < 0 ? rx0 : dx > 0 ? rx1 : x) + dx * WALK_R;
+          y = (dy < 0 ? ry0 : dy > 0 ? ry1 : y) + dy * WALK_R;
+        } else if (WALK_R - d <= 2.0) {        // shallow overlap: slide out
+          x = qx + dx / d * WALK_R; y = qy + dy / d * WALK_R;
+        }
       }
     }
     return [x, y];
@@ -1035,9 +1266,13 @@ function mountScene(canvas, labels, togglesEl) {
   // camera; `enterWalk`/`exitWalk` drive it. `walkTeleport` jumps the player to a
   // plan point (and optional yaw) with the floor resolved instantly — handy for a
   // host that wants to drop you in a chosen room, and for headless driving.
+  // `eyeHeight`/`furniture` report the live presets; the setters mirror the pills
+  // so a host (or a headless test) can drive them without synthesising pointers.
   function walkState() {
     return { walking, x: wpos[0], y: wpos[1], elevation: wElev,
-      yaw: wYaw, pitch: wPitch, eye: wElev + walkEye };
+      yaw: wYaw, pitch: wPitch, eye: wElev + walkEye,
+      eyeHeight: walkEye, eyeTarget: walkEyeTarget, eyeLabel: EYE_PRESETS[eyeIdx].label,
+      furniture, coarse };
   }
   function walkTeleport(x, y, yaw) {
     if (!walking) return;
@@ -1046,8 +1281,18 @@ function mountScene(canvas, labels, togglesEl) {
     let te = floorTarget(x, y); if (te == null) te = (wElev <= 0.08) ? 0 : wElev;
     wElev = te; draw();
   }
+  // Push a raw stick vector (forward, strafe in -1..1) for headless testing; the
+  // move step consumes it exactly as a live thumbstick would. `run` mirrors the
+  // rim threshold. A null/zero vector recentres.
+  function walkStick(fwd, strafe, run) {
+    coarse = true;                        // simulate a touch device
+    stickId = (fwd || strafe) ? 1 : null;
+    stickVec[0] = fwd || 0; stickVec[1] = strafe || 0;
+    stickRun = !!run;
+  }
 
-  return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport };
+  return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport,
+    walkStick, cycleEye, toggleFurniture };
 }
 """
 
