@@ -661,3 +661,70 @@ def test_renderer_has_the_ray_picking_and_identify_hooks():
     assert "rayFromPixel" in RENDERER_JS         # camera-derived ray
     assert "identityOf" in RENDERER_JS           # the "Wall / Roof / Door: <id>" labeller
     assert "CLICK_SLOP" in RENDERER_JS           # drag-vs-click movement threshold
+
+
+# --- Phase 6: sky / ground / fog / shadows + walk smoothing -------------------
+
+
+def test_renderer_has_the_sky_and_ground_hooks():
+    # A sky-gradient program + a JS-built ground plane + distance fog, all driven off
+    # the sun so the horizon and fog agree; toggled by a session flag.
+    assert "skyProg" in RENDERER_JS              # the second (sky) program
+    assert "drawSky" in RENDERER_JS              # the fullscreen gradient pass
+    assert "drawGround" in RENDERER_JS           # the ground-plane pass
+    assert "buildGround" in RENDERER_JS          # JS-generated ground geometry
+    assert "uFogColor" in RENDERER_JS            # distance-fog uniform
+    assert "computeAtmosphere" in RENDERER_JS    # sky/horizon/fog colours from the sun
+    assert "showGround" in RENDERER_JS           # session on/off flag
+    assert "setGround" in RENDERER_JS            # the toggle / test hook
+
+
+def test_renderer_has_the_ground_shadow_hooks():
+    # A planar projected shadow pass onto the ground, stencil-guarded against double
+    # darkening, driven by the live sun direction.
+    assert "drawShadows" in RENDERER_JS          # the shadow pass
+    assert "shadowMatrix" in RENDERER_JS         # planar flattening along the light
+    assert "uShadowColor" in RENDERER_JS         # the translucent dark uniform
+    assert "shProg" in RENDERER_JS               # the third (shadow) program
+    assert "STENCIL_TEST" in RENDERER_JS         # stencil avoids double-darkening
+    assert "stencil: true" in RENDERER_JS        # the context requests a stencil buffer
+    assert "SHADOW_LAYERS" in RENDERER_JS        # walls/roof/porches/frame cast
+    assert "POLYGON_OFFSET_FILL" in RENDERER_JS  # + z-offset vs the ground
+
+
+def test_renderer_has_the_walk_velocity_smoothing_hooks():
+    # Movement eases in/out via a smoothed velocity (no head-bob, collision intact).
+    assert "WALK_ACCEL_TAU" in RENDERER_JS       # ~0.15 s accelerate
+    assert "WALK_DECEL_TAU" in RENDERER_JS       # ~0.10 s decelerate
+    assert "wvel" in RENDERER_JS                 # the smoothed velocity vector
+    assert "0.15" in RENDERER_JS and "0.10" in RENDERER_JS
+
+
+def test_sky_ground_shadows_do_not_leak_into_glb_or_ifc_or_scene_nodes():
+    # The atmosphere is renderer-only: build_scene node names are unchanged apart
+    # from the new opening-trim nodes (`:frame`), so no ground/sky node reaches the
+    # glTF/IFC exports, and the exported bytes are untouched by building the scene.
+    import hashlib
+
+    from barndsl.gltf import build_scene, to_glb
+    from barndsl.ifc import to_ifc
+
+    plan = _plan(SIMPLE)
+    names = {n.name for n in build_scene(plan).nodes}
+    # No renderer-only atmosphere geometry ever becomes a scene node.
+    for banned in ("ground", "sky", "shadow"):
+        assert not any(banned in nm.lower() for nm in names), banned
+    # Every node name is a known architectural prefix (the trim rides the existing
+    # window:/door: opening names), so exports stay clean.
+    known = ("wall:", "room:", "slab:", "roof", "post:", "beam:", "porch:",
+             "stair:", "fixture:", "window:", "door:", "cased:", "opening:")
+    for nm in names:
+        assert nm.startswith(known), nm
+    # And the atmosphere never perturbs the export bytes.
+    g1 = hashlib.sha256(to_glb(plan)).hexdigest()
+    i1 = hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest()
+    from barndsl.viewer import scene_json
+
+    scene_json(build_scene(plan))
+    assert hashlib.sha256(to_glb(plan)).hexdigest() == g1
+    assert hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest() == i1

@@ -447,7 +447,10 @@ def _esc(s: str) -> str:
 # it is never run through str.format. Returns null when WebGL is unavailable.
 RENDERER_JS = r"""
 function mountScene(canvas, labels, togglesEl) {
-  const gl = canvas.getContext('webgl', {antialias: true});
+  // A stencil buffer is requested so the planar ground-shadow pass can mark each
+  // shadowed pixel once and never double-darken where projected triangles overlap
+  // (Phase 6). Falls back gracefully if the context has no stencil bits.
+  const gl = canvas.getContext('webgl', {antialias: true, stencil: true});
   if (!gl) {
     const msg = document.createElement('p');
     msg.style.cssText = 'padding:2em;font:16px sans-serif;color:#7a8494';
@@ -491,6 +494,28 @@ function mountScene(canvas, labels, togglesEl) {
   function translate(dx, dy, dz) {
     return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, dx, dy, dz, 1];
   }
+  // A planar-projection matrix (column-major) that flattens any point onto the
+  // ground plane y = planeY along the light direction L (glTF frame, surface->sun,
+  // so light travels -L). For a point P the shadow lands at
+  //   S = P - ((P.y - planeY) / L.y) * L                                   (i)
+  // A very low sun makes (P.y - planeY)/L.y huge and stretches shadows to the
+  // horizon; `maxLen` clamps the along-light travel so they stay bounded (the
+  // shader can't clamp per-vertex cheaply, so we soften L's downward slope toward a
+  // floor when the sun is low — the existing 5-degree altitude floor bounds L.y).
+  // Deterministic and exact for a normal-height sun; the clamp only bites near dusk.
+  function shadowMatrix(L, planeY) {
+    // Guard a near-horizontal light so we never divide by ~0; SUN_MIN_ALT already
+    // keeps L.y above ~sin(5deg)=0.087, but clamp defensively.
+    const ly = Math.max(L[1], 0.09);
+    const lx = L[0], lz = L[2];
+    // Column-major 4x4 implementing (i): S.x = x - (lx/ly)*(y-planeY), etc.
+    // Written so M * [x,y,z,1] gives [S.x, planeY, S.z, 1].
+    return [
+      1, 0, 0, 0,
+      -lx / ly, 0, -lz / ly, 0,
+      0, 0, 1, 0,
+      (lx / ly) * planeY, planeY, (lz / ly) * planeY, 1];
+  }
   // A dimension for a room-name toast: one decimal only when the value isn't a
   // whole number, so "14 x 16 ft" stays clean but "14.5" keeps its half. ASCII
   // only ("x", "sq ft") per the viewer's plain-text rule.
@@ -526,6 +551,11 @@ function mountScene(canvas, labels, togglesEl) {
     // dollhouse cutaway (default a huge value = no clip, so orbit's normal render
     // and walk mode both stay costless).
     + ' uniform vec3 uLightDir; uniform float uSunWarmth; uniform float uClipY;'
+    // Distance fog: fragments blend toward uFogColor (the sky horizon colour) as
+    // the eye-distance climbs from uFogNear to uFogFar, so the ground plane's far
+    // edge dissolves into the sky instead of showing a hard rim. uFogNear >= uFogFar
+    // (the JS default when fog is off) is a no-op.
+    + ' uniform vec3 uFogColor; uniform float uFogNear; uniform float uFogFar;'
     + ' void main(){'
     + '   if(vWorld.y > uClipY) discard;'
     + '   vec3 n=normalize(vN); vec3 an=abs(n); vec2 uv;'
@@ -557,7 +587,12 @@ function mountScene(canvas, labels, togglesEl) {
     + '   float spec=pow(max(dot(n,H),0.0),sh);'
     + '   vec3 specCol=mix(vec3(0.05),uColor,uMetal);'
     + '   col+=specCol*spec*(0.25+0.75*uMetal);'
-    + '   gl_FragColor=vec4(pow(min(col,vec3(1.4)), vec3(1.0/2.2)), 1.0);'
+    + '   vec3 outc=pow(min(col,vec3(1.4)), vec3(1.0/2.2));'
+    // Fold in distance fog after tone-mapping so the mix meets the (already
+    // gamma-space) sky gradient the sky pass drew. No-op when uFogFar<=uFogNear.
+    + '   float fog=clamp((length(uEye-vWorld)-uFogNear)/max(uFogFar-uFogNear,1e-3),0.0,1.0);'
+    + '   outc=mix(outc, uFogColor, fog);'
+    + '   gl_FragColor=vec4(outc, 1.0);'
     + ' }';
   function compileShader(type, src) { const s = gl.createShader(type);
     gl.shaderSource(s, src); gl.compileShader(s);
@@ -582,8 +617,64 @@ function mountScene(canvas, labels, togglesEl) {
   const uLightDir = gl.getUniformLocation(prog, 'uLightDir');
   const uSunWarmth = gl.getUniformLocation(prog, 'uSunWarmth');
   const uClipY = gl.getUniformLocation(prog, 'uClipY');
+  const uFogColor = gl.getUniformLocation(prog, 'uFogColor');
+  const uFogNear = gl.getUniformLocation(prog, 'uFogNear');
+  const uFogFar = gl.getUniformLocation(prog, 'uFogFar');
   gl.getExtension('OES_element_index_uint');
   gl.enable(gl.DEPTH_TEST);
+
+  // --- sky + ground-shadow programs (renderer-side atmosphere) --------------
+  // Two tiny extra programs keep the main single-pass shader clean: a fullscreen
+  // sky gradient drawn behind everything with depth writes off, and a flat dark
+  // pass that projects the shadow-casting layers onto the ground plane. Both are
+  // renderer-only — no scene geometry, nothing in the glTF/IFC exports.
+  //
+  // SKY: a full-screen triangle in clip space; the fragment lerps between a zenith
+  // and a horizon colour by screen height. Colours come from the sun model (day is
+  // a soft desaturated blue; as the sun sinks uSunWarmth warms the horizon amber),
+  // set each draw so sky, fog and lighting agree.
+  const skyVs = 'attribute vec2 aPos; varying vec2 vUv;'
+    + ' void main(){ vUv=aPos*0.5+0.5; gl_Position=vec4(aPos,0.999,1.0); }';
+  const skyFs = 'precision mediump float; varying vec2 vUv;'
+    + ' uniform vec3 uZenith; uniform vec3 uHorizon;'
+    + ' void main(){ float t=clamp(vUv.y,0.0,1.0);'
+    // ease the blend toward the horizon so the band sits low and natural.
+    + '   float m=pow(t,0.8);'
+    + '   gl_FragColor=vec4(mix(uHorizon,uZenith,m),1.0); }';
+  const skyProg = gl.createProgram();
+  gl.attachShader(skyProg, compileShader(gl.VERTEX_SHADER, skyVs));
+  gl.attachShader(skyProg, compileShader(gl.FRAGMENT_SHADER, skyFs));
+  gl.linkProgram(skyProg);
+  const skyAPos = gl.getAttribLocation(skyProg, 'aPos');
+  const uZenith = gl.getUniformLocation(skyProg, 'uZenith');
+  const uHorizon = gl.getUniformLocation(skyProg, 'uHorizon');
+  const skyBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+  // A single oversized triangle covering the viewport (cheaper than a quad).
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]),
+    gl.STATIC_DRAW);
+
+  // SHADOW: positions only, flattened onto the ground by uShadowMat (built each
+  // draw from the live sun direction), painted a single translucent dark colour.
+  // No texture, no lighting — the stencil buffer keeps overlaps from stacking.
+  const shVs = 'attribute vec3 aPos; uniform mat4 uMVP; uniform mat4 uShadowMat;'
+    + ' void main(){ gl_Position=uMVP*uShadowMat*vec4(aPos,1.0); }';
+  const shFs = 'precision mediump float; uniform vec4 uShadowColor;'
+    + ' void main(){ gl_FragColor=uShadowColor; }';
+  const shProg = gl.createProgram();
+  gl.attachShader(shProg, compileShader(gl.VERTEX_SHADER, shVs));
+  gl.attachShader(shProg, compileShader(gl.FRAGMENT_SHADER, shFs));
+  gl.linkProgram(shProg);
+  const shAPos = gl.getAttribLocation(shProg, 'aPos');
+  const shMVP = gl.getUniformLocation(shProg, 'uMVP');
+  const uShadowMat = gl.getUniformLocation(shProg, 'uShadowMat');
+  const uShadowColor = gl.getUniformLocation(shProg, 'uShadowColor');
+  const hasStencil = gl.getContextAttributes && gl.getContextAttributes().stencil;
+
+  // Which layers cast a ground shadow: the massing that reads as the building's
+  // silhouette. Floors/openings/fixtures/stairs are skipped (flat on the slab, or
+  // too fine to matter) so the pass stays one cheap redraw of ~4 layers.
+  const SHADOW_LAYERS = { walls: 1, roof: 1, porches: 1, frame: 1 };
 
   // --- procedural pattern textures ------------------------------------------
   // One detail map per pattern, drawn on an offscreen canvas (no network) and
@@ -650,6 +741,35 @@ function mountScene(canvas, labels, togglesEl) {
     return tex;
   }
 
+  // Build (or rebuild) the ground plane: one big quad at y=0, extending ~6x the
+  // scene radius around the scene centre so its rim is always past the fog's far
+  // edge. Positions + an up normal in the glTF frame; textured with the shared
+  // speckle map for a grass fleck. Renderer-only — never part of the scene nodes,
+  // so the glTF/IFC exports stay clean architecture.
+  function buildGround() {
+    const R = Math.max(60, radius * 6);
+    const cx = center[0], cz = center[2];       // glTF frame: y is up
+    const x0 = cx - R, x1 = cx + R, z0 = cz - R, z1 = cz + R;
+    // Two triangles, CCW from above (normal +y).
+    const pos = new Float32Array([
+      x0, 0, z0, x1, 0, z0, x1, 0, z1,
+      x0, 0, z0, x1, 0, z1, x0, 0, z1]);
+    const nrm = new Float32Array([
+      0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]);
+    if (!groundBuf) groundBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, groundBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+    if (!groundNorm) groundNorm = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, groundNorm);
+    gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.STATIC_DRAW);
+    groundCount = 6;
+    if (!groundTex) groundTex = patternTexture('speckle');
+    // Fog band: begins just past the scene, full by the ground's rim, so the plane
+    // edge dissolves into the horizon colour rather than cutting a hard line.
+    fogNear = radius * 2.2;
+    fogFar = R * 0.95;
+  }
+
   // --- state (survives setScene so the view/toggles persist on recompile) ---
   let nodes = [];
   let center = [0, 0, 0], radius = 1;
@@ -676,6 +796,7 @@ function mountScene(canvas, labels, togglesEl) {
   let walkEyeTarget = 5.5;         // eased eye-height target (preset cycling)
   let walking = false;
   const wpos = [0, 0];             // player plan position (x, y)
+  const wvel = [0, 0];             // player plan velocity (ft/s) — smoothed, Phase 6
   let wElev = 0;                   // current floor elevation (eased for smooth steps)
   let wYaw = 0, wPitch = 0;        // look angles (radians)
   const keys = {};                 // held movement keys {f,b,l,r,run}
@@ -727,6 +848,33 @@ function mountScene(canvas, labels, togglesEl) {
   let levelIdx = null;                  // isolated level index, or null = all levels
   let floorElevs = [];                  // sorted per-level elevations (ft) from walk.floors
 
+  // --- sky / ground / fog atmosphere (renderer-only) ------------------------
+  // Colours are recomputed in computeSun so the sky gradient, the distance fog and
+  // the ground all track the sun. Kept desaturated and architectural, not a game
+  // sky: a soft blue that warms at the horizon as the sun sinks. The ground is a
+  // muted grass green (its own speckle texture, built lazily) laid out ~6x the
+  // scene radius so its edge is always lost in fog. Shadows are a translucent dark.
+  let skyZenith = [0.42, 0.56, 0.72];   // upper sky colour
+  let skyHorizon = [0.78, 0.84, 0.90];  // horizon band colour (also the fog colour)
+  let groundTex = null;                  // lazily-built grass speckle texture
+  let groundBuf = null, groundNorm = null, groundCount = 0;  // ground plane GL data
+  const GROUND_COLOR = [0.40, 0.46, 0.34];  // muted grass green (linear-ish)
+  let fogNear = 1e9, fogFar = 1e9;      // eye-distance fog band (ft); off until sized
+  let showGround = true;                 // ground + sky + shadows on (session flag)
+
+  // Derive the sky/horizon/fog colours from the current sun altitude. Called from
+  // computeSun (which already has `alt`/`sunWarmth`). Desaturated on purpose.
+  function computeAtmosphere() {
+    const w = sunWarmth;                 // 0 high sun .. 1 low sun
+    // Zenith: a soft blue that deepens and cools very slightly toward dusk.
+    skyZenith = [0.40 - 0.06 * w, 0.55 - 0.10 * w, 0.74 - 0.10 * w];
+    // Horizon: pale by day, warming to amber as the sun sinks (mix toward a warm
+    // tone by warmth). This is also the fog colour so the two always agree.
+    const day = [0.80, 0.85, 0.90], dusk = [0.92, 0.72, 0.52];
+    skyHorizon = [day[0] + (dusk[0] - day[0]) * w,
+      day[1] + (dusk[1] - day[1]) * w, day[2] + (dusk[2] - day[2]) * w];
+  }
+
   // Compute lightDir + sunWarmth from the current (hours, season, latitude,
   // orientation). Standard simplified solar-position model: declination for the
   // season, hour angle 15 deg/hr from solar noon, then altitude/azimuth; the
@@ -760,6 +908,7 @@ function mountScene(canvas, labels, togglesEl) {
     // Warmth rises as the sun sinks: 0 above ~40 deg, ramping to 1 near the horizon.
     const altDeg = alt / D2R;
     sunWarmth = Math.max(0, Math.min(1, (40 - altDeg) / 35));
+    computeAtmosphere();   // sky/horizon/fog colours follow the sun
   }
   computeSun();
   // A "10:30" style clock label for the sun time-of-day slider (ASCII only).
@@ -848,6 +997,7 @@ function mountScene(canvas, labels, togglesEl) {
       // Vertical scene bounds drive the section-cut slider range (just above the
       // ground floor up to above the ridge). World Y is up in the glTF frame.
       sceneMinY = bmin[1]; sceneMaxY = bmax[1];
+      buildGround();   // (re)size the ground plane + fog band to the new scene
     }
     if (!framed && nodes.length) {  // frame once, then keep the user's view
       target[0] = center[0]; target[1] = center[1]; target[2] = center[2];
@@ -986,9 +1136,13 @@ function mountScene(canvas, labels, togglesEl) {
   function draw() {
     if (!hasScene) return;
     resize();
-    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    // Clear colour is a true no-op under the sky pass (which repaints every pixel);
+    // it only shows for the split-second before the first sky draw. Stencil is
+    // cleared for the shadow pass's single-darken mark.
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
     const aspect = canvas.width / Math.max(1, canvas.height);
-    let eye, view, proj;
+    let eye, view, proj, fill, clip;
     if (walking) {
       // First-person: eye at plan (x, y) lifted to the eased floor + eye height;
       // glTF frame is (x, up, -y). Near plane 0.1 ft so interiors don't clip, a
@@ -999,28 +1153,111 @@ function mountScene(canvas, labels, togglesEl) {
       const tgt = [eye[0] + dir[0], eye[1] + dir[1], eye[2] + dir[2]];
       proj = perspective(1.05, aspect, 0.1, Math.max(radius * 40, 300));
       view = lookAt(eye, tgt, [0, 1, 0]);
-      gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
-      gl.uniform3fv(uEye, new Float32Array(eye));
-      gl.uniform1f(uFill, WALK_FILL);   // eye-attached interior fill (walk only)
-      gl.uniform3fv(uLightDir, new Float32Array(lightDir));
-      gl.uniform1f(uSunWarmth, sunWarmth);
-      gl.uniform1f(uClipY, NO_CLIP);    // no section cut inside the model (walk)
-      drawNodes();
-      return;
+      fill = WALK_FILL;     // eye-attached interior fill (walk only)
+      clip = NO_CLIP;       // no section cut inside the model (walk)
+    } else {
+      eye = [
+        target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
+        target[1] + dist * Math.sin(pitch),
+        target[2] + dist * Math.cos(pitch) * Math.cos(yaw)];
+      proj = perspective(0.9, aspect, radius * 0.05, radius * 40);
+      view = lookAt(eye, target, [0, 1, 0]);
+      fill = 0.0;           // orbit: fill is a true no-op (identical pixels)
+      clip = clipY;         // section cut applies in orbit only
     }
-    eye = [
-      target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
-      target[1] + dist * Math.sin(pitch),
-      target[2] + dist * Math.cos(pitch) * Math.cos(yaw)];
-    proj = perspective(0.9, aspect, radius * 0.05, radius * 40);
-    view = lookAt(eye, target, [0, 1, 0]);
-    gl.uniformMatrix4fv(uMVP, false, new Float32Array(mul(proj, view)));
+    const mvp = new Float32Array(mul(proj, view));
+    // Atmosphere first: the sky gradient behind everything, then the ground plane,
+    // then the sun's ground shadow, then the model. All renderer-only.
+    if (showGround) drawSky();
+    // The main program's per-frame camera + sun + fog uniforms (shared by the
+    // ground draw and drawNodes).
+    gl.useProgram(prog);
+    gl.uniformMatrix4fv(uMVP, false, mvp);
     gl.uniform3fv(uEye, new Float32Array(eye));
-    gl.uniform1f(uFill, 0.0);           // orbit: fill is a true no-op (identical pixels)
+    gl.uniform1f(uFill, fill);
     gl.uniform3fv(uLightDir, new Float32Array(lightDir));
     gl.uniform1f(uSunWarmth, sunWarmth);
-    gl.uniform1f(uClipY, clipY);        // section cut applies in orbit only
+    gl.uniform1f(uClipY, clip);
+    // Fog agrees with the sky's horizon colour; off (near=far huge) when no ground.
+    gl.uniform3fv(uFogColor, new Float32Array(skyHorizon));
+    gl.uniform1f(uFogNear, showGround ? fogNear : 1e9);
+    gl.uniform1f(uFogFar, showGround ? fogFar : 1e9);
+    if (showGround) { drawGround(); drawShadows(mvp); gl.useProgram(prog); }
     drawNodes();
+  }
+
+  // Sky: a full-screen gradient behind the scene. Depth writes off + depth test
+  // off so it paints every pixel and the model/ground draw over it normally. The
+  // clip-space z (0.999) still parks it at the far plane conceptually.
+  function drawSky() {
+    gl.useProgram(skyProg);
+    gl.disable(gl.DEPTH_TEST); gl.depthMask(false);
+    gl.uniform3fv(uZenith, new Float32Array(skyZenith));
+    gl.uniform3fv(uHorizon, new Float32Array(skyHorizon));
+    gl.bindBuffer(gl.ARRAY_BUFFER, skyBuf);
+    gl.enableVertexAttribArray(skyAPos);
+    gl.vertexAttribPointer(skyAPos, 2, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true); gl.enable(gl.DEPTH_TEST);
+  }
+
+  // Ground: the muted-grass plane at y=0, drawn with the main program (so it gets
+  // the same lighting + distance fog as the model). Its normal is up, so the sun's
+  // diffuse reads on it; the speckle texture gives a grass fleck.
+  function drawGround() {
+    if (!groundCount) return;
+    gl.uniformMatrix4fv(uModel, false, new Float32Array(IDENTITY));
+    gl.uniform3fv(uColor, new Float32Array(GROUND_COLOR));
+    gl.uniform1f(uRough, 0.95); gl.uniform1f(uMetal, 0.0);
+    gl.uniform1f(uPatScale, 2.5);
+    if (groundTex) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, groundTex);
+      gl.uniform1i(uTex, 0); gl.uniform1f(uHasTex, 1.0); }
+    else gl.uniform1f(uHasTex, 0.0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, groundBuf);
+    gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, groundNorm);
+    gl.enableVertexAttribArray(aNorm); gl.vertexAttribPointer(aNorm, 3, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, groundCount);
+  }
+
+  // Ground shadows: re-draw the shadow-casting layers flattened onto y=0.005 along
+  // the live sun direction, in a translucent dark. The classic double-darkening
+  // where projected triangles overlap is solved with the STENCIL buffer: we mark a
+  // pixel the first time it is shadowed (stencil 0 -> 1) and reject it thereafter,
+  // so every shadowed pixel is darkened exactly once regardless of how many
+  // casters project onto it. A tiny y-offset (0.005) + polygonOffset avoids
+  // z-fighting with the ground plane. Moves live with the Phase 4 time/season
+  // slider because uShadowMat is rebuilt from lightDir every frame.
+  function drawShadows(mvp) {
+    if (!groundCount) return;
+    const smat = new Float32Array(shadowMatrix(lightDir, 0.005));
+    gl.useProgram(shProg);
+    gl.uniformMatrix4fv(shMVP, false, mvp);
+    gl.uniformMatrix4fv(uShadowMat, false, smat);
+    // A soft translucent dark; warms almost imperceptibly at dusk with the sky.
+    gl.uniform4fv(uShadowColor, new Float32Array([0.10, 0.11, 0.13, 0.28]));
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);                       // don't perturb the depth buffer
+    gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1.0, -1.0);
+    let stencilOn = false;
+    if (hasStencil) {
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.EQUAL, 0, 0xFF);       // draw only where not yet shadowed
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.INCR); // ...then mark it shadowed
+      stencilOn = true;
+    }
+    for (const nd of nodes) {
+      if (!SHADOW_LAYERS[nd.layer] || hidden[nd.layer]) continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, nd.pb);
+      gl.enableVertexAttribArray(shAPos);
+      gl.vertexAttribPointer(shAPos, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, nd.ib);
+      gl.drawElements(gl.TRIANGLES, nd.count, gl.UNSIGNED_INT, 0);
+    }
+    if (stencilOn) gl.disable(gl.STENCIL_TEST);
+    gl.disable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(0, 0);
+    gl.depthMask(true); gl.disable(gl.BLEND);
   }
 
   // The layer-respecting node draw, shared by the orbit and walk cameras (the
@@ -1447,6 +1684,7 @@ function mountScene(canvas, labels, togglesEl) {
     const f = sp.face || [0, 1];
     wYaw = Math.atan2(f[0], f[1]);                            // face into the house
     wPitch = 0;
+    wvel[0] = wvel[1] = 0;                                    // start from a standstill
     for (const k in keys) delete keys[k];
     for (const dr of walkDoors) for (const lf of dr.leaves) {
       lf.open = 0; lf.target = 0; lf.pinned = false;         // start every door shut
@@ -1692,8 +1930,15 @@ function mountScene(canvas, labels, togglesEl) {
     }
   }
 
-  // One movement tick: WASD relative to the look yaw, slide off walls, then ease
-  // the floor height under the (possibly stair-ramped) position.
+  // Velocity smoothing time constants (Phase 6): reach the input speed over ~0.15 s
+  // of acceleration; coast to a stop over ~0.1 s when input drops. Smoothing is on
+  // the *velocity* only — collision below is byte-for-byte the same slide, just fed
+  // the eased displacement — so a person eases in and out of a stride instead of a
+  // cart snapping on/off.
+  const WALK_ACCEL_TAU = 0.15, WALK_DECEL_TAU = 0.10;
+  // One movement tick: WASD relative to the look yaw, smooth toward the target
+  // velocity, slide off walls, then ease the floor height under the (possibly
+  // stair-ramped) position.
   function updateMove(dt) {
     const fx = Math.sin(wYaw), fy = Math.cos(wYaw);  // forward (plan)
     const rx = fy, ry = -fx;                          // right (plan)
@@ -1701,14 +1946,26 @@ function mountScene(canvas, labels, togglesEl) {
     if (keys.f) { mx += fx; my += fy; } if (keys.b) { mx -= fx; my -= fy; }
     if (keys.r) { mx += rx; my += ry; } if (keys.l) { mx -= rx; my -= ry; }
     const ml = Math.hypot(mx, my);
+    // Target velocity: the (normalised) input direction times the current speed, or
+    // zero when no key/stick is held. Accelerate toward it (tau 0.15 s) or
+    // decelerate to it (tau 0.10 s); an exponential approach framed per-dt.
+    let tvx = 0, tvy = 0;
     if (ml > 1e-6) {
       const spd = walkSpeed * (keys.run ? 2.5 : 1);
-      let nx = wpos[0] + (mx / ml) * spd * dt, ny = wpos[1] + (my / ml) * spd * dt;
+      tvx = (mx / ml) * spd; tvy = (my / ml) * spd;
+    }
+    const tau = (ml > 1e-6) ? WALK_ACCEL_TAU : WALK_DECEL_TAU;
+    const a = 1 - Math.exp(-dt / tau);               // eased blend factor for this dt
+    wvel[0] += (tvx - wvel[0]) * a;
+    wvel[1] += (tvy - wvel[1]) * a;
+    if (Math.hypot(wvel[0], wvel[1]) < 1e-3) { wvel[0] = 0; wvel[1] = 0; }
+    if (wvel[0] !== 0 || wvel[1] !== 0) {
+      let nx = wpos[0] + wvel[0] * dt, ny = wpos[1] + wvel[1] * dt;
       const slid = collide(nx, ny); nx = slid[0]; ny = slid[1];
       // Don't let a player walk off the slab into the void upstairs; grade
       // (elevation ~0) is open so you can step out an exterior door onto a porch.
       const ft = floorTarget(nx, ny);
-      if (ft == null && wElev > 0.08) { /* blocked: keep current position */ }
+      if (ft == null && wElev > 0.08) { wvel[0] = 0; wvel[1] = 0; /* blocked */ }
       else { wpos[0] = nx; wpos[1] = ny; }
     }
     let te = floorTarget(wpos[0], wpos[1]);
@@ -1830,6 +2087,9 @@ function mountScene(canvas, labels, togglesEl) {
     const rm = curRoomIdx >= 0 ? walkRooms[curRoomIdx] : null;
     return { walking, x: wpos[0], y: wpos[1], elevation: wElev,
       yaw: wYaw, pitch: wPitch, eye: wElev + walkEye,
+      // `speed` is the smoothed velocity magnitude (ft/s); a headless test watches
+      // it ramp over several ticks rather than jumping to full on the first frame.
+      vx: wvel[0], vy: wvel[1], speed: Math.hypot(wvel[0], wvel[1]),
       eyeHeight: walkEye, eyeTarget: walkEyeTarget, eyeLabel: EYE_PRESETS[eyeIdx].label,
       furniture, coarse, minimap: minimapOn,
       room: rm ? rm.name : null, roomLabel: rm ? rm.label : null };
@@ -1845,7 +2105,21 @@ function mountScene(canvas, labels, togglesEl) {
       orientation: sunOrient, latitude: sunLat,
       clipY: clipY, clipActive: clipY < NO_CLIP - 1, level: levelIdx,
       walking: walking,
+      // Atmosphere (Phase 6): the derived sky/horizon/ground colours + the fog band
+      // + the current ground-shadow projection matrix, so a headless test can check
+      // the horizon warms with the sun and the shadow flattening maps a raised point
+      // to the ground along the light. `showGround` reports the session toggle.
+      skyZenith: skyZenith.slice(), skyHorizon: skyHorizon.slice(),
+      groundColor: GROUND_COLOR.slice(), fogNear: fogNear, fogFar: fogFar,
+      showGround: showGround, shadowMat: shadowMatrix(lightDir, 0.005),
     };
+  }
+  // Toggle the sky+ground+shadow atmosphere (renderer-only; session flag). The test
+  // + a future host pill both drive it. Returns the new state.
+  function setGround(on) {
+    showGround = (on == null) ? !showGround : !!on;
+    draw();
+    return showGround;
   }
   function walkTeleport(x, y, yaw) {
     if (!walking) return;
@@ -2519,7 +2793,7 @@ function mountScene(canvas, labels, togglesEl) {
 
   return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport,
     walkStick, cycleEye, toggleFurniture, toggleMinimap,
-    setSun, setSection, setLevel, sunState,
+    setSun, setSection, setLevel, sunState, setGround,
     saveView, restoreView, playTour, stopTour, setMeasure, pick,
     parseHash, encodeHash, currentCamera, autoTourStops };
 }

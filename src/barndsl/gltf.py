@@ -82,6 +82,7 @@ from .materials import (
     PORCH_MATERIAL,
     SLAB_MATERIAL,
     STAIR_MATERIAL,
+    TRIM_MATERIAL,
     Material,
     floor_material,
     roof_material,
@@ -339,6 +340,12 @@ def _opening_boxes(wall: RevitWall, openings: list[RevitOpening], base: float) -
 _LEAF_THICKNESS = 0.15
 _GLASS_THICKNESS = 0.1
 _MULLION = 0.1  # square section of a window bar / a thin jamb casing
+#: Perimeter frame/casing around a window and the head+jamb trim of an exterior
+#: door: a slim band ~0.25 ft wide, proud of both wall faces by ~0.05 ft each side,
+#: in painted-trim material. Deterministic and subtle — a reveal, not a moulding
+#: profile — so the model reads as a finished house without over-modelling.
+_FRAME_WIDTH = 0.25       # how far the band reaches into the opening (along + up)
+_FRAME_PROUD = 0.05       # how far it stands proud of each wall face
 
 
 def _opening_span(wall: RevitWall, o: RevitOpening) -> tuple[float, float] | None:
@@ -374,6 +381,34 @@ def _panel_box(wall: RevitWall, a: float, b: float, z0: float, z1: float,
     if wall.orientation == "v":
         return Box(c - t / 2.0, a, z0, c + t / 2.0, b, z1)
     return Box(a, c - t / 2.0, z0, b, c + t / 2.0, z1)
+
+
+def _add_opening_frame(scene: Scene, wall: RevitWall, o: RevitOpening, name: str,
+                       a: float, b: float, z0: float, z1: float,
+                       sides: str = "all") -> None:
+    """Add a perimeter casing/frame around the opening rect ``[a,b] x [z0,z1]``.
+
+    Four slim boxes — head, sill and two jambs — each ``_FRAME_WIDTH`` ft wide and
+    standing ``_FRAME_PROUD`` ft proud of both wall faces, in the painted-trim
+    material. ``sides`` is ``"all"`` (a window's full casing) or ``"nosill"`` (an
+    exterior door's head + two jambs, no threshold band). One node per opening,
+    named ``<name>:frame``, on the ``openings`` layer, so it toggles with the rest
+    of the opening and exports as real trim. Deterministic; skipped if the opening
+    is too small to carry a frame.
+    """
+    fw = _FRAME_WIDTH
+    if b - a <= 2 * fw or z1 - z0 <= 2 * fw:
+        return  # opening too small to seat a casing without the bands overlapping
+    t = wall.thickness + 2 * _FRAME_PROUD
+    node = scene.node(f"{name}:frame", "openings", TRIM_MATERIAL)
+    add = node.add_box
+    # Jambs run the full opening height on each running-axis edge; the head (and,
+    # for a window, the sill) span the width between them.
+    add(_panel_box(wall, a, a + fw, z0, z1, t))          # near jamb
+    add(_panel_box(wall, b - fw, b, z0, z1, t))          # far jamb
+    add(_panel_box(wall, a + fw, b - fw, z1 - fw, z1, t))  # head casing
+    if sides != "nosill":
+        add(_panel_box(wall, a + fw, b - fw, z0, z0 + fw, t))  # sill / apron
 
 
 def _door_record(wall: RevitWall, o: RevitOpening, a: float, b: float,
@@ -458,9 +493,18 @@ def _add_opening_geometry(
         z1 = z0 + o.height
         if o.category == "window":
             _add_window(scene, wall, o, a, b, z0, z1)
-        elif o.category == "cased_opening":
+            continue
+        if o.category == "cased_opening":
             _add_cased_casing(scene, wall, o, a, b, z0, z1)
-        elif o.kind == "overhead":
+            continue
+        # An exterior door gets a painted head + jamb trim (no threshold band)
+        # proud of the wall, so the entry reads as cased like the windows. Interior
+        # doors keep only their leaf. Added before the leaf so the node order is
+        # frame-then-leaf, deterministically.
+        if o.exterior:
+            _add_opening_frame(scene, wall, o, f"door:{o.id}", a, b, z0, z1,
+                               sides="nosill")
+        if o.kind == "overhead":
             _add_overhead(scene, wall, o, a, b, z0, z1)
         elif o.kind in _SLIDE_KINDS:
             _add_slider(scene, wall, o, a, b, z0, z1, room_pt)
@@ -470,7 +514,9 @@ def _add_opening_geometry(
 
 def _add_window(scene: Scene, wall: RevitWall, o: RevitOpening,
                 a: float, b: float, z0: float, z1: float) -> None:
-    """A thin glazing pane centred in the wall, plus a centre cross of mullions."""
+    """A thin glazing pane centred in the wall, a centre cross of mullions, and a
+    perimeter casing frame proud of both wall faces so the window reads as framed."""
+    _add_opening_frame(scene, wall, o, f"window:{o.id}", a, b, z0, z1, sides="all")
     glass = scene.node(f"window:{o.id}:glass", "openings", GLASS_MATERIAL)
     glass.add_box(_panel_box(wall, a, b, z0, z1, _GLASS_THICKNESS))
     bars = scene.node(f"window:{o.id}:mullions", "openings", OPENING_MATERIAL)
@@ -752,10 +798,16 @@ def _add_walls(scene: Scene) -> None:
             hosted.setdefault(o.host_wall, []).append(o)
     plate = roof_plate(model)
     gl = gable_line(model)
-    wall_mat = wall_material(scene.plan)
+    # The exterior shell wears the plan's siding hint (ribbed metal by default); an
+    # interior partition is painted drywall, not corrugated steel. Split by the
+    # run's `exterior` flag — single-material boxes, so we don't split the interior
+    # face of an exterior wall, only whole partition runs (Phase 6 requirement A).
+    siding_mat = wall_material(scene.plan)
+    partition_mat = PALETTE["drywall"]
     for w in model.walls:
         base = elev.get(w.level, 0.0)
         ops = hosted.get(w.id, [])
+        wall_mat = siding_mat if w.exterior else partition_mat
         node = scene.node(f"wall:{w.id}", "walls", wall_mat)
         intervals = wall_top_intervals(w, model)
         for box in wall_solids(w, ops, base, intervals):

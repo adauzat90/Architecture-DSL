@@ -2723,6 +2723,10 @@ const THREE_TIPS = [
     'Winter / Equinox / Summer season toggle move the sun through the sky, honoring ' +
     'the plan orientation, so you can check daylight and shadow angles. It works in ' +
     'both orbit and walk mode.',
+  'A sky gradient, a grass ground plane and cast shadows sit under the model for a ' +
+    'client-ready view. Drag the Sun time slider and the ground shadows swing with it, ' +
+    'so you can show where the porch shade falls at, say, 5 pm in June; the sky and ' +
+    'the far ground haze warm toward sunset as the sun drops.',
   'Section cut (Section pill, top-right): a slider lowers a horizontal cut plane for ' +
     'a dollhouse view of the interior; at the top of the range clipping is off. On a ' +
     'multi-storey plan the All / L1 / L2 pills isolate a single level. The cut only ' +
