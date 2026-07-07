@@ -78,6 +78,10 @@ PALETTE: dict[str, Material] = {
     "drywall": Material("drywall", "#E7E3DA", 0.90, 0.0, "none", 1.0),
     "glass": Material("glass", "#AFC7D6", 0.10, 0.0, "none", 1.0),
     "timber_frame": Material("timber frame", "#8A5E2E", 0.70, 0.0, "plank", 1.2),
+    # A warm painted-wood door leaf — interior and exterior swing/slide leaves
+    # share it (a garage overhead door reads as ribbed metal, not this). The
+    # plank pattern gives a stile-and-rail hint at true scale.
+    "door_leaf": Material("door leaf", "#9A6B41", 0.60, 0.0, "plank", 0.9),
     # --- fixtures & furnishings ----------------------------------------------
     "porcelain": Material("porcelain", "#F3F4F2", 0.20, 0.0, "none", 1.0),
     "stainless": Material("stainless steel", "#C4C8CC", 0.35, 0.80, "none", 1.0),
@@ -102,6 +106,10 @@ STAIR_MATERIAL = PALETTE["wood_plank"]
 PORCH_MATERIAL = PALETTE["wood_plank"]
 #: The header/sill boxes over and under openings: a painted interior reveal.
 OPENING_MATERIAL = PALETTE["drywall"]
+#: The swinging/sliding door leaf, its jamb casing, and window mullions.
+DOOR_MATERIAL = PALETTE["door_leaf"]
+#: Window glazing — a translucent-reading pale blue pane.
+GLASS_MATERIAL = PALETTE["glass"]
 
 # --- fuzzy hint → material resolution ----------------------------------------
 

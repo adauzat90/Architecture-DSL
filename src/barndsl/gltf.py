@@ -70,11 +70,13 @@ from .constants import SLAB_THICKNESS
 from .elements import Barndominium, RoomType
 from .geometry import TOL
 from .materials import (
+    DOOR_MATERIAL,
     FIXTURE_FABRIC,
     FIXTURE_PORCELAIN,
     FIXTURE_STAINLESS,
     FIXTURE_WOOD,
     FRAME_MATERIAL,
+    GLASS_MATERIAL,
     OPENING_MATERIAL,
     PALETTE,
     PORCH_MATERIAL,
@@ -148,6 +150,11 @@ class MeshNode:
         self.positions: list[tuple[float, float, float]] = []
         self.normals: list[tuple[float, float, float]] = []
         self.indices: list[int] = []
+        #: Door-leaf animation record (hinge/dir/out/mode/width/height in plan
+        #: coords), attached only to a swinging/sliding/overhead leaf node so the
+        #: viewer can animate it independently. ``None`` on every static node —
+        #: the exported glTF bakes the closed geometry and ignores it entirely.
+        self.door: dict | None = None
 
     @property
     def empty(self) -> bool:
@@ -314,6 +321,231 @@ def _opening_boxes(wall: RevitWall, openings: list[RevitOpening], base: float) -
         if top - (base + head) > 1e-6:
             out.append(box(a, b, base + head, top))
     return out
+
+
+# --- opening leaves, panels and glazing (the "reads as a door/window" layer) --
+#
+# `_opening_boxes` (above) only adds the lintel/sill drywall reveals; the void is
+# an empty rectangle. This section fills that void with the recognisable part of
+# the opening — a door leaf, a garage panel, or a glazed window — so the model
+# reads as a house, not a wall with holes. Each *movable* leaf is its own node
+# carrying a `door` record (hinge/dir/out in plan coords) so the viewer's walk
+# mode can swing/slide/lift it independently; the exported glTF just bakes the
+# closed geometry and never reads the record.
+#
+# Everything is built CLOSED, in the wall plane, in plan space (the Scene's
+# transform sends it to the glTF frame). A thin leaf is ~0.15 ft, glazing ~0.1 ft.
+
+_LEAF_THICKNESS = 0.15
+_GLASS_THICKNESS = 0.1
+_MULLION = 0.1  # square section of a window bar / a thin jamb casing
+
+
+def _opening_span(wall: RevitWall, o: RevitOpening) -> tuple[float, float] | None:
+    """The opening's ``(lo, hi)`` along the wall's running axis, clamped, or None."""
+    lo, hi = wall.span
+    along = o.location[1] if wall.orientation == "v" else o.location[0]
+    a = max(lo, along - o.width / 2.0)
+    b = min(hi, along + o.width / 2.0)
+    return (a, b) if b - a > 1e-6 else None
+
+
+def _across_dir(wall: RevitWall) -> tuple[float, float]:
+    """A plan unit vector across the wall thickness (arbitrary but deterministic).
+
+    Vertical runs (const x) face east ``(1, 0)``; horizontal runs face north
+    ``(0, 1)``. The caller flips the sign toward the room a leaf swings into.
+    """
+    return (1.0, 0.0) if wall.orientation == "v" else (0.0, 1.0)
+
+
+def _slab_at(along: float, face: float, wall: RevitWall) -> tuple[float, float]:
+    """A plan ``(x, y)`` at running-axis position ``along`` and thickness offset ``face``."""
+    c = wall.const_coord
+    if wall.orientation == "v":
+        return (c + face, along)
+    return (along, c + face)
+
+
+def _panel_box(wall: RevitWall, a: float, b: float, z0: float, z1: float,
+               t: float) -> Box:
+    """A thin panel filling ``[a, b]`` of the run, ``t`` thick, from ``z0`` to ``z1``."""
+    c = wall.const_coord
+    if wall.orientation == "v":
+        return Box(c - t / 2.0, a, z0, c + t / 2.0, b, z1)
+    return Box(a, c - t / 2.0, z0, b, c + t / 2.0, z1)
+
+
+def _door_record(wall: RevitWall, o: RevitOpening, a: float, b: float,
+                 base: float, mode: str, hinge_far: bool,
+                 out: tuple[float, float]) -> dict:
+    """The per-leaf animation record: hinge/anchor point, latch direction, swing side.
+
+    ``hinge`` is the plan point of the hinge (swing) or the closed anchor edge
+    (slide/overhead); ``dir`` a plan unit vector from the hinge toward the latch
+    along the wall; ``out`` a plan unit vector across the wall toward the side the
+    leaf opens onto. The viewer rotates a swing leaf about ``hinge`` toward ``out``,
+    slides a panel along ``dir``, or lifts an overhead panel; all deterministic.
+    """
+    # Anchor at the low-coordinate end unless hinged "far"; dir points to the latch.
+    if hinge_far:
+        hx, hy = _slab_at(b, 0.0, wall)
+        dx, dy = _slab_at(a, 0.0, wall)
+    else:
+        hx, hy = _slab_at(a, 0.0, wall)
+        dx, dy = _slab_at(b, 0.0, wall)
+    length = math.hypot(dx - hx, dy - hy) or 1.0
+
+    def r(v: float) -> float:
+        # Round to 4 places and collapse a signed zero so the JSON is stable and
+        # never emits the noisy "-0.0".
+        return round(v, 4) + 0.0
+
+    return {
+        "id": o.id,
+        "mode": mode,
+        "hinge": [r(hx), r(hy)],
+        "dir": [r((dx - hx) / length), r((dy - hy) / length)],
+        "out": [r(out[0]), r(out[1])],
+        "width": r(b - a),
+        "height": r(o.height),
+    }
+
+
+def _swing_out(wall: RevitWall, o: RevitOpening, room_pt: dict) -> tuple[float, float]:
+    """The across-wall unit vector toward the side the leaf swings, deterministically.
+
+    An interior swing door with a known ``swing_into`` opens toward that room's
+    centre; otherwise (and for exterior doors, which swing inward toward their one
+    room) we pick the side of the room the door serves. With no room to consult we
+    fall back to the wall's arbitrary ``_across_dir``.
+    """
+    base = _across_dir(wall)
+    c = wall.const_coord
+    target = o.swing_into if o.swing_into else (o.rooms[0] if o.rooms else None)
+    pt = room_pt.get(target)
+    if pt is None:
+        return base
+    side = (pt[0] if wall.orientation == "v" else pt[1]) - c
+    sgn = 1.0 if side >= 0 else -1.0
+    return (base[0] * sgn, base[1] * sgn)
+
+
+_SWING_KINDS = frozenset({"swing", "exterior", "double", "french"})
+_SLIDE_KINDS = frozenset({"sliding", "pocket"})
+
+
+def _add_opening_geometry(
+    scene: Scene, wall: RevitWall, openings: list[RevitOpening], base: float,
+    room_pt: dict,
+) -> None:
+    """Fill each hosted opening's void: a window's glazing, or a door's leaf/panel.
+
+    Called once per wall run from :func:`_add_walls`, after the lintel/sill boxes.
+    Windows get a glazing pane plus a cross of mullions (so they don't read as
+    mirrors); swing doors get one leaf node per leaf (double/french two), each
+    with its own ``door`` animation record; sliding/pocket get one closed panel;
+    overhead a ribbed metal panel; cased openings get only a thin jamb casing.
+    Node order follows ``openings`` order — the caller passes them in model order —
+    so the whole scene stays deterministic.
+    """
+    for o in openings:
+        span = _opening_span(wall, o)
+        if span is None:
+            continue
+        a, b = span
+        z0 = base + o.sill
+        z1 = z0 + o.height
+        if o.category == "window":
+            _add_window(scene, wall, o, a, b, z0, z1)
+        elif o.category == "cased_opening":
+            _add_cased_casing(scene, wall, o, a, b, z0, z1)
+        elif o.kind == "overhead":
+            _add_overhead(scene, wall, o, a, b, z0, z1)
+        elif o.kind in _SLIDE_KINDS:
+            _add_slider(scene, wall, o, a, b, z0, z1, room_pt)
+        else:  # swing / exterior / double / french
+            _add_swing(scene, wall, o, a, b, z0, z1, room_pt)
+
+
+def _add_window(scene: Scene, wall: RevitWall, o: RevitOpening,
+                a: float, b: float, z0: float, z1: float) -> None:
+    """A thin glazing pane centred in the wall, plus a centre cross of mullions."""
+    glass = scene.node(f"window:{o.id}:glass", "openings", GLASS_MATERIAL)
+    glass.add_box(_panel_box(wall, a, b, z0, z1, _GLASS_THICKNESS))
+    bars = scene.node(f"window:{o.id}:mullions", "openings", OPENING_MATERIAL)
+    m = _MULLION
+    mid_along = (a + b) / 2.0
+    mid_z = (z0 + z1) / 2.0
+    # A vertical bar down the centre and a horizontal bar across it, each a thin
+    # square-section box a hair proud of the glass so it reads on both faces.
+    bars.add_box(_panel_box(wall, mid_along - m / 2.0, mid_along + m / 2.0, z0, z1,
+                            _GLASS_THICKNESS + 0.02))
+    bars.add_box(_panel_box(wall, a, b, mid_z - m / 2.0, mid_z + m / 2.0,
+                            _GLASS_THICKNESS + 0.02))
+
+
+def _add_cased_casing(scene: Scene, wall: RevitWall, o: RevitOpening,
+                      a: float, b: float, z0: float, z1: float) -> None:
+    """A thin jamb + head casing around a leafless cased opening (no leaf, no panel)."""
+    node = scene.node(f"cased:{o.id}:casing", "openings", DOOR_MATERIAL)
+    m = _MULLION
+    t = wall.thickness + 0.05  # wrap slightly proud of both wall faces
+    node.add_box(_panel_box(wall, a, a + m, z0, z1, t))          # near jamb
+    node.add_box(_panel_box(wall, b - m, b, z0, z1, t))          # far jamb
+    node.add_box(_panel_box(wall, a, b, z1 - m, z1, t))          # head casing
+
+
+def _add_swing(scene: Scene, wall: RevitWall, o: RevitOpening,
+               a: float, b: float, z0: float, z1: float, room_pt: dict) -> None:
+    """One leaf node per leaf, closed in the wall plane, each with a ``door`` record.
+
+    Single doors hinge at the ``hinge`` end (``"near"`` = low-coordinate end,
+    the default); double/french split into two half-width leaves hinged at
+    opposite jambs. French leaves carry the glass pane material so they read as
+    a glazed pair. Each leaf's record lets the viewer swing it about its own hinge.
+    """
+    out = _swing_out(wall, o, room_pt)
+    double = o.kind in ("double", "french")
+    glassy = o.kind == "french"
+    leaf_mat = GLASS_MATERIAL if glassy else DOOR_MATERIAL
+    if double:
+        mid = (a + b) / 2.0
+        # Leaf 0 hinges at the near jamb; leaf 1 at the far jamb (mirror hinge).
+        _swing_leaf(scene, wall, o, a, mid, z0, z1, leaf_mat, out,
+                    hinge_far=False, suffix=":leaf0")
+        _swing_leaf(scene, wall, o, mid, b, z0, z1, leaf_mat, out,
+                    hinge_far=True, suffix=":leaf1")
+    else:
+        hinge_far = o.hinge == "far"
+        _swing_leaf(scene, wall, o, a, b, z0, z1, leaf_mat, out,
+                    hinge_far=hinge_far, suffix=":leaf")
+
+
+def _swing_leaf(scene: Scene, wall: RevitWall, o: RevitOpening,
+                a: float, b: float, z0: float, z1: float, mat: Material,
+                out: tuple[float, float], hinge_far: bool, suffix: str) -> None:
+    node = scene.node(f"door:{o.id}{suffix}", "openings", mat)
+    node.add_box(_panel_box(wall, a, b, z0, z1, _LEAF_THICKNESS))
+    node.door = _door_record(wall, o, a, b, o.sill, "swing", hinge_far, out)
+
+
+def _add_slider(scene: Scene, wall: RevitWall, o: RevitOpening,
+                a: float, b: float, z0: float, z1: float, room_pt: dict) -> None:
+    """A single sliding/pocket panel, closed across the opening (mode ``"slide"``)."""
+    node = scene.node(f"door:{o.id}:panel", "openings", DOOR_MATERIAL)
+    node.add_box(_panel_box(wall, a, b, z0, z1, _LEAF_THICKNESS))
+    node.door = _door_record(wall, o, a, b, o.sill, "slide", False,
+                             _swing_out(wall, o, room_pt))
+
+
+def _add_overhead(scene: Scene, wall: RevitWall, o: RevitOpening,
+                  a: float, b: float, z0: float, z1: float) -> None:
+    """A single ribbed-metal garage panel filling the opening (mode ``"overhead"``)."""
+    node = scene.node(f"door:{o.id}:panel", "openings", PALETTE["metal_siding"])
+    node.add_box(_panel_box(wall, a, b, z0, z1, _LEAF_THICKNESS))
+    node.door = _door_record(wall, o, a, b, o.sill, "overhead", False,
+                             _across_dir(wall))
 
 
 def _gable_infill(node: MeshNode, wall: RevitWall, base: float) -> None:
@@ -512,6 +744,8 @@ def _add_floors(scene: Scene) -> None:
 def _add_walls(scene: Scene) -> None:
     model = scene.model
     elev = {lvl.index: lvl.elevation for lvl in model.levels}
+    # Room centres, for deciding which way a leaf swings (toward its room).
+    room_pt = {r.id: r.point for r in model.rooms}
     hosted: dict[str, list[RevitOpening]] = {}
     for o in model.openings:
         if o.host_wall is not None:
@@ -541,6 +775,10 @@ def _add_walls(scene: Scene) -> None:
             onode = scene.node(f"opening:{w.id}", "openings", OPENING_MATERIAL)
             for box in lintels:
                 onode.add_box(box)
+        # The recognisable part of each opening — glazing, a door leaf, a garage
+        # panel — also rides the openings layer (movable leaves carry a `door`
+        # record for the walk-mode animation).
+        _add_opening_geometry(scene, w, ops, base, room_pt)
 
 
 def _add_frame(scene: Scene) -> None:

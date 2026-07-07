@@ -2772,7 +2772,37 @@ const THREE_TIPS = [
   'Walk mode: on the 3D tab, click Walk (or press Enter) to step inside at eye height.',
   'WASD or the arrow keys move relative to where you look; the mouse looks around; ' +
     'Shift runs. You slide along walls and pass through doorways.',
+  'On a touch device (iPad), a thumbstick appears bottom-left to move while a ' +
+    'second finger drags to look; push the stick to its rim to run. Tap the Exit ' +
+    'pill to leave (there is no Esc).',
+  'Eye-height pill (or the C key) cycles Standing / Seated (ADA sightlines) / ' +
+    'Child so you can check what each sees. The Furniture pill toggles whether you ' +
+    'bump into fixtures or ghost through them.',
+  'A north-up mini-map sits top-right showing the current storey, the walls and a ' +
+    'view cone for where you are looking; press M to hide or show it. As you cross ' +
+    'into a room its name, size and area toast briefly (e.g. "Primary Bedroom - ' +
+    '14 x 16 ft - 224 sq ft").',
   'Walk up the stairs to reach the upper floor; Esc (or leaving the tab) exits back to orbit.',
+  'Sun study (Sun pill, top-right): a time-of-day slider (6:00-18:00) and a ' +
+    'Winter / Equinox / Summer season toggle move the sun through the sky, honoring ' +
+    'the plan orientation, so you can check daylight and shadow angles. It works in ' +
+    'both orbit and walk mode.',
+  'Section cut (Section pill, top-right): a slider lowers a horizontal cut plane for ' +
+    'a dollhouse view of the interior; at the top of the range clipping is off. On a ' +
+    'multi-storey plan the All / L1 / L2 pills isolate a single level. The cut only ' +
+    'applies in orbit view (you are inside the model in walk mode).',
+  'Views (Views pill, top-right): Save view snapshots the current orbit or walk ' +
+    'camera into a named list you can rename, delete or click to jump back to; Copy ' +
+    'link writes a compact camera state into the URL and copies it so you can share ' +
+    'the exact shot.',
+  'Guided tour (in the Views popover): with 2+ saved views it plays them in order, ' +
+    'easing orbit cameras and dwelling in walk views with a slow look-around; with no ' +
+    'saved views Auto tour walks the rooms largest-first. Esc or any input stops it.',
+  'Measure (Measure pill, both modes): click two points on the model for the distance ' +
+    'in feet, plus the horizontal component when the ends differ in height; Esc or the ' +
+    'pill clears it.',
+  'Click any surface (when Measure is off, in orbit) to identify it - a brief toast ' +
+    'names the wall, roof, door, fixture or room floor and its material.',
 ];
 
 //: Edit-mode direct-manipulation tips (drag behaviours), shown in the help panel.
