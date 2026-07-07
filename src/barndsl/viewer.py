@@ -131,6 +131,11 @@ def _walk_block(scene: Scene) -> dict:
       catalog kind). The JS collides the player circle against these rects when the
       furniture-collision toggle is on, using the same storey-elevation filter as
       the walls, so bumping into a sofa or kitchen island is felt.
+    * ``rooms`` — one ``{id, name, x, y, w, l, elevation, level, area}`` per model
+      room (its axis-aligned rectangle, the level floor elevation, the display
+      name schedules show, and the plan area). The JS draws faint room outlines on
+      the mini-map and point-in-rects the player against them for the room-name
+      toast; ``elevation`` lets it filter to the player's current storey.
     * ``spawn`` — ``{x, y, elevation, face}`` a start point just inside the main
       entry door (facing into the house) if one exists, else the centroid of the
       largest ground-floor room.
@@ -242,6 +247,24 @@ def _walk_block(scene: Scene) -> dict:
         for fx in model.fixtures
     ]
 
+    # --- rooms: labelled rectangles for the mini-map + room-name toast --------
+    # One rect per model room, in model order (deterministic). ``name`` is the
+    # room's *display* name — the same string the schedules show — so a toast reads
+    # "Primary Bedroom", not "primary_bedroom"; RevitRoom.name already resolves the
+    # label-or-title-cased-id fallback (see revit.py's `to_revit_model`). The
+    # elevation is the room's level floor, so the JS filters rooms to the player's
+    # current storey exactly as it does walls and fixtures.
+    rooms = [
+        {
+            "id": r.id, "name": r.name,
+            "x": round(r.x, 4), "y": round(r.y, 4),
+            "w": round(r.width, 4), "l": round(r.length, 4),
+            "elevation": round(elev.get(r.level, 0.0), 4),
+            "level": r.level, "area": round(r.area, 4),
+        }
+        for r in model.rooms
+    ]
+
     return {
         "eyeHeight": WALK_EYE_HEIGHT,
         "spawn": _walk_spawn(model, elev),
@@ -250,6 +273,7 @@ def _walk_block(scene: Scene) -> dict:
         "floors": floors,
         "stairs": stairs,
         "fixtures": fixtures,
+        "rooms": rooms,
     }
 
 
@@ -439,6 +463,13 @@ function mountScene(canvas, labels, togglesEl) {
   function translate(dx, dy, dz) {
     return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, dx, dy, dz, 1];
   }
+  // A dimension for a room-name toast: one decimal only when the value isn't a
+  // whole number, so "14 x 16 ft" stays clean but "14.5" keeps its half. ASCII
+  // only ("x", "sq ft") per the viewer's plain-text rule.
+  function fmtFt(v) {
+    const r = Math.round(v);
+    return Math.abs(v - r) < 0.05 ? String(r) : v.toFixed(1);
+  }
 
   // --- shader ---------------------------------------------------------------
   // World-space position and normal go to the fragment stage; the base colour is
@@ -594,6 +625,9 @@ function mountScene(canvas, labels, togglesEl) {
   let walkSegs = [];               // [x0,y0,x1,y1,elevation] collision segments (flat, fast)
   let walkDoors = [];              // per door: {id, seg:[x0,y0,x1,y1,elev], mid:[x,y], node}
   let walkFixtures = [];           // [x,y,w,l,elevation] fixture footprint rects (flat, fast)
+  let walkRooms = [];              // per room: {x,y,w,l,elevation,level,name,area,area2} for map + toast
+  let minimapOn = true;            // mini-map HUD shown (M toggles; session-only, no persistence)
+  let curRoomIdx = -1;             // index into walkRooms of the room the player is in (-1 = none)
   let walkFF = 10;                 // floor-to-floor (ft) — filters walls to the current storey
   let walkEye = 5.5, walkSpeed = 4;
   let walkEyeTarget = 5.5;         // eased eye-height target (preset cycling)
@@ -668,6 +702,17 @@ function mountScene(canvas, labels, togglesEl) {
       walkSegs = (walk.segments || []).map(s => [s.x0, s.y0, s.x1, s.y1, s.elevation]);
       // Fixture footprints for optional furniture collision: [x, y, w, l, elev].
       walkFixtures = (walk.fixtures || []).map(f => [f.x, f.y, f.w, f.l, f.elevation]);
+      // Room rects for the mini-map + name toast. Keep the label and area; `area2`
+      // is the rect area used only to break point-in-rect ties (a closet inside a
+      // bedroom, both containing the point, wins by smallest area) — kept local so
+      // a zero authored `area` never mis-ranks. `label` is the toast text.
+      walkRooms = (walk.rooms || []).map(r => ({
+        x: r.x, y: r.y, w: r.w, l: r.l, elevation: r.elevation, level: r.level,
+        name: r.name, area: r.area, area2: Math.abs(r.w * r.l),
+        label: r.name + ' - ' + fmtFt(r.w) + ' x ' + fmtFt(r.l) + ' ft - '
+          + fmtFt(r.area) + ' sq ft',
+      }));
+      curRoomIdx = -1;
       const evs = (walk.floors || []).map(f => f.elevation).sort((a, b) => a - b);
       walkFF = 10;
       for (let i = 1; i < evs.length; i++) { const g = evs[i] - evs[i - 1];
@@ -688,7 +733,7 @@ function mountScene(canvas, labels, togglesEl) {
         leaves: nodes.filter(n => n.door && n.door.id === d.id),
       }));
     } else {
-      walkDoors = []; walkFixtures = [];
+      walkDoors = []; walkFixtures = []; walkRooms = []; curRoomIdx = -1;
     }
     updateWalkUI();
     buildToggles(scene.layers || []);
@@ -868,10 +913,49 @@ function mountScene(canvas, labels, togglesEl) {
     + '"Segoe UI",Helvetica,Arial,sans-serif;padding:7px 15px;border-radius:20px;'
     + 'background:rgba(20,24,30,.84);color:#eef1f4;white-space:nowrap;';
   walkHint.textContent = 'WASD / joystick move · look · E doors · C eye height · '
-    + 'Shift run · Esc exit';
+    + 'M map · Shift run · Esc exit';
   if (host.style && getComputedStyle(host).position === 'static') host.style.position = 'relative';
   host.appendChild(walkBtn); host.appendChild(walkHint);
   let hintTimer = null;
+
+  // A room-name toast: a *second* pill (the walk hint still fires on entry) that
+  // reuses the hint's dark-pill look, shown when the player crosses into a room.
+  // It sits just above the hint's baseline so the two never overlap. pointer-events
+  // off so it never eats a canvas drag. `roomToast` fades in, holds, fades out.
+  const roomToast = document.createElement('div');
+  roomToast.style.cssText = 'position:absolute;bottom:90px;left:50%;'
+    + 'transform:translateX(-50%);z-index:6;pointer-events:none;opacity:0;'
+    + 'transition:opacity .3s;font:600 12px -apple-system,BlinkMacSystemFont,'
+    + '"Segoe UI",Helvetica,Arial,sans-serif;padding:7px 15px;border-radius:20px;'
+    + 'background:rgba(20,24,30,.84);color:#eef1f4;white-space:nowrap;';
+  host.appendChild(roomToast);
+  let toastTimer = null;
+
+  // The mini-map HUD: a 2D-canvas inset in the TOP-RIGHT corner (clear of every
+  // other overlay in both hosts — the Layers panel is top-left, the Walk/Eye/
+  // Furniture pills bottom-right, the snapshot pill bottom-left, the hint
+  // bottom-center). North-up, fixed orientation. Hidden outside walk mode and when
+  // toggled off with M. The 2D context is grabbed once (not per frame); the canvas
+  // is sized in setMinimapSize so it stays crisp on hi-dpi.
+  const MAP_CSS = 172;               // css px (the inset is square)
+  const minimap = document.createElement('canvas');
+  minimap.title = 'Mini-map (M to toggle)';
+  minimap.style.cssText = 'position:absolute;top:12px;right:12px;z-index:6;'
+    + 'width:' + MAP_CSS + 'px;height:' + MAP_CSS + 'px;border-radius:10px;'
+    + 'pointer-events:none;display:none;'
+    + 'background:rgba(255,255,255,.12);border:1px solid rgba(140,150,165,.4);'
+    + 'box-shadow:0 2px 10px rgba(20,30,50,.18);-webkit-backdrop-filter:blur(6px);'
+    + 'backdrop-filter:blur(6px);';
+  host.appendChild(minimap);
+  const mapCtx = minimap.getContext('2d');
+  let mapDpr = 0;                    // last device-pixel-ratio the canvas was sized for
+  function setMinimapSize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (mapDpr === dpr && minimap.width) return;   // already correctly sized
+    mapDpr = dpr;
+    minimap.width = Math.round(MAP_CSS * dpr);
+    minimap.height = Math.round(MAP_CSS * dpr);
+  }
 
   // --- walk-mode control pills (eye height + furniture), shown only in walk ---
   // Same pill look as walkBtn (see its cssText); they sit just left of the
@@ -1016,6 +1100,8 @@ function mountScene(canvas, labels, togglesEl) {
     stickId = null; stickVec[0] = stickVec[1] = 0; stickRun = false; centreKnob();
     if (coarse) stickBase.style.display = '';   // thumbstick on touch devices
     showWalkHint();
+    curRoomIdx = -1; checkRoom();   // toast the spawn room if we start inside one
+    drawMinimap();                  // paint the HUD immediately, before the first tick
     document.addEventListener('keydown', onWalkKey, true);
     document.addEventListener('keyup', onWalkKeyUp, true);
     document.addEventListener('mousemove', onLockMouse);
@@ -1046,6 +1132,7 @@ function mountScene(canvas, labels, togglesEl) {
     stickBase.style.display = 'none'; stickId = null;
     stickVec[0] = stickVec[1] = 0; stickRun = false; centreKnob();
     hideWalkHint();
+    minimap.style.display = 'none'; hideRoomToast(); curRoomIdx = -1;
     if (savedCam) { yaw = savedCam.yaw; pitch = savedCam.pitch; dist = savedCam.dist;
       target[0] = savedCam.target[0]; target[1] = savedCam.target[1];
       target[2] = savedCam.target[2]; }
@@ -1065,6 +1152,7 @@ function mountScene(canvas, labels, togglesEl) {
     if (e.key === 'Escape') { e.preventDefault(); exitWalk(); return; }
     if (e.code === 'KeyE') { e.preventDefault(); toggleNearestDoor(); return; }
     if (e.code === 'KeyC') { e.preventDefault(); cycleEye(); return; }
+    if (e.code === 'KeyM') { e.preventDefault(); toggleMinimap(); return; }
     const m = WALK_KEYS[e.code];
     if (m) { keys[m] = true; e.preventDefault(); }
     if (e.key === 'Shift') keys.run = true;
@@ -1096,6 +1184,117 @@ function mountScene(canvas, labels, togglesEl) {
   function hideWalkHint() { walkHint.style.opacity = '0';
     if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; } }
 
+  // === room detection + name toast =========================================
+  // The room containing plan point (x, y) on the player's current storey, as an
+  // index into walkRooms (-1 = none: porch / outside every rect). Ties — a closet
+  // nested in a bedroom, both containing the point — go to the SMALLEST rect so
+  // the tightest enclosing room wins. Only rooms near the current elevation count,
+  // using the same storey filter the walls/fixtures use.
+  function roomAt(x, y) {
+    let best = -1, bestA = Infinity;
+    for (let i = 0; i < walkRooms.length; i++) {
+      const r = walkRooms[i];
+      if (Math.abs(r.elevation - wElev) > walkFF * 0.75) continue;
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.l) {
+        if (r.area2 < bestA) { bestA = r.area2; best = i; }
+      }
+    }
+    return best;
+  }
+  // Fire a toast only when the player *crosses* into a different room; re-entering
+  // the same room without leaving it first is silent, and stepping out into a
+  // porch/outside (idx -1) clears the tracker but shows nothing.
+  function checkRoom() {
+    const idx = roomAt(wpos[0], wpos[1]);
+    if (idx === curRoomIdx) return;
+    curRoomIdx = idx;
+    if (idx >= 0) showRoomToast(walkRooms[idx].label);
+  }
+  function showRoomToast(text) {
+    roomToast.textContent = text;
+    roomToast.style.opacity = '1';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { roomToast.style.opacity = '0'; }, 2000);
+  }
+  function hideRoomToast() {
+    roomToast.style.opacity = '0';
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+  }
+
+  // === mini-map HUD ========================================================
+  // Draw the current storey (walls with door gaps + faint room outlines) into the
+  // top-right inset, north-up, with the player as a dot + a ~60-degree view cone
+  // rotated by wYaw. Auto-fits the storey's segment/room bounds into the inset with
+  // a small padding. Cheap: at most a few hundred short strokes; nothing is
+  // allocated per frame beyond a few numbers. Colors are rgba so they read on both
+  // the light and the prefers-color-scheme dark viewer themes.
+  function nearElev(e) { return Math.abs(e - wElev) <= walkFF * 0.75; }
+  function drawMinimap() {
+    if (!minimapOn || !walk) { minimap.style.display = 'none'; return; }
+    minimap.style.display = '';
+    setMinimapSize();
+    const S = minimap.width, ctx = mapCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, S, S);
+    // Fit the current storey's walls + rooms into the inset. Gather bounds in plan
+    // feet; if the storey is empty (shouldn't happen mid-walk) bail after clearing.
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    for (const s of walkSegs) { if (!nearElev(s[4])) continue;
+      minx = Math.min(minx, s[0], s[2]); maxx = Math.max(maxx, s[0], s[2]);
+      miny = Math.min(miny, s[1], s[3]); maxy = Math.max(maxy, s[1], s[3]); }
+    for (const r of walkRooms) { if (!nearElev(r.elevation)) continue;
+      minx = Math.min(minx, r.x); maxx = Math.max(maxx, r.x + r.w);
+      miny = Math.min(miny, r.y); maxy = Math.max(maxy, r.y + r.l); }
+    if (!(maxx > minx) || !(maxy > miny)) return;
+    const pad = 12 * mapDpr;                        // inset padding (device px)
+    const spanx = maxx - minx, spany = maxy - miny;
+    const sc = Math.min((S - 2 * pad) / spanx, (S - 2 * pad) / spany);
+    const ox = (S - sc * spanx) / 2, oy = (S - sc * spany) / 2;
+    // Plan (x east, y north) -> canvas: x right, y UP (north-up), so flip Y. The
+    // map never rotates with the player; only the view cone rotates.
+    const px = x => ox + (x - minx) * sc;
+    const py = y => S - (oy + (y - miny) * sc);
+    // 1. Room outlines, faint (drawn under the walls).
+    ctx.lineWidth = Math.max(1, mapDpr);
+    ctx.strokeStyle = 'rgba(150,160,175,.5)';
+    for (const r of walkRooms) { if (!nearElev(r.elevation)) continue;
+      ctx.strokeRect(px(r.x), py(r.y + r.l), r.w * sc, r.l * sc); }
+    // 2. Walls (already door-punched in walkSegs) plus every *closed* door span as
+    // a thin mark; an open door leaves its gap. Neutral line that reads on both
+    // themes. Batched into one path so it's a single stroke call.
+    ctx.strokeStyle = 'rgba(120,132,150,.95)';
+    ctx.lineWidth = Math.max(1.5, 1.5 * mapDpr);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (const s of walkSegs) { if (!nearElev(s[4])) continue;
+      ctx.moveTo(px(s[0]), py(s[1])); ctx.lineTo(px(s[2]), py(s[3])); }
+    ctx.stroke();
+    // Closed-door spans as a lighter thin mark (an open door shows a gap instead).
+    ctx.strokeStyle = 'rgba(120,132,150,.5)';
+    ctx.lineWidth = Math.max(1, mapDpr);
+    ctx.beginPath();
+    for (const dr of walkDoors) { if (!nearElev(dr.elevation)) continue;
+      const shut = dr.leaves.length && dr.leaves.some(lf => lf.open < 0.5);
+      if (!shut) continue;
+      ctx.moveTo(px(dr.seg[0]), py(dr.seg[1])); ctx.lineTo(px(dr.seg[2]), py(dr.seg[3])); }
+    ctx.stroke();
+    // 3. The player: a ~60-degree view cone (matching the walk FOV) rotated by
+    // wYaw, then a dot. Plan yaw 0 faces +y (north); a plan direction (sin, cos)
+    // maps to canvas (right = +x, up = +y with the Y flip). Cone length is a small
+    // fraction of the inset so it reads without swamping the map.
+    const cx = px(wpos[0]), cy = py(wpos[1]);
+    const cone = S * 0.16, half = 30 * Math.PI / 180;   // 60-degree total spread
+    function dirPt(ang, len) {                          // plan yaw -> canvas point
+      return [cx + Math.sin(ang) * len, cy - Math.cos(ang) * len]; }
+    const pL = dirPt(wYaw - half, cone), pR = dirPt(wYaw + half, cone);
+    ctx.fillStyle = 'rgba(209,135,63,.28)';             // the viewer's accent, faint
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(pL[0], pL[1]); ctx.lineTo(pR[0], pR[1]); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(209,135,63,1)';
+    ctx.beginPath(); ctx.arc(cx, cy, Math.max(2.5, 3 * mapDpr), 0, 2 * Math.PI); ctx.fill();
+  }
+  function toggleMinimap() { minimapOn = !minimapOn; drawMinimap(); }
+
   function walkStep(now) {
     if (!walking) return;
     const dt = Math.min(0.05, (now - walkLast) / 1000) || 0; walkLast = now;
@@ -1106,6 +1305,8 @@ function mountScene(canvas, labels, togglesEl) {
     walkEye += (walkEyeTarget - walkEye) * Math.min(1, dt * 4);
     if (Math.abs(walkEye - walkEyeTarget) < 1e-3) walkEye = walkEyeTarget;
     draw();
+    checkRoom();       // toast on crossing into a new room (cheap point-in-rects)
+    drawMinimap();     // redraw the HUD inset (also cheap; skips when off/hidden)
     walkRAF = requestAnimationFrame(walkStep);
   }
 
@@ -1269,10 +1470,12 @@ function mountScene(canvas, labels, togglesEl) {
   // `eyeHeight`/`furniture` report the live presets; the setters mirror the pills
   // so a host (or a headless test) can drive them without synthesising pointers.
   function walkState() {
+    const rm = curRoomIdx >= 0 ? walkRooms[curRoomIdx] : null;
     return { walking, x: wpos[0], y: wpos[1], elevation: wElev,
       yaw: wYaw, pitch: wPitch, eye: wElev + walkEye,
       eyeHeight: walkEye, eyeTarget: walkEyeTarget, eyeLabel: EYE_PRESETS[eyeIdx].label,
-      furniture, coarse };
+      furniture, coarse, minimap: minimapOn,
+      room: rm ? rm.name : null, roomLabel: rm ? rm.label : null };
   }
   function walkTeleport(x, y, yaw) {
     if (!walking) return;
@@ -1280,6 +1483,8 @@ function mountScene(canvas, labels, togglesEl) {
     if (yaw != null) wYaw = yaw;
     let te = floorTarget(x, y); if (te == null) te = (wElev <= 0.08) ? 0 : wElev;
     wElev = te; draw();
+    checkRoom();     // a teleport across a room boundary toasts the new room
+    drawMinimap();   // and repaints the HUD at the new position
   }
   // Push a raw stick vector (forward, strafe in -1..1) for headless testing; the
   // move step consumes it exactly as a live thumbstick would. `run` mirrors the
@@ -1292,7 +1497,7 @@ function mountScene(canvas, labels, togglesEl) {
   }
 
   return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport,
-    walkStick, cycleEye, toggleFurniture };
+    walkStick, cycleEye, toggleFurniture, toggleMinimap };
 }
 """
 

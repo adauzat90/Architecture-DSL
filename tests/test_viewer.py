@@ -388,3 +388,108 @@ def test_renderer_has_the_eye_attached_fill_uniform():
 def test_renderer_does_not_request_pointer_lock_on_touch():
     # Entering walk on a coarse pointer must skip pointer lock (no Esc on iPad).
     assert "!coarse && canvas.requestPointerLock" in RENDERER_JS
+
+
+# --- Phase 3: walk-block rooms + mini-map / room-toast hooks ------------------
+
+
+def test_walk_block_ships_a_rooms_entry_per_model_room():
+    from barndsl.revit import to_revit_model
+
+    plan = _plan(WALK_PLAN)
+    model = to_revit_model(plan)
+    w = scene_json(build_scene(plan))["walk"]
+    assert "rooms" in w
+    # One walk.rooms entry per model room, in model order (deterministic).
+    assert len(w["rooms"]) == len(model.rooms)
+    for r, jr in zip(model.rooms, w["rooms"]):
+        assert jr["id"] == r.id
+        assert jr["name"] == r.name          # the schedule display name
+        assert jr["level"] == r.level
+
+
+def test_walk_room_carries_rect_name_area_fields_rounded():
+    w = scene_json(build_scene(_plan(WALK_PLAN)))["walk"]
+    assert w["rooms"], "a plan with rooms carries room rects"
+    for jr in w["rooms"]:
+        assert {"id", "name", "x", "y", "w", "l", "elevation", "level", "area"} <= set(jr)
+        assert jr["w"] > 0 and jr["l"] > 0 and jr["area"] > 0
+        assert isinstance(jr["name"], str) and jr["name"]
+        # coordinates/area rounded to 4 places (deterministic serialisation)
+        for k in ("x", "y", "w", "l", "elevation", "area"):
+            assert round(jr[k], 4) == jr[k]
+
+
+def test_walk_room_name_is_the_display_name_not_the_id():
+    # The name is the schedule *display* name, which title-cases a multi-word id
+    # ("primary_bedroom" -> "Primary Bedroom") rather than shipping the raw id —
+    # the same string revit.py's RevitRoom.name resolves.
+    src = """\
+plan "Named"
+envelope 30 x 20
+ceiling 9
+room primary_bedroom: bedroom at 0,0 size 15 x 20
+room kitchen: kitchen at 15,0 size 15 x 20
+entry primary_bedroom south width 3 offset 4
+"""
+    w = scene_json(build_scene(_plan(src)))["walk"]
+    names = {jr["id"]: jr["name"] for jr in w["rooms"]}
+    assert names["primary_bedroom"] == "Primary Bedroom"   # title-cased id fallback
+    assert names["kitchen"] == "Kitchen"
+
+
+def test_walk_room_rect_matches_the_model_room():
+    from barndsl.revit import to_revit_model
+
+    plan = _plan(WALK_PLAN)
+    model = to_revit_model(plan)
+    w = scene_json(build_scene(plan))["walk"]
+    r0, jr0 = model.rooms[0], w["rooms"][0]
+    assert abs(jr0["x"] - r0.x) < 1e-3 and abs(jr0["y"] - r0.y) < 1e-3
+    assert abs(jr0["w"] - r0.width) < 1e-3 and abs(jr0["l"] - r0.length) < 1e-3
+    assert abs(jr0["area"] - r0.area) < 1e-3
+
+
+def test_walk_rooms_block_is_deterministic_across_two_builds():
+    plan = _plan(WALK_PLAN)
+    a = json.dumps(scene_json(build_scene(plan))["walk"]["rooms"], sort_keys=True)
+    b = json.dumps(scene_json(build_scene(plan))["walk"]["rooms"], sort_keys=True)
+    assert a == b
+
+
+def test_rooms_do_not_leak_into_glb_or_ifc_bytes():
+    # The rooms walk data is viewer-only: exported glb/ifc bytes are untouched by
+    # building (and re-building) the scene JSON — the pinned-determinism invariant.
+    import hashlib
+
+    from barndsl.gltf import to_glb
+    from barndsl.ifc import to_ifc
+
+    plan = _plan(WALK_PLAN)
+    g1 = hashlib.sha256(to_glb(plan)).hexdigest()
+    i1 = hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest()
+    scene_json(build_scene(plan))  # exercises the rooms walk path
+    assert hashlib.sha256(to_glb(plan)).hexdigest() == g1
+    assert hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest() == i1
+
+
+def test_renderer_has_the_minimap_hud_hooks():
+    # The mini-map inset: its own canvas + 2D context, an M-key toggle, a session
+    # flag, and the draw entry point wired into the walk step.
+    assert "minimap" in RENDERER_JS              # the inset canvas element
+    assert "drawMinimap" in RENDERER_JS          # the per-frame draw
+    assert "toggleMinimap" in RENDERER_JS        # the M toggle
+    assert "minimapOn" in RENDERER_JS            # remembered for the session
+    assert "KeyM" in RENDERER_JS                 # M binds the toggle
+    assert "walkRooms" in RENDERER_JS            # room rects the map + toast read
+
+
+def test_renderer_has_the_room_name_toast_hooks():
+    # The room-name toast: a second pill (not the hint), a room-crossing detector
+    # with smallest-area tie-break, and the "name - dims - area" label builder.
+    assert "roomToast" in RENDERER_JS            # the toast element (distinct from walkHint)
+    assert "showRoomToast" in RENDERER_JS        # fades it in on a crossing
+    assert "roomAt" in RENDERER_JS               # point-in-rect on the current storey
+    assert "curRoomIdx" in RENDERER_JS           # tracks the current room (no re-toast)
+    assert "sq ft" in RENDERER_JS                # the ASCII area label
+    assert "fmtFt" in RENDERER_JS                # one-decimal dimension formatting

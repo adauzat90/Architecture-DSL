@@ -2714,6 +2714,10 @@ const THREE_TIPS = [
   'Eye-height pill (or the C key) cycles Standing / Seated (ADA sightlines) / ' +
     'Child so you can check what each sees. The Furniture pill toggles whether you ' +
     'bump into fixtures or ghost through them.',
+  'A north-up mini-map sits top-right showing the current storey, the walls and a ' +
+    'view cone for where you are looking; press M to hide or show it. As you cross ' +
+    'into a room its name, size and area toast briefly (e.g. "Primary Bedroom - ' +
+    '14 x 16 ft - 224 sq ft").',
   'Walk up the stairs to reach the upper floor; Esc (or leaving the tab) exits back to orbit.',
 ];
 
