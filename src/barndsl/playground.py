@@ -695,6 +695,11 @@ def export_artifact(fmt: str, plan: Any, result: Any = None) -> tuple[bytes, str
 #: :class:`~barndsl.agent.DesignResult`.
 Designer = Callable[..., Any]
 
+#: Coalesce streamed reasoning/text deltas into ~this-many-character ``token``
+#: frames — small enough to feel live, large enough that a reasoning model's
+#: hundreds of tiny chunks don't each become their own flushed SSE frame.
+_ACTIVITY_FLUSH_CHARS = 60
+
 
 def _default_designer(
     brief: str,
@@ -704,6 +709,7 @@ def _default_designer(
     on_step: Callable[[Any], None],
     on_phase: Callable[[str, int], None],
     cancel: Callable[[], bool],
+    on_activity: Callable[[str, int, str, str], None] | None = None,
 ) -> Any:
     """Run the real Claude loop. Imported lazily so ``anthropic`` stays optional."""
     from .agent import BarndoAgent
@@ -715,6 +721,7 @@ def _default_designer(
         on_step=on_step,
         on_phase=on_phase,
         cancel=cancel,
+        on_activity=on_activity,
     )
 
 
@@ -1208,10 +1215,39 @@ class _Handler(BaseHTTPRequestHandler):
             self._sse(cancel, "error", {"kind": "unavailable", "message": reason})
             return
 
+        # Live token feed: the writing/critiquing LLM calls stream their reasoning
+        # and text through ``on_activity``. A chatty reasoning model emits hundreds
+        # of tiny chunks, so coalesce them into modest ``token`` frames, and flush
+        # at every phase/round boundary so a ``token`` frame never straddles the
+        # ``status``/``iteration`` frame that closes the phase it belongs to.
+        activity: dict[str, Any] = {"key": None, "round": None, "text": ""}
+
+        def flush_activity() -> None:
+            if not activity["text"]:
+                return
+            phase, channel = activity["key"]
+            self._sse(cancel, "token", {"phase": phase, "channel": channel,
+                                        "round": activity["round"], "rounds": rounds,
+                                        "delta": activity["text"]})
+            activity["text"] = ""
+
+        def on_activity(phase: str, rnd: int, channel: str, delta: str) -> None:
+            if cancel.is_set():
+                return
+            key = (phase, channel)
+            if key != activity["key"] or rnd != activity["round"]:
+                flush_activity()
+                activity["key"], activity["round"] = key, rnd
+            activity["text"] += delta
+            if len(activity["text"]) >= _ACTIVITY_FLUSH_CHARS:
+                flush_activity()
+
         def on_phase(phase: str, rnd: int) -> None:
+            flush_activity()
             self._sse(cancel, "status", {"phase": phase, "round": rnd, "rounds": rounds})
 
         def on_step(step: Any) -> None:
+            flush_activity()
             self._sse(cancel, "iteration", _iteration_event(step, rounds))
 
         designer: Designer = server.designer or _default_designer
@@ -1223,6 +1259,7 @@ class _Handler(BaseHTTPRequestHandler):
                 on_step=on_step,
                 on_phase=on_phase,
                 cancel=cancel.is_set,
+                on_activity=on_activity,
             )
         except ImportError as exc:  # anthropic vanished between probe and call
             self._sse(cancel, "error", {"kind": "missing_dependency", "message": str(exc)})
@@ -1231,6 +1268,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._sse(cancel, "error", {"kind": "api_error", "message": str(exc)})
             return
 
+        flush_activity()  # drain any tail before the terminal frame
         if cancel.is_set():
             self._sse(cancel, "error", {"kind": "cancelled", "message": "design cancelled"})
             return
@@ -1488,6 +1526,32 @@ _APP_HTML = r"""<!doctype html>
   .iter-row .ct { color:var(--faint); font:11px ui-monospace,Menlo,Consolas,monospace;
     margin-left:auto; }
   .iter-row.win { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  /* Live activity panel: the agent's reasoning + DSL draft, streamed per round. */
+  .act-block { align-self:stretch; border:1px solid var(--line); border-radius:9px;
+    background:var(--panel); overflow:hidden; }
+  .act-head { display:flex; align-items:center; gap:7px; padding:6px 9px;
+    cursor:pointer; user-select:none; color:var(--muted); font-size:12px; }
+  .act-head:hover { color:var(--ink); }
+  .act-caret { font-size:9px; color:var(--faint); flex:none; transition:transform .15s;
+    transform:rotate(90deg); }
+  .act-block.collapsed .act-caret { transform:rotate(0deg); }
+  .act-title { font-weight:600; flex:1; white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis; }
+  .act-live { width:7px; height:7px; border-radius:50%; flex:none;
+    background:var(--accent2); animation:act-pulse 1s ease-in-out infinite; }
+  .act-block.done .act-live { display:none; }
+  @keyframes act-pulse { 0%,100% { opacity:.25; } 50% { opacity:1; } }
+  .act-body { border-top:1px solid var(--line); max-height:260px; overflow:auto; }
+  .act-block.collapsed .act-body { display:none; }
+  .act-sec { display:none; padding:7px 10px; }
+  .act-sec.has { display:block; }
+  .act-sec.has ~ .act-sec.has { border-top:1px dashed var(--line); }
+  .act-label { font-size:10px; text-transform:uppercase; letter-spacing:.5px;
+    color:var(--faint); margin-bottom:4px; }
+  .act-text { margin:0; white-space:pre-wrap; word-break:break-word;
+    font-size:11.5px; line-height:1.5; color:var(--muted); }
+  .act-sec.draft .act-text { font-family:ui-monospace,Menlo,Consolas,monospace;
+    color:var(--ink); }
   .composer { border-top:1px solid var(--line); padding:10px; display:flex;
     flex-direction:column; gap:8px; }
   #brief { width:100%; min-height:58px; max-height:160px; resize:vertical; border:1px
@@ -3774,6 +3838,7 @@ let running = false;
 let jobId = null;
 let hasResult = false;   // has the agent landed a plan in this conversation yet?
 let statusEl = null;     // the live status bubble shown while a job streams
+let actByRound = {};     // round -> live activity panel (reasoning + DSL draft)
 
 const PHASE_LABEL = { starting:'starting', writing:'writing DSL', compiling:'compiling',
   critiquing:'critiquing', revising:'revising' };
@@ -3878,17 +3943,76 @@ function addMsg(cls, text){
   thread.appendChild(el); thread.scrollTop = thread.scrollHeight;
   return el;
 }
+// Insert live content (activity panels, iteration rows) ABOVE the status
+// spinner, so the spinner always reads as the current bottom of the thread.
+function threadAdd(el){
+  if (statusEl) thread.insertBefore(el, statusEl);
+  else thread.appendChild(el);
+}
 function setStatus(text){
   if (!statusEl){
     statusEl = document.createElement('div');
     statusEl.className = 'msg-status';
     statusEl.innerHTML = '<span class="spin"></span><span class="txt"></span>';
-    thread.appendChild(statusEl);
   }
   statusEl.querySelector('.txt').textContent = text;
+  thread.appendChild(statusEl);   // keep the spinner pinned to the bottom
   thread.scrollTop = thread.scrollHeight;
 }
 function clearStatus(){ if (statusEl){ statusEl.remove(); statusEl = null; } }
+
+// A per-round collapsible panel that fills as the agent's reasoning and DSL
+// draft stream in, then auto-collapses to a one-line summary when the round
+// lands. Created lazily on the round's first token; absent if none arrive.
+function activityBlock(round){
+  let a = actByRound[round];
+  if (a) return a;
+  const block = document.createElement('div');
+  block.className = 'act-block'; block.dataset.round = round;
+  const head = document.createElement('div'); head.className = 'act-head';
+  const caret = document.createElement('span'); caret.className = 'act-caret'; caret.textContent = '▶';
+  const title = document.createElement('span'); title.className = 'act-title';
+  title.textContent = 'round ' + round + ' · thinking…';
+  const live = document.createElement('span'); live.className = 'act-live';
+  head.append(caret, title, live);
+  const body = document.createElement('div'); body.className = 'act-body';
+  function section(cls, label){
+    const sec = document.createElement('div'); sec.className = 'act-sec ' + cls;
+    const lab = document.createElement('div'); lab.className = 'act-label'; lab.textContent = label;
+    const pre = document.createElement('pre'); pre.className = 'act-text';
+    sec.append(lab, pre); body.appendChild(sec); return { sec, pre };
+  }
+  const reason = section('reason', 'reasoning');
+  const draft  = section('draft',  'drafting plan');
+  const review = section('review', 'critic reasoning');
+  block.append(head, body);
+  head.addEventListener('click', () => block.classList.toggle('collapsed'));
+  threadAdd(block);
+  a = actByRound[round] = { block, body, title, reason, draft, review };
+  return a;
+}
+function onToken(ev){
+  const atBottom = (thread.scrollHeight - thread.scrollTop - thread.clientHeight) < 90;
+  const a = activityBlock(ev.round);
+  let target;
+  if (ev.phase === 'critiquing'){
+    if (ev.channel !== 'thinking') return;   // suppress the critic's raw JSON reply
+    target = a.review; a.title.textContent = 'round ' + ev.round + ' · reviewing…';
+  } else {
+    target = ev.channel === 'thinking' ? a.reason : a.draft;
+  }
+  target.sec.classList.add('has');
+  target.pre.textContent += ev.delta;
+  a.body.scrollTop = a.body.scrollHeight;                 // the panel follows its own stream
+  if (atBottom) thread.scrollTop = thread.scrollHeight;   // don't fight a reader scrolled up
+}
+function finishActivity(round, scoreTotal){
+  const a = actByRound[round];
+  if (!a) return;
+  a.block.classList.add('done', 'collapsed');
+  const sc = (scoreTotal == null) ? '' : ' · score ' + fmt(scoreTotal);
+  a.title.textContent = 'round ' + round + ' · thought & drafted' + sc;
+}
 
 function iterRow(ev){
   const row = document.createElement('div');
@@ -3900,7 +4024,7 @@ function iterRow(ev){
                : '<span class="sc ' + scoreClass(t) + '">' + fmt(t) + '</span>') +
     '<span class="ct">' + (c.error | 0) + 'e ' + (c.warning | 0) + 'w ' +
     (c.info | 0) + 'i</span>';
-  thread.appendChild(row); thread.scrollTop = thread.scrollHeight;
+  threadAdd(row); thread.scrollTop = thread.scrollHeight;
 }
 function applyIteration(ev){
   if (ev.source != null){ editor.value = ev.source; renderGutter(); }
@@ -3925,7 +4049,7 @@ async function sendDesign(){
   const body = { brief, iterations: 3 };
   // Follow-ups refine the current editor plan; the first brief starts fresh.
   if (hasResult) body.source = editor.value;
-  setRunning(true); clearStatus(); setStatus('starting'); jobId = null;
+  setRunning(true); clearStatus(); actByRound = {}; setStatus('starting'); jobId = null;
   try {
     const resp = await fetch('/api/design', { method:'POST',
       headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(body) });
@@ -3970,7 +4094,10 @@ function onEvent(kind, ev){
     if (ev.job) jobId = ev.job;
     const label = PHASE_LABEL[ev.phase] || ev.phase;
     setStatus(ev.round ? (label + ' — round ' + ev.round + ' of ' + ev.rounds) : label);
+  } else if (kind === 'token'){
+    onToken(ev);
   } else if (kind === 'iteration'){
+    finishActivity(ev.round, ev.score ? ev.score.total : null);
     iterRow(ev); applyIteration(ev);
   } else if (kind === 'done'){
     clearStatus();
