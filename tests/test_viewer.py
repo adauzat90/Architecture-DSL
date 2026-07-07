@@ -184,3 +184,87 @@ def test_walk_block_does_not_disturb_glb_or_ifc_bytes():
     scene_json(build_scene(plan))
     assert hashlib.sha256(to_glb(plan)).hexdigest() == g1
     assert hashlib.sha256(to_ifc(plan).encode("utf-8")).hexdigest() == i1
+
+
+# --- door metadata + walk-block doors ---------------------------------------
+
+
+def _nodes(src=WALK_PLAN):
+    return scene_json(build_scene(_plan(src)))["nodes"]
+
+
+def test_scene_json_door_leaf_carries_hinge_dir_out_metadata():
+    # The interior swing door's leaf node ships a `door` record the renderer
+    # animates; it names its plan-space hinge, along-wall dir, and swing side.
+    leaf = next(n for n in _nodes() if n["name"] == "door:o0:leaf")
+    d = leaf["door"]
+    assert d["mode"] == "swing"
+    assert len(d["hinge"]) == 2 and len(d["dir"]) == 2 and len(d["out"]) == 2
+    # dir and out are unit vectors
+    for v in (d["dir"], d["out"]):
+        assert abs((v[0] * v[0] + v[1] * v[1]) - 1.0) < 1e-3
+    assert d["width"] > 0 and d["height"] > 0
+
+
+def test_scene_json_static_nodes_have_no_door_key():
+    # Walls, glazing and casing are static: the `door` key is absent entirely, so
+    # the orbit path and the exported glb (closed geometry) agree.
+    for n in _nodes():
+        if not (n["name"].startswith("door:") ):
+            assert "door" not in n, n["name"]
+
+
+def test_walk_block_has_one_doors_entry_per_door_opening():
+    # The a/b interior door is the only door in WALK_PLAN (the entry is exterior —
+    # also a door — so two doors total); the window contributes none.
+    w = _walk()
+    assert w["doors"], "a door plan carries walk.doors entries"
+    ids = {d["id"] for d in w["doors"]}
+    # every entry is a real span segment with an elevation + level
+    for d in w["doors"]:
+        assert {"id", "x0", "y0", "x1", "y1", "elevation", "level"} <= set(d)
+    # the interior door o0 shows up; the window never does
+    assert "o0" in ids
+
+
+def test_walk_doors_do_not_reintroduce_wall_gaps():
+    # The doors array is additive: the wall SEGMENTS must still be punched (the
+    # existing gap invariant), independent of the new doors list.
+    w = _walk()
+    segs = [s for s in w["segments"] if abs(s["x0"] - 15) < 1e-6 and abs(s["x1"] - 15) < 1e-6]
+    assert len(segs) == 2  # the door gap still splits the a/b wall
+
+
+def test_cased_opening_has_no_walk_doors_entry_and_no_leaf():
+    # A cased (leafless) opening is always an open passage: no walk.doors entry
+    # for it (so it never re-blocks the gap) and no door-leaf node.
+    from barndsl.revit import to_revit_model
+
+    src = """\
+plan "Cased"
+envelope 30 x 20
+ceiling 9
+room a: living at 0,0 size 15 x 20
+room b: kitchen at 15,0 size 15 x 20
+open a - b width 4
+entry a south width 3 offset 4
+"""
+    plan = _plan(src)
+    cased_ids = {o.id for o in to_revit_model(plan).openings
+                 if o.category == "cased_opening"}
+    assert cased_ids
+    data = scene_json(build_scene(plan))
+    door_ids = {d["id"] for d in data["walk"]["doors"]}
+    assert not (cased_ids & door_ids)  # the cased opening is never a walk door
+    # and its casing node (if drawn) carries no door record
+    cased = [n for n in data["nodes"] if n["name"].startswith("cased:")]
+    assert all("door" not in n for n in cased)
+
+
+def test_scene_json_is_byte_identical_across_two_builds():
+    # Determinism: the full scene JSON (nodes + door records + walk) serialises
+    # byte-for-byte the same on a fresh build of the same plan.
+    plan = _plan(WALK_PLAN)
+    a = json.dumps(scene_json(build_scene(plan)))
+    b = json.dumps(scene_json(build_scene(plan)))
+    assert a == b

@@ -116,6 +116,10 @@ def _walk_block(scene: Scene) -> dict:
       **door / cased-opening** span (walkable gaps); windows stay solid. ``elevation``
       is the run's level floor elevation, so the JS collides only with walls near
       the player's current storey.
+    * ``doors`` — one entry per **door-category** opening ``{id, x0, y0, x1, y1,
+      elevation, level}``: the door's span segment on the wall centreline. The JS
+      treats it as a live collision segment while the leaf is closed and drops it
+      as the leaf swings open. Cased openings get no entry (always an open passage).
     * ``floors`` — per level ``{level, elevation, rects}`` (the slab footprint
       rectangles), so the JS knows where floor exists and how high the eye sits.
     * ``stairs`` — per stair run ``{x, y, w, l, fromLevel, toLevel, fromElevation,
@@ -136,10 +140,16 @@ def _walk_block(scene: Scene) -> dict:
         if o.host_wall is not None:
             hosted.setdefault(o.host_wall, []).append(o)
     segments: list[dict] = []
+    # A `doors` entry per door-category opening: the span segment on the wall
+    # centreline, which the renderer turns into a *live* collision segment while
+    # the leaf is closed (and drops while it swings open). A cased opening gets
+    # no entry — it is always an open passage — so it never re-blocks the gap.
+    doors: list[dict] = []
     for w in model.walls:
         vertical = w.orientation == "v"
         c = w.const_coord
         lo, hi = w.span
+        z = elev.get(w.level, 0.0)
         gaps: list[tuple[float, float]] = []
         for o in hosted.get(w.id, []):
             # A door or a doorless cased opening is a walkable gap; a window is not.
@@ -148,9 +158,20 @@ def _walk_block(scene: Scene) -> dict:
             along = o.location[1] if vertical else o.location[0]
             a = max(lo, along - o.width / 2.0)
             b = min(hi, along + o.width / 2.0)
-            if b > a:
-                gaps.append((a, b))
-        z = elev.get(w.level, 0.0)
+            if b <= a:
+                continue
+            gaps.append((a, b))
+            if o.category == "door":  # a leafed door can re-close the gap
+                if vertical:
+                    x0, y0, x1, y1 = c, a, c, b
+                else:
+                    x0, y0, x1, y1 = a, c, b, c
+                doors.append({
+                    "id": o.id,
+                    "x0": round(x0, 4), "y0": round(y0, 4),
+                    "x1": round(x1, 4), "y1": round(y1, 4),
+                    "elevation": round(z, 4), "level": w.level,
+                })
         for a, b in _subtract_intervals(lo, hi, gaps):
             if vertical:
                 seg = {"x0": c, "y0": a, "x1": c, "y1": b}
@@ -204,6 +225,7 @@ def _walk_block(scene: Scene) -> dict:
         "eyeHeight": WALK_EYE_HEIGHT,
         "spawn": _walk_spawn(model, elev),
         "segments": segments,
+        "doors": doors,
         "floors": floors,
         "stairs": stairs,
     }
@@ -281,20 +303,25 @@ def scene_json(scene: Scene) -> dict:
         for v in n.normals:
             norms.extend(_to_gltf(v))
         mat = n.material
-        nodes.append(
-            {
-                "name": n.name,
-                "layer": n.layer,
-                "color": effective_linear(mat, n.tint)[:3],
-                "roughness": round(mat.roughness, 3),
-                "metallic": round(mat.metallic, 3),
-                "pattern": mat.pattern,
-                "patternScale": mat.pattern_scale,
-                "positions": [round(x, 4) for x in verts],
-                "normals": [round(x, 4) for x in norms],
-                "indices": n.indices,
-            }
-        )
+        entry = {
+            "name": n.name,
+            "layer": n.layer,
+            "color": effective_linear(mat, n.tint)[:3],
+            "roughness": round(mat.roughness, 3),
+            "metallic": round(mat.metallic, 3),
+            "pattern": mat.pattern,
+            "patternScale": mat.pattern_scale,
+            "positions": [round(x, 4) for x in verts],
+            "normals": [round(x, 4) for x in norms],
+            "indices": n.indices,
+        }
+        # A movable door/panel leaf carries its animation record (hinge/dir/out in
+        # plan coords); the renderer's walk mode swings/slides/lifts it about that
+        # hinge. Static nodes (walls, glazing, casing) omit the key entirely, so
+        # the orbit path and the exported glb — which bake closed geometry — agree.
+        if n.door is not None:
+            entry["door"] = n.door
+        nodes.append(entry)
     layers = [ly for ly in Scene.LAYERS if any(nd["layer"] == ly for nd in nodes)]
     return {"nodes": nodes, "layers": layers, "walk": _walk_block(scene)}
 
@@ -375,15 +402,36 @@ function mountScene(canvas, labels, togglesEl) {
   function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
   function norm(a) { const l = Math.hypot(a[0], a[1], a[2]) || 1;
     return [a[0] / l, a[1] / l, a[2] / l]; }
+  const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  // A rigid model matrix for a door leaf, built in the glTF frame (x, up=+y,
+  // -y_plan). `rotY` rotates `ang` radians about the vertical axis through plan
+  // pivot (px, py) — the hinge — mapped to (px, up, -py). `translate` shifts by a
+  // glTF vector. Both are column-major so they feed uniformMatrix4fv directly and
+  // compose as uMVP * uModel * pos in the shader.
+  function rotY(px, py, ang) {
+    const c = Math.cos(ang), s = Math.sin(ang), ax = px, az = -py;
+    // Rotation about +y, then re-anchor so the pivot stays put.
+    return [c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0,
+      ax - (c * ax + s * az), 0, az - (-s * ax + c * az), 1];
+  }
+  function translate(dx, dy, dz) {
+    return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, dx, dy, dz, 1];
+  }
 
   // --- shader ---------------------------------------------------------------
   // World-space position and normal go to the fragment stage; the base colour is
   // modulated there by a triplanar-mapped procedural texture (chosen per dominant
   // world-normal axis) and lit with a diffuse + sky-fill term plus a
   // roughness/metallic-driven specular, so a metal roof reads as metal.
+  // uModel is an optional per-node rigid transform (default identity); a door
+  // leaf sets it each frame to swing/slide/lift, everything else draws at rest.
+  // Position goes through it before the shared MVP; the normal is rotated by the
+  // upper 3x3 (rigid rotations only, so no inverse-transpose is needed).
   const vs = 'attribute vec3 aPos; attribute vec3 aNorm;'
-    + ' uniform mat4 uMVP; varying vec3 vN; varying vec3 vWorld;'
-    + ' void main(){ vN=aNorm; vWorld=aPos; gl_Position=uMVP*vec4(aPos,1.0); }';
+    + ' uniform mat4 uMVP; uniform mat4 uModel;'
+    + ' varying vec3 vN; varying vec3 vWorld;'
+    + ' void main(){ vec4 wp=uModel*vec4(aPos,1.0); vWorld=wp.xyz;'
+    + '   vN=mat3(uModel)*aNorm; gl_Position=uMVP*wp; }';
   const fs = 'precision mediump float;'
     + ' varying vec3 vN; varying vec3 vWorld;'
     + ' uniform vec3 uColor; uniform vec3 uEye;'
@@ -422,6 +470,7 @@ function mountScene(canvas, labels, togglesEl) {
   const aPos = gl.getAttribLocation(prog, 'aPos');
   const aNorm = gl.getAttribLocation(prog, 'aNorm');
   const uMVP = gl.getUniformLocation(prog, 'uMVP');
+  const uModel = gl.getUniformLocation(prog, 'uModel');
   const uColor = gl.getUniformLocation(prog, 'uColor');
   const uEye = gl.getUniformLocation(prog, 'uEye');
   const uRough = gl.getUniformLocation(prog, 'uRough');
@@ -513,6 +562,7 @@ function mountScene(canvas, labels, togglesEl) {
   // exiting restores it exactly. `walk` is the block scene_json() ships.
   let walk = null;                 // the walk-support data (segments/floors/stairs/spawn)
   let walkSegs = [];               // [x0,y0,x1,y1,elevation] collision segments (flat, fast)
+  let walkDoors = [];              // per door: {id, seg:[x0,y0,x1,y1,elev], mid:[x,y], node}
   let walkFF = 10;                 // floor-to-floor (ft) — filters walls to the current storey
   let walkEye = 5.5, walkSpeed = 4;
   let walking = false;
@@ -541,10 +591,13 @@ function mountScene(canvas, labels, togglesEl) {
       const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(n.indices), gl.STATIC_DRAW);
       const pattern = n.pattern || 'none';
+      // A leaf carries its `door` record + a runtime {open, target} the walk step
+      // eases; static nodes have door=null and always draw at the identity model.
       return { layer: n.layer, color: n.color,
         rough: n.roughness == null ? 0.8 : n.roughness,
         metal: n.metallic == null ? 0.0 : n.metallic,
         patScale: n.patternScale || 1.0, tex: patternTexture(pattern),
+        door: n.door || null, open: 0, target: 0, pinned: false,
         pb, nb, ib, count: n.indices.length };
     });
     if (nodes.length) {
@@ -568,6 +621,18 @@ function mountScene(canvas, labels, togglesEl) {
       for (let i = 1; i < evs.length; i++) { const g = evs[i] - evs[i - 1];
         if (g > 0.5) { walkFF = g; break; } }
       walkEye = walk.eyeHeight || 5.5;
+      // Link each walk.doors span to the leaf node(s) that share its id — a
+      // double/french door has two leaves, so a door drives every matching node.
+      // The span segment collides while the door is < half open; its midpoint is
+      // the proximity test point. Deterministic (walk.doors is in model order).
+      walkDoors = (walk.doors || []).map(d => ({
+        id: d.id, elevation: d.elevation,
+        seg: [d.x0, d.y0, d.x1, d.y1, d.elevation],
+        mid: [(d.x0 + d.x1) / 2, (d.y0 + d.y1) / 2],
+        leaves: nodes.filter(n => n.door && n.door.id === d.id),
+      }));
+    } else {
+      walkDoors = [];
     }
     updateWalkUI();
     buildToggles(scene.layers || []);
@@ -660,9 +725,32 @@ function mountScene(canvas, labels, togglesEl) {
   // The layer-respecting node draw, shared by the orbit and walk cameras (the
   // MVP/eye uniforms are set by the caller). Hidden layers (e.g. the roof toggled
   // off to look inside) are skipped in walk mode too.
+  // The model matrix for a door leaf at its current open fraction (0 closed, 1
+  // fully open). Swing rotates up to ~100 deg about the hinge toward `out`;
+  // slide translates ~90% of the width along `dir`; overhead lifts ~90% of the
+  // height. Only ever non-identity in walk mode — orbit forces `open`=0 below,
+  // so the exported closed glb and the viewer agree.
+  const SWING_MAX = 100 * Math.PI / 180;
+  function doorModelMatrix(nd) {
+    const d = nd.door, f = nd.open;
+    if (!d || f <= 1e-4) return IDENTITY;
+    if (d.mode === 'slide') {
+      return translate(d.dir[0] * d.width * 0.9 * f, 0, -d.dir[1] * d.width * 0.9 * f);
+    }
+    if (d.mode === 'overhead') { return translate(0, d.height * 0.9 * f, 0); }
+    // swing: sign chosen so the leaf rotates from the wall toward `out`. `dir`
+    // and `out` are perpendicular plan units; their 2D cross fixes the handedness
+    // (the y-axis rotation in the glTF frame flips sign vs. the plan cross).
+    const cr = d.dir[0] * d.out[1] - d.dir[1] * d.out[0];
+    const ang = SWING_MAX * f * (cr >= 0 ? 1 : -1);
+    return rotY(d.hinge[0], d.hinge[1], ang);
+  }
+
   function drawNodes() {
     for (const nd of nodes) {
       if (hidden[nd.layer]) continue;
+      gl.uniformMatrix4fv(uModel, false, new Float32Array(
+        (walking && nd.door) ? doorModelMatrix(nd) : IDENTITY));
       gl.uniform3fv(uColor, nd.color);
       gl.uniform1f(uRough, nd.rough);
       gl.uniform1f(uMetal, nd.metal);
@@ -704,7 +792,7 @@ function mountScene(canvas, labels, togglesEl) {
     + 'transition:opacity .3s;font:600 12px -apple-system,BlinkMacSystemFont,'
     + '"Segoe UI",Helvetica,Arial,sans-serif;padding:7px 15px;border-radius:20px;'
     + 'background:rgba(20,24,30,.84);color:#eef1f4;white-space:nowrap;';
-  walkHint.textContent = 'WASD move · mouse look · Shift run · Esc exit';
+  walkHint.textContent = 'WASD move · mouse look · E opens doors · Shift run · Esc exit';
   if (host.style && getComputedStyle(host).position === 'static') host.style.position = 'relative';
   host.appendChild(walkBtn); host.appendChild(walkHint);
   let hintTimer = null;
@@ -728,6 +816,9 @@ function mountScene(canvas, labels, togglesEl) {
     wYaw = Math.atan2(f[0], f[1]);                            // face into the house
     wPitch = 0;
     for (const k in keys) delete keys[k];
+    for (const dr of walkDoors) for (const lf of dr.leaves) {
+      lf.open = 0; lf.target = 0; lf.pinned = false;         // start every door shut
+    }
     walkBtn.textContent = 'Exit';
     showWalkHint();
     document.addEventListener('keydown', onWalkKey, true);
@@ -770,9 +861,25 @@ function mountScene(canvas, labels, togglesEl) {
     KeyA: 'l', ArrowLeft: 'l', KeyD: 'r', ArrowRight: 'r' };
   function onWalkKey(e) {
     if (e.key === 'Escape') { e.preventDefault(); exitWalk(); return; }
+    if (e.code === 'KeyE') { e.preventDefault(); toggleNearestDoor(); return; }
     const m = WALK_KEYS[e.code];
     if (m) { keys[m] = true; e.preventDefault(); }
     if (e.key === 'Shift') keys.run = true;
+  }
+
+  // E flips the nearest door within 4.5 ft and *pins* it (open or shut) so it
+  // holds against the proximity rule until E again or the player walks out of
+  // range. `pinned` rides on the door's leaves; updateDoors clears it out of range.
+  function toggleNearestDoor() {
+    let best = null, bd = 4.5 * 4.5;
+    for (const dr of walkDoors) {
+      if (Math.abs(dr.elevation - wElev) > walkFF * 0.75) continue;
+      const dx = wpos[0] - dr.mid[0], dy = wpos[1] - dr.mid[1], q = dx * dx + dy * dy;
+      if (q < bd) { bd = q; best = dr; }
+    }
+    if (!best) return;
+    const opening = best.leaves.length && best.leaves[0].target < 0.5;
+    for (const lf of best.leaves) { lf.target = opening ? 1 : 0; lf.pinned = true; }
   }
   function onWalkKeyUp(e) {
     const m = WALK_KEYS[e.code];
@@ -789,9 +896,35 @@ function mountScene(canvas, labels, togglesEl) {
   function walkStep(now) {
     if (!walking) return;
     const dt = Math.min(0.05, (now - walkLast) / 1000) || 0; walkLast = now;
+    updateDoors(dt);   // resolve door open fractions first so collision agrees
     updateMove(dt);
     draw();
     walkRAF = requestAnimationFrame(walkStep);
+  }
+
+  // Proximity door logic + easing. A door within ~3.5 ft of the player wants to
+  // be open; beyond ~6 ft it wants to be shut (a dead band between avoids it
+  // flapping on the threshold). A pinned door (toggled with E) ignores this until
+  // the player leaves the ~6 ft range, then un-pins. Each leaf eases its `open`
+  // toward `target` over ~0.35 s. A door's leaves share the same door id, so a
+  // double/french pair opens together.
+  const DOOR_NEAR = 3.5, DOOR_FAR = 6.0, DOOR_EASE = 1 / 0.35;
+  function updateDoors(dt) {
+    const k = Math.min(1, dt * DOOR_EASE);
+    for (const dr of walkDoors) {
+      const near = Math.abs(dr.elevation - wElev) <= walkFF * 0.75;
+      const dx = wpos[0] - dr.mid[0], dy = wpos[1] - dr.mid[1];
+      const dist = Math.hypot(dx, dy);
+      for (const lf of dr.leaves) {
+        if (lf.pinned) { if (!near || dist > DOOR_FAR) lf.pinned = false; }
+        if (!lf.pinned) {
+          if (near && dist < DOOR_NEAR) lf.target = 1;
+          else if (!near || dist > DOOR_FAR) lf.target = 0;
+        }
+        lf.open += (lf.target - lf.open) * k;
+        if (Math.abs(lf.open - lf.target) < 1e-3) lf.open = lf.target;
+      }
+    }
   }
 
   // One movement tick: WASD relative to the look yaw, slide off walls, then ease
@@ -818,11 +951,28 @@ function mountScene(canvas, labels, togglesEl) {
     wElev += (te - wElev) * Math.min(1, dt * 12);   // smooth the step/stair transition
   }
 
-  // Slide a circle (radius WALK_R) out of every nearby wall segment. Two passes so
-  // an inside corner resolves cleanly; only walls near the current storey count.
+  // The wall segments plus every *closed* door span — a door whose leaves are
+  // less than half open re-blocks its gap, so you can't walk through a shut door.
+  // Rebuilt each move tick off the live `open` state; cased openings never appear
+  // here (they have no walk.doors entry), so they stay open.
+  function liveSegments() {
+    const segs = walkSegs;
+    if (!walkDoors.length) return segs;
+    const live = segs.slice();
+    for (const dr of walkDoors) {
+      const shut = dr.leaves.length && dr.leaves.some(lf => lf.open < 0.5);
+      if (shut) live.push(dr.seg);
+    }
+    return live;
+  }
+
+  // Slide a circle (radius WALK_R) out of every nearby wall/closed-door segment.
+  // Two passes so an inside corner resolves cleanly; only segments near the
+  // current storey count.
   function collide(x, y) {
+    const segs = liveSegments();
     for (let pass = 0; pass < 2; pass++) {
-      for (const s of walkSegs) {
+      for (const s of segs) {
         if (Math.abs(s[4] - wElev) > walkFF * 0.75) continue;
         const ax = s[0], ay = s[1], ex = s[2] - ax, ey = s[3] - ay;
         const el = ex * ex + ey * ey || 1;
