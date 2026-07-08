@@ -530,6 +530,8 @@ def _cmd_design(args: argparse.Namespace) -> int:
             notes += "  (repair round)"
         elif getattr(step, "restructured", False):
             notes += "  (restructure round)"
+        if getattr(step, "salvaged", False):
+            notes += "  (compile fixed in-round)"
         crit_obj = step.critique
         if crit_obj is not None and getattr(crit_obj, "blocking_issues", None):
             notes += "  (blocked: capped at 65)"

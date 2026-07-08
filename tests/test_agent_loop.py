@@ -183,9 +183,11 @@ def _satisfied() -> CritiqueSpec:
 
 
 def test_design_returns_the_best_scoring_iteration_not_the_last():
-    """broken → clean → broken again: the loop must hand back iteration 2."""
+    """broken → clean → broken again: the loop must hand back iteration 2. (Each
+    intended-failed round scripts TWO broken sources — the write plus its
+    in-round repair retry, which must also fail for the round to stay failed.)"""
     client = FakeClient(
-        sources=[BROKEN, CLEAN, BROKEN],
+        sources=[BROKEN, BROKEN, CLEAN, BROKEN, BROKEN],
         critiques=[_unsatisfied("Add a porch.")],  # only iter 2 has a plan to review
     )
     result = _agent(client).design("a small cottage", max_iterations=3, target_score=None)
@@ -511,7 +513,8 @@ def test_solver_seed_is_iteration_0_and_wins_when_the_llm_never_beats_it():
         d.code == "PROGRAM_MISMATCH" for d in seed.result.warnings
     )
 
-    client = FakeClient(sources=[BROKEN, BROKEN])  # LLM never produces a plan
+    # LLM never produces a plan (each round: the write + its failed in-round retry)
+    client = FakeClient(sources=[BROKEN] * 4)
     result = _agent(client).design(
         "a small barndo", max_iterations=2, target_score=None,
         seed_with_solver=_solver_brief(),
@@ -551,7 +554,7 @@ def test_seed_accepts_a_textual_brief():
         "adjacent living kitchen bed1\n"
         "adjacent bed1 bath\n"
     )
-    client = FakeClient(sources=[BROKEN])
+    client = FakeClient(sources=[BROKEN, BROKEN])  # the write + its failed retry
     result = _agent(client).design(
         "a small barndo", max_iterations=1, target_score=None,
         seed_with_solver=brief_text,
@@ -689,8 +692,8 @@ def test_structured_brief_keeps_parse_brief2_precedence(monkeypatch):
 
 
 def test_failed_round_carries_its_own_source_and_diagnostics_for_repair():
-    """CLEAN -> BROKEN -> CLEAN: after the broken round the NEXT prompt is a
-    repair round. It carries the FAILED source verbatim (so "reproduce it, fix
+    """CLEAN, then a broken round-2 write: the NEXT prompt — round 2's in-round
+    repair retry — carries the FAILED source verbatim (so "reproduce it, fix
     line N" is coherent) paired with that source's OWN diagnostics — it does NOT
     revert to the best-valid source, which would invite a redesign."""
     client = FakeClient(
@@ -698,7 +701,7 @@ def test_failed_round_carries_its_own_source_and_diagnostics_for_repair():
     )
     _agent(client).design("a cottage", max_iterations=3, target_score=None)
 
-    revision = client.stream_prompts[2]  # the prompt after the broken round 2
+    revision = client.stream_prompts[2]  # the prompt after round 2's broken write
     # Repair wording, not the old discard/best-valid revert.
     assert "Do NOT redesign" in revision
     assert "did not compile and was DISCARDED" not in revision
@@ -723,9 +726,9 @@ def test_render_feedback_regression_line_for_a_lower_score():
 
 
 def test_repair_round_revises_the_failed_source_not_the_best_valid():
-    """After a broken round the loop repairs the broken source in place; it does
-    NOT swap in the best VALID source (that would let the model redesign, the
-    convergence regression repair mode fixes)."""
+    """After a broken write the loop repairs the broken source in place (here in
+    the in-round retry); it does NOT swap in the best VALID source (that would
+    let the model redesign, the convergence regression repair mode fixes)."""
     client = FakeClient(
         sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
     )
@@ -1532,7 +1535,11 @@ def test_critique_not_called_when_plan_has_errors_even_though_plan_exists():
     partial = compile_source(PARTIAL_WITH_ERRORS)
     assert partial.plan is not None and not partial.ok  # the gated case
 
-    client = _CritCountingClient(sources=[PARTIAL_WITH_ERRORS], critiques=[])
+    # The in-round retry also returns the errored plan (equal badness keeps the
+    # original) — and being a generation call, it must not tick the critic either.
+    client = _CritCountingClient(
+        sources=[PARTIAL_WITH_ERRORS, PARTIAL_WITH_ERRORS], critiques=[]
+    )
     result = _agent(client).design("one bed", max_iterations=1, target_score=None)
 
     assert client.critique_calls == 0  # the ok-gate skipped the critic
@@ -1898,12 +1905,13 @@ REPAIR_MARK = "Do NOT redesign"
 
 
 def test_failed_round_puts_next_write_in_repair_mode():
-    """BROKEN -> CLEAN: round 1 fails, so round 2's write carries the repair
-    wording (and the error count), not the restructure wording."""
-    client = FakeClient(sources=[BROKEN, CLEAN], critiques=[_satisfied()])
+    """BROKEN (write and in-round retry both fail) -> CLEAN: round 1 stays
+    failed, so round 2's write carries the repair wording (and the error
+    count), not the restructure wording."""
+    client = FakeClient(sources=[BROKEN, BROKEN, CLEAN], critiques=[_satisfied()])
     result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
 
-    revision = _prompt_text(client.stream_prompts[1])
+    revision = _prompt_text(client.stream_prompts[2])
     assert REPAIR_MARK in revision
     assert RESTRUCTURE_MARK not in revision
     assert REFINE_MARK not in revision
@@ -1915,10 +1923,10 @@ def test_failed_round_puts_next_write_in_repair_mode():
 def test_repair_prompt_carries_the_previous_failed_source():
     """The repair prompt shows the failed source as the prior DSL, so "reproduce
     it and fix line N" is coherent — the whole point of repair over redesign."""
-    client = FakeClient(sources=[BROKEN, CLEAN], critiques=[_satisfied()])
+    client = FakeClient(sources=[BROKEN, BROKEN, CLEAN], critiques=[_satisfied()])
     _agent(client).design("a cottage", max_iterations=2, target_score=None)
 
-    revision = _prompt_text(client.stream_prompts[1])
+    revision = _prompt_text(client.stream_prompts[2])  # round 2's write
     assert "Your previous DSL:" in revision
     assert 'plan "Broken"' in revision  # the failed source rides the prompt
     assert "envelope banana" in revision
@@ -1928,9 +1936,10 @@ def test_repair_prompt_carries_the_previous_failed_source():
 def test_failed_rounds_do_not_trigger_restructure_on_a_zero_plateau():
     """Three failed rounds (BROKEN) score 0,0,0 — a flat *raw* history. That must
     NOT read as a plateau: every round after a failure is a repair round, never
-    a restructure round. Only a COMPILING plateau restructures."""
+    a restructure round. Only a COMPILING plateau restructures. (Each failed
+    round scripts two broken sources: the write plus its failed in-round retry.)"""
     client = FakeClient(
-        sources=[BROKEN, BROKEN, BROKEN, CLEAN],
+        sources=[BROKEN] * 6 + [CLEAN],
         critiques=[_satisfied()],  # only the final CLEAN round is critiqued
     )
     result = _agent(client).design("a cottage", max_iterations=4, target_score=None)
@@ -1949,15 +1958,17 @@ def test_compiling_plateau_still_restructures_despite_earlier_failures():
     (all score ~44) plateau the compiling scores, so the round-5 write
     restructures — the earlier 0 does not disturb the compiling-only window."""
     client = FakeClient(
-        sources=[BROKEN, MEDIOCRE, MEDIOCRE, MEDIOCRE, CLEAN],
+        sources=[BROKEN, BROKEN, MEDIOCRE, MEDIOCRE, MEDIOCRE, CLEAN],
         critiques=[_unsatisfied("a"), _unsatisfied("b"), _unsatisfied("c"), _satisfied()],
     )
     result = _agent(client).design("a cottage", max_iterations=5, target_score=None)
 
-    # Round 2 (after BROKEN) is repair; rounds 3-4 refine while the compiling
-    # window fills; round 5 restructures once three compiling scores plateau.
+    # Round 1 fails twice (write + in-round retry); round 2 is repair; rounds
+    # 3-4 refine while the compiling window fills; round 5 restructures once
+    # three compiling scores plateau. Prompts: [0] R1 write, [1] R1 retry,
+    # [2] R2 repair, [3] R3, [4] R4, [5] R5 restructure.
     assert result.history[1].repaired is True
-    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[4])
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[5])
     assert result.history[4].restructured is True
 
 
@@ -1982,6 +1993,100 @@ def test_write_source_repair_wording_is_off_by_default():
     prompt = _prompt_text(client.stream_prompts[0])
     assert REPAIR_MARK not in prompt
     assert REFINE_MARK in prompt
+
+
+# -- the in-round repair retry (salvage) ---------------------------------------
+# A round whose write fails to compile gets ONE extra generation call in the
+# same iteration — the repair-mode prompt on the just-failed source — before the
+# round is recorded. Restructure rounds are the usual patient: moving rooms
+# wholesale breaks a door offset or two, and under the old flow the redesign
+# burned the iteration and the next repair round often reverted it. The retry
+# replaces the write only when STRICTLY less broken (no plan at all is worse
+# than any recovered plan; recovered plans rank by error count).
+
+BROKEN2 = 'plan "Broken Two"\nenvelope banana\n'
+
+# MEDIOCRE plus one/two doors to rooms that don't exist: the compiler recovers a
+# plan but carries one/two errors — for ranking retries by error count.
+ONE_ERROR = MEDIOCRE + "door living - ghost width 2.5\n"
+TWO_ERRORS = MEDIOCRE + "door living - ghost width 2.5\ndoor bed - ghost2 width 2.5\n"
+
+
+def test_failed_write_is_salvaged_in_the_same_round():
+    """BROKEN then CLEAN in ONE round: the in-round retry fixes the compile, the
+    step records the compiling source, and the iteration is not burnt."""
+    client = FakeClient(sources=[BROKEN, CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+
+    assert len(result.history) == 1
+    step = result.history[0]
+    assert step.result.ok and step.salvaged is True
+    assert step.source == result.source and result.result.ok
+    assert len(client.stream_prompts) == 2  # the write + exactly one retry
+    # The retry prompt is repair mode on the just-failed source.
+    retry = _prompt_text(client.stream_prompts[1])
+    assert REPAIR_MARK in retry
+    assert "FAILED to compile with 1 error(s)" in retry
+    assert "envelope banana" in retry  # the failed source is the prior
+    # The salvaged (compiling) plan still gets its critique.
+    assert step.critique is not None and step.critique.satisfied
+
+
+def test_salvage_retry_that_still_fails_keeps_the_round_failed():
+    """When the retry is just as broken, the original write is kept, the round
+    stays failed (salvaged=False), and the NEXT round opens in cross-round
+    repair mode as before."""
+    client = FakeClient(sources=[BROKEN, BROKEN2, CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    step1 = result.history[0]
+    assert not step1.result.ok and step1.salvaged is False
+    assert step1.source == BROKEN  # equal badness: the original is kept
+    step2 = result.history[1]
+    assert step2.repaired is True and step2.result.ok
+
+
+def test_salvage_keeps_a_retry_that_is_strictly_less_broken():
+    """A retry that still fails but with FEWER errors replaces the source — the
+    next (cross-round) repair starts closer — yet the round is not marked
+    salvaged and still counts as failed."""
+    two, one = compile_source(TWO_ERRORS), compile_source(ONE_ERROR)
+    assert two.plan is not None and len(two.errors) == 2
+    assert one.plan is not None and len(one.errors) == 1
+
+    client = FakeClient(sources=[TWO_ERRORS, ONE_ERROR])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    step = result.history[0]
+    assert step.source == ONE_ERROR
+    assert not step.result.ok and step.salvaged is False
+
+
+def test_compiling_write_spends_no_salvage_call():
+    """A round whose write compiles makes exactly one generation call."""
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    assert len(client.stream_prompts) == 1
+
+
+def test_salvage_write_error_keeps_the_failed_round():
+    """An exception in the retry call (here: the script runs dry) is contained:
+    the failed round is recorded exactly as before instead of crashing the loop."""
+    client = FakeClient(sources=[BROKEN])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    step = result.history[0]
+    assert not step.result.ok and step.salvaged is False and step.source == BROKEN
+
+
+def test_a_salvaged_restructure_round_keeps_its_mode_flag():
+    """`restructured` says how the round's write was prompted; `salvaged` says
+    its compile was rescued afterwards — both can be true on one step."""
+    client = FakeClient(
+        sources=[MEDIOCRE, BROKEN, CLEAN],
+        critiques=[_blocking("The shop blocks the bedrooms."), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+    step2 = result.history[1]
+    assert step2.restructured is True and step2.salvaged is True and step2.result.ok
 
 
 # -- pure trigger helpers -----------------------------------------------------

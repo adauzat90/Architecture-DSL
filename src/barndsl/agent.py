@@ -957,6 +957,12 @@ class DesignStep:
     #: and fix only the erroring lines). Mutually exclusive with ``restructured`` —
     #: repair takes priority over restructure. Surfaced by the CLI line too.
     repaired: bool = False
+    #: True when this round's FIRST write failed to compile and the in-round repair
+    #: retry (one extra generation call, same iteration) produced the compiling
+    #: source recorded here. Orthogonal to ``restructured``/``repaired`` — those
+    #: say how the round's first write was prompted; this says its compile was
+    #: rescued afterwards. Surfaced by the CLI line too.
+    salvaged: bool = False
 
     @property
     def effective_total(self) -> float:
@@ -1126,11 +1132,13 @@ class BarndoAgent:
         the model the layout itself is stuck and it MAY re-place rooms, change
         adjacencies and re-route circulation wholesale (turned on when the score
         plateaus, the critic flags a blocking issue, or a suggestion repeats).
-        *repair* mode is used when the PREVIOUS round failed to compile: it names
-        the error count and forbids any redesign, so the model reproduces its
-        prior source and edits only the few lines the errors name. ``repair`` (an
-        error count > 0) takes priority over ``restructure`` — a broken plan is
-        repaired, never restructured (see :meth:`design`).
+        *repair* mode is used when a write failed to compile — both for the
+        loop's in-round retry (same iteration, immediately after the failing
+        write) and for the round after a failure that retry couldn't fix: it
+        names the error count and forbids any redesign, so the model reproduces
+        its prior source and edits only the few lines the errors name.
+        ``repair`` (an error count > 0) takes priority over ``restructure`` — a
+        broken plan is repaired, never restructured (see :meth:`design`).
         """
         prompt = f"Design brief:\n{brief}\n"
         if seed and not prior:
@@ -1393,6 +1401,13 @@ class BarndoAgent:
     ) -> DesignResult:
         """Run the write → compile → score → critique → revise loop.
 
+        A round whose write fails to compile gets ONE in-round repair retry (an
+        extra generation call in the same iteration, repair-mode prompt: fix
+        only the erroring lines) before the round is recorded; the retry's
+        source is kept only when it is strictly less broken. Only a failure the
+        retry couldn't fix costs the iteration and puts the NEXT round in
+        cross-round repair mode.
+
         ``max_iterations`` and ``target_score`` default to the environment-backed
         values (:func:`resolve_max_iterations` / :func:`resolve_target_score`, i.e.
         ``$BARNDSL_MAX_ITERATIONS`` / ``$BARNDSL_TARGET_SCORE`` or the built-in
@@ -1579,6 +1594,46 @@ class BarndoAgent:
             # (a pure function of the source), so the score stays a contract —
             # and a missing `program` line now costs points the loop can win back.
             _fold_program_nudge(result)
+            # In-round repair: when THIS round's write fails to compile, spend one
+            # extra generation call to fix it NOW instead of burning the iteration
+            # and repairing next round. Restructure rounds are the usual patient
+            # (moving rooms wholesale breaks a door offset or two), and a salvaged
+            # restructure keeps its structural gains where the old flow lost them:
+            # fail → next round repairs → the redesign itself is often reverted.
+            # The retry reuses repair mode verbatim (reproduce, fix only the
+            # erroring lines) and is kept only when STRICTLY less broken, so a
+            # "repair" that redesigns into different errors is discarded.
+            salvaged = False
+            if (result.plan is None or result.errors) and not (
+                cancel is not None and cancel()
+            ):
+                if on_phase is not None:
+                    on_phase("writing", i)
+                retry_feedback = render_feedback(
+                    result, design_score(result), score_history=scored_totals()
+                )
+                try:
+                    retry_source, retry_truncated = self._write_source_ex(
+                        brief, prior=source, diagnostics=retry_feedback,
+                        on_activity=activity_for("writing", i),
+                        repair=max(len(result.errors), 1),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "In-round repair failed on iteration %d (%s: %s) — "
+                        "keeping the failed round.",
+                        i, type(exc).__name__, str(exc)[:200],
+                    )
+                else:
+                    if on_phase is not None:
+                        on_phase("compiling", i)
+                    retry_result = compile_source(retry_source, name=None)
+                    _fold_program_nudge(retry_result)
+                    if _compile_badness(retry_result) < _compile_badness(result):
+                        source, result, truncated = (
+                            retry_source, retry_result, retry_truncated
+                        )
+                        salvaged = result.ok
             score = design_score(result)
             crit = None
             # Gate the critique on ``ok``, not just a plan: a partially-recovered
@@ -1611,7 +1666,7 @@ class BarndoAgent:
             step = DesignStep(
                 i, source, result, crit, score,
                 gating_total=gating_total, restructured=restructured,
-                repaired=repaired,
+                repaired=repaired, salvaged=salvaged,
             )
             history.append(step)
             if on_step:
@@ -1625,7 +1680,8 @@ class BarndoAgent:
                 done = False
             if done or i == max_iterations:
                 break
-            # When THIS round failed to compile, the NEXT round is a REPAIR round:
+            # When THIS round failed to compile (even after the in-round retry
+            # above spent its one attempt), the NEXT round is a REPAIR round:
             # the model reproduces this exact (failed) source and fixes only the
             # erroring lines. Carry the failed source forward as the "prior" (so
             # "reproduce it, fix line N" is coherent) with its OWN diagnostics, and
@@ -1709,6 +1765,20 @@ def _fold_blocking(result: CompileResult, crit: CritiqueSpec | None) -> None:
                 hint="Architect's review (blocking structural defect - fix before polishing).",
             )
         )
+
+
+def _compile_badness(result: CompileResult) -> float:
+    """How broken a compile is, for judging the in-round repair retry.
+
+    No plan at all outranks any recovered plan (an unparseable source gives the
+    next repair nothing to stand on); recovered plans rank by error count; 0.0
+    means it compiled clean of errors. The retry replaces the original only when
+    STRICTLY lower — equal badness keeps the original, so a "repair" that merely
+    trades one broken arrangement for another is discarded.
+    """
+    if result.plan is None:
+        return float("inf")
+    return float(len(result.errors))
 
 
 def _normalize_suggestion(text: str) -> str:
