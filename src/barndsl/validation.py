@@ -1985,13 +1985,17 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
 
     Uses the clear (finish-face) interior, so the check reflects the built room,
     not the nominal rectangle. A bath that can't fit toilet/lav/tub with
-    clearances is a ``BATH_CLEARANCE`` warning; a cramped kitchen is a
+    clearances is a ``BATH_CLEARANCE`` warning; a laundry that can't load its
+    washer/dryer is a ``LAUNDRY_FIT`` warning; a cramped kitchen is a
     ``KITCHEN_FIT`` info.
     """
     from .fixtures import fixtures_fit  # lazy: fixtures imports back from here
 
     for room in plan.rooms:
-        if room.type not in (RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN):
+        if room.type not in (
+            RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN,
+            RoomType.LAUNDRY,
+        ):
             continue
         clear_w, clear_l = clear_dimensions(plan, room)
         ok, reason = fixtures_fit(room.type, clear_w, clear_l)
@@ -2006,6 +2010,19 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
                     room=room.id,
                     hint="Enlarge it so a sink, range and refrigerator fit with a "
                     "working aisle.",
+                )
+            )
+        elif room.type is RoomType.LAUNDRY:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "LAUNDRY_FIT",
+                    f"Laundry '{room.id}' can't fit its washer/dryer with a "
+                    f"working aisle: {reason}.",
+                    room=room.id,
+                    hint="A laundry wants ~5.5 ft of clear depth — a washer/dryer "
+                    "(2.25 ft deep) plus a 3 ft aisle to load them; widen the "
+                    "room or fold it into a bigger mudroom/utility.",
                 )
             )
         else:
@@ -4268,7 +4285,10 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
     # 8b. Mudroom shape: not habitable, so the check above never sees one — but a
     #     long, skinny mudroom is a corridor wearing a mudroom label. Its job is a
     #     drop zone: a bench and hooks (~1.5 ft) plus a 3 ft walkway wants >= 5 ft
-    #     of width and a compact footprint (a 6 x 8 is the classic).
+    #     of width and a compact footprint (a 6 x 8 is the classic). Severity is
+    #     tiered: under the width bar the room CANNOT do its job (a bench plus a
+    #     walkway physically doesn't fit) — that's a WARNING, not a taste note;
+    #     wide-enough-but-elongated stays an INFO nudge.
     for room in plan.rooms:
         if room.type is not RoomType.MUDROOM:
             continue
@@ -4295,13 +4315,14 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
             why = f"{aspect:.1f}:1 — a corridor, not a drop zone"
         add(
             Issue(
-                Severity.INFO,
+                Severity.WARNING if tight else Severity.INFO,
                 "MUDROOM_SHAPE",
                 f"Mudroom '{room.id}' is {_f(room.width)} x {_f(room.length)}, {why}.",
                 room=room.id,
                 hint=f"A working mudroom is >= {MIN_MUDROOM_WIDTH:g} ft wide and "
                 f"compact (near 6 x 8, under ~{MAX_MUDROOM_ASPECT:g}:1); give the "
-                "surplus length to the shop, laundry or pantry.",
+                "surplus length to the shop, laundry or pantry, or label the "
+                "strip what it is (a hallway).",
             )
         )
 

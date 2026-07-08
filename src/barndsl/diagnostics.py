@@ -39,7 +39,8 @@ class CodeInfo:
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
 _VARYING = frozenset(
-    {"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING", "AREA_VOID"}
+    {"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING", "AREA_VOID",
+     "MUDROOM_SHAPE"}
 )
 
 
@@ -840,11 +841,17 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "its own."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
-        _c("MUDROOM_SHAPE", I, "Mudroom too narrow or too elongated",
-           "A mudroom under ~5 ft wide can't hold its job — a bench and hooks "
-           "(~1.5 ft) plus a 3 ft walkway — and one past ~2.5:1 is a corridor "
-           "wearing a mudroom label. Aim near a compact 6 x 8; give surplus "
-           "length to the shop, laundry or pantry."),
+        _c("LAUNDRY_FIT", W, "Laundry can't hold its washer/dryer",
+           "The laundry's clear interior can't fit a washer and dryer (2.25 ft "
+           "deep) with a 3 ft working aisle to load them — about 5.5 ft of clear "
+           "depth. Widen the room, or fold laundry into a bigger mudroom/utility."),
+        _c("MUDROOM_SHAPE", W, "Mudroom too narrow or too elongated",
+           "A mudroom under ~5 ft wide CANNOT do its job — a bench and hooks "
+           "(~1.5 ft) plus a 3 ft walkway physically don't fit — so that is a "
+           "WARNING (it's a hallway wearing a mudroom label). One that is wide "
+           "enough but past ~2.5:1 reads as a corridor and stays an INFO nudge. "
+           "Aim near a compact 6 x 8; give surplus length to the shop, laundry "
+           "or pantry."),
         _c("GARAGE_BEDROOM", W, "Garage/shop opens into a bedroom",
            "A garage or shop must not open directly into a sleeping room (IRC "
            "R302.5.1). A barndominium shop bay is treated as a garage."),

@@ -121,6 +121,26 @@ def test_bath_clearance_silent_on_a_workable_bath():
     assert "BATH_CLEARANCE" not in _codes(plan)
 
 
+def test_laundry_fit_warns_on_a_3ft_strip():
+    # A live agent plan shipped a 3 x 13 "laundry" — a washer is 2.25 ft deep
+    # and wants a 3 ft aisle to load, so a 3 ft strip can't work at all.
+    plan = (
+        barndominium("x").envelope(24, 20).ceiling(9)
+        .add_room("laundry", T.LAUNDRY, x=0, y=0, width=3, length=13)
+        .add_room("rest", T.LIVING, x=3, y=0, width=21, length=20)
+    )
+    assert "LAUNDRY_FIT" in _codes(plan)
+
+
+def test_laundry_fit_silent_on_a_workable_laundry():
+    plan = (
+        barndominium("x").envelope(24, 20).ceiling(9)
+        .add_room("laundry", T.LAUNDRY, x=0, y=0, width=6, length=8)
+        .add_room("rest", T.LIVING, x=6, y=0, width=18, length=20)
+    )
+    assert "LAUNDRY_FIT" not in _codes(plan)
+
+
 def test_kitchen_fit_is_an_info_not_a_warning():
     plan = (
         barndominium("x").envelope(24, 20).ceiling(9)

@@ -245,10 +245,11 @@ BARNDOMINIUM IDIOMS worth reaching for:
   or hall (never a shared wall with a bedroom). `require separate <shop> <bed>`.
 - A mudroom/drop-zone at the family entry (off the garage or the drive side)
   catches coats and boots before the kitchen. Keep it COMPACT - near 6 x 8 and
-  at least 5 ft wide (a bench plus a walkway). A 4-ft-wide strip running the
-  building's depth is a corridor wearing a mudroom label (MUDROOM_SHAPE);
-  buffer the shop with the laundry/pantry stacked beside a short mudroom
-  instead of stretching one room the whole seam.
+  at least 5 ft wide: under 5 ft a bench plus a walkway physically don't fit,
+  and MUDROOM_SHAPE fires as a WARNING (a 3-4 ft strip running the building's
+  depth is a hallway wearing a mudroom label). Buffer the shop with the
+  laundry/pantry stacked beside a short mudroom instead of stretching one
+  room the whole seam.
 - Deep covered porches on the SOUTH face, the front porch aligned to the
   living-room glazing; a back porch off the kitchen/dining for the grill.
 - Kitchen toward the east for morning light; keep sink-range-fridge a tight
@@ -274,6 +275,10 @@ LINT the compiler enforces (satisfy these too):
   buffer with a mudroom or hall (IRC R302.5.1).
 - HALL_DEADEND / DOOR_CENTERED: cap a hall at a doorway; back swing doors to a
   corner with `offset` so a wall flank stays furnishable.
+- MUDROOM_SHAPE / LAUNDRY_FIT (warnings): service rooms need WORKING WIDTH -
+  a mudroom >= 5 ft wide and compact; a laundry ~5.5 ft clear so the washer/
+  dryer load with a 3 ft aisle. A 3-4 ft strip labelled mudroom or laundry is
+  really a hallway and costs warning points.
 """
 
 #: The design method, stated as an ordered procedure. It sits between the
