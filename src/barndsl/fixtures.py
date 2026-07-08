@@ -599,7 +599,10 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
     that an authored fixture of a *seeded* kind **replaces** that kind's seed (an
     explicit ``toilet`` moves the toilet; the lavatory/tub seeds stay). Seeds are
     laid first (perimeter walk), then authored fixtures fill the first free slot
-    that clears what's already down. Every fixture gets a stable
+    that clears what's already down. Door swings count as occupied for both walks
+    — a seed and an auto-slotted authored piece slide clear of every hinged
+    door's arc; only an explicit ``at x,y`` can park a fixture in one (and the
+    ``FIXTURE_DOOR`` check flags it). Every fixture gets a stable
     ``<room>~<kind>~<i>`` id. Deterministic and side-effect-free.
     """
     explicit = [pf for pf in getattr(plan, "fixtures", []) if pf.room == room.id]
@@ -609,9 +612,12 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
 
     explicit_kinds = {pf.kind for pf in explicit}
     surviving = [k for k in fixtures_for(room.type) if k not in explicit_kinds]
-    placed = _place_perimeter(x0, y0, cw, cl, surviving, gaps=_seed_gaps(room.type))
+    keepouts = tuple(_door_swing_rects(plan, room))
+    placed = _place_perimeter(
+        x0, y0, cw, cl, surviving, keepouts, _seed_gaps(room.type)
+    )
 
-    occupied = [(f.x, f.y, f.width, f.length) for f in placed]
+    occupied = [(f.x, f.y, f.width, f.length) for f in placed] + list(keepouts)
     for pf in explicit:
         if pf.kind not in FIXTURES:
             continue
@@ -715,14 +721,15 @@ def validate_fixtures(plan: Barndominium, add) -> None:
                 if _rects_overlap(rects[i], door):
                     add(
                         Issue(
-                            Severity.INFO,
+                            Severity.WARNING,
                             "FIXTURE_DOOR",
                             f"Fixture '{f.kind}' in '{room.id}' sits in a door's "
-                            "swing.",
+                            "swing — the leaf hits it.",
                             room=room.id,
                             line=f.source_line,
-                            hint="Keep the clear floor in front of the door open; "
-                            "slide the fixture clear of the swing.",
+                            hint="Keep the clear floor in front of the door open: "
+                            "slide the fixture clear of the swing, or make the "
+                            "door pocket/sliding.",
                         )
                     )
                     break
@@ -1083,10 +1090,29 @@ def _fmt(v: float) -> str:
 
 def _door_swing_rects(plan: Barndominium, room: Room) -> list:
     """Coarse swing-clearance rectangles for the leaves opening into ``room`` — a
-    width-deep band inside each hinged interior door on one of the room's walls."""
+    width-deep band inside each hinged door on one of the room's walls, interior
+    partitions and exterior entries alike (an overhead door rides its tracks and a
+    pocket/sliding leaf stays in the wall, so neither reserves an arc)."""
     from .geometry import shared_edge
 
     out = []
+    for d in plan.exterior_doors:
+        if d.room != room.id or getattr(d, "overhead", False):
+            continue
+        if getattr(d, "kind", "entry") in ("pocket", "sliding"):
+            continue
+        w = d.width
+        x1, y1, x2, y2 = opening_endpoints(room, d.wall, d.offset, d.width)
+        if d.wall is Direction.SOUTH:
+            out.append((min(x1, x2), room.y, w, min(w, room.length)))
+        elif d.wall is Direction.NORTH:
+            d_in = min(w, room.length)
+            out.append((min(x1, x2), room.y2 - d_in, w, d_in))
+        elif d.wall is Direction.WEST:
+            out.append((room.x, min(y1, y2), min(w, room.width), w))
+        else:  # EAST
+            d_in = min(w, room.width)
+            out.append((room.x2 - d_in, min(y1, y2), d_in, w))
     for d in plan.interior_doors:
         if getattr(d, "kind", "swing") not in ("swing", "double", "french"):
             continue

@@ -357,11 +357,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two fixtures occupy the same floor — an author-placed one overlaps "
            "another fixture (a seed or another placement). Slide one along its "
            "wall, or back it to a different wall."),
-        _c("FIXTURE_DOOR", I, "Fixture blocks a door swing",
+        _c("FIXTURE_DOOR", W, "Fixture blocks a door swing",
            "An author-placed fixture sits in the clear floor a hinged door swings "
-           "through, so the door can't fully open past it. Keep the swing clear — "
-           "slide the fixture off the door approach, or swing the door the other "
-           "way."),
+           "through, so the door can't fully open — its leaf hits the fixture. "
+           "The auto-placer keeps its own seeds and auto-slotted pieces clear of "
+           "every swing, so only an explicit `at x,y` can land here. Keep the "
+           "swing clear — slide the fixture off the door approach, or swing the "
+           "door the other way (or make it a pocket/sliding door)."),
         _c("FIXTURE_TOILET_CLEARANCE", W, "Toilet clearance below IRC R307.1",
            "An author-placed toilet has less than 15 in from its centreline to the "
            "nearest side wall or fixture, or less than 21 in of clear floor in "
