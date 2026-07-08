@@ -840,6 +840,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "its own."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
+        _c("MUDROOM_SHAPE", I, "Mudroom too narrow or too elongated",
+           "A mudroom under ~5 ft wide can't hold its job — a bench and hooks "
+           "(~1.5 ft) plus a 3 ft walkway — and one past ~2.5:1 is a corridor "
+           "wearing a mudroom label. Aim near a compact 6 x 8; give surplus "
+           "length to the shop, laundry or pantry."),
         _c("GARAGE_BEDROOM", W, "Garage/shop opens into a bedroom",
            "A garage or shop must not open directly into a sleeping room (IRC "
            "R302.5.1). A barndominium shop bay is treated as a garage."),

@@ -97,6 +97,11 @@ _LANDING_KINDS: frozenset[str] = frozenset(
     {"counter", "sink", "kitchen_island", "refrigerator"}
 )
 
+#: Pieces the wall auto-slot tries CENTRED on their wall before walking for the
+#: first free run: a bed wants nightstand room on both sides and a sofa an end
+#: table — cornered, they read as parked, not placed.
+_CENTER_ON_WALL: frozenset[str] = frozenset({"bed_queen", "bed_twin", "sofa"})
+
 #: The default depth of an ``along`` counter run (into the room). 25 in — 2 ft 1 in
 #: — is the US-standard finished countertop depth (24 in cabinet + a 1 in overhang),
 #: so an ``along`` run without a ``depth`` uses it. (The catalog ``counter`` keeps
@@ -479,6 +484,55 @@ def _place_perimeter(
     return placed
 
 
+#: The longest alcove a seed tub stretches to span wall-to-wall (72 in tubs are
+#: stock; past that the catalog tub anchors to a corner instead of stretching).
+_TUB_ALCOVE_MAX = 6.0
+
+
+def _alcove_tub(x0: float, y0: float, cw: float, cl: float, keepouts) -> Fixture | None:
+    """A tub fitted like real construction: spanning the clear box's SHORT
+    dimension wall-to-wall at one end of the room (an alcove), touching the side
+    walls, rather than floating as a strip along the long wall. Stretches the
+    catalog 5 ft tub up to :data:`_TUB_ALCOVE_MAX` to close the alcove. Returns
+    ``None`` when the room is too narrow/too wide for an alcove or a door swing
+    blocks both ends — the perimeter walk then places the tub as before."""
+    spec = FIXTURES["tub"]
+    span = min(cw, cl)
+    if span + 1e-6 < spec.width or span > _TUB_ALCOVE_MAX + 1e-6:
+        return None
+    if cw <= cl:  # the alcove spans x: the tub sits across the N or S end
+        ends = (
+            ("N", (x0, y0 + cl - spec.depth, span, spec.depth)),
+            ("S", (x0, y0, span, spec.depth)),
+        )
+    else:  # spans y: across the E or W end
+        ends = (
+            ("E", (x0 + cw - spec.depth, y0, spec.depth, span)),
+            ("W", (x0, y0, spec.depth, span)),
+        )
+    for wall, (fx, fy, fw, fl) in ends:
+        if not any(_rects_overlap((fx, fy, fw, fl), b) for b in keepouts):
+            return Fixture("tub", fx, fy, fw, fl, wall)
+    return None
+
+
+def _place_seeds(
+    x0: float, y0: float, cw: float, cl: float, kinds: list[str],
+    keepouts: tuple = (), gaps: dict[str, float] | None = None,
+) -> list[Fixture]:
+    """The deterministic seed layout: an alcove tub first (when the room affords
+    one), then the perimeter walk for everything else with the tub as a keepout."""
+    placed: list[Fixture] = []
+    if "tub" in kinds:
+        tub = _alcove_tub(x0, y0, cw, cl, keepouts)
+        if tub is not None:
+            placed.append(tub)
+            kinds = [k for k in kinds if k != "tub"]
+            keepouts = tuple(keepouts) + ((tub.x, tub.y, tub.width, tub.length),)
+    placed.extend(_place_perimeter(x0, y0, cw, cl, kinds, keepouts, gaps))
+    return placed
+
+
 def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = True) -> list[Fixture]:
     """Place ``room``'s **auto-seed** fixtures against its walls (deterministic).
 
@@ -498,7 +552,7 @@ def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = Tr
     if cw <= 0 or cl <= 0:
         return []
     keepouts = tuple(_door_swing_rects(plan, room)) if avoid_doors else ()
-    return _place_perimeter(x0, y0, cw, cl, kinds, keepouts, _seed_gaps(room.type))
+    return _place_seeds(x0, y0, cw, cl, kinds, keepouts, _seed_gaps(room.type))
 
 
 def _quarter_turns(rotation: float) -> int:
@@ -571,6 +625,17 @@ def _place_explicit(
         return Fixture(pf.kind, fx, fy, fw, fl, wall, rotation=pf.rotation)
 
     if wall:
+        # A bed or sofa reads best CENTRED on its wall (nightstand/end-table room
+        # on both sides), so try the centred slot first; anything in the way —
+        # another fixture or a door swing — falls back to the free-slot walk.
+        if pf.kind in _CENTER_ON_WALL:
+            run = cw if wall in ("S", "N") else cl
+            if width <= run + 1e-9:
+                rect = _wall_rect(
+                    wall, x0, y0, cw, cl, (run - width) / 2.0, width, depth
+                )
+                if not any(_rects_overlap(rect, o) for o in occupied):
+                    return Fixture(pf.kind, *rect, wall, rotation=pf.rotation)
         # Auto-place against the named wall: first free slot along its run.
         rx, ry, rw, rl = _first_free_on_wall(x0, y0, cw, cl, wall, width, depth, occupied)
         return Fixture(pf.kind, rx, ry, rw, rl, wall, rotation=pf.rotation)
@@ -631,7 +696,7 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
     explicit_kinds = {pf.kind for pf in explicit}
     surviving = [k for k in fixtures_for(room.type) if k not in explicit_kinds]
     keepouts = tuple(_door_swing_rects(plan, room))
-    placed = _place_perimeter(
+    placed = _place_seeds(
         x0, y0, cw, cl, surviving, keepouts, _seed_gaps(room.type)
     )
 

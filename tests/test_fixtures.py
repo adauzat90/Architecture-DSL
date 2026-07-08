@@ -50,6 +50,60 @@ def test_placed_fixtures_sit_inside_the_clear_box():
         assert f.wall in ("S", "N", "E", "W")
 
 
+# --- the alcove tub -------------------------------------------------------------
+# A tub is built into an alcove — spanning the room's short dimension wall-to-wall
+# at one end — not floated as a 2.5 ft strip along the long wall (a live plan's
+# 6 x 12 bath drew exactly that strip). The seed stretches the catalog 5 ft tub
+# up to 6 ft to close the alcove; wider rooms keep the plain perimeter walk.
+
+
+def test_seed_tub_spans_the_alcove_in_a_standard_bath():
+    plan = _big_bath(6, 12)  # the live "Wheatland" mbath shape
+    room = plan.room("bath")
+    x0, y0, cw, cl = clear_box(plan, room)
+    placed = plan_room_fixtures(plan, room)
+    tub = next(f for f in placed if f.kind == "tub")
+    assert tub.x == x0 and tub.width == cw  # wall-to-wall across the short side
+    assert tub.wall in ("N", "S") and tub.length == 2.5
+    assert tub.y in (y0, y0 + cl - 2.5)  # parked at one end of the long axis
+    # The toilet and lavatory still land, clear of the tub.
+    assert {f.kind for f in placed} == {"toilet", "lavatory", "tub"}
+
+
+def test_seed_tub_keeps_the_perimeter_walk_when_no_alcove_fits():
+    plan = _big_bath(8, 11)  # ~7.5 ft clear span: too wide to stretch a tub across
+    room = plan.room("bath")
+    tub = next(f for f in plan_room_fixtures(plan, room) if f.kind == "tub")
+    assert 5.0 in (tub.width, tub.length)  # catalog width, unstretched
+
+
+def test_seed_tub_alcove_dodges_the_door_end():
+    from barndsl import compile_source
+    from barndsl.fixtures import resolve_room_fixtures
+
+    # The bath's door is on its north wall, so the north alcove end is a swing
+    # keepout — the tub takes the south end instead.
+    src = """\
+plan "T"
+envelope 22 x 20
+ceiling 9
+room bath: bathroom at 0,0 size 6 x 12
+room living: living at 6,0 size 16 x 20
+room hall: hallway at 0,12 size 6 x 8
+door hall - bath width 2.67 offset 1 into bath
+door hall - living width 3 offset 2
+entry living south width 3 offset 6
+window living south width 10 offset 4
+"""
+    r = compile_source(src)
+    assert r.plan is not None
+    bath = r.plan.room("bath")
+    x0, y0, cw, _cl = clear_box(r.plan, bath)
+    tub = next(f for f in resolve_room_fixtures(r.plan, bath) if f.kind == "tub")
+    assert tub.wall == "S" and tub.y == y0
+    assert tub.x == x0 and tub.width == cw
+
+
 def test_fit_passes_a_reasonable_bath_fails_a_tiny_one():
     ok, _ = fixtures_fit(T.BATHROOM, 7.6, 10.5)  # a normal full bath
     assert ok

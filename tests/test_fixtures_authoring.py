@@ -158,6 +158,40 @@ def test_offset_round_trips_through_emit_dsl():
     assert (d1.x, d1.y, d1.width, d1.length) == (d2.x, d2.y, d2.width, d2.length)
 
 
+# --- wall auto-slot: beds and sofas centre on a clear wall ---------------------
+
+
+def test_wall_slotted_bed_centres_on_a_clear_wall():
+    # A bed reads best centred (nightstand room both sides), not parked in the
+    # first corner the walk reaches.
+    from barndsl.validation import clear_box
+
+    r = compile_source(_plan("fixture bed_queen in bed wall N"))
+    bed_room = r.plan.room("bed")
+    x0, _y0, cw, _cl = clear_box(r.plan, bed_room)
+    f = next(x for x in resolve_room_fixtures(r.plan, bed_room)
+             if x.kind == "bed_queen")
+    assert f.wall == "N"
+    assert abs((f.x + f.width / 2.0) - (x0 + cw / 2.0)) < 1e-6
+
+
+def test_centred_bed_falls_back_to_the_walk_when_blocked():
+    from barndsl.fixtures import _rects_overlap
+
+    r = compile_source(_plan(
+        "fixture dresser in bed wall N offset 6",  # parked over the wall's middle
+        "fixture bed_queen in bed wall N",
+    ))
+    fixtures = resolve_room_fixtures(r.plan, r.plan.room("bed"))
+    dresser = next(f for f in fixtures if f.kind == "dresser")
+    bed = next(f for f in fixtures if f.kind == "bed_queen")
+    assert bed.wall == "N"
+    assert not _rects_overlap(
+        (bed.x, bed.y, bed.width, bed.length),
+        (dresser.x, dresser.y, dresser.width, dresser.length),
+    )
+
+
 # --- add-vs-replace seed semantics -------------------------------------------
 
 

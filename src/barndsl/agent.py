@@ -244,7 +244,11 @@ BARNDOMINIUM IDIOMS worth reaching for:
   `overhead` door facing the drive; buffer it from the house with a mudroom
   or hall (never a shared wall with a bedroom). `require separate <shop> <bed>`.
 - A mudroom/drop-zone at the family entry (off the garage or the drive side)
-  catches coats and boots before the kitchen.
+  catches coats and boots before the kitchen. Keep it COMPACT - near 6 x 8 and
+  at least 5 ft wide (a bench plus a walkway). A 4-ft-wide strip running the
+  building's depth is a corridor wearing a mudroom label (MUDROOM_SHAPE);
+  buffer the shop with the laundry/pantry stacked beside a short mudroom
+  instead of stretching one room the whole seam.
 - Deep covered porches on the SOUTH face, the front porch aligned to the
   living-room glazing; a back porch off the kitchen/dining for the grill.
 - Kitchen toward the east for morning light; keep sink-range-fridge a tight
@@ -350,10 +354,17 @@ FURNISH THE KEY ROOMS (a plan reads as a home when furniture proves each room wo
   earns its place in a kitchen roomier than ~12 ft across.
 - Craft: prefer a bare `wall N|S|E|W` over `offset`/`at` - the auto-slot
   clears door swings by itself; hand-pinned spots are where FIXTURE_DOOR and
-  FIXTURE_OVERLAP warnings come from. Head a bed to a wall WITHOUT a window.
-  Free-standing pieces (tables, island) centre themselves - leave ~2 ft of
-  walkway around them. Never park tall casework (a wardrobe) over a bedroom's
-  egress window, and stop a counter run short of doorways with `from`/`to`.
+  FIXTURE_OVERLAP warnings come from. Free-standing pieces (tables, island)
+  centre themselves - leave ~2 ft of walkway around them. Never park tall
+  casework (a wardrobe) over a bedroom's egress window, and stop a counter
+  run short of doorways with `from`/`to`.
+- BED FENG SHUI: the bed is the room's anchor - head it to a SOLID, windowless
+  wall (never the wall its door is in: the leaf would sweep at the sleeper's
+  head, and never a wall shared with a toilet/shower), centred with nightstand
+  room on both sides (the auto-slot centres beds and sofas when the wall is
+  clear). The sleeper should see the door without lying directly in line with
+  it. Pick the bed wall FIRST, then place the door and window on the other
+  walls to suit.
 """
 
 #: A complete plan that compiles 0 errors / 0 warnings / 0 infos and scores

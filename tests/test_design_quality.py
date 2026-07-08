@@ -209,6 +209,76 @@ window living west width 8 offset 6
     assert "ROOM_PROPORTION" not in _codes(r, "info")
 
 
+# --- MUDROOM_SHAPE -------------------------------------------------------------
+# A mudroom is a drop zone (bench + hooks + a 3 ft walkway), so it wants >= 5 ft
+# of width and a compact footprint. ROOM_PROPORTION never sees one (mudrooms
+# aren't habitable) — a live agent plan buffered a shop with a 4 x 28 corridor
+# labelled "mudroom" and no check said a word.
+
+
+def test_long_skinny_mudroom_is_flagged():
+    # The Wheatland shape: a mudroom strip running the building's full depth.
+    src = """\
+plan "Skinny mud"
+envelope 40 x 28
+ceiling 9
+room shop: shop at 0,0 size 20 x 28
+room mud: mudroom at 20,0 size 4 x 28
+room living: living at 24,0 size 16 x 28
+door mud - shop width 3 offset 1 into shop
+door mud - living width 3 offset 1
+entry living south width 3 offset 6
+entry shop south width 3 offset 2
+window living south width 8 offset 6
+window living east width 8 offset 6
+"""
+    r = compile_source(src)
+    assert "MUDROOM_SHAPE" in _codes(r, "info")
+    msg = next(d for d in r.infos if d.code == "MUDROOM_SHAPE").message
+    assert "corridor" in msg
+
+
+def test_narrow_mudroom_is_flagged_even_when_compact():
+    # 4 x 8 is only 2:1, but 4 ft can't hold a bench plus a walkway.
+    src = """\
+plan "Narrow mud"
+envelope 28 x 20
+ceiling 9
+room living: living at 0,0 size 24 x 20
+room mud: mudroom at 24,0 size 4 x 8
+room util: utility at 24,8 size 4 x 12
+door living - mud width 3 offset 1
+door living - util width 2.67 offset 2
+entry mud south width 3 offset 0.5
+entry living south width 3 offset 6
+window living south width 10 offset 8
+window living west width 8 offset 6
+"""
+    r = compile_source(src)
+    assert "MUDROOM_SHAPE" in _codes(r, "info")
+    msg = next(d for d in r.infos if d.code == "MUDROOM_SHAPE").message
+    assert "only 4 ft wide" in msg
+
+
+def test_compact_mudroom_is_silent():
+    # The classic 6 x 8 drop zone passes without comment.
+    src = """\
+plan "Good mud"
+envelope 30 x 24
+ceiling 9
+room living: living at 0,0 size 24 x 24
+room mud: mudroom at 24,0 size 6 x 8
+room laundry: laundry at 24,8 size 6 x 16
+door living - mud width 3 offset 1
+door living - laundry width 2.67 offset 2
+entry mud south width 3 offset 1.5
+entry living south width 3 offset 6
+window living south width 12 offset 8
+"""
+    r = compile_source(src)
+    assert "MUDROOM_SHAPE" not in _codes(r, "info")
+
+
 # --- GARAGE_BEDROOM (warning) ------------------------------------------------
 
 

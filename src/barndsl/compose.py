@@ -67,8 +67,8 @@ MAX_PART_BYTES = 256 * 1024
 PART_LOCAL_CODES = frozenset({
     "DUP_ID",
     # room geometry (a room's own shape/size — independent of placement)
-    "ROOM_SIZE", "ROOM_TIGHT", "ROOM_PROPORTION", "ROOM_GEOMETRY", "ROOM_CLEAR",
-    "ROOM_HABITABLE",
+    "ROOM_SIZE", "ROOM_TIGHT", "ROOM_PROPORTION", "MUDROOM_SHAPE", "ROOM_GEOMETRY",
+    "ROOM_CLEAR", "ROOM_HABITABLE",
     "BEDROOM_AREA", "BEDROOM_DIM", "CLOSET_SHAPE", "BATH_CLEARANCE",
     "BATH_OVERSIZE", "OPEN_BATH", "BATH_DISTANCE",
     # fixtures & furniture clearances (room-local)

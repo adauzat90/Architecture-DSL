@@ -145,6 +145,12 @@ MAX_ROOM_ASPECT = 3.0  # default: a habitable room longer than this (long:short)
 MAX_ROOM_ASPECT_BY_TYPE: dict[RoomType, float] = {
     RoomType.BEDROOM: 1.8,
 }
+#: A mudroom's job needs floor, not length: a bench (~1.5 ft) plus a 3 ft
+#: walkway means anything under ~5 ft wide can't hold the drop zone it exists
+#: for, and past ~2.5:1 it reads as a corridor wearing a mudroom label.
+#: Mudrooms aren't habitable, so ROOM_PROPORTION never sees them (MUDROOM_SHAPE).
+MIN_MUDROOM_WIDTH = 5.0
+MAX_MUDROOM_ASPECT = 2.5
 #: A single *concentrated* patch of unassigned footprint this large (sq ft) is a
 #: void — a real hole in the plan (an unfinished room, a mis-sized neighbour), not
 #: the diffuse slack AREA_UNUSED measures. AREA_UNUSED only speaks below 85%
@@ -4258,6 +4264,46 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
                         "— widen the short side or split the space.",
                     )
                 )
+
+    # 8b. Mudroom shape: not habitable, so the check above never sees one — but a
+    #     long, skinny mudroom is a corridor wearing a mudroom label. Its job is a
+    #     drop zone: a bench and hooks (~1.5 ft) plus a 3 ft walkway wants >= 5 ft
+    #     of width and a compact footprint (a 6 x 8 is the classic).
+    for room in plan.rooms:
+        if room.type is not RoomType.MUDROOM:
+            continue
+        short = room.min_dimension
+        long_side = max(room.width, room.length)
+        if short <= EPSILON:
+            continue
+        aspect = long_side / short
+        tight = short + EPSILON < MIN_MUDROOM_WIDTH
+        skinny = aspect > MAX_MUDROOM_ASPECT
+        if not (tight or skinny):
+            continue
+        if tight and skinny:
+            why = (
+                f"only {_f(short)} ft wide and {aspect:.1f}:1 — a corridor, "
+                "not a drop zone"
+            )
+        elif tight:
+            why = (
+                f"only {_f(short)} ft wide — a 1.5 ft bench plus a 3 ft walkway "
+                "doesn't fit"
+            )
+        else:
+            why = f"{aspect:.1f}:1 — a corridor, not a drop zone"
+        add(
+            Issue(
+                Severity.INFO,
+                "MUDROOM_SHAPE",
+                f"Mudroom '{room.id}' is {_f(room.width)} x {_f(room.length)}, {why}.",
+                room=room.id,
+                hint=f"A working mudroom is >= {MIN_MUDROOM_WIDTH:g} ft wide and "
+                f"compact (near 6 x 8, under ~{MAX_MUDROOM_ASPECT:g}:1); give the "
+                "surplus length to the shop, laundry or pantry.",
+            )
+        )
 
 
 def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
