@@ -1117,6 +1117,13 @@ def test_generate_system_teaches_the_anchor_rule_and_shows_the_example():
 
     assert "ANCHOR RULE" in _GENERATE_SYSTEM
     assert "TILE, THEN CONNECT" in _GENERATE_SYSTEM
+    # Furnishing: the craft block rides both prompts (the critic can ask for a
+    # bed the generator knows how to place), and the lead example models it.
+    from barndsl.agent import _CRITIQUE_SYSTEM
+
+    assert "FURNISH THE KEY ROOMS" in _GENERATE_SYSTEM
+    assert "FURNISH THE KEY ROOMS" in _CRITIQUE_SYSTEM
+    assert "fixture bed_queen in master" in _EXAMPLE_HALL_SPINE
     # The hall-spine plan leads and the L-shaped `wing` plan follows; the
     # two-story example is deliberately NOT in the prompt (kept as a pinned
     # constant only), to make room for the design-process block.
@@ -1134,6 +1141,7 @@ def test_generate_system_teaches_the_anchor_rule_and_shows_the_example():
         _GENERATE_SYSTEM.index("HOW AN ARCHITECT THINKS"),
         _GENERATE_SYSTEM.index("DESIGN PROCESS (follow when drafting"),
         _GENERATE_SYSTEM.index("HOW TO PLACE ROOMS"),
+        _GENERATE_SYSTEM.index("FURNISH THE KEY ROOMS"),
         _GENERATE_SYSTEM.index("FULL GRAMMAR REFERENCE"),
         _GENERATE_SYSTEM.index(DSL_REFERENCE),
         _GENERATE_SYSTEM.index("You MUST declare the brief"),

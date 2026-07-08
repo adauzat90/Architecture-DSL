@@ -325,6 +325,35 @@ HOW TO PLACE ROOMS (craft that keeps plans compiling first try):
   (`into <room> hinge near`), and backed to the wall's end with `offset`.
 """
 
+#: Furnishing craft: the `fixture` catalog and where furniture belongs. Wet
+#: rooms seed their own fixtures; furniture is an authoring act, so the prompt
+#: asks for it explicitly — an empty bedroom on the drawing reads as an
+#: unfinished design. Shared with the critic so "furnish the office" lands in
+#: terms the generator understands.
+_FURNISH_CRAFT = """\
+FURNISH THE KEY ROOMS (a plan reads as a home when furniture proves each room works):
+- Wet rooms furnish THEMSELVES: a bath seeds toilet/lavatory/tub, a kitchen
+  seeds range/sink/refrigerator, a laundry seeds washer/dryer - write no
+  `fixture` line for those unless you are deliberately moving one.
+- Furniture is yours to place. EXACT grammar (there is NO offset option):
+    fixture <kind> in <room> wall N|S|E|W    # auto-slots along that wall,
+                                             #   sliding clear of door swings
+    fixture <kind> in <room> at <x>,<y>      # room-local feet from the SW corner
+    fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]
+  Furniture kinds: bed_queen, bed_twin, sofa, armchair, dining_table,
+  coffee_table, desk, dresser, wardrobe, kitchen_island, counter.
+- MINIMUM furnishing: a bed in EVERY bedroom (bed_queen for the primary,
+  bed_twin for kids/guests), sofa + coffee_table in the living room, a
+  dining_table in the dining room, a desk in an office. A kitchen_island
+  earns its place in a kitchen roomier than ~12 ft across.
+- Craft: prefer `wall N|S|E|W` over `at x,y` - the auto-slot clears door
+  swings by itself; hand coordinates are where FIXTURE_DOOR and
+  FIXTURE_OVERLAP warnings come from. Head a bed to a wall WITHOUT a window.
+  Free-standing pieces (tables, island) centre themselves - leave ~2 ft of
+  walkway around them. Never park tall casework (a wardrobe) over a bedroom's
+  egress window, and stop a counter run short of doorways with `from`/`to`.
+"""
+
 #: A complete plan that compiles 0 errors / 0 warnings / 0 infos and scores
 #: 100/100 — pinned by a test so it can never rot against the grammar. One
 #: worked example anchors the output format better than any instruction,
@@ -441,6 +470,16 @@ window bed2 north width 5 offset 4
 window master north width 6 offset 6
 window bath1 north width 3 offset 2 sill 5     # high privacy transom
 window mbath north width 3 offset 1 sill 5
+
+# --- FURNITURE: prove each room works. Baths/kitchen seed their own fixtures;
+#     beds head to windowless walls; `wall <W>` auto-slots clear of door swings;
+#     the free-standing tables centre themselves. ---
+fixture bed_queen in master wall E
+fixture bed_twin in bed1 wall W
+fixture bed_twin in bed2 wall E
+fixture sofa in living wall W
+fixture coffee_table in living
+fixture dining_table in dining
 
 alarm smoke in bed1
 alarm smoke in bed2
@@ -599,6 +638,8 @@ _GENERATE_SYSTEM = (
     + _DESIGN_PROCESS
     + "\n"
     + _PLACEMENT_CRAFT
+    + "\n"
+    + _FURNISH_CRAFT
     + "\nFULL GRAMMAR REFERENCE (consult for exact syntax):\n\n"
     + DSL_REFERENCE
     + "\nYou MUST declare the brief's program as a `program` statement derived "
@@ -614,8 +655,9 @@ _GENERATE_SYSTEM = (
 # The critic judges livability, not grammar: it is given the compiled
 # diagnostics as evidence, so it does NOT need the full grammar reference. It
 # shares the generator's design vocabulary instead — _DESIGN_RULES +
-# _PLACEMENT_CRAFT — so a suggestion it makes ("back the hall door to the end")
-# lands in terms the generator already understands.
+# _PLACEMENT_CRAFT + _FURNISH_CRAFT — so a suggestion it makes ("back the hall
+# door to the end", "furnish the office") lands in terms the generator already
+# understands.
 _CRITIQUE_SYSTEM = (
     "You are a senior architect reviewing a barndominium plan (given as barndsl "
     "source plus the compiler's report) for design quality and livability.\n\n"
@@ -640,6 +682,8 @@ _CRITIQUE_SYSTEM = (
     + _DESIGN_RULES
     + "\n"
     + _PLACEMENT_CRAFT
+    + "\n"
+    + _FURNISH_CRAFT
 )
 
 #: Appended to every critique prompt so the model emits JSON we can parse. Native
