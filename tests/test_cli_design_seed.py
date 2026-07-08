@@ -10,9 +10,18 @@ supplied `on_step`, so the printed step lines are exercised for real.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import barndsl.agent as agent_mod
 from barndsl import compile_source
-from barndsl.agent import CritiqueSpec, DesignStep
+from barndsl.agent import (
+    BarndoAgent,
+    CritiqueSpec,
+    DesignStep,
+    _brief_from_llm,
+    _solver_candidate_sources,
+    _solver_seed,
+)
 from barndsl.cli import main
 from barndsl.scaffold import starter_dsl
 from barndsl.score import design_score
@@ -199,3 +208,255 @@ def test_no_seed_note_absent_when_iteration_zero_present(monkeypatch, capsys):
     assert main(["design", "3 bed 2 bath 2000 sqft", "--out", "unused.svg"]) == 0
     out = capsys.readouterr().out
     assert "could not draft a seed" not in out
+
+
+# ============================================================================
+# Multi-seed exposure: alternate starts + the LLM-brief fallback (deliverables
+# 2 & 3). These drive a real BarndoAgent with a scripted fake client and inspect
+# the first write prompt / the seed-resolution chain — no network.
+# ============================================================================
+
+
+class _PromptRecordingClient:
+    """A minimal `.messages.stream(...)` fake for BarndoAgent.
+
+    Records the first-turn content of every call (`prompts`) and returns scripted
+    replies. Generation calls (system is NOT the critique's "senior architect")
+    pop `gen_replies`; critique calls return a satisfied JSON verdict; the
+    LLM-brief call (system marker "You translate briefs") pops `brief_replies`.
+    Everything the model sees rides `prompts` so a test can assert on it.
+    """
+
+    def __init__(self, gen_replies, brief_replies=None):
+        self._gen = list(gen_replies)
+        self._brief = list(brief_replies or [])
+        self.prompts: list[str] = []
+        self.systems: list[str] = []
+        self.messages = self
+
+    def stream(self, **kwargs):
+        system = kwargs.get("system", "")
+        content = kwargs["messages"][0]["content"]
+        text = content if isinstance(content, str) else "".join(
+            b["text"] for b in content if b.get("type") == "text"
+        )
+        self.prompts.append(text)
+        self.systems.append(system)
+        if "You translate briefs" in system:  # the LLM-brief call
+            reply = self._brief.pop(0)
+        elif "senior architect" in system:  # a critique call
+            reply = '{"satisfied": true, "assessment": "ok", "rationale": "ok", "suggestions": []}'
+        else:  # a generation call
+            reply = f"```barn\n{self._gen.pop(0)}```"
+        return _OneShotStream(reply)
+
+
+class _OneShotStream:
+    def __init__(self, text):
+        self._text = text
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=self._text)],
+            stop_reason="end_turn",
+        )
+
+
+# A textual v2 brief whose three engines (bands/slice/dual) all compile — small
+# enough (4 rooms) that dual runs and produces a structurally different tiling.
+MULTI_ENGINE_BRIEF = (
+    'plan "Alt Seed"\n'
+    "room living: living area 300\n"
+    "room kitchen: kitchen area 200\n"
+    "room bed1: bedroom area 170\n"
+    "room bath: bathroom area 70\n"
+    "adjacent living kitchen\n"
+    "adjacent living bed1\n"
+    "adjacent bed1 bath\n"
+)
+
+
+def test_alternates_appear_in_first_prompt_when_multiple_engines_compile():
+    # Several engines compile this brief, so the first write prompt carries an
+    # ALTERNATE STARTS section with the runner-up engine sources.
+    seed = _solver_seed(MULTI_ENGINE_BRIEF)
+    assert seed is not None and len(seed.alternates) >= 1
+
+    client = _PromptRecordingClient(gen_replies=[CLEAN])
+    BarndoAgent(client=client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=MULTI_ENGINE_BRIEF,
+    )
+    first = client.prompts[0]
+    assert "ALTERNATE STARTS (structurally different, also sound" in first
+    # Each retained alternate's engine label and source appear.
+    for alt in seed.alternates:
+        assert f"[{alt.engine} engine, score" in first
+
+
+def test_alternates_capped_at_two():
+    seed = _solver_seed(MULTI_ENGINE_BRIEF)
+    assert seed is not None
+    assert len(seed.alternates) <= 2
+    # The prompt shows at most two alternate blocks.
+    client = _PromptRecordingClient(gen_replies=[CLEAN])
+    BarndoAgent(client=client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=MULTI_ENGINE_BRIEF,
+    )
+    assert client.prompts[0].count(" engine, score ") <= 2
+
+
+def test_alternates_from_different_engines_than_the_winner():
+    seed = _solver_seed(MULTI_ENGINE_BRIEF)
+    assert seed is not None
+    engines = [a.engine for a in seed.alternates]
+    assert len(engines) == len(set(engines))  # no duplicate engine
+
+
+def test_no_alternate_section_when_only_one_engine_succeeds():
+    # A large program (>9 rooms) skips dual and often breaks slice, leaving only
+    # the bands winner — so no ALTERNATE STARTS section.
+    seed = _solver_seed("4 bed 3 bath 2600 sqft with a shop and an office")
+    assert seed is not None
+    if seed.alternates:  # if diversity does survive here, the test is not meaningful
+        return
+    client = _PromptRecordingClient(gen_replies=[CLEAN])
+    BarndoAgent(client=client).design(
+        "a big barndo", max_iterations=1, target_score=None,
+        seed_with_solver="4 bed 3 bath 2600 sqft with a shop and an office",
+    )
+    assert "ALTERNATE STARTS" not in client.prompts[0]
+
+
+def test_new_seed_intro_wording_present_and_old_absent():
+    client = _PromptRecordingClient(gen_replies=[CLEAN])
+    BarndoAgent(client=client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=MULTI_ENGINE_BRIEF,
+    )
+    first = client.prompts[0]
+    # The new, permissive wording.
+    assert "Start from these bones and improve the DESIGN" in first
+    assert "the room arrangement is yours to improve" in first
+    # The old anchoring wording is gone.
+    assert "do NOT start from scratch and do not regress its geometry" not in first
+
+
+# --- deliverable 3: the LLM-brief fallback ----------------------------------
+
+
+# A valid brief2 the fake LLM "writes" for a bedless prose brief.
+LLM_BRIEF_REPLY = (
+    'plan "LLM Seed"\n'
+    "ceiling 10\n"
+    "room living: living area 300\n"
+    "room kitchen: kitchen area 200\n"
+    "room bed1: bedroom area 170\n"
+    "room bath: bathroom area 80\n"
+    "adjacent living kitchen\n"
+    "adjacent living bed1\n"
+    "adjacent bed1 bath\n"
+    "entry living\n"
+)
+
+# Prose with NO bedroom-count signal, so it reaches the LLM path (parse_brief2
+# and the regex both fail).
+BEDLESS_PROSE = "a cozy place to live with a spot to cook and a room to sleep in"
+
+
+def test_llm_brief_used_when_regex_fails_produces_a_solver_seed():
+    # The bedless prose reaches the LLM; its scripted brief2 parses and seeds the
+    # loop, so the first write prompt carries the solver seed.
+    client = _PromptRecordingClient(gen_replies=[CLEAN], brief_replies=[LLM_BRIEF_REPLY])
+    result = BarndoAgent(client=client).design(
+        BEDLESS_PROSE, max_iterations=1, target_score=None,
+        seed_with_solver=BEDLESS_PROSE,
+    )
+    # Iteration 0 is the solver seed derived from the LLM brief.
+    assert result.history[0].iteration == 0
+    assert result.history[0].result.ok
+    # The write prompt (neither the brief nor the critique call) shows the
+    # deterministic-solver seed lead-in.
+    gen_prompt = next(
+        p
+        for p, s in zip(client.prompts, client.systems)
+        if "You translate briefs" not in s and "senior architect" not in s
+    )
+    assert "deterministic layout solver produced this" in gen_prompt
+    # The LLM-brief call happened (its distinctive system marker was used).
+    assert any("You translate briefs" in s for s in client.systems)
+
+
+def test_invalid_llm_reply_falls_back_to_unseeded_without_raising():
+    # The LLM returns junk that parse_brief2 rejects → no seed, no exception; the
+    # loop runs unseeded (no iteration 0).
+    client = _PromptRecordingClient(
+        gen_replies=[CLEAN], brief_replies=["this is not a brief at all"]
+    )
+    result = BarndoAgent(client=client).design(
+        BEDLESS_PROSE, max_iterations=1, target_score=None,
+        seed_with_solver=BEDLESS_PROSE,
+    )
+    assert all(s.iteration >= 1 for s in result.history)  # no iteration 0
+    assert result.history[0].iteration == 1
+
+
+def test_regex_wins_when_it_can_parse_no_llm_brief_call():
+    # A brief WITH a bedroom count is handled by the regex; the LLM-brief path is
+    # never reached, so no "You translate briefs" call is made.
+    client = _PromptRecordingClient(gen_replies=[CLEAN])
+    BarndoAgent(client=client).design(
+        "2 bed 1 bath cabin", max_iterations=1, target_score=None,
+        seed_with_solver="2 bed 1 bath cabin",
+    )
+    assert not any("You translate briefs" in s for s in client.systems)
+
+
+def test_llm_brief_skipped_when_no_client():
+    # _solver_candidate_sources with client=None must not attempt the LLM path.
+    assert _solver_candidate_sources(BEDLESS_PROSE) == []
+    assert _solver_candidate_sources(BEDLESS_PROSE, client=None) == []
+
+
+def test_brief_from_llm_returns_none_on_missing_client_or_empty_text():
+    assert _brief_from_llm(BEDLESS_PROSE, client=None) is None
+    assert _brief_from_llm("", client=object()) is None
+
+
+# --- deliverable 3: the prose->brief template fix (no GARAGE_PASSTHROUGH) -----
+
+
+def test_shop_brief_seed_has_no_garage_passthrough_warning():
+    # The synthesized brief buffers the shop off a mudroom, off the public core —
+    # never off the sleeping hall — so the deterministic seed compiles with NO
+    # GARAGE_PASSTHROUGH warning.
+    seed = _solver_seed(
+        "3 bed 2 bath barndominium ~2000 sqft with open core and shop bay"
+    )
+    assert seed is not None and seed.step.result.ok
+    codes = {d.code for d in seed.step.result.warnings}
+    assert "GARAGE_PASSTHROUGH" not in codes
+
+
+def test_shop_brief_adds_a_buffering_mudroom_off_the_public_core():
+    from barndsl.agent import _brief2_from_prose
+
+    brief = _brief2_from_prose(
+        "3 bed 2 bath barndominium ~2000 sqft with open core and shop bay"
+    )
+    assert brief is not None
+    ids = {r.id for r in brief.rooms}
+    assert "mudroom" in ids and "shop" in ids
+    adj = {frozenset(pair) for pair in brief.adjacencies}
+    # shop doors into the mudroom; the mudroom into the kitchen (the public core).
+    assert frozenset({"shop", "mudroom"}) in adj
+    assert frozenset({"mudroom", "kitchen"}) in adj
+    # The shop is NEVER wired off the sleeping hall.
+    assert frozenset({"shop", "hall"}) not in adj

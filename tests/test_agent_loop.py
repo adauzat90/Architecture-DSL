@@ -266,15 +266,18 @@ def test_render_feedback_carries_the_score_causes():
 
 
 def test_render_feedback_appends_the_geometry_pack():
-    from barndsl.introspect import plan_summary, summary_text
+    from barndsl.introspect import plan_summary, render_ascii_plan, summary_text
 
     result = compile_source(MEDIOCRE)
     text = render_feedback(result)
     assert "  living living L0 0,0 18 x 24 | south north west" in text
     assert "Adjacency (door edges): living-bed (swing 2.67)" in text
     assert "Unplaced footprint (L0): none" in text
-    # verbatim the block `barndsl inspect` prints — one source of truth
-    assert text.endswith(summary_text(plan_summary(result.plan)))
+    # the geometry pack rides verbatim — one source of truth with `barndsl inspect`
+    assert summary_text(plan_summary(result.plan)) in text
+    # the ASCII plan view is appended after it (the drawing the table hides)
+    assert text.endswith(render_ascii_plan(result.plan))
+    assert "PLAN VIEW (north up," in text
 
 
 def test_render_feedback_without_a_plan_has_no_geometry_pack():
@@ -558,8 +561,18 @@ def test_seed_accepts_a_textual_brief():
 
 
 def test_seed_degrades_gracefully_when_the_solver_yields_nothing():
-    """An unusable solver spec leaves the loop exactly as it is without seeding."""
-    client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    """An unusable solver spec leaves the loop exactly as it is without seeding.
+
+    The seed brief has no bedroom-count signal, so it now reaches the LLM-brief
+    fallback; the first scripted reply is not a parseable brief2, so that path
+    returns None and the loop runs unseeded on the remaining rounds. The first
+    scripted source is consumed by the (failed) brief-translation call, so the two
+    LLM rounds draw the two that follow.
+    """
+    client = FakeClient(
+        sources=["not a brief either", MEDIOCRE, CLEAN],
+        critiques=[_unsatisfied(), _satisfied()],
+    )
     result = _agent(client).design(
         "a starter home", max_iterations=2, target_score=None,
         seed_with_solver="this is not a valid brief statement",
@@ -675,28 +688,23 @@ def test_structured_brief_keeps_parse_brief2_precedence(monkeypatch):
 # -- regression legibility in the feedback header -----------------------------
 
 
-def test_feedback_stays_coherent_after_a_failed_iteration():
-    """CLEAN → BROKEN → CLEAN: after the broken round the prompt shows the best
-    valid source paired with ITS OWN feedback, names the discarded attempt, and
-    quotes the fatal diagnostics only under an attribution that says they belong
-    to the discarded source — never captioned as feedback on the shown DSL."""
+def test_failed_round_carries_its_own_source_and_diagnostics_for_repair():
+    """CLEAN -> BROKEN -> CLEAN: after the broken round the NEXT prompt is a
+    repair round. It carries the FAILED source verbatim (so "reproduce it, fix
+    line N" is coherent) paired with that source's OWN diagnostics — it does NOT
+    revert to the best-valid source, which would invite a redesign."""
     client = FakeClient(
         sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
     )
     _agent(client).design("a cottage", max_iterations=3, target_score=None)
 
     revision = client.stream_prompts[2]  # the prompt after the broken round 2
-    assert "did not compile and was DISCARDED" in revision
-    assert "best valid iteration (1" in revision
-    # The fatal diagnostics appear, but only AFTER the attribution line.
-    attribution = "Fatal diagnostics from the discarded attempt"
-    assert attribution in revision
-    assert revision.index("BAD_NUMBER") > revision.index(attribution)
-    # The feedback block above the attribution describes the CLEAN source: no
-    # NO_PROGRAM info (CLEAN declares a program) and no fatal-error score.
-    described = revision[: revision.index(attribution)]
-    assert "BAD_NUMBER" not in described
-    assert "NO_PROGRAM" not in described
+    # Repair wording, not the old discard/best-valid revert.
+    assert "Do NOT redesign" in revision
+    assert "did not compile and was DISCARDED" not in revision
+    # The prior shown is the broken source, and its error rides the feedback.
+    assert 'plan "Broken"' in revision
+    assert "BAD_NUMBER" in revision
 
 
 def test_regression_line_absent_when_render_feedback_has_no_best_prior():
@@ -714,19 +722,20 @@ def test_render_feedback_regression_line_for_a_lower_score():
     assert "iteration 2" in text
 
 
-def test_revision_reverts_to_the_best_valid_source_after_a_broken_round():
-    """After a broken round the loop revises from the best VALID source, not the
-    broken one it just produced (a behaviour change from always-latest)."""
+def test_repair_round_revises_the_failed_source_not_the_best_valid():
+    """After a broken round the loop repairs the broken source in place; it does
+    NOT swap in the best VALID source (that would let the model redesign, the
+    convergence regression repair mode fixes)."""
     client = FakeClient(
         sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
     )
     _agent(client).design("a cottage", max_iterations=3, target_score=None)
 
     revision = client.stream_prompts[2]
-    assert "banana" not in revision.split("Fatal diagnostics")[0]
-    assert 'plan "Stillwater Cottage"' in revision  # CLEAN is carried forward
-    # Nothing above the attribution claims the shown (valid) source failed.
-    assert "does not compile" not in revision.split("Fatal diagnostics")[0]
+    # The failed source is the prior, NOT the earlier clean plan.
+    assert "banana" in revision  # the broken source is carried forward
+    assert 'plan "Stillwater Cottage"' not in revision
+    assert "Do NOT redesign" in revision
 
 
 # -- refinement seed (seed_source) --------------------------------------------
@@ -1047,6 +1056,25 @@ def test_the_embedded_example_plan_compiles_perfect():
     assert design_score(result).total == 100.0
 
 
+def test_the_lead_hall_spine_example_compiles_with_no_errors_or_warnings():
+    """The lead worked example (_EXAMPLE_HALL_SPINE, "Birch Hollow") carries the
+    added `zone`/`suite`/`require` declarations, so it must still compile with zero
+    errors AND zero warnings (infos tolerated). No exact score is asserted here —
+    the score is being recalibrated concurrently — only the diagnostic counts."""
+    from barndsl.agent import _EXAMPLE_HALL_SPINE
+    from barndsl.validation import Severity
+
+    result = compile_source(_EXAMPLE_HALL_SPINE)
+    assert result.plan is not None
+    bad = [
+        d
+        for d in result.diagnostics
+        if d.severity in (Severity.ERROR, Severity.WARNING)
+        and not getattr(d, "accepted", False)
+    ]
+    assert not bad, [(d.severity.name, d.code) for d in bad]
+
+
 def test_embedded_lshape_example_pins_the_gallery_file_and_compiles_clean():
     """The `wing` few-shot is a byte-for-byte copy of examples/gallery/lshape.barn
     (a test-pinned clean plan) — the pin makes the copy unable to drift — and it
@@ -1077,8 +1105,8 @@ def test_embedded_two_story_example_pins_the_gallery_file_and_compiles_clean():
 
 def test_generate_system_teaches_the_anchor_rule_and_shows_the_example():
     from barndsl.agent import (
+        _EXAMPLE_HALL_SPINE,
         _EXAMPLE_LSHAPE,
-        _EXAMPLE_PLAN,
         _EXAMPLE_TWO_STORY,
         _GENERATE_SYSTEM,
     )
@@ -1086,20 +1114,22 @@ def test_generate_system_teaches_the_anchor_rule_and_shows_the_example():
 
     assert "ANCHOR RULE" in _GENERATE_SYSTEM
     assert "TILE, THEN CONNECT" in _GENERATE_SYSTEM
-    # All three worked examples are shown.
-    assert _EXAMPLE_PLAN in _GENERATE_SYSTEM
+    # The hall-spine plan leads and the L-shaped `wing` plan follows; the
+    # two-story example is deliberately NOT in the prompt (kept as a pinned
+    # constant only), to make room for the design-process block.
+    assert _EXAMPLE_HALL_SPINE in _GENERATE_SYSTEM
     assert _EXAMPLE_LSHAPE in _GENERATE_SYSTEM
-    assert _EXAMPLE_TWO_STORY in _GENERATE_SYSTEM
+    assert _EXAMPLE_TWO_STORY not in _GENERATE_SYSTEM
     # The strict output contract: exactly one fenced block, complete source.
     assert "exactly ONE ```barn code block" in _GENERATE_SYSTEM
-    # Ordering: worked examples precede the rules/craft, the full grammar comes
-    # LAST under its header, and the program mandate + output contract sit at the
-    # very end (contract-last is deliberate).
+    # Ordering: worked examples precede the rules -> process -> craft, the full
+    # grammar comes LAST under its header, and the program mandate + output
+    # contract sit at the very end (contract-last is deliberate).
     order = [
-        _GENERATE_SYSTEM.index(_EXAMPLE_PLAN),
+        _GENERATE_SYSTEM.index(_EXAMPLE_HALL_SPINE),
         _GENERATE_SYSTEM.index(_EXAMPLE_LSHAPE),
-        _GENERATE_SYSTEM.index(_EXAMPLE_TWO_STORY),
-        _GENERATE_SYSTEM.index("DESIGN RULES the compiler enforces"),
+        _GENERATE_SYSTEM.index("HOW AN ARCHITECT THINKS"),
+        _GENERATE_SYSTEM.index("DESIGN PROCESS (follow when drafting"),
         _GENERATE_SYSTEM.index("HOW TO PLACE ROOMS"),
         _GENERATE_SYSTEM.index("FULL GRAMMAR REFERENCE"),
         _GENERATE_SYSTEM.index(DSL_REFERENCE),
@@ -1214,8 +1244,10 @@ def test_critique_prompt_asks_for_at_most_five_suggestions():
 
 
 def test_revision_prompt_pins_smallest_change_and_full_source():
+    # A compiling prior (MEDIOCRE) keeps round 2 in *refine* mode — a failed prior
+    # would force repair mode instead (see the repair-mode tests).
     client = FakeClient(
-        sources=[BROKEN, CLEAN], critiques=[_satisfied()]
+        sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied("a"), _satisfied()]
     )
     _agent(client).design("a cottage", max_iterations=2, target_score=None)
     revision = client.stream_prompts[1]
@@ -1655,3 +1687,329 @@ def test_score_history_shows_two_entries_with_a_solver_seed():
     seed_total = result.history[0].score.total  # iteration 0
     round1_total = result.history[1].score.total
     assert f"{seed_total:g} -> {round1_total:g} (this round)" in revision
+
+
+# -- blocking issues: critique authority + gating clamp -----------------------
+# The critic gets a structured `blocking_issues` channel (room-level structural
+# defects that make a plan unshippable regardless of score). When present, the
+# loop clamps the step's *gating total* to BLOCKING_CLAMP (65) — the number used
+# for BOTH the target gate and best-step selection — while the TRUE score object
+# stays untouched. So a 99-point plan whose only path to the bedrooms runs
+# through the shop can never end the loop nor out-rank a sound lower-scoring one.
+
+
+def _blocking(*issues: str, suggestions: tuple[str, ...] = ()) -> CritiqueSpec:
+    """An unsatisfied critique carrying blocking structural issues."""
+    return CritiqueSpec(
+        satisfied=False,
+        assessment="Structurally broken.",
+        rationale="A room-level defect the score can't see.",
+        blocking_issues=list(issues) or ["The only path to the bedrooms runs through the shop."],
+        suggestions=list(suggestions) or ["Swap the shop and bed wing; buffer with a mudroom."],
+    )
+
+
+def test_blocking_issues_parsed_from_critique_json():
+    """The critique JSON's `blocking_issues` array round-trips through the parser."""
+    from barndsl.agent import _critique_from_text
+
+    text = (
+        '{"satisfied": false, "assessment": "a", "rationale": "b", '
+        '"blocking_issues": ["through-shop path to the bedrooms"], '
+        '"suggestions": ["swap the wings"]}'
+    )
+    crit = _critique_from_text(text)
+    assert crit is not None
+    assert crit.blocking_issues == ["through-shop path to the bedrooms"]
+
+
+def test_blocking_issues_default_to_empty_when_field_missing():
+    """A reply that omits `blocking_issues` (backward compat) validates to []."""
+    from barndsl.agent import _critique_from_text
+
+    text = '{"satisfied": true, "assessment": "a", "rationale": "b", "suggestions": []}'
+    crit = _critique_from_text(text)
+    assert crit is not None and crit.blocking_issues == []
+
+
+def test_blocking_issue_caps_gating_total_and_does_not_end_the_loop():
+    """A plan whose TRUE score clears the target but whose critique reports a
+    blocking issue does NOT satisfy the gate: its gating total is clamped to 65,
+    below the target, so the loop keeps going instead of shipping the broken plan."""
+    from barndsl.agent import BLOCKING_CLAMP
+
+    # Round 1 CLEAN scores ~99 (> target 90) but is blocked; round 2 is satisfied.
+    client = FakeClient(
+        sources=[CLEAN, CLEAN],
+        critiques=[_blocking(), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=90.0)
+
+    # The loop did NOT stop after round 1 despite its 99 true score.
+    assert result.iterations == 2
+    step1 = result.history[0]
+    assert step1.score.total > 90.0  # true score really did clear the target
+    assert step1.gating_total == BLOCKING_CLAMP  # clamped for gating
+    assert step1.score.total > step1.gating_total  # true score untouched
+
+
+def test_unblocked_lower_score_step_wins_best_selection_over_blocked_higher():
+    """Best-step selection ranks on the gating total: an earlier blocked step with
+    a higher TRUE score loses to a later unblocked step with a lower true score."""
+    from barndsl.agent import BLOCKING_CLAMP, _best_step, _best_valid_step
+    from barndsl.score import ScoreReport
+
+    ok = compile_source(CLEAN)  # a real compiling plan for both steps
+    blocked_high = DesignStep(
+        1, CLEAN, ok, _blocking(), ScoreReport(total=99.0),
+        gating_total=BLOCKING_CLAMP,  # clamped
+    )
+    clean_lower = DesignStep(
+        2, CLEAN, ok, _satisfied(), ScoreReport(total=80.0),
+        gating_total=80.0,
+    )
+    history = [blocked_high, clean_lower]
+
+    # True scores would pick the blocked step; gating totals pick the sound one.
+    assert blocked_high.score.total > clean_lower.score.total  # 99 > 80
+    assert blocked_high.effective_total < clean_lower.effective_total  # 65 < 80
+    assert _best_step(history) is clean_lower
+    assert _best_valid_step(history) is clean_lower
+
+
+def test_effective_total_falls_back_to_true_score_when_unclamped():
+    """A step with no stored gating_total ranks on its true score (and -1 when
+    unscored), so callers that build steps directly keep the old semantics."""
+    from barndsl.score import ScoreReport
+
+    ok = compile_source(CLEAN)
+    scored = DesignStep(1, CLEAN, ok, None, ScoreReport(total=77.0))
+    unscored = DesignStep(2, CLEAN, ok, None, None)
+    assert scored.effective_total == 77.0
+    assert unscored.effective_total == -1.0
+
+
+def test_blocking_issue_folds_into_next_round_feedback_with_marker():
+    """The blocking issue rides the diagnostic channel into the next prompt,
+    marked 'BLOCKING:' and stating the effective-score cap."""
+    client = FakeClient(
+        sources=[CLEAN, CLEAN],
+        critiques=[_blocking("through-shop path to the bedrooms"), _satisfied()],
+    )
+    _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    revision = client.stream_prompts[1]
+    assert "BLOCKING:" in revision
+    assert "through-shop path to the bedrooms" in revision
+    assert "caps this plan's effective score at 65" in revision
+
+
+# -- restructure mode ---------------------------------------------------------
+# The write path takes a `restructure` flag that swaps the revision instruction
+# from "smallest local edit" to "reconsider the LAYOUT wholesale". design() turns
+# it on for the NEXT round when the score plateaus, the critic blocks, or a
+# suggestion repeats across two rounds.
+
+REFINE_MARK = "smallest revision"
+RESTRUCTURE_MARK = "Reconsider the LAYOUT"
+
+
+def test_write_source_refine_vs_restructure_wording():
+    """The flag swaps the revision instruction; refine is the default."""
+    client = FakeClient(sources=[CLEAN, CLEAN])
+    agent = _agent(client)
+    agent.write_source("brief", prior=MEDIOCRE, diagnostics="fb")  # refine
+    agent.write_source("brief", prior=MEDIOCRE, diagnostics="fb", restructure=True)
+    assert REFINE_MARK in _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK not in _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[1])
+    assert "# concept:" in _prompt_text(client.stream_prompts[1])
+
+
+def test_restructure_triggers_on_a_blocking_issue():
+    """A blocking issue in round 1 puts round 2 into restructure mode."""
+    client = FakeClient(
+        sources=[CLEAN, CLEAN],
+        critiques=[_blocking(), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[1])
+    assert result.history[1].restructured is True
+
+
+def test_restructure_triggers_on_a_repeated_suggestion():
+    """The same suggestion in two consecutive critiques (normalized) flips round 3
+    into restructure mode."""
+    client = FakeClient(
+        sources=[MEDIOCRE, MEDIOCRE, CLEAN],
+        critiques=[
+            _unsatisfied("Widen the hall spine."),
+            _unsatisfied("  widen   the HALL   spine.  "),  # same, differently cased/spaced
+            _satisfied(),
+        ],
+    )
+    _agent(client).design("a starter home", max_iterations=3, target_score=None)
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[2])
+
+
+def test_restructure_triggers_on_a_score_plateau():
+    """Two consecutive sub-2-point score deltas plateau the loop into restructure.
+    MEDIOCRE compiles to the same score every round; after rounds 1-3 (all
+    MEDIOCRE) the totals are [44, 44, 44], so the round-4 write restructures.
+    Distinct suggestions keep the *repeated-suggestion* trigger from firing, so
+    this isolates the plateau path."""
+    client = FakeClient(
+        sources=[MEDIOCRE, MEDIOCRE, MEDIOCRE, CLEAN],
+        critiques=[_unsatisfied("a"), _unsatisfied("b"), _unsatisfied("c"), _satisfied()],
+    )
+    result = _agent(client).design("a starter home", max_iterations=4, target_score=None)
+    # The round-4 write follows three flat rounds: stream_prompts[3].
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[3])
+    assert result.history[3].restructured is True
+    # Round 2 and 3 writes precede the plateau (only 1 then 2 totals): still refine.
+    assert REFINE_MARK in _prompt_text(client.stream_prompts[1])
+
+
+def test_big_score_jump_stays_in_refine_mode():
+    """A large jump (MEDIOCRE ~44 -> CLEAN ~99) is not a plateau: round 2 keeps
+    the refine wording and is not marked restructured."""
+    client = FakeClient(
+        sources=[MEDIOCRE, CLEAN, CLEAN],
+        critiques=[_unsatisfied("a"), _unsatisfied("b"), _satisfied()],
+    )
+    result = _agent(client).design("a starter home", max_iterations=3, target_score=None)
+    # Round 2 prompt (after the big jump into round 1's mediocre... actually the
+    # jump lands at round 2's compile). The round-2 write follows round 1 (MEDIOCRE)
+    # with only one prior scored delta, so no plateau yet: refine wording, unmarked.
+    assert REFINE_MARK in _prompt_text(client.stream_prompts[1])
+    assert result.history[1].restructured is False
+
+
+# -- repair mode --------------------------------------------------------------
+# When the PREVIOUS round failed to compile, the next write is a REPAIR round:
+# the model reproduces its prior (failed) source and fixes only the erroring
+# lines. Repair takes priority over both refine and restructure — a broken plan
+# is fixed line by line, never redesigned. A failed round must NOT trigger
+# restructure, even when its 0-score makes the raw history look like a plateau.
+
+REPAIR_MARK = "Do NOT redesign"
+
+
+def test_failed_round_puts_next_write_in_repair_mode():
+    """BROKEN -> CLEAN: round 1 fails, so round 2's write carries the repair
+    wording (and the error count), not the restructure wording."""
+    client = FakeClient(sources=[BROKEN, CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    revision = _prompt_text(client.stream_prompts[1])
+    assert REPAIR_MARK in revision
+    assert RESTRUCTURE_MARK not in revision
+    assert REFINE_MARK not in revision
+    assert "FAILED to compile with 1 error(s)" in revision  # the count is named
+    assert result.history[1].repaired is True
+    assert result.history[1].restructured is False
+
+
+def test_repair_prompt_carries_the_previous_failed_source():
+    """The repair prompt shows the failed source as the prior DSL, so "reproduce
+    it and fix line N" is coherent — the whole point of repair over redesign."""
+    client = FakeClient(sources=[BROKEN, CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    revision = _prompt_text(client.stream_prompts[1])
+    assert "Your previous DSL:" in revision
+    assert 'plan "Broken"' in revision  # the failed source rides the prompt
+    assert "envelope banana" in revision
+    assert "BAD_NUMBER" in revision  # its own error rides the feedback
+
+
+def test_failed_rounds_do_not_trigger_restructure_on_a_zero_plateau():
+    """Three failed rounds (BROKEN) score 0,0,0 — a flat *raw* history. That must
+    NOT read as a plateau: every round after a failure is a repair round, never
+    a restructure round. Only a COMPILING plateau restructures."""
+    client = FakeClient(
+        sources=[BROKEN, BROKEN, BROKEN, CLEAN],
+        critiques=[_satisfied()],  # only the final CLEAN round is critiqued
+    )
+    result = _agent(client).design("a cottage", max_iterations=4, target_score=None)
+
+    # Rounds 2-4 follow a failed round: repair, never restructure.
+    for prompt in client.stream_prompts[1:]:
+        assert REPAIR_MARK in _prompt_text(prompt)
+        assert RESTRUCTURE_MARK not in _prompt_text(prompt)
+    assert all(not s.restructured for s in result.history)
+    assert [s.repaired for s in result.history] == [False, True, True, True]
+
+
+def test_compiling_plateau_still_restructures_despite_earlier_failures():
+    """Failed rounds are excluded from the stagnation window, but a genuine
+    plateau over COMPILING rounds still restructures. BROKEN then three MEDIOCRE
+    (all score ~44) plateau the compiling scores, so the round-5 write
+    restructures — the earlier 0 does not disturb the compiling-only window."""
+    client = FakeClient(
+        sources=[BROKEN, MEDIOCRE, MEDIOCRE, MEDIOCRE, CLEAN],
+        critiques=[_unsatisfied("a"), _unsatisfied("b"), _unsatisfied("c"), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=5, target_score=None)
+
+    # Round 2 (after BROKEN) is repair; rounds 3-4 refine while the compiling
+    # window fills; round 5 restructures once three compiling scores plateau.
+    assert result.history[1].repaired is True
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[4])
+    assert result.history[4].restructured is True
+
+
+def test_repair_takes_priority_over_restructure_in_the_prompt():
+    """When both flags are set, the write prompt uses the repair instruction and
+    drops the restructure one — repair wins."""
+    client = FakeClient(sources=[CLEAN])
+    agent = _agent(client)
+    agent.write_source(
+        "brief", prior=MEDIOCRE, diagnostics="fb", restructure=True, repair=2
+    )
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert REPAIR_MARK in prompt
+    assert "FAILED to compile with 2 error(s)" in prompt
+    assert RESTRUCTURE_MARK not in prompt
+
+
+def test_write_source_repair_wording_is_off_by_default():
+    """repair defaults to 0 (off): a plain revision stays in refine mode."""
+    client = FakeClient(sources=[CLEAN])
+    _agent(client).write_source("brief", prior=MEDIOCRE, diagnostics="fb")
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert REPAIR_MARK not in prompt
+    assert REFINE_MARK in prompt
+
+
+# -- pure trigger helpers -----------------------------------------------------
+
+
+def test_stagnating_detects_small_consecutive_deltas():
+    from barndsl.agent import _stagnating
+
+    assert _stagnating([80.0, 80.5, 81.0]) is True  # deltas 0.5, 0.5 < 2
+    assert _stagnating([80.0, 90.0, 91.0]) is False  # first delta 10 >= 2
+    assert _stagnating([80.0, 81.0, 91.0]) is False  # second delta 10 >= 2
+    assert _stagnating([80.0, 81.0]) is False  # only one delta, need window+1
+    assert _stagnating([]) is False
+
+
+def test_stagnating_window_and_eps_are_configurable():
+    from barndsl.agent import _stagnating
+
+    # window=1 needs just one small delta; a tighter eps rejects a 1.5 delta.
+    assert _stagnating([80.0, 81.0], window=1) is True
+    assert _stagnating([80.0, 81.5], window=1, eps=1.0) is False
+
+
+def test_repeated_suggestion_matches_normalized_across_rounds():
+    from barndsl.agent import _repeated_suggestion
+
+    a = _unsatisfied("Widen the hall spine.")
+    b = _unsatisfied("  WIDEN the   hall spine. ")  # same normalized
+    c = _unsatisfied("Add a porch.")
+    assert _repeated_suggestion(a, b) is True
+    assert _repeated_suggestion(a, c) is False
+    assert _repeated_suggestion(None, b) is False  # a skipped critique never repeats
+    assert _repeated_suggestion(a, None) is False

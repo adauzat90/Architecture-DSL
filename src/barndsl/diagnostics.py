@@ -51,11 +51,13 @@ E, W, I = Severity.ERROR, Severity.WARNING, Severity.INFO
 REGISTRY: dict[str, CodeInfo] = dict(
     [
         # --- suppression pragmas (the `# barndsl: accept CODE` escape hatch) --
-        _c("ACCEPT_DENIED", W, "Error can't be accepted",
-           "An `# barndsl: accept <CODE>` pragma named a code that fired as an "
-           "ERROR on its target line. Errors are unbuildable-plan problems, not "
-           "judgement calls — they must be fixed, never waived. `accept` only "
-           "downgrades warnings and infos. Resolve the underlying error."),
+        _c("ACCEPT_DENIED", W, "Diagnostic can't be accepted",
+           "An `# barndsl: accept <CODE>` pragma named a code that can't be waived: "
+           "either it fired as an ERROR (an unbuildable-plan problem), or it is a "
+           "structural design-flaw code on the accept-denylist (e.g. "
+           "GARAGE_PASSTHROUGH — a broken *building*, not a jurisdiction judgement "
+           "call). Both must be fixed, never waived. `accept` only downgrades "
+           "ordinary warnings and infos. Resolve the underlying problem."),
         _c("ACCEPT_UNKNOWN", W, "Accept pragma names an unknown code",
            "An `# barndsl: accept <CODE>` pragma named a code the registry doesn't "
            "know (a typo, or an old name). The pragma suppresses nothing. Use a "
@@ -264,6 +266,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "overlap or the envelope is too small."),
         _c("AREA_UNUSED", I, "Footprint under-used",
            "A large share of the footprint isn't assigned to any room."),
+        _c("AREA_VOID", I, "Concentrated unassigned void",
+           "One connected, room-sized patch of the footprint is assigned to no "
+           "room — a real hole in the plan (an unfinished space, a mis-sized "
+           "neighbour, a gap the tiling left). Unlike AREA_UNUSED — which sums "
+           "diffuse slack and only speaks below 85% coverage — this fires on the "
+           "largest single gap regardless of overall coverage, so a dead pocket on "
+           "an otherwise well-covered footprint stays visible. Fill it with a room, "
+           "grow a neighbour over it, or trim the envelope."),
         # --- room programs --------------------------------------------------
         _c("BEDROOM_AREA", E, "Bedroom too small",
            "A bedroom is below the ~70 sq ft IRC minimum habitable area (R304)."),
@@ -825,6 +835,17 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("GARAGE_BEDROOM", W, "Garage/shop opens into a bedroom",
            "A garage or shop must not open directly into a sleeping room (IRC "
            "R302.5.1). A barndominium shop bay is treated as a garage."),
+        _c("GARAGE_PASSTHROUGH", W, "Bedrooms reached only through the garage/shop",
+           "The only interior route from the public core (living/kitchen/dining) to "
+           "one or more bedrooms passes through a garage or shop — the vehicle bay "
+           "is a corridor, so you must cross it (fumes, cold, no fire separation on "
+           "the path) to reach the sleeping rooms. Subtler and more dangerous than "
+           "GARAGE_BEDROOM (a direct garage↔bedroom door): here no single door is "
+           "garage↔bedroom, yet the garage is a cut vertex on the whole route. A "
+           "circulation-shape defect reachability (NO_ACCESS) can't see. This is a "
+           "structural design flaw — it cannot be waived with an `accept` pragma. "
+           "Route the bedrooms off a hall that reaches the core without crossing "
+           "the garage."),
         _c("GARAGE_NO_ENTRY", I, "Garage/shop has no people-door",
            "A garage or shop abuts the house but has no interior door into it."),
         _c("GARAGE_SEPARATION", I, "Garage/dwelling fire separation required",
@@ -940,6 +961,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
         # --- agent layer ----------------------------------------------------
         _c("DESIGN", I, "Architect's critique",
            "A design-quality suggestion folded in from the agent's architect review."),
+        _c("TRUNCATED", I, "Generated reply was cut off",
+           "The agent's generated plan hit the output token cap before it finished "
+           "(on both the write and its retry), so the source may be incomplete. "
+           "Folded into the feedback so the next revision is written more "
+           "concisely."),
         _c("NO_PROGRAM", I, "No `program` statement",
            "The source declares no `program` line, so the compiler cannot check the "
            "plan delivers the brief's beds/baths/area. Derive one from the brief — "

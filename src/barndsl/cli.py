@@ -523,7 +523,17 @@ def _cmd_design(args: argparse.Namespace) -> int:
         # Iteration 0 is the deterministic solver seed, not a model round — label
         # it so the printed floor isn't mistaken for the agent's first attempt.
         label = "solver seed" if step.iteration == 0 else f"iteration {step.iteration}"
-        print(f"  {label}: {step.result.summary()}{score}{crit}")
+        # Restructure/blocked notes (getattr: stay decoupled from the concurrently
+        # edited agent module and tolerate older DesignStep shapes in tests).
+        notes = ""
+        if getattr(step, "repaired", False):
+            notes += "  (repair round)"
+        elif getattr(step, "restructured", False):
+            notes += "  (restructure round)"
+        crit_obj = step.critique
+        if crit_obj is not None and getattr(crit_obj, "blocking_issues", None):
+            notes += "  (blocked: capped at 65)"
+        print(f"  {label}: {step.result.summary()}{score}{crit}{notes}")
         # A degraded critique (the call failed or returned no parseable JSON) is
         # otherwise invisible here — surface it so the miss isn't silent. The
         # sentinel prefix is a stable contract in agent.py; match it by string so

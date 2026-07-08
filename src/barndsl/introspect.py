@@ -352,3 +352,135 @@ def summary_text(summary: dict) -> str:
         for z in summary["zones"]:
             lines.append(f"  {z['id']}: {' '.join(z['members'])}")
     return "\n".join(lines)
+
+
+# --- ASCII plan view ----------------------------------------------------------
+
+#: Default grid resolution for :func:`render_ascii_plan`: one character per this
+#: many feet, so a 60 ft wide plan prints in 30 columns (kept under ~35).
+_ASCII_CELL_FT = 2.0
+
+#: The character for a footprint cell no room covers (a VOID). ``' '`` is outside
+#: the footprint entirely.
+_ASCII_VOID = "."
+
+
+def _room_letters(rooms: list[Room]) -> dict[str, str]:
+    """A stable single-character label per room id, collisions disambiguated.
+
+    The base letter is the first ASCII letter of the room id, uppercased (so
+    ``master`` -> ``M``, ``bed2`` -> ``B``); a room id with no letter falls back
+    to the first letter of its type, then ``?``. A cell is a single character, so
+    a collision can't take a multi-char suffix: the later room (in plan order)
+    keeps the base letter's meaning where it can — first the lowercase form of the
+    base (``bath`` -> ``B``, ``bed1`` -> ``b``), then a digit ``2..9`` — before
+    falling back to the next free uppercase, lowercase or digit label. Every cell
+    stays exactly one char and the mapping is deterministic in plan order.
+    """
+    # Global fallback pool of single-char labels: A-Z, a-z, 0-9.
+    pool = (
+        [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+        + [chr(c) for c in range(ord("a"), ord("z") + 1)]
+        + [str(d) for d in range(10)]
+    )
+    used: set[str] = set()
+    out: dict[str, str] = {}
+    for r in rooms:
+        # Preferred base: first alpha of the id, else first alpha of the type.
+        base = next((ch.upper() for ch in r.id if ch.isascii() and ch.isalpha()), "")
+        if not base:
+            base = next(
+                (ch.upper() for ch in r.type.value if ch.isascii() and ch.isalpha()),
+                "?",
+            )
+        # Try the base, then keep its meaning on collision: lowercase, then 2-9,
+        # then the next free label from the global pool.
+        candidates = [base, base.lower(), *[str(d) for d in range(2, 10)]]
+        letter = next(
+            (c for c in candidates if c not in used and c in pool),
+            None,
+        )
+        if letter is None:
+            letter = next((p for p in pool if p not in used), "?")
+        used.add(letter)
+        out[r.id] = letter
+    return out
+
+
+def render_ascii_plan(plan: Barndominium, cell_ft: float = _ASCII_CELL_FT) -> str:
+    """A north-up ASCII occupancy grid of the plan, one grid per populated level.
+
+    Each cell is ``cell_ft`` feet square (default 2 ft, so 1 char ~ 2 ft and a
+    60 ft plan stays ~30 columns). A cell shows the letter of the room whose
+    centre-covered rectangle owns it (see :func:`_room_letters` for the stable
+    id -> letter map), :data:`_ASCII_VOID` (``.``) for a cell inside the
+    footprint that no room covers (a VOID), and a space for a cell outside the
+    footprint. Row 0 is at the TOP and is max-y (north up). A legend maps each
+    letter to ``id (type WxL)`` and a scale line states the cell size. Pure and
+    deterministic — a function of the plan geometry only.
+
+    Ground level (0) always prints; any additional level with rooms prints its
+    own grid below, headed by ``Level N:``.
+    """
+    cell = float(cell_ft) if cell_ft and cell_ft > 0 else _ASCII_CELL_FT
+    sections = plan.footprint_sections()
+    min_x = min(s[0] for s in sections)
+    min_y = min(s[1] for s in sections)
+    max_x = max(s[0] + s[2] for s in sections)
+    max_y = max(s[1] + s[3] for s in sections)
+    ncols = max(1, math.ceil((max_x - min_x) / cell - EPSILON))
+    nrows = max(1, math.ceil((max_y - min_y) / cell - EPSILON))
+
+    levels = sorted({0} | {r.level for r in plan.rooms})
+    multi = len([lvl for lvl in levels if lvl == 0 or any(r.level == lvl for r in plan.rooms)]) > 1
+
+    out: list[str] = [
+        f"PLAN VIEW (north up, 1 char ~ {_g(cell)} ft, {_ASCII_VOID} = unassigned void):"
+    ]
+    for lvl in levels:
+        level_rooms = [r for r in plan.rooms if r.level == lvl]
+        if lvl != 0 and not level_rooms:
+            continue
+        if multi:
+            out.append(f"Level {lvl}:")
+        letters = _room_letters(level_rooms)
+        # Build the grid: rows top (north, max-y) to bottom (south, min-y).
+        for row in range(nrows):
+            # Cell centre in world coords. Row 0 is the northernmost strip.
+            cy = max_y - (row + 0.5) * cell
+            chars: list[str] = []
+            for col in range(ncols):
+                cx = min_x + (col + 0.5) * cell
+                chars.append(_ascii_cell(sections, level_rooms, letters, cx, cy))
+            out.append("".join(chars).rstrip() or " ")
+        # Legend: every room that appears on this level, in plan order.
+        for r in level_rooms:
+            out.append(
+                f"  {letters[r.id]} = {r.id} ({r.type.value} "
+                f"{_g(r.width)}x{_g(r.length)})"
+            )
+    return "\n".join(out)
+
+
+def _ascii_cell(
+    sections: list[tuple[float, float, float, float]],
+    rooms: list[Room],
+    letters: dict[str, str],
+    cx: float,
+    cy: float,
+) -> str:
+    """The character for the cell whose centre is ``(cx, cy)``.
+
+    A room letter when a room's rectangle covers the centre (last room in plan
+    order wins an overlap, matching draw order), :data:`_ASCII_VOID` when the
+    centre is inside the footprint but unassigned, else a space (outside).
+    """
+    owner = None
+    for r in rooms:
+        if r.x - EPSILON <= cx <= r.x2 + EPSILON and r.y - EPSILON <= cy <= r.y2 + EPSILON:
+            owner = r
+    if owner is not None:
+        return letters[owner.id]
+    if point_in_footprint(sections, cx, cy):
+        return _ASCII_VOID
+    return " "

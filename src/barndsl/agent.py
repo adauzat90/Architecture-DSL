@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
 from .compiler import _KEYWORDS as _STMT_KEYWORDS
-from .introspect import plan_summary, summary_text
+from .introspect import plan_summary, render_ascii_plan, summary_text
 from .score import ScoreReport, design_score
 from .validation import Issue, Severity
 
@@ -116,6 +116,14 @@ MAX_ITERATIONS_ENV_VAR = "BARNDSL_MAX_ITERATIONS"
 #: Sentinel for "argument not supplied" where ``None`` is itself a meaningful
 #: value — ``target_score=None`` disables the gate, so it can't double as "unset".
 _UNSET: Any = object()
+
+#: Effective-score ceiling applied to a step whose critique reported blocking
+#: structural issues (see :attr:`CritiqueSpec.blocking_issues`). The TRUE score is
+#: untouched — this clamps only the *gating total* used for the target gate and
+#: best-step selection, so a structurally broken plan can never end the loop nor
+#: win over a sound one on raw score alone. 65 sits below any realistic target so
+#: a blocked plan is always held for a revision round.
+BLOCKING_CLAMP = 65.0
 
 
 def resolve_target_score() -> float:
@@ -207,36 +215,84 @@ def _retryable_api_errors() -> tuple[type[BaseException], ...]:
     )
 
 _DESIGN_RULES = """\
-DESIGN RULES the compiler enforces (write DSL that satisfies them):
-- Rooms must stay inside the envelope and must not overlap. Tile the footprint
-  with little waste; barndominiums are a single rectangle.
-- An interior `door` only connects two rooms that SHARE A WALL. Plan adjacencies
-  so every room is reachable from an `entry` through interior doors (use a
-  hallway or open plan to connect spaces — never strand a room).
-- Bedrooms: >= 70 sq ft, smallest side >= 7 ft, each needs an egress `window`
-  (or its own `entry`) on a wall that lies on the envelope edge.
-- Provide at least one bathroom, sited near the bedrooms.
-- Habitable rooms (living/kitchen/dining/bedroom/office/loft) need windows
-  totalling >= 8% of their floor area, so put them on exterior walls.
-- At least one `entry` must be >= 2.67 ft (an egress door). Hallways >= 3 ft.
-- Idiomatic barndo: open-concept living/kitchen/dining, plus a shop/garage bay.
+HOW AN ARCHITECT THINKS (do this before writing rooms):
+1. ZONE the box into bands before placing anything. A barndo reads as three
+   zones: PUBLIC (living/kitchen/dining - the day zone), PRIVATE (bedrooms +
+   their baths - the night zone), and SERVICE (shop/garage, laundry, utility,
+   mudroom). Keep each zone contiguous; put a buffer (hall, closets, laundry,
+   or mudroom) on every seam between a loud/dirty zone and a quiet one. Declare
+   the intent so the compiler can check it: `zone public: ...`, `zone night:
+   ...`, and `suite primary: master mbath mcloset`.
+2. CIRCULATE with one clear spine. From the front entry you must reach EVERY
+   bedroom without passing THROUGH the garage/shop, a utility room, another
+   bedroom, or a bathroom. The path to the night zone runs off the public core
+   or a hall - NEVER through the service zone. Hang each private room one deep
+   off the spine; keep total hallway under ~15% of the interior.
+3. PLACE for daylight and privacy. Habitable rooms (living/kitchen/dining/
+   bedroom/office/loft) take the PERIMETER for windows; bury halls, baths,
+   closets, pantry, utility inside. Give the great room two exposures (windows
+   on two walls). Put the primary suite at the OPPOSITE end from the kids'
+   rooms; don't back its head wall onto the garage or the living-room TV wall.
+   Aim rooms near 1.2:1-1.6:1 - never a tunnel (a 2:1+ room won't furnish).
+4. OPEN the core, door the private. `open` living-kitchen-dining into one
+   great room (vault it under the ridge with `vaulted` for the barndo look);
+   give every bath and bedroom a real `door` for privacy. The kitchen is a
+   ROOM, not a corridor - no through-traffic across the work triangle.
 
-QUALITY CODES the score dings (avoid proactively):
-- WET_GROUP: cluster wet rooms (bath/kitchen/laundry/utility) on a shared
-  plumbing wall; 3+ scattered means long, costly runs.
-- NO_CLOSET: every bedroom needs a closet reached BY A DOOR from it.
-- BED_SOUND: two bedrooms sharing a wall carry sound; back their closets onto
-  that wall (or put a hall/closet between them) to buffer it.
-- MASTER_ENSUITE: with 2+ full baths, the primary bedroom wants its own
-  adjoining (ensuite) bath, reachable without crossing the plan.
-- PRIVATE_PASSTHROUGH: never route the only path to a room through a bathroom
-  or someone else's bedroom; hang it off a hall or living space.
-- GARAGE_BEDROOM: a garage/shop must not open into a bedroom (IRC R302.5.1);
-  buffer it with a mudroom or hall.
-- HALL_DEADEND: cap a hall's end with a room whose door sits AT that end; don't
-  run the hall past its last doorway into blank wall.
-- DOOR_CENTERED: back a swing door to a corner with `offset` so one flank keeps
-  an unbroken wall to furnish, instead of floating it mid-wall.
+BARNDOMINIUM IDIOMS worth reaching for:
+- Anchor the shop/garage at a GABLE END (short wall) or in its own wing, its
+  `overhead` door facing the drive; buffer it from the house with a mudroom
+  or hall (never a shared wall with a bedroom). `require separate <shop> <bed>`.
+- A mudroom/drop-zone at the family entry (off the garage or the drive side)
+  catches coats and boots before the kitchen.
+- Deep covered porches on the SOUTH face, the front porch aligned to the
+  living-room glazing; a back porch off the kitchen/dining for the grill.
+- Kitchen toward the east for morning light; keep sink-range-fridge a tight
+  triangle, dining on the kitchen's open side, with a door out to the porch.
+
+LINT the compiler enforces (satisfy these too):
+- Rooms stay inside the envelope, don't overlap, and tile it with little waste
+  (a room-sized unassigned void is wasted money - absorb it or use it).
+- An interior `door` only joins two rooms that SHARE A WALL; every room must be
+  reachable from an `entry` through interior doors/opens.
+- Bedrooms >= 70 sqft, smallest side >= 7 ft, each with an egress `window` on
+  an exterior wall. At least one bath near the beds. One `entry` >= 2.67 ft.
+- Habitable rooms need windows >= 8% of floor area (put them on exterior walls).
+- WET_GROUP: cluster bath/kitchen/laundry on a shared plumbing wall.
+- NO_CLOSET: every bedroom needs a closet reached by a door FROM it.
+- BED_SOUND: buffer two adjacent beds with closets/hall on the shared wall.
+- MASTER_ENSUITE / PRIVATE_PASSTHROUGH: the primary gets its own ensuite; never
+  route the only path to a room through a bath or someone else's bedroom.
+- GARAGE_PASSTHROUGH / GARAGE_BEDROOM: bedrooms must be reachable without
+  walking through the shop/garage, and a garage never opens into a bedroom -
+  buffer with a mudroom or hall (IRC R302.5.1).
+- HALL_DEADEND / DOOR_CENTERED: cap a hall at a doorway; back swing doors to a
+  corner with `offset` so a wall flank stays furnishable.
+"""
+
+#: The design method, stated as an ordered procedure. It sits between the
+#: architectural principles (_DESIGN_RULES) and the placement mechanics
+#: (_PLACEMENT_CRAFT): zone/circulate/place/open is the WHAT, this is the HOW-you-
+#: work — parti header first, zones before rooms, then a walk-through the plan.
+_DESIGN_PROCESS = """\
+DESIGN PROCESS (follow when drafting a plan; when REVISING, obey the revision instruction in the request instead):
+1. Open your source with a 2-3 line PARTI as a comment header stating the
+   concept - zoning, the circulation spine, and the shop strategy. Example:
+     # concept: public core (S) opens to a vaulted great room; 4 ft spine
+     # feeds a private night wing (W); shop at the E gable, mudroom-buffered.
+     # entry lands in a foyer; back porch off the dining.
+2. Lay the ZONES down before rooms: sketch the public band, the night wing and
+   the service end as blocks, then tile rooms inside each. Declare `zone` and
+   `suite primary: ...` so the compiler checks the bands you intended.
+3. WALK THE PLAN before you finish. Trace it and confirm:
+   - Enter the front door: do you land in a foyer/mudroom/living space (a
+     coat/drop landing), NOT straight into a bedroom hall or a bath?
+   - From that entry, can you reach EVERY bedroom WITHOUT crossing the
+     garage/shop, a utility room, another bedroom, or a bathroom?
+   - Does the kitchen see the dining and a door to a porch, and is it OFF the
+     through-path (not a corridor)?
+   - Is there a coat/drop landing at each exterior door people use daily?
+   If any answer is no, move rooms (not trim) until it is yes.
 """
 
 #: Placement craft distilled from the authoring guide. The grammar reference
@@ -308,6 +364,86 @@ window bed2 north width 4 offset 3
 alarm smoke in bed1
 alarm smoke in bed2
 alarm smoke in hall
+"""
+
+#: The lead worked example: an ANNOTATED version of examples/gallery/hall_spine.barn
+#: ("Birch Hollow", the strongest plan in the pool). It keeps that geometry but
+#: adds `zone`/`suite` declarations and comments that explain WHY each move is
+#: good, so the few-shot teaches architectural thinking, not just syntax. A test
+#: compiles it and asserts 0 errors / 0 warnings.
+_EXAMPLE_HALL_SPINE = """\
+plan "Birch Hollow"
+envelope 69 x 33
+ceiling 10
+program 3 bed 2 bath
+require adjacent kitchen dining      # dining touches the kitchen: one eat-in flow
+require separate master bed2         # primary sits away from the kids' wing
+
+# concept: public band opens across the south into one great room; a 4 ft spine
+# runs the north edge feeding a west kids' wing and an east primary suite; the
+# hall dies at the master door, so no corridor runs past its last doorway.
+
+suite primary: master mbath mcloset
+zone public:  living kitchen dining
+zone night:   bed1 bed2 master
+
+# --- PUBLIC BAND (south): living-kitchen-dining open as one core.
+#     Every public room is on the south wall for daylight + the front porch. ---
+room living:  living  at 0,0   size 27 x 15
+room kitchen: kitchen at 27,0  size 20 x 15   # centred: sees living AND dining
+room dining:  dining  at 47,0  size 22 x 15   # on the kitchen's open side, by the back door
+
+# --- THE SPINE: 4 ft, the ONLY corridor. It reaches every bedroom directly,
+#     so no bedroom is entered through another private room. ---
+room hall: hallway at 0,15 size 63 x 4
+
+# --- WEST KIDS' WING: bed1 + bed2 do NOT share a wall - a stacked pair of
+#     closets sits between them, buffering sound. ---
+room bed1:    bedroom at 0,19   size 13 x 14
+room closet1: closet  at 13,19  size 6 x 7     # bed1's closet, on the party wall
+room closet2: closet  at 13,26  size 6 x 7     # bed2's closet, backing closet1 = sound buffer
+room bed2:    bedroom at 19,19  size 13 x 14
+
+# --- CENTRE: shared hall bath between the kids' wing and the suite. ---
+room bath1: bathroom at 32,19 size 9 x 14
+
+# --- EAST PRIMARY SUITE: ensuite backs onto the hall bath (one wet wall, short
+#     plumbing runs); the walk-in caps the hall's east end so the corridor
+#     stops at the master door instead of running past it. ---
+room mbath:   bathroom at 41,19 size 6 x 14
+room master:  bedroom  at 47,19 size 16 x 14   # opposite end from the kids
+room mcloset: closet   at 63,15 size 6 x 18    # caps the corridor's east end
+
+open living - kitchen width 10                 # open core: one great room
+open kitchen - dining width 10
+open living - hall width 4                     # public core feeds the spine
+door hall - bed1 width 3 offset 0.5            # each bedroom hangs off the spine,
+door hall - bed2 width 3 offset 0.5            #   one room deep, private door
+door hall - bath1 width 2.67 offset 3
+door hall - master width 3 offset 12.5         # master door AT the hall's end
+door bed1 - closet1 width 2.5 offset 0.5 into bed1
+door bed2 - closet2 width 2.5 offset 0.5
+door master - mbath width 2.67 offset 0.5 into mbath   # ensuite reached only from master
+door master - mcloset width 2.5 offset 10.5 into master
+
+entry living south width 3 offset 20           # front door lands in the living core
+entry dining east width 3 offset 6             # 2nd door off dining, by the back porch
+
+porch front at 18,-6 size 7 x 6 covered        # landings at both doors (IRC R311.3);
+porch back at 69,4 size 6 x 7 covered          #   front porch aligned to living glazing
+window living south width 10 offset 2          # great room takes the south light
+window kitchen south width 8 offset 6
+window dining south width 8 offset 6
+window bed1 north width 5 offset 4             # every bed's egress window, exterior wall
+window bed2 north width 5 offset 4
+window master north width 6 offset 6
+window bath1 north width 3 offset 2 sill 5     # high privacy transom
+window mbath north width 3 offset 1 sill 5
+
+alarm smoke in bed1
+alarm smoke in bed2
+alarm smoke in master
+alarm smoke in hall                            # smoke alarm outside the beds (IRC R314)
 """
 
 #: An L-shaped footprint using `wing`, copied verbatim from
@@ -434,29 +570,31 @@ alarm smoke in hall
 alarm smoke in loft
 """
 
-# The system prompt is ordered to front-load craft and worked examples, and put
-# the raw grammar LAST: the persona, then three complete worked plans, then the
-# design rules and the placement craft, then the full grammar reference for exact
-# syntax, and finally the `program` mandate and the strict output contract. The
-# contract sits at the very end on purpose — the model reads it last, right before
-# it answers — so keep it there.
+# The system prompt is ordered to front-load architectural thinking and worked
+# examples, and put the raw grammar LAST: the persona, then two complete worked
+# plans (a hall-spine barndo, then an L-shaped `wing` plan), then the design
+# rules, the design process, and the placement craft, then the full grammar
+# reference for exact syntax, and finally the `program` mandate and the strict
+# output contract. The contract sits at the very end on purpose — the model reads
+# it last, right before it answers — so keep it there.
 _GENERATE_SYSTEM = (
     "You are an expert residential designer specialising in barndominiums. You "
     "describe floor plans by writing source code in the barndsl architecture "
     "language, then refining it against the compiler's diagnostics until it is "
     "valid and well-designed.\n\n"
-    "A COMPLETE EXAMPLE that compiles with zero errors, zero warnings, zero "
-    "infos and scores 100/100 — note the relative anchors, the hall spine with "
-    "every bedroom hung one room deep off it, the `open` core, the closets, and "
-    "the second exterior door:\n```barn\n" + _EXAMPLE_PLAN + "```\n"
+    "A COMPLETE, ANNOTATED EXAMPLE that compiles with zero errors and zero "
+    "warnings — read the comments: it zones the box (public band, night wing, a "
+    "shared centre), runs one 4 ft spine that reaches every bedroom directly, "
+    "opens the core into one great room, buffers the two kids' beds with a "
+    "stacked closet pair, gives the primary its own ensuite, and lands the front "
+    "door in the living core:\n```barn\n" + _EXAMPLE_HALL_SPINE + "```\n"
     "\nAn L-shaped footprint using `wing` (the building is the union of the "
     "`envelope` and each wing; the seam between blocks is an interior wall):\n"
     "```barn\n" + _EXAMPLE_LSHAPE + "```\n"
-    "\nA two-story plan using `level` and `stair` (the upper room sits on `level "
-    "1`; the `stair` footprint overlaps a room on each level to link them):\n"
-    "```barn\n" + _EXAMPLE_TWO_STORY + "```\n"
     "\n"
     + _DESIGN_RULES
+    + "\n"
+    + _DESIGN_PROCESS
     + "\n"
     + _PLACEMENT_CRAFT
     + "\nFULL GRAMMAR REFERENCE (consult for exact syntax):\n\n"
@@ -478,13 +616,25 @@ _GENERATE_SYSTEM = (
 # lands in terms the generator already understands.
 _CRITIQUE_SYSTEM = (
     "You are a senior architect reviewing a barndominium plan (given as barndsl "
-    "source plus the compiler's report) for design quality and livability. Judge "
-    "flow and adjacencies (kitchen by dining, baths by beds, mudroom by entry), "
-    "privacy, light, wasted space, and whether it is pleasant to live in — not "
-    "just code-compliant. Anchor your verdict in the evidence you are given: "
-    "the design score, its per-component deductions, and the diagnostics. Be "
-    "constructive but exacting. You share the designer's rulebook, so frame "
-    "suggestions in its terms:\n\n"
+    "source plus the compiler's report) for design quality and livability.\n\n"
+    "FIRST, walk the plan and answer these in your assessment - the design score "
+    "cannot see all of them, so a high score does not excuse a 'no':\n"
+    "  1. Enter the front door: do you land in a foyer/mudroom/living space, NOT "
+    "straight into a bedroom hall or a bath?\n"
+    "  2. From the entry, can you reach EVERY bedroom without crossing the "
+    "garage/shop, a utility room, another bedroom, or a bathroom? A path to "
+    "the bedrooms that runs THROUGH the garage/shop is a serious defect even "
+    "if the score is high.\n"
+    "  3. Does the kitchen see the dining and a porch, and is it OFF the "
+    "through-path rather than a corridor?\n"
+    "  4. Is the public zone contiguous, and the private zone buffered from the "
+    "service zone (shop/laundry/utility)?\n"
+    "  5. Is there a coat/drop landing at each daily entrance?\n\n"
+    "Name the SINGLE biggest structural weakness and propose a ROOM-LEVEL move to "
+    "fix it (swap two rooms, add a buffer, re-route the spine) - not a trim tweak. "
+    "THEN list smaller nits. Judge flow, adjacencies, privacy, light, wasted space, "
+    "and proportion - not just code-compliance. Anchor your verdict in the evidence. "
+    "Be constructive but exacting. You share the designer's rulebook:\n\n"
     + _DESIGN_RULES
     + "\n"
     + _PLACEMENT_CRAFT
@@ -501,10 +651,17 @@ _CRITIQUE_JSON = (
     "it — of exactly this shape:\n"
     '{"satisfied": true|false, "assessment": "<one-paragraph overall judgement>", '
     '"rationale": "<which diagnostics and score components justify the verdict>", '
+    '"blocking_issues": ["<structural defect that makes the plan unshippable>", ...], '
     '"suggestions": ["<specific, actionable change>", ...]}\n'
     "Set `suggestions` to [] when satisfied is true. Give AT MOST 5 suggestions, "
     "ordered most-impactful first — five changes the designer will actually make "
-    "beat a dozen that scatter the next revision."
+    "beat a dozen that scatter the next revision.\n"
+    "`blocking_issues` are ROOM-LEVEL STRUCTURAL defects (the walk-the-plan "
+    "failures above) that make the plan unshippable regardless of score - leave "
+    "it [] when there are none. Blocking (goes in blocking_issues): \"the only "
+    "path from the living core to the bedrooms runs THROUGH the shop - swap the "
+    "shop and bed wing and buffer with a mudroom\". Not blocking (a mere trim, "
+    "goes in suggestions): \"shift the bed2 door flush to the hall's west end\"."
 )
 
 #: Appended to the critique system prompt only when a rendered PNG rides along —
@@ -707,6 +864,11 @@ def render_feedback(
         lines.append(line)
     if result.plan is not None:
         lines.append(summary_text(plan_summary(result.plan)))
+        # A drawing makes what the table hides obvious — a shop band sandwiched
+        # between living and bedrooms shows up as stacked letter rows. The critic
+        # gets this for free: its user content embeds render_feedback (see
+        # `critique`), so both the writer and the reviewer see the plan.
+        lines.append(render_ascii_plan(result.plan))
     return "\n".join(lines)
 
 
@@ -747,6 +909,14 @@ class CritiqueSpec(BaseModel):
     suggestions: list[str] = Field(
         default_factory=list, description="Specific, actionable changes. Empty if satisfied."
     )
+    #: Room-level STRUCTURAL defects (through-shop paths, entry into the bed hall,
+    #: a stranded night zone) that make the plan unshippable regardless of score.
+    #: Additive with a default so a reply that omits it still validates; the loop
+    #: clamps a step's *gating total* to :data:`BLOCKING_CLAMP` while any are present.
+    blocking_issues: list[str] = Field(
+        default_factory=list,
+        description="Structural defects that make the plan unshippable regardless of score.",
+    )
     #: True only on the degraded fallbacks (the critique call failed, or returned
     #: no parseable JSON) — a neutral verdict the model never emits itself.
     #: Additive with a default, so ``model_validate_json`` still accepts a real
@@ -765,23 +935,48 @@ class DesignStep:
     result: CompileResult
     critique: CritiqueSpec | None = None
     score: ScoreReport | None = None
+    #: The score the loop *gates and ranks on*. Equal to ``score.total`` normally,
+    #: but clamped to :data:`BLOCKING_CLAMP` when the critique flagged blocking
+    #: structural issues, so a structurally broken plan can never end the loop nor
+    #: out-rank a sound one on raw score. ``None`` means "use the true score" — the
+    #: default for steps a caller builds without going through the loop.
+    gating_total: float | None = None
+    #: True when this step was generated in restructure mode (the write prompt told
+    #: the model to reconsider the LAYOUT). Surfaced by the CLI per-iteration line.
+    restructured: bool = False
+    #: True when this step was generated in repair mode (the previous round failed
+    #: to compile, so the write prompt told the model to reproduce its prior source
+    #: and fix only the erroring lines). Mutually exclusive with ``restructured`` —
+    #: repair takes priority over restructure. Surfaced by the CLI line too.
+    repaired: bool = False
+
+    @property
+    def effective_total(self) -> float:
+        """The gating total for ranking/gating: the stored clamp, else the true
+        score, else ``-1.0`` when unscored (so it sorts below any scored step)."""
+        if self.gating_total is not None:
+            return self.gating_total
+        return self.score.total if self.score is not None else -1.0
 
 
 def _best_step(history: list[DesignStep]) -> DesignStep:
-    """The highest-scoring step; ties go to the later iteration."""
-    return max(
-        history,
-        key=lambda s: (s.score.total if s.score is not None else -1.0, s.iteration),
-    )
+    """The highest-scoring step; ties go to the later iteration.
+
+    Ranks on the *gating* total (:attr:`DesignStep.effective_total`), so a step
+    the critic flagged as structurally broken — clamped to :data:`BLOCKING_CLAMP` —
+    cannot win over a sound one that scored lower on raw points.
+    """
+    return max(history, key=lambda s: (s.effective_total, s.iteration))
 
 
 def _best_valid_step(history: list[DesignStep]) -> DesignStep | None:
     """The highest-scoring step that actually *compiled* (a plan, no errors).
 
-    Ties go to the later iteration. Returns ``None`` when nothing valid has been
-    recorded yet — used both to head off a regression (the "best prior valid"
-    reference in the feedback) and to pick a sound source to revise from when the
-    latest attempt failed to compile.
+    Ranks on the *gating* total (:attr:`DesignStep.effective_total`), so a blocked
+    step is de-preferenced here too. Ties go to the later iteration. Returns
+    ``None`` when nothing valid has been recorded yet — used both to head off a
+    regression (the "best prior valid" reference in the feedback) and to pick a
+    sound source to revise from when the latest attempt failed to compile.
     """
     valid = [
         s
@@ -790,7 +985,7 @@ def _best_valid_step(history: list[DesignStep]) -> DesignStep | None:
     ]
     if not valid:
         return None
-    return max(valid, key=lambda s: (s.score.total if s.score else 0.0, s.iteration))
+    return max(valid, key=lambda s: (s.effective_total, s.iteration))
 
 
 @dataclass
@@ -853,6 +1048,23 @@ class BarndoAgent:
             self._client = anthropic.Anthropic(base_url=base_url)
         return self._client
 
+    def _available_client(self):
+        """A usable client for the (optional) LLM-brief seed, or ``None``.
+
+        Returns an injected client as-is; otherwise resolves the real client the
+        same way :attr:`client` does, but swallows the missing-``anthropic`` error
+        so the solver-seed path degrades to no-LLM-brief instead of raising. Kept
+        separate from :attr:`client` (which must raise for the write/critique
+        calls that genuinely need a client) — here, "no client" is a valid state
+        that simply skips the LLM brief.
+        """
+        if self._client is not None:
+            return self._client
+        try:
+            return self.client
+        except Exception:
+            return None
+
     # -- single steps ------------------------------------------------------
 
     def write_source(
@@ -862,15 +1074,18 @@ class BarndoAgent:
         diagnostics: str | None = None,
         seed: str | None = None,
         on_activity: Callable[[str, str], None] | None = None,
+        restructure: bool = False,
+        repair: int = 0,
     ) -> str:
         """Generate DSL for one round (see :meth:`_write_source_ex`).
 
-        Public signature unchanged: returns just the extracted source. The loop
-        calls :meth:`_write_source_ex` when it also needs the truncation flag.
+        Public signature unchanged for the common call; the loop calls
+        :meth:`_write_source_ex` when it also needs the truncation flag.
+        ``restructure``/``repair`` swap the revision instruction (see there).
         """
         source, _truncated = self._write_source_ex(
             brief, prior=prior, diagnostics=diagnostics, seed=seed,
-            on_activity=on_activity,
+            on_activity=on_activity, restructure=restructure, repair=repair,
         )
         return source
 
@@ -880,7 +1095,10 @@ class BarndoAgent:
         prior: str | None = None,
         diagnostics: str | None = None,
         seed: str | None = None,
+        seed_alternates: "list[SeedAlternate] | None" = None,
         on_activity: Callable[[str, str], None] | None = None,
+        restructure: bool = False,
+        repair: int = 0,
     ) -> tuple[str, bool]:
         """Generate DSL and report whether the reply was truncated.
 
@@ -890,6 +1108,21 @@ class BarndoAgent:
         half-written plan, so the loop folds a deterministic TRUNCATED info into
         that round's feedback (after scoring) telling the model to be terser. A
         clean stop, or a truncation the retry recovered from, reports False.
+
+        ``seed_alternates`` (only shown on the first write, alongside ``seed``) are
+        structurally-different runner-up solver candidates the model may switch to
+        or blend, so it isn't anchored to a single topology.
+
+        ``restructure``/``repair`` swap the revision instruction. The default
+        *refine* mode asks for the smallest local edit; *restructure* mode tells
+        the model the layout itself is stuck and it MAY re-place rooms, change
+        adjacencies and re-route circulation wholesale (turned on when the score
+        plateaus, the critic flags a blocking issue, or a suggestion repeats).
+        *repair* mode is used when the PREVIOUS round failed to compile: it names
+        the error count and forbids any redesign, so the model reproduces its
+        prior source and edits only the few lines the errors name. ``repair`` (an
+        error count > 0) takes priority over ``restructure`` — a broken plan is
+        repaired, never restructured (see :meth:`design`).
         """
         prompt = f"Design brief:\n{brief}\n"
         if seed and not prior:
@@ -897,10 +1130,26 @@ class BarndoAgent:
                 "\nA deterministic layout solver produced this dimensionally "
                 "sound draft from the brief — rooms tile the envelope, interior "
                 "doors sit on shared walls, and egress/daylight windows are "
-                "placed. Start from it and improve the DESIGN (flow, adjacencies, "
-                "proportion, light, wasted space); do NOT start from scratch and "
-                "do not regress its geometry:\n```barn\n" + seed + "```\n"
+                "placed. Start from these bones and improve the DESIGN (flow, "
+                "adjacencies, zoning, proportion, light). You MAY re-place rooms "
+                "or switch to an alternate start if the arrangement flows poorly "
+                "- dimensional soundness matters, but the room arrangement is "
+                "yours to improve:\n```barn\n" + seed + "```\n"
             )
+            # Structural diversity: show the runner-up solver topologies so the
+            # model can pick a different set of bones instead of polishing one.
+            if seed_alternates:
+                prompt += (
+                    "\nALTERNATE STARTS (structurally different, also sound - you "
+                    "may switch to or blend these bones instead of the seed):\n"
+                )
+                for alt in seed_alternates[:_MAX_SEED_ALTERNATES]:
+                    prompt += (
+                        f"\n[{alt.engine} engine, score {alt.score:g}]\n"
+                        "```barn\n" + alt.source
+                        + ("" if alt.source.endswith("\n") else "\n")
+                        + "```\n"
+                    )
         if prior:
             prompt += f"\nYour previous DSL:\n```barn\n{prior}```\n"
         if diagnostics:
@@ -914,11 +1163,40 @@ class BarndoAgent:
         if prior or seed:
             prompt += (
                 "\nReturn the COMPLETE revised source (every line — never a diff "
-                "or a fragment) as one ```barn block. Make the smallest revision "
-                "that fixes the diagnostics: keep every line that already works, "
-                "and do not restructure or rename rooms unless a diagnostic "
-                "demands it."
+                "or a fragment) as one ```barn block. "
             )
+            if repair:
+                prompt += (
+                    f"Your previous plan FAILED to compile with {repair} "
+                    f"error(s). Do NOT redesign, re-place rooms, or change the "
+                    "envelope. Reproduce your previous source exactly, changing "
+                    "ONLY the smallest set of lines needed to fix each error "
+                    "listed below (adjust a door/window offset or width, nudge "
+                    "one room dimension). Every error message names the line and "
+                    "the numbers that conflict - do the arithmetic and fix just "
+                    "that. You may fix warnings ONLY when the fix does not move "
+                    "rooms."
+                )
+            elif restructure:
+                prompt += (
+                    "The score has stalled or the architect flagged a structural "
+                    "problem that local edits cannot fix. Reconsider the LAYOUT "
+                    "itself, not just details: you MAY re-place rooms wholesale, "
+                    "change adjacencies, and re-route circulation. Do NOT preserve "
+                    "the current arrangement if a different one flows better. State "
+                    "the new parti in a `# concept:` comment header. Then EARN the "
+                    "restructure: re-derive every door/window offset and every "
+                    "shared wall from the NEW room positions before you answer -- "
+                    "prefer whole- or half-foot dimensions -- because a "
+                    "restructured plan that fails to compile is a wasted round."
+                )
+            else:
+                prompt += (
+                    "Make the smallest revision that fixes the diagnostics: keep "
+                    "every line that already works, and do not restructure or "
+                    "rename rooms unless a diagnostic or the architect's review "
+                    "demands it."
+                )
         else:
             prompt += (
                 "\nReturn the complete plan source as one ```barn block."
@@ -1158,18 +1436,30 @@ class BarndoAgent:
         history: list[DesignStep] = []
         source: str | None = None
         feedback: str | None = None
+        # Revision mode for the NEXT round, decided from THIS round's outcome.
+        # ``repair_next`` (the previous round's error count) wins over
+        # ``restructure_next``: a plan that failed to compile is repaired line by
+        # line, never restructured. ``restructure_next`` (score plateaued, blocked,
+        # or a suggestion repeated) is only ever set when the round COMPILED — a
+        # 0-score plateau built from failed rounds must not latch it on.
+        restructure_next = False
+        repair_next = 0
 
         # Candidate 0: the deterministic solver's best plan, if one was requested
         # and it compiles. Recorded as iteration 0 so best-iteration-wins can
-        # return it, and its source seeds the first generation prompt.
+        # return it, and its source seeds the first generation prompt. Structurally
+        # different runners-up ride the first prompt as ALTERNATE STARTS so the
+        # model isn't anchored to one solver topology.
         solver_seed: str | None = None
+        seed_alternates: list[SeedAlternate] = []
         if seed_with_solver:
-            seed_step = _solver_seed_step(seed_with_solver)
-            if seed_step is not None:
-                history.append(seed_step)
-                solver_seed = seed_step.source
+            seed_res = _solver_seed(seed_with_solver, client=self._available_client())
+            if seed_res is not None:
+                history.append(seed_res.step)
+                solver_seed = seed_res.step.source
+                seed_alternates = seed_res.alternates
                 if on_step:
-                    on_step(seed_step)
+                    on_step(seed_res.step)
 
         # Refinement: revise the caller's current plan. Prime round 1 with it as
         # the "prior" source plus its diagnostics so the first write is a revision.
@@ -1193,9 +1483,30 @@ class BarndoAgent:
             solver seed at iteration 0), for the score-history feedback line."""
             return [s.score.total for s in history if s.score is not None]
 
+        def compiling_scored_totals() -> list[float]:
+            """Totals of only the steps that COMPILED (a plan, no errors).
+
+            Feeds the stagnation detector: a failed round scores 0, so a run of
+            failed rounds would otherwise read as a flat plateau and (wrongly)
+            trigger restructure. Restructure is a signal that *compiling* plans
+            have run out of gradient, so it must be judged over compiling scores
+            alone — a 0 from a broken round is repaired, not restructured."""
+            return [
+                s.score.total
+                for s in history
+                if s.score is not None and s.result.ok
+            ]
+
         for i in range(1, max_iterations + 1):
             if cancel is not None and cancel():
                 break
+            # Snapshot how THIS round writes, so the step (recorded below) reflects
+            # how its source was generated. Repair wins over restructure: when the
+            # previous round failed to compile the model reproduces its prior source
+            # and fixes only the erroring lines (never redesigns), so a broken round
+            # is never also restructured.
+            repaired = repair_next > 0
+            restructured = restructure_next and not repaired
             if on_phase is not None:
                 on_phase("writing", i)
             # Generation can raise: the RuntimeError from two empty replies, or an
@@ -1205,7 +1516,10 @@ class BarndoAgent:
             try:
                 source, truncated = self._write_source_ex(
                     brief, prior=source, diagnostics=feedback, seed=solver_seed,
+                    seed_alternates=seed_alternates,
                     on_activity=activity_for("writing", i),
+                    restructure=restructured,
+                    repair=repair_next if repaired else 0,
                 )
             except Exception as exc:
                 if not history:
@@ -1236,67 +1550,73 @@ class BarndoAgent:
             # design feedback travels the same channel as the compiler's errors.
             # (After scoring: the critique is model-driven, the score is not.)
             _fold_critique(result, crit)
+            # Fold the critic's BLOCKING structural issues (same channel, marked
+            # "BLOCKING:") so the next prompt sees the effective-score clamp reason.
+            _fold_blocking(result, crit)
             # Fold a TRUNCATED info when the reply was cut off at the token cap on
             # both the write and its retry. Folded AFTER scoring (like the critique)
             # so it rides the feedback text without perturbing the score contract:
             # the plan may be a half-written stub, so tell the model to be terser.
             _fold_truncation(result, truncated)
 
-            step = DesignStep(i, source, result, crit, score)
+            # The gating total is the TRUE score, clamped to BLOCKING_CLAMP when the
+            # critic flagged a blocking structural issue. It drives the target gate
+            # and best-step selection (via DesignStep.effective_total); the true
+            # ``score`` object is untouched, so render_feedback stays honest.
+            blocked = crit is not None and bool(crit.blocking_issues)
+            gating_total = min(score.total, BLOCKING_CLAMP) if blocked else score.total
+
+            step = DesignStep(
+                i, source, result, crit, score,
+                gating_total=gating_total, restructured=restructured,
+                repaired=repaired,
+            )
             history.append(step)
             if on_step:
                 on_step(step)
 
             done = result.ok and (crit is None or crit.satisfied)
-            # Gate mechanically: the critic's "satisfied" alone can't end the
-            # loop while the score says there are points on the table.
-            if target_score is not None and score.total < target_score:
+            # Gate mechanically on the GATING total, not the raw score: the critic's
+            # "satisfied" alone can't end the loop while points remain, and a
+            # blocking structural issue caps the effective score below any target.
+            if target_score is not None and gating_total < target_score:
                 done = False
             if done or i == max_iterations:
                 break
-            # Flag a regression against the best valid iteration *before* this one,
-            # so a broken or lower-scoring round reads as a regression. Carry the
-            # true score trajectory so the model sees whether it is climbing.
-            feedback = render_feedback(
-                result, score, best_prior=_best_valid_step(history[:-1]),
-                score_history=scored_totals(),
-            )
-            # When the latest attempt failed to compile, revise from the best
-            # valid source instead of stranding the model on non-compiling code.
-            # The feedback must stay coherent with the source it is shown
-            # against: the prompt captions it as "feedback on it", so pair the
-            # best valid source with ITS OWN diagnostics and quote the broken
-            # attempt's fatal lines separately, clearly attributed.
-            if result.plan is None or result.errors:
-                best_valid = _best_valid_step(history)
-                if best_valid is not None:
-                    source = best_valid.source
-                    fatal = []
-                    for d in result.to_dict()["diagnostics"]:
-                        if d["severity"] != "error":
-                            continue
-                        loc = f" line {d['line']}" if d["line"] else ""
-                        fatal.append(f"error {d['code']}{loc}: {d['message']}")
-                    bv_score = best_valid.score
-                    assert bv_score is not None  # _best_valid_step filters on it
-                    # The shown source is the best valid one, but the score-history
-                    # line still tells the TRUE trajectory across every scored step.
-                    feedback = (
-                        f"NOTE: your newest attempt (iteration {i}) did not "
-                        f"compile and was DISCARDED. The DSL shown above is "
-                        f"your best valid iteration ({best_valid.iteration}, "
-                        f"scored {bv_score.total:g}); the feedback "
-                        f"below describes THAT source. Improve it — and do "
-                        f"not repeat the discarded attempt's mistakes.\n"
-                        + render_feedback(
-                            best_valid.result, best_valid.score,
-                            score_history=scored_totals(),
-                        )
-                        + "\n\nFatal diagnostics from the discarded attempt "
-                        "(these describe the discarded source, NOT the DSL "
-                        "shown above):\n"
-                        + "\n".join(fatal)
-                    )
+            # When THIS round failed to compile, the NEXT round is a REPAIR round:
+            # the model reproduces this exact (failed) source and fixes only the
+            # erroring lines. Carry the failed source forward as the "prior" (so
+            # "reproduce it, fix line N" is coherent) with its OWN diagnostics, and
+            # do NOT revert to a best-valid source — that would invite a wholesale
+            # redesign, the very regression repair mode fixes. A failed round never
+            # latches restructure; repair takes priority and the restructure trigger
+            # is judged over compiling rounds only (below).
+            failed = result.plan is None or bool(result.errors)
+            if failed:
+                repair_next = sum(1 for d in result.diagnostics if d.severity is Severity.ERROR)
+                restructure_next = False
+                source = history[-1].source  # the failed source, verbatim
+                feedback = render_feedback(result, score, score_history=scored_totals())
+            else:
+                # A compiling round: decide whether the NEXT round restructures.
+                # A score plateau (judged over COMPILING scores only — a 0 from a
+                # broken round must not read as a flat plateau), a blocking issue
+                # this round, or the same suggestion two rounds running all signal
+                # local edits have run out and the layout needs rework.
+                repair_next = 0
+                prev_crit = history[-2].critique if len(history) >= 2 else None
+                restructure_next = (
+                    _stagnating(compiling_scored_totals())
+                    or blocked
+                    or _repeated_suggestion(prev_crit, crit)
+                )
+                # Flag a regression against the best valid iteration *before* this
+                # one, so a lower-scoring round reads as a regression. Carry the
+                # true score trajectory so the model sees whether it is climbing.
+                feedback = render_feedback(
+                    result, score, best_prior=_best_valid_step(history[:-1]),
+                    score_history=scored_totals(),
+                )
 
         if not history:
             # Cancelled before any round was recorded: still return a well-formed
@@ -1323,6 +1643,65 @@ def _fold_critique(result: CompileResult, crit: CritiqueSpec | None) -> None:
         result.diagnostics.append(
             Issue(Severity.INFO, "DESIGN", s, hint="Architect's review (design quality).")
         )
+
+
+def _fold_blocking(result: CompileResult, crit: CritiqueSpec | None) -> None:
+    """Fold the critic's blocking structural issues into ``result`` as INFO.
+
+    Rides the SAME diagnostic channel :func:`_fold_critique` uses (so it reaches
+    the next revision prompt via ``render_feedback`` without editing it), but each
+    message is prefixed ``BLOCKING: `` and led with the clamp fact, so the model
+    reads the plan's effective score as capped at :data:`BLOCKING_CLAMP` until the
+    defect is fixed. Independent of ``satisfied``: a blocking issue is folded even
+    on the rare "satisfied but with a blocker" reply. ASCII-only for cp1252.
+    """
+    if crit is None or not crit.blocking_issues:
+        return
+    for issue in crit.blocking_issues[:5]:
+        result.diagnostics.append(
+            Issue(
+                Severity.INFO,
+                "DESIGN",
+                f"BLOCKING: a blocking structural issue caps this plan's effective "
+                f"score at {BLOCKING_CLAMP:g} until fixed: {issue}",
+                hint="Architect's review (blocking structural defect - fix before polishing).",
+            )
+        )
+
+
+def _normalize_suggestion(text: str) -> str:
+    """Casefold + collapse whitespace, for comparing suggestions across rounds."""
+    return " ".join(text.split()).casefold()
+
+
+def _stagnating(totals: list[float], window: int = 2, eps: float = 2.0) -> bool:
+    """True when the last ``window`` score-to-score deltas are each below ``eps``.
+
+    The score plateaued: successive rounds are moving the total by less than
+    ``eps`` points apiece, so local polishing has run out of gradient and the loop
+    should try a structural restructure. Needs ``window + 1`` totals to form
+    ``window`` deltas; fewer (or a big jump anywhere in the window) returns False.
+    """
+    if len(totals) < window + 1:
+        return False
+    recent = totals[-(window + 1):]
+    deltas = [abs(b - a) for a, b in zip(recent, recent[1:])]
+    return all(d < eps for d in deltas)
+
+
+def _repeated_suggestion(
+    prev: CritiqueSpec | None, cur: CritiqueSpec | None
+) -> bool:
+    """True when any normalized suggestion appears in BOTH critiques.
+
+    Two consecutive rounds naming the same fix means local edits aren't landing
+    it — a signal to restructure. ``None`` on either side (a skipped critique)
+    returns False.
+    """
+    if prev is None or cur is None:
+        return False
+    prev_set = {_normalize_suggestion(s) for s in prev.suggestions}
+    return any(_normalize_suggestion(s) in prev_set for s in cur.suggestions)
 
 
 def _fold_truncation(result: CompileResult, truncated: bool) -> None:
@@ -1445,8 +1824,15 @@ def _brief2_from_prose(text: str):
         rooms.append(("dining", "dining", 170, None))
     rooms.append(("hall", "hallway", 150, 4))  # min 4 = comfort hallway width
     rooms.append(("master", "bedroom", 224, None))
+    # A closet per bedroom, sitting in the private band beside its bedroom (the
+    # adjacency below makes it the bedroom's row-neighbour, and _connect_adjacencies
+    # cuts the door NO_CLOSET wants). The master gets a walk-in (min 4 ft so it isn't
+    # a strip); the secondary bedrooms get reach-ins. Sizing rides the same area
+    # scale as every other room, so the totals still track the stated floor area.
+    rooms.append(("mcloset", "closet", 40, 4))
     for i in range(2, beds + 1):
         rooms.append((f"bed{i}", "bedroom", 156, None))
+        rooms.append((f"closet{i}", "closet", 24, None))
     ensuite = baths >= 2
     if ensuite:
         rooms.append(("mbath", "bathroom", 100, None))  # master ensuite
@@ -1455,7 +1841,12 @@ def _brief2_from_prose(text: str):
         rooms.append(("bath", "bathroom", 100, None))  # one shared bath
     if has_office:
         rooms.append(("office", "office", 120, None))
-    if has_mudroom:
+    # A shop is a garage-class bay (overhead door, vehicles) — it must NOT open off
+    # the sleeping hall (GARAGE_PASSTHROUGH / GARAGE_BEDROOM). Force a mudroom to
+    # buffer it from the house even when the prose never named one, so the shop
+    # doors into the mudroom and the mudroom into the public core.
+    want_mudroom = has_mudroom or has_shop
+    if want_mudroom:
         rooms.append(("mudroom", "mudroom", 80, None))
     # Shop bay: functionally a garage (min 12 ft to take a vehicle). Kept because
     # it costs no score and delivers what the brief asked for (verified empirically).
@@ -1487,10 +1878,22 @@ def _brief2_from_prose(text: str):
     lines.append("adjacent hall " + " ".join(bedroom_ids + [shared_bath]))
     if ensuite:
         lines.append("adjacent master mbath")
+    # Each bedroom doors into its own closet (what NO_CLOSET checks for). The
+    # closet chains beside its bedroom in the private band, so _connect_adjacencies
+    # cuts the door on their shared wall.
+    lines.append("adjacent master mcloset")
+    for i in range(2, beds + 1):
+        lines.append(f"adjacent bed{i} closet{i}")
+    # Buffer the shop OFF the sleeping spine: it doors into the mudroom, and the
+    # mudroom into the public core (kitchen if there is one, else living) — never
+    # `adjacent hall shop`, which would make the vehicle bay a corridor to the beds
+    # (GARAGE_PASSTHROUGH). The mudroom is the drop-zone between the drive and the
+    # house that a barndo shop wants anyway.
+    if want_mudroom:
+        core = "kitchen"  # kitchen always exists in this program
+        lines.append(f"adjacent {core} mudroom")
     if has_shop:
-        # Off the hall like the other private spaces (solves the same as living-shop
-        # here; the hall keeps the shop's door out of the open core).
-        lines.append("adjacent hall shop")
+        lines.append("adjacent mudroom shop")
     lines.append("entry living")
 
     from .layout2 import parse_brief2
@@ -1503,37 +1906,141 @@ def _brief2_from_prose(text: str):
         return None
 
 
-def _solver_candidate_sources(spec) -> list[str]:
-    """Emit DSL for each solver candidate derived from ``spec``.
+#: The compact brief2-grammar summary + worked example the LLM-brief system prompt
+#: carries. Modeled on ``examples/oakline.brief``; kept small so the one call is
+#: cheap. The marker phrase "You translate briefs" is deliberately distinct from
+#: the critique dispatch marker "senior architect" (see the FakeClient in
+#: tests/test_agent_loop.py, which tells generation from critique by that phrase),
+#: so a test double can key on this call type without colliding.
+_BRIEF_LLM_SYSTEM = (
+    "You translate briefs. Given a free-text description of a house, you write a "
+    "structured brief in the barndsl brief2 grammar (rooms by TARGET AREA plus "
+    "adjacencies) that a deterministic layout solver can consume.\n\n"
+    "GRAMMAR (one statement per line):\n"
+    '  plan "<name>"\n'
+    "  ceiling <ft>\n"
+    "  room <id>: <type> area <sqft> [min <ft>]   # size program, not coordinates\n"
+    "  adjacent <a> <b> [<c> ...]                  # connect <a> to each of the rest\n"
+    "  entry <room>\n"
+    "Room types: living kitchen dining bedroom bathroom hallway closet pantry "
+    "mudroom office laundry utility loft garage shop.\n\n"
+    "RULES: give every bedroom count the brief asks for; put a hallway spine and "
+    "hang the bedrooms + a shared bath off it; open the living/kitchen/dining core; "
+    "if a shop or garage is requested, BUFFER it with a mudroom (adjacent shop "
+    "mudroom, adjacent mudroom kitchen) and NEVER put the shop adjacent to the "
+    "hall or a bedroom. Only output the brief - no prose, no code fences.\n\n"
+    "WORKED EXAMPLE:\n"
+    'plan "Oakline 3-Bed"\n'
+    "ceiling 10\n"
+    "room living: living area 380\n"
+    "room kitchen: kitchen area 280\n"
+    "room dining: dining area 170\n"
+    "room hall: hallway area 150 min 4\n"
+    "room master: bedroom area 224\n"
+    "room mbath: bathroom area 100\n"
+    "room bed2: bedroom area 156\n"
+    "room bed3: bedroom area 156\n"
+    "room bath2: bathroom area 90\n"
+    "adjacent living kitchen\n"
+    "adjacent kitchen dining\n"
+    "adjacent living hall\n"
+    "adjacent hall master bed2 bed3 bath2\n"
+    "adjacent master mbath\n"
+    "entry living\n"
+)
+
+
+def _brief_from_llm(text: str, client):
+    """Ask the LLM to write a brief2 from free-text prose, or ``None`` on any failure.
+
+    The last resort in the seed-resolution chain: reached only for free text that
+    BOTH :func:`~barndsl.layout2.parse_brief2` and :func:`_brief2_from_prose`
+    failed on (the regex needs a bedroom-count signal and returns ``None`` without
+    one). Makes ONE streaming call (the SDK requires streaming for a possibly-slow
+    reasoning model), parses the reply with ``parse_brief2``, and on ANY failure —
+    a missing client, an API error, an empty or unparseable reply — returns
+    ``None`` so the caller falls back silently to an unseeded loop. Never raises.
+    """
+    if client is None or not (text and text.strip()):
+        return None
+    from .layout2 import parse_brief2
+
+    prompt = (
+        "Write a barndsl brief2 for this house description. Output ONLY the brief "
+        "(no fences, no commentary):\n\n" + text.strip() + "\n"
+    )
+    try:
+        with client.messages.stream(
+            model=resolve_model(),
+            max_tokens=resolve_max_tokens(),
+            system=_BRIEF_LLM_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+            thinking={"type": "adaptive"},
+        ) as stream:
+            msg = stream.get_final_message()
+    except Exception as exc:
+        logger.warning(
+            "LLM brief-translation call failed (%s: %s) — falling back to an "
+            "unseeded loop.",
+            type(exc).__name__, str(exc)[:200],
+        )
+        return None
+    reply = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+    if not reply.strip():
+        return None
+    # Try the raw reply first, then a fence-stripped version (the reply may arrive
+    # fenced despite the instruction — reuse the same fence recovery the source
+    # extractor uses so a compat-gateway model still parses).
+    for candidate in (reply, _extract_source(reply)):
+        try:
+            return parse_brief2(candidate)
+        except Exception:
+            continue
+    logger.warning("LLM brief was unparseable — falling back to an unseeded loop.")
+    return None
+
+
+def _solver_candidate_sources(spec, client=None) -> list[tuple[str, str]]:
+    """Emit ``(engine_label, DSL)`` for each solver candidate derived from ``spec``.
 
     ``spec`` is a program the deterministic engines can solve — a
     :class:`barndsl.layout2.LayoutBrief2` (run through the space-filling
     topologies), a :class:`barndsl.layout.LayoutBrief` (the v1 greedy engine), or
     a textual brief (parsed as a v2 brief). Enumerates engines × topologies the
     way the CLI does, capped at the three v2 topologies (bands · slice · dual) so
-    runtime stays bounded — every one is near-free (no API call). Returns one DSL
-    string per topology that produced a plan; any failure is skipped, so seeding
-    always degrades gracefully to "no seed".
+    runtime stays bounded — every one is near-free (no API call). Returns one
+    ``(engine, DSL)`` pair per topology that produced a plan, so the caller can
+    keep structurally different runners-up with their engine label; any failure is
+    skipped, so seeding always degrades gracefully to "no seed" (``[]``).
 
-    A ``str`` spec is first tried as the structured brief-statement grammar
-    (``parse_brief2``); when that raises — the common case for a natural-language
-    brief — it falls back to :func:`_brief2_from_prose`. Structured briefs thus
-    keep precedence, and only when *both* fail is the spec unusable (``[]``).
+    A ``str`` spec is resolved through a fallback chain, in order: the structured
+    brief-statement grammar (:func:`~barndsl.layout2.parse_brief2`); then, when
+    that raises, the regex prose reader (:func:`_brief2_from_prose`), which needs
+    a bedroom-count signal; then, only when a ``client`` is available and both
+    have failed, ONE LLM call (:func:`_brief_from_llm`) that writes a brief2 from
+    the prose. Structured input keeps precedence, and the regex still wins over the
+    LLM whenever it can parse — so the LLM path only fires on free text with no
+    bedroom-count signal. When every resolver fails the spec is unusable (``[]``).
     """
     from .emit import emit_dsl
     from .layout import LayoutBrief, solve_layout
     from .layout2 import LayoutBrief2, parse_brief2, solve_layout2
 
     if isinstance(spec, str):
+        text = spec  # keep the original prose for the LLM fallback below
         try:
             spec = parse_brief2(spec)
         except Exception:
             # Not the structured grammar — try to read a program out of the prose.
-            spec = _brief2_from_prose(spec)
+            spec = _brief2_from_prose(text)
+            if spec is None and client is not None:
+                # Regex found no bedroom-count signal; ask the LLM to write a
+                # brief2. Any failure returns None (silent fall to no-seed).
+                spec = _brief_from_llm(text, client)
             if spec is None:
                 return []
 
-    results = []
+    results: list[tuple[str, Any]] = []
     if isinstance(spec, LayoutBrief2):
         for engine in ("bands", "slice", "dual"):
             try:
@@ -1541,19 +2048,19 @@ def _solver_candidate_sources(spec) -> list[str]:
             except Exception:
                 continue
             if out is not None and out.plan is not None:
-                results.append(out)
+                results.append((engine, out))
     elif isinstance(spec, LayoutBrief):
         try:
             out = solve_layout(spec)
         except Exception:
             out = None
         if out is not None and out.plan is not None:
-            results.append(out)
+            results.append(("greedy", out))
     else:
         return []
 
-    sources: list[str] = []
-    for out in results:
+    sources: list[tuple[str, str]] = []
+    for engine, out in results:
         try:
             src = emit_dsl(out.plan)
         except Exception:
@@ -1574,21 +2081,58 @@ def _solver_candidate_sources(spec) -> list[str]:
                 if baths:
                     stmt += f" {baths} bath"
                 src = stmt + "\n" + src
-        sources.append(src)
+        sources.append((engine, src))
     return sources
 
 
-def _solver_seed_step(spec) -> DesignStep | None:
-    """The solver's best compiling candidate, as iteration 0 — or ``None``.
+@dataclass
+class SeedAlternate:
+    """A structurally-different runner-up solver candidate for the first prompt.
 
-    Each candidate is compiled, folded through the same ``program`` nudge the
-    loop applies (so its score is directly comparable to the LLM's iterations),
-    and scored with :func:`design_score`; the highest-scoring one that actually
-    compiles (a plan, no errors) wins. Returns ``None`` when the solver yields
+    Carries the engine that produced it, its design-score total, and its full DSL
+    source, so :meth:`BarndoAgent.design` can offer the model a bounded set of
+    alternate starts it may switch to or blend, instead of anchoring it to one.
+    """
+
+    engine: str
+    score: float
+    source: str
+
+
+@dataclass
+class SeedResult:
+    """The solver seed handed to :meth:`BarndoAgent.design`.
+
+    ``step`` is the best compiling candidate as iteration 0 (the floor
+    best-iteration-wins must beat); ``alternates`` are up to two compiling
+    runners-up from DIFFERENT engines than the winner, near-duplicates skipped, so
+    the first write prompt can show the model real structural diversity.
+    """
+
+    step: DesignStep
+    alternates: list[SeedAlternate] = field(default_factory=list)
+
+
+#: How many structurally-different runner-up seeds to keep and show the model.
+_MAX_SEED_ALTERNATES = 2
+
+
+def _solver_seed(spec, client=None) -> SeedResult | None:
+    """The solver's best compiling candidate + alternates, or ``None``.
+
+    Each candidate is compiled, folded through the same ``program`` nudge the loop
+    applies (so its score is directly comparable to the LLM's iterations), and
+    scored with :func:`design_score`; the highest-scoring one that actually
+    compiles (a plan, no errors) becomes iteration 0. Up to
+    :data:`_MAX_SEED_ALTERNATES` other compiling candidates from DIFFERENT engines
+    than the winner are retained as :class:`SeedAlternate`\\ s (near-duplicate
+    sources skipped), so the caller can offer the model structural diversity
+    instead of a single anchored seed. Returns ``None`` when the solver yields
     nothing that compiles, so the loop then proceeds exactly as it does today.
     """
-    best: DesignStep | None = None
-    for src in _solver_candidate_sources(spec):
+    # (engine, source, DesignStep) for every candidate that compiled clean.
+    scored: list[tuple[str, str, DesignStep]] = []
+    for engine, src in _solver_candidate_sources(spec, client=client):
         try:
             result = compile_source(src, name=None)
         except Exception:
@@ -1597,9 +2141,50 @@ def _solver_seed_step(spec) -> DesignStep | None:
             continue
         _fold_program_nudge(result)
         score = design_score(result)
-        if best is None or best.score is None or score.total > best.score.total:
-            best = DesignStep(0, result.source, result, None, score)
-    return best
+        scored.append((engine, result.source, DesignStep(0, result.source, result, None, score)))
+    if not scored:
+        return None
+
+    # Best by score wins iteration 0 (ties keep discovery order, i.e. bands first).
+    scored.sort(key=lambda t: -(t[2].score.total if t[2].score else 0.0))
+    win_engine, win_src, win_step = scored[0]
+
+    # Keep up to N runners-up from DIFFERENT engines, skipping near-duplicate
+    # sources (a slice/dual tiling that came out identical to the winner adds no
+    # diversity). Normalise whitespace before comparing so cosmetic differences
+    # don't defeat the dedup.
+    def _norm(s: str) -> str:
+        return "\n".join(line.strip() for line in s.strip().splitlines())
+
+    seen_norm = {_norm(win_src)}
+    seen_engines = {win_engine}
+    alternates: list[SeedAlternate] = []
+    for engine, src, step in scored[1:]:
+        if len(alternates) >= _MAX_SEED_ALTERNATES:
+            break
+        if engine in seen_engines:
+            continue
+        norm = _norm(src)
+        if norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        seen_engines.add(engine)
+        alternates.append(
+            SeedAlternate(engine=engine, score=step.score.total if step.score else 0.0, source=src)
+        )
+    return SeedResult(step=win_step, alternates=alternates)
+
+
+def _solver_seed_step(spec, client=None) -> DesignStep | None:
+    """The solver's best compiling candidate as iteration 0 — or ``None``.
+
+    A thin wrapper over :func:`_solver_seed` that discards the alternates and
+    hands back just the winning :class:`DesignStep`, preserving the original
+    public contract (the loop uses :func:`_solver_seed` directly when it also
+    needs the alternate starts for the first write prompt).
+    """
+    res = _solver_seed(spec, client=client)
+    return res.step if res is not None else None
 
 
 def design(

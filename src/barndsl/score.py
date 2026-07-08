@@ -17,20 +17,27 @@ where each component is a penalty (points deducted):
     warnings     8 per warning, capped at 40.
     infos        2 per design-quality info nudge, capped at 20.
     space        up to 10 — ground-floor room area / footprint, full marks at
-                 the 85% coverage AREA_UNUSED expects, scaling to 10 at 0%.
+                 the 85% coverage AREA_UNUSED expects, scaling to 10 at 0%; a
+                 concentrated room-sized void also costs up to 6 even above 85%.
     circulation  up to 6 — hallway share of interior area; free up to 15%,
                  full penalty at 35% (a plan that is mostly corridor).
-    proportion   up to 8 — mean habitable-room elongation past 1.6:1
-                 (full penalty at a mean 3.1:1 — long thin rooms don't furnish).
+    proportion   up to 8 — habitable-room elongation past 1.6:1, bedrooms counted
+                 double and worst-dominated (0.6·worst + 0.4·mean) so a lone tunnel
+                 room can't be averaged away by squarer neighbours.
     daylight     up to 8 — mean habitable-room glazing shortfall below the
                  IRC R303 8%-of-floor minimum (full penalty at zero glazing).
+    topology     up to 15 — fraction of bedrooms whose only interior route to the
+                 living core crosses a garage/shop (all severed → full 15). The
+                 through-garage circulation defect as a continuous term, redundant
+                 with the GARAGE_PASSTHROUGH warning so it can't be capped away.
 
-Diagnostics dominate (their caps sum to 60 before the error gate); the four
-continuous terms (32 max) refine, so two clean plans still rank — the one with
-less waste, squarer rooms, and more light wins. The continuous terms overlap
-some diagnostics (AREA_UNUSED, HALL_TIGHT, ROOM_PROPORTION, NATURAL_LIGHT) on
-purpose: the info gives the step, the margin gives the *gradient* an agent can
-descend even before (or after) the threshold trips.
+Diagnostics dominate (their caps sum to 60 before the error gate); the five
+continuous terms (47 max) refine, so two clean plans still rank — the one with
+less waste, squarer rooms, more light, and a sound circulation topology wins. The
+continuous terms overlap some diagnostics (AREA_UNUSED/AREA_VOID, HALL_TIGHT,
+ROOM_PROPORTION, NATURAL_LIGHT, GARAGE_PASSTHROUGH) on purpose: the info/warning
+gives the step, the margin gives the *gradient* an agent can descend even before
+(or after) the threshold trips.
 
 Each non-zero continuous component also carries a **cause** in
 :attr:`ScoreReport.details` — a short string naming the worst offenders with
@@ -48,8 +55,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .elements import HABITABLE_TYPES, Barndominium, RoomType
-from .validation import Severity
+from .elements import GARAGE_TYPES, HABITABLE_TYPES, Barndominium, RoomType
+from .validation import MIN_CONCENTRATED_VOID, Severity, _largest_void
+
+#: The public core a bedroom's daily route must reach without crossing a garage.
+_PUBLIC_TYPES = frozenset({RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING})
 
 # --- weights (the contract; change these and the score changes meaning) ------
 
@@ -60,14 +70,18 @@ INFO_CAP = 20.0  #: … up to this many
 
 SPACE_WEIGHT = 10.0  #: max penalty for unassigned footprint
 SPACE_FULL_MARKS = 0.85  #: coverage at/above this loses nothing (AREA_UNUSED's bar)
+VOID_SPACE_WEIGHT = 6.0  #: max penalty from one concentrated void (part of `space`)
+VOID_FULL_FRAC = 0.10  #: a void this big a share of the footprint hits VOID_SPACE_WEIGHT
 CIRCULATION_WEIGHT = 6.0  #: max penalty for hallway-heavy plans
 CIRCULATION_FREE = 0.15  #: hallway share of interior area with no penalty
 CIRCULATION_WORST = 0.35  #: share at/above which the full penalty applies
 PROPORTION_WEIGHT = 8.0  #: max penalty for elongated habitable rooms
 GOOD_ASPECT = 1.6  #: elongation past this ratio starts to cost (ROOM_PROPORTION's bar)
-WORST_ASPECT_EXCESS = 1.5  #: mean excess (i.e. 3.1:1) at which the full penalty applies
+WORST_ASPECT_EXCESS = 1.5  #: excess (i.e. 3.1:1) at which the full penalty applies
+BEDROOM_EXCESS_WEIGHT = 2.0  #: bedrooms count double in proportion (like layout2)
 DAYLIGHT_WEIGHT = 8.0  #: max penalty for under-glazed habitable rooms
 DAYLIGHT_RATIO = 0.08  #: IRC R303 glazing floor: 8% of habitable floor area
+TOPOLOGY_WEIGHT = 15.0  #: max penalty for bedrooms reachable only through a garage/shop
 
 
 @dataclass
@@ -112,16 +126,44 @@ def _worst(offenders: list[tuple[float, str, str]]) -> str:
 
 
 def _space_penalty(plan: Barndominium) -> tuple[float, str | None]:
-    """Unassigned footprint. Coverage is a ground-floor concept (lofts sit above)."""
+    """Unassigned footprint. Coverage is a ground-floor concept (lofts sit above).
+
+    Two ways a footprint wastes space, taking the harsher of the two:
+
+    * **diffuse slack** — total ground-floor coverage below :data:`SPACE_FULL_MARKS`
+      (85%), scaling to the full weight at 0% (the historical term).
+    * **a concentrated void** — one connected room-sized gap that the coverage term
+      forgives whenever overall coverage is high (a footprint 97% covered but with
+      an 80 sqft dead pocket still reads as 97%). Charge for the largest single gap
+      as a fraction of the footprint, so a room-sized hole costs *something* even
+      above 85%. This is the score's continuous companion to the AREA_VOID info.
+    """
     footprint = plan.footprint_area
     if footprint <= 0:
         return 0.0, None
     used = sum(r.area for r in plan.rooms if r.level == 0)
     frac = min(1.0, used / footprint)
     shortfall = max(0.0, SPACE_FULL_MARKS - frac) / SPACE_FULL_MARKS
-    penalty = SPACE_WEIGHT * min(1.0, shortfall)
+    coverage_pen = SPACE_WEIGHT * min(1.0, shortfall)
+
+    # Concentrated-void term: only room-sized gaps count (a wall-thickness sliver
+    # of slack between rooms shouldn't ping the score). Scales the void's share of
+    # the footprint into a penalty capped at VOID_SPACE_WEIGHT.
+    void_area, bbox = _largest_void(plan)
+    void_pen = 0.0
+    if void_area >= MIN_CONCENTRATED_VOID:
+        void_pen = min(VOID_SPACE_WEIGHT, VOID_SPACE_WEIGHT * (void_area / footprint) / VOID_FULL_FRAC)
+
+    penalty = max(coverage_pen, void_pen)
     if penalty <= 0.0:
         return penalty, None
+    if void_pen > coverage_pen and bbox is not None:
+        x1, y1, x2, y2 = bbox
+        return penalty, (
+            f"a concentrated {void_area:.0f} sqft void ({x1:.0f},{y1:.0f} to "
+            f"{x2:.0f},{y2:.0f}) sits in an otherwise {frac * 100:.0f}%-covered "
+            f"{footprint:.0f} sqft footprint"
+        )
     return penalty, (
         f"ground-floor rooms cover {frac * 100:.0f}% of the {footprint:.0f} sqft "
         f"footprint ({footprint - used:.0f} sqft unassigned; free at "
@@ -148,26 +190,47 @@ def _circulation_penalty(plan: Barndominium) -> tuple[float, str | None]:
 
 
 def _proportion_penalty(plan: Barndominium) -> tuple[float, str | None]:
-    """Mean habitable-room elongation past GOOD_ASPECT (halls/closets exempt)."""
+    """Habitable-room elongation past GOOD_ASPECT (halls/closets exempt).
+
+    Two shape choices ported from the deterministic solver
+    (:func:`barndsl.layout2._proportion_penalty`), because the old plain mean let a
+    couple of bad rooms hide among many good ones — two 2.0:1 tunnel bedrooms among
+    seven rooms diluted to ~0.6 pts:
+
+    * **bedrooms count double** — a long thin bedroom is the most noticeable
+      (you sleep in it), so its excess is weighted ``BEDROOM_EXCESS_WEIGHT``.
+    * **worst-dominated aggregation** — ``0.6·worst + 0.4·mean`` instead of the
+      mean alone, so the single worst room drives most of the penalty and can't be
+      averaged away by squarer neighbours.
+    """
     excesses: list[float] = []
+    weights: list[float] = []
     offenders: list[tuple[float, str, str]] = []
     for r in plan.rooms:
         if r.type not in HABITABLE_TYPES:
             continue
+        w = BEDROOM_EXCESS_WEIGHT if r.type is RoomType.BEDROOM else 1.0
         side = min(r.width, r.length)
         if side <= 0:
             excesses.append(WORST_ASPECT_EXCESS)  # degenerate: as bad as it gets
-            offenders.append((WORST_ASPECT_EXCESS, r.id, f"{r.id} has a zero side"))
+            weights.append(w)
+            offenders.append((WORST_ASPECT_EXCESS * w, r.id, f"{r.id} has a zero side"))
             continue
         excess = max(0.0, max(r.width, r.length) / side - GOOD_ASPECT)
         excesses.append(excess)
+        weights.append(w)
         if excess > 0.0:
             ratio = max(r.width, r.length) / side
-            offenders.append((excess, r.id, f"{r.id} is {ratio:.1f}:1"))
+            offenders.append((excess * w, r.id, f"{r.id} is {ratio:.1f}:1"))
     if not excesses:
         return 0.0, None
-    mean = sum(excesses) / len(excesses)
-    penalty = PROPORTION_WEIGHT * min(1.0, mean / WORST_ASPECT_EXCESS)
+    # Weighted mean (bedrooms 2x) blended with the single worst weighted excess,
+    # worst-dominated so a tunnel room can't be diluted by squarer neighbours.
+    weighted = [e * wt for e, wt in zip(excesses, weights)]
+    mean = sum(weighted) / sum(weights)
+    worst = max(weighted)
+    combined = 0.6 * worst + 0.4 * mean
+    penalty = PROPORTION_WEIGHT * min(1.0, combined / WORST_ASPECT_EXCESS)
     if penalty <= 0.0 or not offenders:
         return penalty, None
     return penalty, f"{_worst(offenders)} (past the {GOOD_ASPECT:g}:1 target)"
@@ -198,6 +261,69 @@ def _daylight_penalty(plan: Barndominium) -> tuple[float, str | None]:
         return penalty, None
     return penalty, (
         f"{_worst(offenders)} (below the {DAYLIGHT_RATIO * 100:.0f}% glazing floor)"
+    )
+
+
+def _door_components_excluding(
+    plan: Barndominium, excluded: set[str]
+) -> list[set[str]]:
+    """Connected components of the interior-door graph with ``excluded`` rooms
+    removed. Replicated here (a tiny BFS over ``plan.interior_doors``) so the
+    score stays a pure, self-contained function of the compile result — the same
+    topology question :func:`barndsl.validation._dq_garage_passthrough` asks."""
+    graph: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
+    for d in plan.interior_doors:
+        if d.room_a in graph and d.room_b in graph:
+            graph[d.room_a].add(d.room_b)
+            graph[d.room_b].add(d.room_a)
+    comps: list[set[str]] = []
+    seen: set[str] = set()
+    for start in graph:
+        if start in excluded or start in seen:
+            continue
+        comp: set[str] = set()
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            if node in comp:
+                continue
+            comp.add(node)
+            seen.add(node)
+            for nb in graph[node]:
+                if nb not in excluded and nb not in comp:
+                    stack.append(nb)
+        comps.append(comp)
+    return comps
+
+
+def _topology_penalty(plan: Barndominium) -> tuple[float, str | None]:
+    """Fraction of bedrooms whose only interior route to the public core crosses a
+    garage/shop — the through-garage circulation defect, as a continuous term.
+
+    Remove every garage/shop from the door graph; a bedroom no longer in the
+    component holding the public rooms (living/kitchen/dining) is *severed* — you
+    must cross the vehicle bay to reach it. Penalise proportionally: all bedrooms
+    severed → the full weight, so the defect can't be capped away by the warning
+    (GARAGE_PASSTHROUGH) alone. Redundant with that warning on purpose."""
+    garages = {r.id for r in plan.rooms if r.type in GARAGE_TYPES}
+    if not garages:
+        return 0.0, None
+    publics = {r.id for r in plan.rooms if r.type in _PUBLIC_TYPES}
+    beds = [r.id for r in plan.rooms if r.type is RoomType.BEDROOM]
+    if not publics or not beds:
+        return 0.0, None
+    comps = _door_components_excluding(plan, garages)
+    public_comp = next((c for c in comps if c & publics), None)
+    if public_comp is None:
+        return 0.0, None  # the public rooms themselves sit behind the garage
+    severed = sorted(b for b in beds if b not in public_comp)
+    if not severed:
+        return 0.0, None
+    penalty = TOPOLOGY_WEIGHT * (len(severed) / len(beds))
+    names = ", ".join(f"'{b}'" for b in severed)
+    return penalty, (
+        f"{len(severed)} of {len(beds)} bedroom(s) ({names}) reach the "
+        "living core only through a garage/shop"
     )
 
 
@@ -233,6 +359,7 @@ def design_score(result) -> ScoreReport:
         ("circulation", _circulation_penalty),
         ("proportion", _proportion_penalty),
         ("daylight", _daylight_penalty),
+        ("topology", _topology_penalty),
     )
     for name, penalty in continuous:
         points, cause = penalty(plan) if plan is not None else (0.0, None)
