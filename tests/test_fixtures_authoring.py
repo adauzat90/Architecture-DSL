@@ -96,6 +96,68 @@ def test_wall_accepts_letters_and_names():
     assert r.plan.fixtures[0].wall.value == "north"
 
 
+# --- wall + offset: the along-wall pin (the door/window convention) -----------
+# `wall <W> offset <n>` pins a piece n ft along the wall from its S/W start
+# corner — the same convention as a door, window, outlet or switch. Added
+# because the design agent kept (reasonably) inventing exactly this syntax.
+
+
+def test_offset_pins_the_piece_along_each_wall():
+    # bed is at 0,0 size 16 x 12, so its walls run x 0..16 and y 0..12.
+    r = compile_source(_plan(
+        "fixture dresser in bed wall S offset 3",
+        "fixture desk in bed wall N offset 2",
+        "fixture wardrobe in bed wall W offset 4",
+        "fixture bed_queen in bed wall E offset 1",
+    ))
+    assert r.plan is not None
+    by_kind = {f.kind: f for f in resolve_room_fixtures(r.plan, r.plan.room("bed"))}
+    dresser = by_kind["dresser"]  # 5 x 1.67, south wall, 3 ft from the west corner
+    assert (dresser.x, dresser.y) == (3.0, 0.0)
+    assert (dresser.width, dresser.length) == (5.0, 1.67)
+    desk = by_kind["desk"]  # 4 x 2, north wall: y = 12 - depth
+    assert (desk.x, desk.y) == (2.0, 10.0)
+    ward = by_kind["wardrobe"]  # 4 x 2, west wall: depth runs in x, width in y
+    assert (ward.x, ward.y) == (0.0, 4.0)
+    assert (ward.width, ward.length) == (2.0, 4.0)
+    bedq = by_kind["bed_queen"]  # 5 x 6.67, east wall: x = 16 - depth
+    assert (bedq.x, bedq.y) == (16.0 - 6.67, 1.0)
+
+
+def test_offset_grammar_errors():
+    # offset without a wall - nothing to measure along.
+    assert ("BAD_OPTION", "error") in _codes(_plan("fixture desk in bed offset 3"))
+    # offset and `at` both pin the position - mutually exclusive.
+    assert ("BAD_OPTION", "error") in _codes(
+        _plan("fixture desk in bed at 2,2 wall S offset 3")
+    )
+    # a negative offset is nonsense.
+    assert ("BAD_OPTION", "error") in _codes(
+        _plan("fixture desk in bed wall S offset -1")
+    )
+
+
+def test_offset_past_the_room_warns_oob():
+    # desk is 4 ft wide; offset 14 on a 16 ft wall runs 2 ft past the room.
+    assert ("FIXTURE_OOB", "warning") in _codes(
+        _plan("fixture desk in bed wall S offset 14")
+    )
+
+
+def test_offset_round_trips_through_emit_dsl():
+    from barndsl.emit import emit_dsl
+
+    r = compile_source(_plan("fixture desk in bed wall N offset 2"))
+    out = emit_dsl(r.plan)
+    assert "fixture desk in bed wall N offset 2" in out
+    r2 = compile_source(out)
+    d1 = next(f for f in resolve_room_fixtures(r.plan, r.plan.room("bed"))
+              if f.kind == "desk")
+    d2 = next(f for f in resolve_room_fixtures(r2.plan, r2.plan.room("bed"))
+              if f.kind == "desk")
+    assert (d1.x, d1.y, d1.width, d1.length) == (d2.x, d2.y, d2.width, d2.length)
+
+
 # --- add-vs-replace seed semantics -------------------------------------------
 
 
@@ -217,6 +279,19 @@ def test_move_fixture_rewrites_at_on_one_line():
     changed = [i for i in range(len(lines_after)) if lines_after[i] != lines_before[i]]
     assert len(changed) == 1
     assert "at 5,4" in lines_after[changed[0]]
+
+
+def test_move_fixture_converts_an_offset_pin_to_at():
+    # Dragging a `wall N offset 2` piece rewrites its pin as `at x,y` and drops
+    # the offset clause - `at` and `offset` are mutually exclusive, so leaving
+    # both would make the edited line uncompilable.
+    src = _plan("fixture desk in bed wall N offset 2")
+    e = edit_from_json({"kind": "move_fixture", "key": "bed~desk~0", "x": 5, "y": 4})
+    res = apply_edit(src, e)
+    assert res.ok and res.changed
+    line = res.source.split("\n")[res.line - 1]
+    assert "at 5,4" in line and "offset" not in line and "wall N" in line
+    assert compile_source(res.source).plan is not None  # still parses
 
 
 def test_move_fixture_seed_is_not_editable():

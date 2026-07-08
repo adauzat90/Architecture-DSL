@@ -335,9 +335,11 @@ FURNISH THE KEY ROOMS (a plan reads as a home when furniture proves each room wo
 - Wet rooms furnish THEMSELVES: a bath seeds toilet/lavatory/tub, a kitchen
   seeds range/sink/refrigerator, a laundry seeds washer/dryer - write no
   `fixture` line for those unless you are deliberately moving one.
-- Furniture is yours to place. EXACT grammar (there is NO offset option):
-    fixture <kind> in <room> wall N|S|E|W    # auto-slots along that wall,
-                                             #   sliding clear of door swings
+- Furniture is yours to place. EXACT grammar:
+    fixture <kind> in <room> wall N|S|E|W [offset <n>]
+        # auto-slots along that wall, sliding clear of door swings; add
+        #   `offset <n>` (ft from the wall's S/W corner, like a door/window)
+        #   only when you must pin the spot yourself
     fixture <kind> in <room> at <x>,<y>      # room-local feet from the SW corner
     fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]
   Furniture kinds: bed_queen, bed_twin, sofa, armchair, dining_table,
@@ -346,8 +348,8 @@ FURNISH THE KEY ROOMS (a plan reads as a home when furniture proves each room wo
   bed_twin for kids/guests), sofa + coffee_table in the living room, a
   dining_table in the dining room, a desk in an office. A kitchen_island
   earns its place in a kitchen roomier than ~12 ft across.
-- Craft: prefer `wall N|S|E|W` over `at x,y` - the auto-slot clears door
-  swings by itself; hand coordinates are where FIXTURE_DOOR and
+- Craft: prefer a bare `wall N|S|E|W` over `offset`/`at` - the auto-slot
+  clears door swings by itself; hand-pinned spots are where FIXTURE_DOOR and
   FIXTURE_OVERLAP warnings come from. Head a bed to a wall WITHOUT a window.
   Free-standing pieces (tables, island) centre themselves - leave ~2 ft of
   walkway around them. Never park tall casework (a wardrobe) over a bedroom's

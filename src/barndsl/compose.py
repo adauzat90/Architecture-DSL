@@ -753,6 +753,7 @@ def _xform_fixture(xf: _Xform, f: PlacedFixture, alias: str, dims: dict) -> Plac
     new_wall = xf.wall(f.wall) if f.wall is not None else None
     new_rot = xf.fixture_rotation(f.rotation)
     nx, ny = f.x, f.y
+    new_off = f.offset
     if f.x is not None and f.y is not None:
         rw, rl = dims.get(f.room, (0.0, 0.0))
         spec = FIXTURES.get(f.kind)
@@ -762,9 +763,19 @@ def _xform_fixture(xf: _Xform, f: PlacedFixture, alias: str, dims: dict) -> Plac
             fw, fd = fd, fw
         bx, by, _bw, _bl = xf.rect(f.x, f.y, fw, fd, rw, rl)
         nx, ny = bx, by
+    elif f.wall is not None and f.offset is not None:
+        # A wall-pinned piece remaps exactly like a door/window: the offset is
+        # re-derived from the transformed span (its along-wall extent is the
+        # rotation-adjusted catalog width).
+        rw, rl = dims.get(f.room, (0.0, 0.0))
+        spec = FIXTURES.get(f.kind)
+        fw = float(f.width) if f.width else (spec.width if spec else 1.0)
+        if _quarter_turns(f.rotation) % 2 == 1:
+            fw = spec.depth if spec else 1.0
+        _nw, new_off = _remap_wall_offset(xf, f.wall, f.offset, fw, rw, rl)
     return dataclasses.replace(
         f, room=_pref(alias, f.room), x=nx, y=ny, wall=new_wall,
-        rotation=new_rot, line=None, col=None, end_col=None,
+        offset=new_off, rotation=new_rot, line=None, col=None, end_col=None,
     )
 
 

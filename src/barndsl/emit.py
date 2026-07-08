@@ -141,6 +141,8 @@ def _fixture_line(f: object) -> str:
         line += f" at {_n(f.x)},{_n(f.y)}"  # type: ignore[attr-defined]
     if f.wall is not None:  # type: ignore[attr-defined]
         line += f" wall {f.wall.value[0].upper()}"  # type: ignore[attr-defined]
+        if getattr(f, "offset", None) is not None:
+            line += f" offset {_n(f.offset)}"  # type: ignore[attr-defined]
     if f.rotation:  # type: ignore[attr-defined]
         line += f" rotate {_n(f.rotation)}"  # type: ignore[attr-defined]
     if f.width is not None:  # type: ignore[attr-defined]

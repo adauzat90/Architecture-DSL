@@ -552,6 +552,24 @@ def _place_explicit(
         fx, fy = room.x + float(pf.x), room.y + float(pf.y)
         return Fixture(pf.kind, fx, fy, width, depth, wall or "S", rotation=pf.rotation)
 
+    if wall and getattr(pf, "offset", None) is not None:
+        # `wall <W> offset <n>`: pinned n ft along the wall from its S/W start
+        # corner (the door/window convention), judged against the room rectangle
+        # like an `at` placement — so FIXTURE_OOB/FIXTURE_DOOR see it as authored.
+        off = float(pf.offset)
+        if wall == "S":
+            fx, fy, fw, fl = room.x + off, room.y, width, min(depth, room.length)
+        elif wall == "N":
+            d_in = min(depth, room.length)
+            fx, fy, fw, fl = room.x + off, room.y2 - d_in, width, d_in
+        elif wall == "W":
+            d_in = min(depth, room.width)
+            fx, fy, fw, fl = room.x, room.y + off, d_in, width
+        else:  # E
+            d_in = min(depth, room.width)
+            fx, fy, fw, fl = room.x2 - d_in, room.y + off, d_in, width
+        return Fixture(pf.kind, fx, fy, fw, fl, wall, rotation=pf.rotation)
+
     if wall:
         # Auto-place against the named wall: first free slot along its run.
         rx, ry, rw, rl = _first_free_on_wall(x0, y0, cw, cl, wall, width, depth, occupied)
