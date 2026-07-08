@@ -282,6 +282,12 @@ MULTI_ENGINE_BRIEF = (
 )
 
 
+def _first_write_prompt(client) -> str:
+    """The first GENERATION prompt. The solver seed is critiqued before round 1
+    now, so ``prompts[0]`` can be the seed-review call — select by content."""
+    return next(p for p in client.prompts if "Design brief:" in p)
+
+
 def test_alternates_appear_in_first_prompt_when_multiple_engines_compile():
     # Several engines compile this brief, so the first write prompt carries an
     # ALTERNATE STARTS section with the runner-up engine sources.
@@ -293,7 +299,7 @@ def test_alternates_appear_in_first_prompt_when_multiple_engines_compile():
         "a small barndo", max_iterations=1, target_score=None,
         seed_with_solver=MULTI_ENGINE_BRIEF,
     )
-    first = client.prompts[0]
+    first = _first_write_prompt(client)
     assert "ALTERNATE STARTS (structurally different, also sound" in first
     # Each retained alternate's engine label and source appear.
     for alt in seed.alternates:
@@ -310,7 +316,7 @@ def test_alternates_capped_at_two():
         "a small barndo", max_iterations=1, target_score=None,
         seed_with_solver=MULTI_ENGINE_BRIEF,
     )
-    assert client.prompts[0].count(" engine, score ") <= 2
+    assert _first_write_prompt(client).count(" engine, score ") <= 2
 
 
 def test_alternates_from_different_engines_than_the_winner():
@@ -332,7 +338,7 @@ def test_no_alternate_section_when_only_one_engine_succeeds():
         "a big barndo", max_iterations=1, target_score=None,
         seed_with_solver="4 bed 3 bath 2600 sqft with a shop and an office",
     )
-    assert "ALTERNATE STARTS" not in client.prompts[0]
+    assert "ALTERNATE STARTS" not in _first_write_prompt(client)
 
 
 def test_new_seed_intro_wording_present_and_old_absent():
@@ -341,7 +347,7 @@ def test_new_seed_intro_wording_present_and_old_absent():
         "a small barndo", max_iterations=1, target_score=None,
         seed_with_solver=MULTI_ENGINE_BRIEF,
     )
-    first = client.prompts[0]
+    first = _first_write_prompt(client)
     # The new, permissive wording.
     assert "Start from these bones and improve the DESIGN" in first
     assert "the room arrangement is yours to improve" in first

@@ -1676,7 +1676,9 @@ def test_score_history_shows_two_entries_with_a_solver_seed():
     """A solver seed is iteration 0, so by the round-2 prompt there are >= 2
     scored totals and the history line appears with the true trajectory."""
     client = FakeClient(
-        sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()]
+        sources=[MEDIOCRE, CLEAN],
+        # The solver seed is critiqued too now, so it consumes the first one.
+        critiques=[_unsatisfied(), _unsatisfied(), _satisfied()],
     )
     result = _agent(client).design(
         "a small barndo", max_iterations=2, target_score=None,
@@ -2013,3 +2015,83 @@ def test_repeated_suggestion_matches_normalized_across_rounds():
     assert _repeated_suggestion(a, c) is False
     assert _repeated_suggestion(None, b) is False  # a skipped critique never repeats
     assert _repeated_suggestion(a, None) is False
+
+
+# -- the solver seed faces the critic too -------------------------------------
+# Iteration 0 used to skip the critique entirely, so it competed on its TRUE
+# score while every LLM round was clamped to BLOCKING_CLAMP on blocking issues —
+# an unreviewed 79-point seed could out-rank a blocked true-84 round. The seed
+# is now reviewed like any compiling round: it can be clamped, its review is
+# folded into round 1's feedback, and a blocked seed licenses a restructure.
+
+
+def test_solver_seed_is_critiqued_like_any_compiling_round():
+    from barndsl.agent import BLOCKING_CLAMP
+
+    client = FakeClient(
+        sources=[CLEAN],
+        critiques=[_blocking("bedrooms only reachable through the shop"),
+                   _satisfied()],
+    )
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    seed = result.history[0]
+    assert seed.iteration == 0
+    assert seed.critique is not None and seed.critique.blocking_issues
+    # The blocked seed's gating total is clamped exactly like an LLM round's.
+    assert seed.effective_total == min(seed.score.total, BLOCKING_CLAMP)
+
+
+def test_seed_is_not_critiqued_when_critique_is_off():
+    client = FakeClient(sources=[CLEAN], critiques=[])
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None, critique=False,
+        seed_with_solver=_solver_brief(),
+    )
+    assert result.history[0].critique is None  # and no critique was consumed
+
+
+def test_blocked_seed_puts_round_one_in_restructure_mode():
+    client = FakeClient(
+        sources=[CLEAN],
+        critiques=[_blocking("bedrooms only reachable through the shop"),
+                   _satisfied()],
+    )
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    assert result.history[1].restructured is True
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK in prompt
+
+
+def test_unblocked_seed_keeps_round_one_in_refine_mode():
+    client = FakeClient(sources=[CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    assert result.history[1].restructured is False
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK not in prompt
+
+
+def test_round_one_prompt_carries_the_seed_report_and_review():
+    """The first write sees the seed's rendered feedback (score header) with the
+    architect's review folded in — not just the bare seed source."""
+    client = FakeClient(
+        sources=[CLEAN],
+        critiques=[_unsatisfied("Swap the shop and the bedroom wing."),
+                   _satisfied()],
+    )
+    _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert "Compiler feedback on it" in prompt
+    assert "Design score:" in prompt
+    assert "Swap the shop and the bedroom wing." in prompt

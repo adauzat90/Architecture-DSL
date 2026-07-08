@@ -658,10 +658,16 @@ _CRITIQUE_JSON = (
     "beat a dozen that scatter the next revision.\n"
     "`blocking_issues` are ROOM-LEVEL STRUCTURAL defects (the walk-the-plan "
     "failures above) that make the plan unshippable regardless of score - leave "
-    "it [] when there are none. Blocking (goes in blocking_issues): \"the only "
-    "path from the living core to the bedrooms runs THROUGH the shop - swap the "
-    "shop and bed wing and buffer with a mudroom\". Not blocking (a mere trim, "
-    "goes in suggestions): \"shift the bed2 door flush to the hall's west end\"."
+    "it [] when there are none. Two hard rules: (1) a defect the compiler "
+    "ALREADY reports (any coded diagnostic in the report - a missing landing, "
+    "tempered glazing, a door width) is NEVER blocking; the score is already "
+    "paying for it, so repeat it in suggestions only if you have a better fix "
+    "than the hint. (2) blocking means fixing it requires MOVING ROOMS - if one "
+    "or two edited lines (a porch, a window, one door) would fix it, it is a "
+    "suggestion. Blocking (goes in blocking_issues): \"the only path from the "
+    "living core to the bedrooms runs THROUGH the shop - swap the shop and bed "
+    "wing and buffer with a mudroom\". Not blocking (a mere trim, goes in "
+    "suggestions): \"shift the bed2 door flush to the hall's west end\"."
 )
 
 #: Appended to the critique system prompt only when a rendered PNG rides along —
@@ -1445,6 +1451,15 @@ class BarndoAgent:
         restructure_next = False
         repair_next = 0
 
+        # A 2-arg (channel, delta) adapter that stamps each streamed token with
+        # the phase and round the design-level ``on_activity`` contract carries.
+        # ``None`` when no activity was requested, so ``write_source``/``critique``
+        # never iterate the stream (today's callers pay nothing).
+        def activity_for(phase: str, rnd: int) -> Callable[[str, str], None] | None:
+            if on_activity is None:
+                return None
+            return lambda channel, delta: on_activity(phase, rnd, channel, delta)
+
         # Candidate 0: the deterministic solver's best plan, if one was requested
         # and it compiles. Recorded as iteration 0 so best-iteration-wins can
         # return it, and its source seeds the first generation prompt. Structurally
@@ -1455,11 +1470,45 @@ class BarndoAgent:
         if seed_with_solver:
             seed_res = _solver_seed(seed_with_solver, client=self._available_client())
             if seed_res is not None:
-                history.append(seed_res.step)
-                solver_seed = seed_res.step.source
+                seed_step = seed_res.step
+                # Review the seed like any compiling round, for two reasons.
+                # Fairness: LLM rounds are clamped to BLOCKING_CLAMP on blocking
+                # issues, so an unreviewed seed would out-rank a better-but-blocked
+                # round on its unclamped score. Direction: with the seed's review
+                # folded into round 1's feedback, the first write revises toward
+                # the architect's notes instead of re-interpreting the brief.
+                if critique and seed_step.result.ok and seed_step.score is not None:
+                    if on_phase is not None:
+                        on_phase("critiquing", 0)
+                    seed_crit = self.critique(
+                        seed_step.result, seed_step.score,
+                        on_activity=activity_for("critiquing", 0),
+                    )
+                    seed_step.critique = seed_crit
+                    _fold_critique(seed_step.result, seed_crit)
+                    _fold_blocking(seed_step.result, seed_crit)
+                    if seed_crit.blocking_issues:
+                        seed_step.gating_total = min(
+                            seed_step.score.total, BLOCKING_CLAMP
+                        )
+                        # The critic found a structural flaw in the seed itself:
+                        # round 1 gets restructure licence (and its arithmetic
+                        # discipline) instead of polishing a broken arrangement.
+                        restructure_next = True
+                # Round 1 revises the seed with its report in hand — score
+                # breakdown, plan view, and the folded review — not just its
+                # source. Without this the first write flies blind past the
+                # seed's known weaknesses.
+                if seed_step.score is not None:
+                    feedback = render_feedback(
+                        seed_step.result, seed_step.score,
+                        score_history=[seed_step.score.total],
+                    )
+                history.append(seed_step)
+                solver_seed = seed_step.source
                 seed_alternates = seed_res.alternates
                 if on_step:
-                    on_step(seed_res.step)
+                    on_step(seed_step)
 
         # Refinement: revise the caller's current plan. Prime round 1 with it as
         # the "prior" source plus its diagnostics so the first write is a revision.
@@ -1468,15 +1517,6 @@ class BarndoAgent:
             seed_result = compile_source(seed_source, name=None)
             _fold_program_nudge(seed_result)
             feedback = render_feedback(seed_result)
-
-        # A 2-arg (channel, delta) adapter that stamps each streamed token with
-        # the phase and round the design-level ``on_activity`` contract carries.
-        # ``None`` when no activity was requested, so ``write_source``/``critique``
-        # never iterate the stream (today's callers pay nothing).
-        def activity_for(phase: str, rnd: int) -> Callable[[str, str], None] | None:
-            if on_activity is None:
-                return None
-            return lambda channel, delta: on_activity(phase, rnd, channel, delta)
 
         def scored_totals() -> list[float]:
             """The chronological totals of every scored step so far (incl. the
