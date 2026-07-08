@@ -150,12 +150,14 @@ MAX_ROOM_ASPECT_BY_TYPE: dict[RoomType, float] = {
 #: the diffuse slack AREA_UNUSED measures. AREA_UNUSED only speaks below 85%
 #: coverage and sums *all* slack, so a room-sized rectangle of dead space on an
 #: otherwise well-covered footprint (95%+) is invisible to it; this fires on the
-#: largest connected gap regardless of overall coverage. Set just below a small
-#: bedroom/office so a genuine missing room trips it, but a strip of wall-thickness
-#: slack between rooms (a few sq ft) never does. Verified against every shipped
-#: example: only the intentionally-gappy composed showcase carries a gap this big,
-#: and it already tolerates INFO-level notes.
-MIN_CONCENTRATED_VOID = 70.0
+#: largest connected gap regardless of overall coverage. Set just below a walk-in
+#: closet / powder-room's worth of floor so any genuinely usable pocket trips it,
+#: but a strip of wall-thickness slack between rooms (a few sq ft) never does.
+#: (It was 70 at first — "just below a small bedroom" — until a live agent run
+#: shipped a 6x11 = 66 sq ft dead pocket that slid under the bar.) Verified
+#: against every shipped example: only the intentionally-gappy composed showcase
+#: carries a gap this big, and it already tolerates INFO-level notes.
+MIN_CONCENTRATED_VOID = 45.0
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
 #: Minimum plan overlap (sq ft) between an upper-floor wet room and a wet room
 #: below for their plumbing to share one straight vertical waste stack. A mere

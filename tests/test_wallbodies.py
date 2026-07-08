@@ -192,3 +192,88 @@ entry a north width 3 offset 8
     from barndsl.render import WINDOW_COLOR
 
     assert svg.count(f'stroke="{WINDOW_COLOR}"') == 5
+
+
+# -- walls around unassigned voids ---------------------------------------------
+# A room edge is normally on the envelope (exterior shell) or shared with another
+# room (interior partition). An edge facing a hole in the tiling got neither, so
+# a plan with a void drew its neighbours wall-less and open into the pocket, and
+# a void touching the envelope left a gap in the building outline. Both edges are
+# real framed construction, so wall_bands now closes them.
+
+# A 6x10 = 60 sq ft unassigned pocket at (12,10)-(18,20): bounded by room a's
+# north edge (below), b's east edge (west), c's west edge (east), and the
+# envelope's north wall (above, where no room reaches).
+VOID_FIXTURE = """\
+plan "Void"
+envelope 30 x 20
+ceiling 9
+room a: living  at 0,0   size 30 x 10
+room b: bedroom at 0,10  size 12 x 10
+room c: kitchen at 18,10 size 12 x 10
+door a - b width 3 offset 1
+open a - c width 6 offset 1
+entry a south width 3 offset 2
+window a south width 8 offset 10
+window b north width 4 offset 4
+window c north width 4 offset 4
+"""
+
+
+def _void_plan():
+    result = compile_source(VOID_FIXTURE)
+    assert result.plan is not None, [d.code for d in result.errors]
+    return result
+
+
+def test_room_edges_facing_a_void_get_interior_bands():
+    bands = wall_bands(_void_plan().plan, 0)
+    void_walls = {
+        _norm(b.x0, b.y0, b.x1, b.y1)
+        for b in bands
+        if b.kind == "interior" and b.room_b is None
+    }
+    from barndsl.wallbodies import THICKNESS
+
+    ph = THICKNESS[INTERIOR] / 2.0
+    assert _norm(12 - ph, 10, 12 + ph, 20) in void_walls  # b's east edge
+    assert _norm(18 - ph, 10, 18 + ph, 20) in void_walls  # c's west edge
+    assert _norm(12, 10 - ph, 18, 10 + ph) in void_walls  # a's north run
+
+
+def test_envelope_run_over_a_void_gets_a_shell_band():
+    bands = wall_bands(_void_plan().plan, 0)
+    gap_shell = [
+        b for b in bands
+        if b.kind == "exterior" and b.room_a == "" and b.wall == "N"
+    ]
+    assert len(gap_shell) == 1
+    b = gap_shell[0]
+    # Spans the uncovered x 12..18 run (plus the half-thickness corner overrun).
+    assert min(b.x0, b.x1) < 12 < 18 < max(b.x0, b.x1)
+
+
+def test_void_free_plans_gain_no_extra_bands():
+    # The parity FIXTURE tiles its envelope completely: every band is still an
+    # exterior shell piece with a host room or a two-flank partition.
+    result = compile_source(FIXTURE)
+    for b in wall_bands(result.plan, 0):
+        if b.kind == "exterior":
+            assert b.room_a != ""
+        else:
+            assert b.room_b is not None
+
+
+def test_a_room_sized_void_now_fires_area_void():
+    # 60 sq ft slid under the original 70 sq ft bar (a live run shipped a 66 sq
+    # ft dead pocket); the lowered threshold catches any usable-room's worth.
+    result = _void_plan()
+    assert "AREA_VOID" in [d.code for d in result.diagnostics]
+
+
+def test_dxf_walls_match_the_bands_for_a_void_plan():
+    # The void walls ride the same shared band geometry as every other wall, so
+    # the DXF export carries them too — parity holds for a plan with a hole.
+    plan = _void_plan().plan
+    band_rects = {_norm(b.x0, b.y0, b.x1, b.y1) for b in wall_bands(plan, 0)}
+    assert _dxf_wall_rects(to_dxf(plan)) == band_rects

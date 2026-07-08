@@ -25,7 +25,13 @@ from .constants import (
     PLUMBING_WALL_THICKNESS,
 )
 from .elements import Barndominium, Direction, Room
-from .geometry import SharedEdge, opening_endpoints, shared_edge, wall_segment
+from .geometry import (
+    SharedEdge,
+    opening_endpoints,
+    point_in_footprint,
+    shared_edge,
+    wall_segment,
+)
 from .spatial import RoomIndex
 
 _TOL = 1e-6
@@ -223,6 +229,149 @@ def wall_bands(plan: Barndominium, level: int) -> list[WallBand]:
                     WallBand(a, edge.pos - ph, b, edge.pos + ph, "interior",
                              cls, "h", ra.id, rb.id, None)
                 )
+
+    # Last (so void-free plans keep a byte-identical band sequence): walls on
+    # room edges that face an unassigned interior pocket — a hole in the tiling —
+    # and the exterior shell along envelope runs no room reaches (a void touching
+    # the envelope would otherwise leave a gap in the building outline).
+    if level == 0:
+        bands.extend(_void_wall_bands(plan, rooms))
+        bands.extend(_void_shell_bands(plan, rooms))
+    return bands
+
+
+def _void_wall_bands(plan: Barndominium, rooms: list[Room]) -> list[WallBand]:
+    """Wall bands on room edges that face *unassigned* interior area (a void).
+
+    A room edge is normally either on the envelope (an exterior shell band) or
+    shared with another room (an interior partition band). An edge facing a
+    hole in the tiling — footprint area no room claims — got neither, so a
+    void's neighbours (a hall, a bedroom) drew with no wall at all and the
+    plan read as open into the pocket. Real construction frames that wall, so
+    emit an ordinary interior partition along the room's side of the line.
+
+    Level 0 only: on an upper storey the non-room area is open-to-below (a
+    railing line, not a framed wall).
+    """
+    sections = plan.footprint_sections()
+    ph = THICKNESS[INTERIOR] / 2.0
+    probe = 0.05  # just past the wall line, mirroring wall_faces_outside()
+    bands: list[WallBand] = []
+    for room in rooms:
+        for wall in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST):
+            horizontal = wall in (Direction.SOUTH, Direction.NORTH)
+            x1, y1, x2, y2 = wall_segment(room, wall)
+            if horizontal:
+                lo, hi, pos = min(x1, x2), max(x1, x2), y1
+            else:
+                lo, hi, pos = min(y1, y2), max(y1, y2), x1
+            # Intervals of this edge covered by a facing room: its opposite
+            # edge collinear with ours, extents overlapping along the run.
+            covered: list[tuple[float, float]] = []
+            for rb in rooms:
+                if rb is room:
+                    continue
+                if horizontal:
+                    facing = rb.y2 if wall is Direction.SOUTH else rb.y
+                    if abs(facing - pos) > _TOL:
+                        continue
+                    a, b = max(lo, rb.x), min(hi, rb.x2)
+                else:
+                    facing = rb.x2 if wall is Direction.WEST else rb.x
+                    if abs(facing - pos) > _TOL:
+                        continue
+                    a, b = max(lo, rb.y), min(hi, rb.y2)
+                if b > a + _TOL:
+                    covered.append((a, b))
+            for a, b in solid_runs(lo, hi, covered):
+                if b - a <= _TOL:
+                    continue
+                mid = (a + b) / 2.0
+                if wall is Direction.SOUTH:
+                    px, py = mid, pos - probe
+                elif wall is Direction.NORTH:
+                    px, py = mid, pos + probe
+                elif wall is Direction.WEST:
+                    px, py = pos - probe, mid
+                else:
+                    px, py = pos + probe, mid
+                if not point_in_footprint(sections, px, py):
+                    continue  # faces outside: the exterior shell owns this run
+                if horizontal:
+                    bands.append(
+                        WallBand(a, pos - ph, b, pos + ph, "interior",
+                                 INTERIOR, "h", room.id, None, None)
+                    )
+                else:
+                    bands.append(
+                        WallBand(pos - ph, a, pos + ph, b, "interior",
+                                 INTERIOR, "v", room.id, None, None)
+                    )
+    return bands
+
+
+def _void_shell_bands(plan: Barndominium, rooms: list[Room]) -> list[WallBand]:
+    """Exterior shell bands along envelope runs no room reaches.
+
+    The shell pass in :func:`wall_bands` is per room, so an unassigned pocket
+    that touches the envelope leaves its stretch of the building outline
+    undrawn. Walk each footprint section's edges, subtract the intervals rooms
+    cover, and band what remains — but only where the far side really is
+    outside the union (a seam between two abutting sections is interior).
+    Solid runs only: openings belong to rooms, and no room is here.
+    """
+    sections = plan.footprint_sections()
+    half = EXTERIOR_WALL_THICKNESS / 2.0
+    probe = 0.05
+    bands: list[WallBand] = []
+    for sx, sy, sw, sl in sections:
+        edges = (
+            (Direction.SOUTH, sy, sx, sx + sw),
+            (Direction.NORTH, sy + sl, sx, sx + sw),
+            (Direction.WEST, sx, sy, sy + sl),
+            (Direction.EAST, sx + sw, sy, sy + sl),
+        )
+        for wall, pos, lo, hi in edges:
+            horizontal = wall in (Direction.SOUTH, Direction.NORTH)
+            covered: list[tuple[float, float]] = []
+            for r in rooms:
+                if horizontal:
+                    redge = r.y if wall is Direction.SOUTH else r.y2
+                    if abs(redge - pos) > _TOL:
+                        continue
+                    a, b = max(lo, r.x), min(hi, r.x2)
+                else:
+                    redge = r.x if wall is Direction.WEST else r.x2
+                    if abs(redge - pos) > _TOL:
+                        continue
+                    a, b = max(lo, r.y), min(hi, r.y2)
+                if b > a + _TOL:
+                    covered.append((a, b))
+            for a, b in solid_runs(lo, hi, covered):
+                if b - a <= _TOL:
+                    continue
+                mid = (a + b) / 2.0
+                if wall is Direction.SOUTH:
+                    px, py = mid, pos - probe
+                elif wall is Direction.NORTH:
+                    px, py = mid, pos + probe
+                elif wall is Direction.WEST:
+                    px, py = pos - probe, mid
+                else:
+                    px, py = pos + probe, mid
+                if point_in_footprint(sections, px, py):
+                    continue  # a seam into an abutting section, not the boundary
+                side = _SIDE[wall]
+                if horizontal:
+                    bands.append(
+                        WallBand(a - half, pos - half, b + half, pos + half,
+                                 "exterior", EXTERIOR, "h", "", None, side)
+                    )
+                else:
+                    bands.append(
+                        WallBand(pos - half, a - half, pos + half, b + half,
+                                 "exterior", EXTERIOR, "v", "", None, side)
+                    )
     return bands
 
 
