@@ -27,10 +27,12 @@
         is the v1 abutment placer.
 
     barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
-                   [--target-score S]
+                   [--no-seed-solver] [--target-score S]
         Run the Claude agent: brief → DSL → compile → score → critique → refine,
-        keeping the best-scoring iteration. Requires `pip install 'barndsl[agent]'`
-        and ANTHROPIC_API_KEY.
+        keeping the best-scoring iteration. By default the deterministic layout
+        engines draft iteration 0 as a sound starting point for the model to
+        refine; `--no-seed-solver` starts from a blank page. Requires
+        `pip install 'barndsl[agent]'` and ANTHROPIC_API_KEY.
 
     barndsl gltf FILE.barn [--out FILE.glb]
         Compile, then lower the plan to a 3D model as glTF 2.0. `.glb` (default)
@@ -518,7 +520,23 @@ def _cmd_design(args: argparse.Namespace) -> int:
         if step.critique is not None:
             crit = "  (critic: satisfied)" if step.critique.satisfied else "  (critic: needs work)"
         score = f"  score {step.score.total:g}/100" if step.score is not None else ""
-        print(f"  iteration {step.iteration}: {step.result.summary()}{score}{crit}")
+        # Iteration 0 is the deterministic solver seed, not a model round — label
+        # it so the printed floor isn't mistaken for the agent's first attempt.
+        label = "solver seed" if step.iteration == 0 else f"iteration {step.iteration}"
+        print(f"  {label}: {step.result.summary()}{score}{crit}")
+        # A degraded critique (the call failed or returned no parseable JSON) is
+        # otherwise invisible here — surface it so the miss isn't silent. The
+        # sentinel prefix is a stable contract in agent.py; match it by string so
+        # this stays decoupled from a concurrently-edited module.
+        if step.critique is not None and step.critique.assessment.startswith(
+            "(critique skipped"
+        ):
+            print(f"    note: critique unavailable {step.critique.assessment}")
+
+    # Seed iteration 0 from the deterministic layout engines unless opted out; the
+    # brief text doubles as the solver program (parsed as a v2 brief), and seeding
+    # degrades to no-seed when it isn't parseable, so defaulting it on is safe.
+    seed = None if args.no_seed_solver else args.brief
 
     print(f"Designing with {model} (up to {iterations} iteration(s))...\n")
     agent = BarndoAgent(model=model)
@@ -529,10 +547,20 @@ def _cmd_design(args: argparse.Namespace) -> int:
             critique=not args.no_critique,
             on_step=on_step,
             target_score=target_score,
+            seed_with_solver=seed,
         )
     except Exception as exc:  # pragma: no cover - network/runtime errors
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+    # Seeding was requested but the solver drafted no iteration-0 step (the brief
+    # wasn't a program it could solve — e.g. a vague natural-language brief). That
+    # used to degrade silently; surface it so the missing floor is visible.
+    if seed is not None and not any(s.iteration == 0 for s in result.history):
+        print(
+            "  note: the layout solver could not draft a seed from this brief; "
+            "the model designed from a blank page."
+        )
 
     print(
         f"\n--- final DSL (best of {result.iterations} iteration(s): "
@@ -1268,6 +1296,14 @@ def main(argv: list[str] | None = None) -> int:
         help="model id (default: $BARNDSL_MODEL, else claude-opus-4-8)",
     )
     p_design.add_argument("--no-critique", action="store_true", help="skip the design critic")
+    p_design.add_argument(
+        "--no-seed-solver",
+        action="store_true",
+        help="don't seed iteration 0 from the deterministic layout engines; by "
+        "default they draft a dimensionally sound plan (iteration 0) for the model "
+        "to refine instead of starting from a blank page. Seeding degrades to "
+        "no-seed automatically when the brief isn't solver-parseable.",
+    )
     p_design.add_argument(
         "--target-score",
         type=float,

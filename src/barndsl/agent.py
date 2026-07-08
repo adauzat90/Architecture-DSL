@@ -30,6 +30,7 @@ import base64
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -172,6 +173,39 @@ def agent_availability() -> tuple[bool, str | None]:
         return False, f"ANTHROPIC_API_KEY is not set — {AGENT_INSTALL_HINT}"
     return True, None
 
+
+#: Total attempts (initial + retries) for a transient API failure on a single
+#: generation call, and the backoff between them. ``anthropic`` is an optional
+#: extra, so the retryable exception *types* are resolved lazily (see
+#: :func:`_retryable_api_errors`); when it is absent the tuple is empty and the
+#: guard catches nothing — the call simply behaves as if there were no retry.
+_API_RETRY_ATTEMPTS = 3
+#: Seconds to sleep before retry 2 and retry 3. Kept short and read through
+#: :func:`time.sleep`, which tests patch to make the backoff instantaneous.
+_API_RETRY_BACKOFF = (2.0, 4.0)
+
+
+def _retryable_api_errors() -> tuple[type[BaseException], ...]:
+    """The anthropic exception types a transient failure should be retried on.
+
+    Resolved lazily, not at import time: ``anthropic`` is an optional extra, so
+    catching these types must never require it to be installed. Returns an empty
+    tuple when the package is absent (``except ():`` catches nothing), so the
+    retry guard degrades to a plain call rather than raising ``ImportError``.
+    ``APIStatusError`` (any 4xx/5xx with a status) is included here but the
+    caller re-raises it unless the status is a 5xx — a 4xx is the caller's bug,
+    not a transient blip, so it must propagate immediately.
+    """
+    try:
+        import anthropic
+    except ImportError:  # pragma: no cover - anthropic is installed in CI
+        return ()
+    return (
+        anthropic.APIConnectionError,
+        anthropic.RateLimitError,
+        anthropic.APIStatusError,
+    )
+
 _DESIGN_RULES = """\
 DESIGN RULES the compiler enforces (write DSL that satisfies them):
 - Rooms must stay inside the envelope and must not overlap. Tile the footprint
@@ -186,6 +220,23 @@ DESIGN RULES the compiler enforces (write DSL that satisfies them):
   totalling >= 8% of their floor area, so put them on exterior walls.
 - At least one `entry` must be >= 2.67 ft (an egress door). Hallways >= 3 ft.
 - Idiomatic barndo: open-concept living/kitchen/dining, plus a shop/garage bay.
+
+QUALITY CODES the score dings (avoid proactively):
+- WET_GROUP: cluster wet rooms (bath/kitchen/laundry/utility) on a shared
+  plumbing wall; 3+ scattered means long, costly runs.
+- NO_CLOSET: every bedroom needs a closet reached BY A DOOR from it.
+- BED_SOUND: two bedrooms sharing a wall carry sound; back their closets onto
+  that wall (or put a hall/closet between them) to buffer it.
+- MASTER_ENSUITE: with 2+ full baths, the primary bedroom wants its own
+  adjoining (ensuite) bath, reachable without crossing the plan.
+- PRIVATE_PASSTHROUGH: never route the only path to a room through a bathroom
+  or someone else's bedroom; hang it off a hall or living space.
+- GARAGE_BEDROOM: a garage/shop must not open into a bedroom (IRC R302.5.1);
+  buffer it with a mudroom or hall.
+- HALL_DEADEND: cap a hall's end with a room whose door sits AT that end; don't
+  run the hall past its last doorway into blank wall.
+- DOOR_CENTERED: back a swing door to a corner with `offset` so one flank keeps
+  an unbroken wall to furnish, instead of floating it mid-wall.
 """
 
 #: Placement craft distilled from the authoring guide. The grammar reference
@@ -259,21 +310,158 @@ alarm smoke in bed2
 alarm smoke in hall
 """
 
+#: An L-shaped footprint using `wing`, copied verbatim from
+#: examples/gallery/lshape.barn (a test-pinned clean plan). Pinned by a test to
+#: equal that file exactly, so the few-shot can never drift from the gallery.
+_EXAMPLE_LSHAPE = """\
+# L-shaped plan exercising `wing` — a 36x30 main block with an 18x18 primary
+# suite projecting east. The footprint union (not a rectangle) drives which
+# walls are exterior; the seam between block and wing is interior. The primary
+# suite has its own ensuite + walk-in; the laundry doubles as a mudroom with a
+# back door; bed1 caps the west end of the hall (its door at that end). All
+# exterior dims are on the 3 ft build module.
+plan "Maple Bend"
+envelope 36 x 30
+wing 18 x 18 at 36,0
+ceiling 10
+program 2 bed 2 bath
+
+# --- main block public band (south) ---
+room living:  living  at 0,0   size 20 x 14
+room kitchen: kitchen at 20,0  size 16 x 14
+
+# --- spine: 4 ft ---
+room hall: hallway at 0,14 size 36 x 4
+
+# --- main block private band (north) ---
+room bed1:    bedroom  at 0,18   size 16 x 12
+room closet1: closet   at 16,18  size 4 x 12
+room bath:    bathroom at 20,18  size 8 x 12
+room laundry: laundry  at 28,18  size 8 x 12
+
+# --- east wing: primary suite with a private ensuite + walk-in ---
+room master:  bedroom  at 36,0  size 12 x 18
+room mbath:   bathroom at 48,0  size 6 x 9
+room mcloset: closet   at 48,9  size 6 x 9
+
+open living - kitchen width 10
+open living - hall width 4
+door hall - bed1 width 3 offset 0.5
+door hall - bath width 2.67
+door hall - laundry width 2.5
+door hall - master width 3 into master
+door bed1 - closet1 width 2.5 offset 0.5 into bed1
+door master - mbath width 2.67 offset 0.5 into mbath
+door master - mcloset width 2.5 offset 0.5
+
+entry living south width 3 offset 14
+entry laundry north width 3 offset 2
+
+# Covered landings at both exterior doors — a floor to step onto (IRC R311.3).
+porch front at 12,-6 size 7 x 6 covered
+porch mud at 29,30 size 6 x 6 covered
+window living south width 8 offset 2
+window kitchen south width 6 offset 6
+window bed1 north width 6 offset 5
+window bath north width 3 offset 2 sill 5
+window master south width 5 offset 4
+window mbath east width 2 offset 3 sill 5
+
+# Smoke alarms: one in each bedroom plus the hall outside the sleeping rooms
+# (IRC R314); the bath windows are high privacy transoms clear of the tubs.
+alarm smoke in bed1
+alarm smoke in master
+alarm smoke in hall
+"""
+
+#: A two-story plan using `level` and `stair`, copied verbatim from
+#: examples/gallery/two_story.barn (a test-pinned clean plan). Pinned by a test to
+#: equal that file exactly.
+_EXAMPLE_TWO_STORY = """\
+# Two-story plan with a `stair` and a `loft`. The loft sits on level 1 above the
+# great room; the stair runs along the west wall (not marooned mid-room) and its
+# footprint overlaps a room on each level, which links them and makes the loft
+# reachable from the ground entry. The bedroom caps the west end of the hall and
+# the laundry/mudroom the east end (its door at the hall end), so the corridor
+# terminates at doorways. Exterior dims are on the 3 ft build module.
+plan "Cedar Loft"
+envelope 39 x 33
+ceiling 9
+program 1 bed 1 bath
+
+# --- ground floor (level 0) ---
+room living:  living   at 0,0   size 24 x 18
+room kitchen: kitchen  at 24,0  size 15 x 18
+room hall:    hallway  at 0,18  size 39 x 4
+room bed:     bedroom  at 0,22  size 14 x 11
+room closet:  closet   at 14,22 size 5 x 11
+room bath:    bathroom at 19,22 size 8 x 11
+room laundry: laundry  at 27,22 size 12 x 11
+
+# --- upper floor (level 1) ---
+room loft: loft at 0,0 size 24 x 18 level 1
+
+# A queen bed against the bedroom's north wall (its head to the outside wall);
+# the bath/kitchen/laundry fixtures auto-seed with no `fixture` line at all.
+fixture bed_queen in bed wall N
+
+# --- vertical circulation: along the west wall, clear of the kitchen doorway ---
+stair flight at 0,3 size 4 x 12 from 0 to 1   # barndsl: accept STAIR_HANDRAIL "handrail on the west wall, on the construction documents"
+
+open living - kitchen width 10
+open living - hall width 4
+door hall - bed width 3 offset 0.5
+door hall - bath width 2.67 offset 2
+door hall - laundry width 2.5 offset 9
+door bed - closet width 2.5 offset 0.5 into bed
+
+entry living south width 3 offset 14
+entry laundry east width 3 offset 4
+
+# Covered landings at both exterior doors — a floor to step onto (IRC R311.3).
+porch front at 12,-6 size 7 x 6 covered
+porch back at 39,24 size 6 x 7 covered
+window living south width 10 offset 2
+window kitchen south width 7 offset 6
+window bed north width 4 offset 5
+window bath north width 3 offset 2 sill 5
+window loft south width 10 offset 7
+
+# Smoke alarms: the bedroom + the hall outside it on the ground floor, and one on
+# the loft level so every storey is covered (IRC R314.3(3)).
+alarm smoke in bed
+alarm smoke in hall
+alarm smoke in loft
+"""
+
+# The system prompt is ordered to front-load craft and worked examples, and put
+# the raw grammar LAST: the persona, then three complete worked plans, then the
+# design rules and the placement craft, then the full grammar reference for exact
+# syntax, and finally the `program` mandate and the strict output contract. The
+# contract sits at the very end on purpose — the model reads it last, right before
+# it answers — so keep it there.
 _GENERATE_SYSTEM = (
     "You are an expert residential designer specialising in barndominiums. You "
     "describe floor plans by writing source code in the barndsl architecture "
     "language, then refining it against the compiler's diagnostics until it is "
     "valid and well-designed.\n\n"
-    + DSL_REFERENCE
-    + "\n"
-    + _DESIGN_RULES
-    + "\n"
-    + _PLACEMENT_CRAFT
-    + "\nA COMPLETE EXAMPLE that compiles with zero errors, zero warnings, zero "
+    "A COMPLETE EXAMPLE that compiles with zero errors, zero warnings, zero "
     "infos and scores 100/100 — note the relative anchors, the hall spine with "
     "every bedroom hung one room deep off it, the `open` core, the closets, and "
     "the second exterior door:\n```barn\n" + _EXAMPLE_PLAN + "```\n"
-    "\nYou MUST declare the brief's program as a `program` statement derived "
+    "\nAn L-shaped footprint using `wing` (the building is the union of the "
+    "`envelope` and each wing; the seam between blocks is an interior wall):\n"
+    "```barn\n" + _EXAMPLE_LSHAPE + "```\n"
+    "\nA two-story plan using `level` and `stair` (the upper room sits on `level "
+    "1`; the `stair` footprint overlaps a room on each level to link them):\n"
+    "```barn\n" + _EXAMPLE_TWO_STORY + "```\n"
+    "\n"
+    + _DESIGN_RULES
+    + "\n"
+    + _PLACEMENT_CRAFT
+    + "\nFULL GRAMMAR REFERENCE (consult for exact syntax):\n\n"
+    + DSL_REFERENCE
+    + "\nYou MUST declare the brief's program as a `program` statement derived "
     "from the brief — grammar: `program <n> bed [<m> bath] [<k> <type> ...] "
     "[area <sqft>]` (e.g. `program 3 bed 2 bath area 1800`) — so the compiler "
     "checks the plan delivers what was asked, not what you remembered.\n"
@@ -283,6 +471,11 @@ _GENERATE_SYSTEM = (
     "the block; if you must reason first, keep it out of the final answer."
 )
 
+# The critic judges livability, not grammar: it is given the compiled
+# diagnostics as evidence, so it does NOT need the full grammar reference. It
+# shares the generator's design vocabulary instead — _DESIGN_RULES +
+# _PLACEMENT_CRAFT — so a suggestion it makes ("back the hall door to the end")
+# lands in terms the generator already understands.
 _CRITIQUE_SYSTEM = (
     "You are a senior architect reviewing a barndominium plan (given as barndsl "
     "source plus the compiler's report) for design quality and livability. Judge "
@@ -290,7 +483,11 @@ _CRITIQUE_SYSTEM = (
     "privacy, light, wasted space, and whether it is pleasant to live in — not "
     "just code-compliant. Anchor your verdict in the evidence you are given: "
     "the design score, its per-component deductions, and the diagnostics. Be "
-    "constructive but exacting.\n\n" + DSL_REFERENCE
+    "constructive but exacting. You share the designer's rulebook, so frame "
+    "suggestions in its terms:\n\n"
+    + _DESIGN_RULES
+    + "\n"
+    + _PLACEMENT_CRAFT
 )
 
 #: Appended to every critique prompt so the model emits JSON we can parse. Native
@@ -432,6 +629,7 @@ def render_feedback(
     score: ScoreReport | None = None,
     *,
     best_prior: "DesignStep | None" = None,
+    score_history: list[float] | None = None,
 ) -> str:
     """Render a compact, deterministic feedback block for the revision prompt.
 
@@ -452,14 +650,42 @@ def render_feedback(
     compile, or scored lower — a single ``REGRESSION`` line is added under the
     header so the model reads the lost gradient as a regression and knows to
     revise from that iteration, not this broken one.
+
+    When the ``errors`` component gates the score (a 100-point flat deduction
+    that pins the total at 0), the header also carries a **projected** score with
+    just that deduction removed — the number the plan would earn once the errors
+    are fixed. A raw ``0/100`` hides whether the continuous terms are already
+    strong; the projection shows the reward for fixing the errors, so the model
+    keeps the good bones instead of rewriting a plan that was nearly there.
+
+    ``score_history`` (keyword-only) is the chronological run of scored totals so
+    far; when two or more are given, a ``Score history: a -> b -> c (this round)``
+    line under the header shows the trajectory, so the model sees whether it is
+    climbing or thrashing across rounds.
     """
     if score is None:
         score = design_score(result)
     deductions = ", ".join(f"{k} -{v:g}" for k, v in score.components.items() if v)
-    lines = [
+    header = (
         f"Design score: {score.total:g}/100"
         + (f" — deductions: {deductions}" if deductions else " — no deductions")
-    ]
+    )
+    # When errors flat-gate the score to 0, project what the plan would earn once
+    # they are fixed: the same total with only the errors deduction backed out,
+    # clamped to [0, 100]. ASCII-only ("->") for cp1252 consoles.
+    errors_component = score.components.get("errors")
+    if errors_component:
+        others = sum(v for k, v in score.components.items() if k != "errors")
+        projected = max(0.0, min(100.0, 100.0 - others))
+        header = (
+            f"Design score: {score.total:g}/100 (errors block scoring; "
+            f"projected once errors are fixed: {projected:g}/100)"
+            + (f" - deductions: {deductions}" if deductions else " - no deductions")
+        )
+    lines = [header]
+    if score_history is not None and len(score_history) >= 2:
+        trail = " -> ".join(f"{s:g}" for s in score_history)
+        lines.append(f"Score history: {trail} (this round)")
     if best_prior is not None and best_prior.score is not None:
         broke = result.plan is None or bool(result.errors)
         if broke or score.total < best_prior.score.total:
@@ -520,6 +746,15 @@ class CritiqueSpec(BaseModel):
     )
     suggestions: list[str] = Field(
         default_factory=list, description="Specific, actionable changes. Empty if satisfied."
+    )
+    #: True only on the degraded fallbacks (the critique call failed, or returned
+    #: no parseable JSON) — a neutral verdict the model never emits itself.
+    #: Additive with a default, so ``model_validate_json`` still accepts a real
+    #: reply that omits it; lets a caller tell "the critic passed it" apart from
+    #: "the critic was skipped and we defaulted to the compile status".
+    skipped: bool = Field(
+        default=False,
+        description="Internal: set when the critique degraded to a neutral fallback.",
     )
 
 
@@ -628,6 +863,34 @@ class BarndoAgent:
         seed: str | None = None,
         on_activity: Callable[[str, str], None] | None = None,
     ) -> str:
+        """Generate DSL for one round (see :meth:`_write_source_ex`).
+
+        Public signature unchanged: returns just the extracted source. The loop
+        calls :meth:`_write_source_ex` when it also needs the truncation flag.
+        """
+        source, _truncated = self._write_source_ex(
+            brief, prior=prior, diagnostics=diagnostics, seed=seed,
+            on_activity=on_activity,
+        )
+        return source
+
+    def _write_source_ex(
+        self,
+        brief: str,
+        prior: str | None = None,
+        diagnostics: str | None = None,
+        seed: str | None = None,
+        on_activity: Callable[[str, str], None] | None = None,
+    ) -> tuple[str, bool]:
+        """Generate DSL and report whether the reply was truncated.
+
+        Returns ``(source, truncated)``. ``truncated`` is True only when the
+        model hit ``stop_reason=max_tokens`` on BOTH the first try and the one
+        silent retry — a reply cut off at the token cap is real DSL but may be a
+        half-written plan, so the loop folds a deterministic TRUNCATED info into
+        that round's feedback (after scoring) telling the model to be terser. A
+        clean stop, or a truncation the retry recovered from, reports False.
+        """
         prompt = f"Design brief:\n{brief}\n"
         if seed and not prior:
             prompt += (
@@ -661,28 +924,33 @@ class BarndoAgent:
                 "\nReturn the complete plan source as one ```barn block."
             )
 
-        # One silent retry on an empty reply, then fail loudly. An empty body is
-        # what a compat gateway returns when the model id doesn't resolve, and
-        # what a reasoning model returns when it burns the whole token cap
-        # thinking — both are configuration problems the caller must see, not a
-        # blank plan the loop grinds against for max_iterations rounds.
+        # One silent retry on an empty reply OR a truncated reply, then fail (on
+        # empty) or accept-but-flag (on truncation). An empty body is what a
+        # compat gateway returns when the model id doesn't resolve, and what a
+        # reasoning model returns when it burns the whole token cap thinking —
+        # both are configuration problems the caller must see, not a blank plan
+        # the loop grinds against for max_iterations rounds. A truncated body is
+        # partial DSL: worth one terser retry, but if the retry is also cut off
+        # we still return what we have and let the loop warn the model.
         for attempt in (1, 2):
-            with self.client.messages.stream(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=_GENERATE_SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-                thinking={"type": "adaptive"},
-            ) as stream:
-                if on_activity is not None:
-                    _pump_activity(stream, on_activity)
-                msg = stream.get_final_message()
+            msg = self._stream_message(prompt, on_activity)
             text = "".join(b.text for b in msg.content if b.type == "text")
+            stop_reason = getattr(msg, "stop_reason", None)
+            truncated = stop_reason == "max_tokens"
             if text.strip():
-                return _extract_source(text)
+                # A truncated first reply is retried once (to get a complete
+                # plan); a truncated second reply is returned anyway, flagged.
+                if truncated and attempt == 1:
+                    logger.warning(
+                        "Model %r reply truncated at the token cap (attempt %d, "
+                        "stop_reason=max_tokens) — retrying once for a complete plan.",
+                        self.model, attempt,
+                    )
+                    continue
+                return _extract_source(text), truncated
             logger.warning(
                 "Model %r returned an empty reply (attempt %d, stop_reason=%s).",
-                self.model, attempt, getattr(msg, "stop_reason", None),
+                self.model, attempt, stop_reason,
             )
         raise RuntimeError(
             f"Model {self.model!r} returned no text twice in a row "
@@ -691,6 +959,51 @@ class BarndoAgent:
             "BARNDSL_MODEL names a model the gateway actually serves, and that "
             "BARNDSL_MAX_TOKENS leaves a reasoning model room to think AND emit."
         )
+
+    def _stream_message(
+        self, prompt: str, on_activity: Callable[[str, str], None] | None
+    ) -> Any:
+        """Run one generation stream call, retrying transient API failures.
+
+        A transient network/API error (``APIConnectionError``,
+        ``RateLimitError``, or an ``APIStatusError`` with a 5xx status) must not
+        abort the whole design run — the gateway hiccuped, not the plan. Retry up
+        to :data:`_API_RETRY_ATTEMPTS` times with bounded backoff
+        (:data:`_API_RETRY_BACKOFF`, patched short in tests). A 4xx
+        ``APIStatusError`` is the caller's request being wrong (bad model id,
+        auth, oversized prompt) — re-raise it immediately. When ``anthropic`` is
+        absent the retryable tuple is empty, so this is a plain single call.
+        """
+        retryable = _retryable_api_errors()
+        last_exc: BaseException | None = None
+        for attempt in range(1, _API_RETRY_ATTEMPTS + 1):
+            try:
+                with self.client.messages.stream(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=_GENERATE_SYSTEM,
+                    messages=[{"role": "user", "content": prompt}],
+                    thinking={"type": "adaptive"},
+                ) as stream:
+                    if on_activity is not None:
+                        _pump_activity(stream, on_activity)
+                    return stream.get_final_message()
+            except retryable as exc:
+                # A 4xx status is a client error, not a transient blip — propagate.
+                status = getattr(exc, "status_code", None)
+                if status is not None and status < 500:
+                    raise
+                last_exc = exc
+                if attempt >= _API_RETRY_ATTEMPTS:
+                    break
+                logger.warning(
+                    "Generation call to model %r failed (%s: %s) — retry %d/%d.",
+                    self.model, type(exc).__name__, str(exc)[:200],
+                    attempt, _API_RETRY_ATTEMPTS - 1,
+                )
+                time.sleep(_API_RETRY_BACKOFF[min(attempt - 1, len(_API_RETRY_BACKOFF) - 1)])
+        assert last_exc is not None  # only reached after the retry loop exhausts
+        raise last_exc
 
     def critique(
         self,
@@ -759,6 +1072,7 @@ class BarndoAgent:
                 satisfied=result.ok,
                 assessment="(critique skipped: the critique call failed)",
                 rationale="",
+                skipped=True,
             )
         text = "".join(b.text for b in msg.content if b.type == "text")
         crit = _critique_from_text(text)
@@ -771,6 +1085,7 @@ class BarndoAgent:
                 satisfied=result.ok,
                 assessment="(critique skipped: no parseable critique returned)",
                 rationale="",
+                skipped=True,
             )
         return crit
 
@@ -873,15 +1188,34 @@ class BarndoAgent:
                 return None
             return lambda channel, delta: on_activity(phase, rnd, channel, delta)
 
+        def scored_totals() -> list[float]:
+            """The chronological totals of every scored step so far (incl. the
+            solver seed at iteration 0), for the score-history feedback line."""
+            return [s.score.total for s in history if s.score is not None]
+
         for i in range(1, max_iterations + 1):
             if cancel is not None and cancel():
                 break
             if on_phase is not None:
                 on_phase("writing", i)
-            source = self.write_source(
-                brief, prior=source, diagnostics=feedback, seed=solver_seed,
-                on_activity=activity_for("writing", i),
-            )
+            # Generation can raise: the RuntimeError from two empty replies, or an
+            # API error that survived the transient-retry loop. Never discard the
+            # rounds already completed — if we have any history, warn and hand back
+            # the best step so far; only re-raise when there is nothing to return.
+            try:
+                source, truncated = self._write_source_ex(
+                    brief, prior=source, diagnostics=feedback, seed=solver_seed,
+                    on_activity=activity_for("writing", i),
+                )
+            except Exception as exc:
+                if not history:
+                    raise
+                logger.warning(
+                    "Generation failed on iteration %d (%s: %s) — returning the "
+                    "best of the %d completed iteration(s).",
+                    i, type(exc).__name__, str(exc)[:200], len(history),
+                )
+                break
             if on_phase is not None:
                 on_phase("compiling", i)
             result = compile_source(source, name=None)
@@ -891,7 +1225,10 @@ class BarndoAgent:
             _fold_program_nudge(result)
             score = design_score(result)
             crit = None
-            if critique and result.plan is not None:
+            # Gate the critique on ``ok``, not just a plan: a partially-recovered
+            # plan WITH errors scores 0 and can never satisfy the critic, so a
+            # reasoning-model critique call on it is burnt tokens.
+            if critique and result.ok:
                 if on_phase is not None:
                     on_phase("critiquing", i)
                 crit = self.critique(result, score, on_activity=activity_for("critiquing", i))
@@ -899,6 +1236,11 @@ class BarndoAgent:
             # design feedback travels the same channel as the compiler's errors.
             # (After scoring: the critique is model-driven, the score is not.)
             _fold_critique(result, crit)
+            # Fold a TRUNCATED info when the reply was cut off at the token cap on
+            # both the write and its retry. Folded AFTER scoring (like the critique)
+            # so it rides the feedback text without perturbing the score contract:
+            # the plan may be a half-written stub, so tell the model to be terser.
+            _fold_truncation(result, truncated)
 
             step = DesignStep(i, source, result, crit, score)
             history.append(step)
@@ -913,9 +1255,11 @@ class BarndoAgent:
             if done or i == max_iterations:
                 break
             # Flag a regression against the best valid iteration *before* this one,
-            # so a broken or lower-scoring round reads as a regression.
+            # so a broken or lower-scoring round reads as a regression. Carry the
+            # true score trajectory so the model sees whether it is climbing.
             feedback = render_feedback(
-                result, score, best_prior=_best_valid_step(history[:-1])
+                result, score, best_prior=_best_valid_step(history[:-1]),
+                score_history=scored_totals(),
             )
             # When the latest attempt failed to compile, revise from the best
             # valid source instead of stranding the model on non-compiling code.
@@ -935,6 +1279,8 @@ class BarndoAgent:
                         fatal.append(f"error {d['code']}{loc}: {d['message']}")
                     bv_score = best_valid.score
                     assert bv_score is not None  # _best_valid_step filters on it
+                    # The shown source is the best valid one, but the score-history
+                    # line still tells the TRUE trajectory across every scored step.
                     feedback = (
                         f"NOTE: your newest attempt (iteration {i}) did not "
                         f"compile and was DISCARDED. The DSL shown above is "
@@ -942,7 +1288,10 @@ class BarndoAgent:
                         f"scored {bv_score.total:g}); the feedback "
                         f"below describes THAT source. Improve it — and do "
                         f"not repeat the discarded attempt's mistakes.\n"
-                        + render_feedback(best_valid.result, best_valid.score)
+                        + render_feedback(
+                            best_valid.result, best_valid.score,
+                            score_history=scored_totals(),
+                        )
                         + "\n\nFatal diagnostics from the discarded attempt "
                         "(these describe the discarded source, NOT the DSL "
                         "shown above):\n"
@@ -976,6 +1325,31 @@ def _fold_critique(result: CompileResult, crit: CritiqueSpec | None) -> None:
         )
 
 
+def _fold_truncation(result: CompileResult, truncated: bool) -> None:
+    """Append a TRUNCATED info when the generation reply was cut off at the cap.
+
+    Folded the same way :func:`_fold_critique` folds the critique — AFTER the
+    step is scored, so it never perturbs the score contract, and rides the
+    diagnostic stream into the next revision prompt. ``truncated`` is only True
+    when the model hit ``stop_reason=max_tokens`` on both the write and its one
+    retry (see :meth:`BarndoAgent._write_source_ex`): the reply is real DSL but
+    may be a half-written plan, so the model is told its previous answer was cut
+    off and to be more concise. ASCII-only for cp1252 consoles.
+    """
+    if not truncated:
+        return
+    result.diagnostics.append(
+        Issue(
+            Severity.INFO,
+            "TRUNCATED",
+            "Your previous reply was cut off at the output token cap before it "
+            "finished, so this plan may be incomplete. Write a more concise plan "
+            "-- fewer rooms/openings if needed -- so the full source fits.",
+            hint="Keep the answer inside the token cap; omit optional detail first.",
+        )
+    )
+
+
 def _fold_program_nudge(result: CompileResult) -> None:
     """Append an INFO when the source declares no ``program`` statement.
 
@@ -1000,6 +1374,135 @@ def _fold_program_nudge(result: CompileResult) -> None:
     )
 
 
+# Prose-brief extractors. `parse_brief2` speaks the structured brief-statement
+# grammar (`room id: type area N` / `adjacent a b` / `entry`), not English, so a
+# natural-language brief ("3 bed 2 bath ~2000 sqft with a shop bay") can't seed
+# the loop directly — these turn the numbers and program flags out of the prose
+# into that grammar. Case-insensitive; each is deliberately narrow so it doesn't
+# fire on incidental digits. A bedroom count is the one *required* signal (below):
+# no bed count means "this isn't a program", and we return None rather than guess.
+_PROSE_BED_RE = re.compile(r"(\d+)[\s-]*(?:bed(?:room)?s?|br\b)", re.IGNORECASE)
+# Baths may be a decimal (2.5 bath); we floor to int, min 1, so a half-bath adds
+# no extra shared/ensuite room — the grammar has no half-bath *program* room and
+# the deduped count keeps the derived program honest.
+_PROSE_BATH_RE = re.compile(r"(\d+(?:\.\d+)?)[\s-]*bath", re.IGNORECASE)
+# Floor area: 3-6 digits (with optional grouping commas) followed by a sqft unit,
+# so a stray "2 bath" or "10 ceiling" never reads as an area. Commas stripped.
+_PROSE_AREA_RE = re.compile(
+    r"(\d[\d,]{2,5})\s*(?:sq\.?\s*ft\.?|sqft|square\s+feet)", re.IGNORECASE
+)
+# Program presence flags. `shop` covers the barndominium shop bay / garage /
+# workshop (all lower to the same SHOP room, which the fill engine tiles fine —
+# verified: keeping it is score-neutral vs omitting it and it honours the brief).
+_PROSE_SHOP_RE = re.compile(r"\b(?:shop|garage|workshop)\b", re.IGNORECASE)
+_PROSE_OFFICE_RE = re.compile(r"\b(?:office|study)\b", re.IGNORECASE)
+_PROSE_MUDROOM_RE = re.compile(r"\bmud\s*room\b", re.IGNORECASE)
+_PROSE_DINING_RE = re.compile(r"\bdin(?:ing|e)\b", re.IGNORECASE)
+
+
+def _brief2_from_prose(text: str):
+    """Derive a :class:`~barndsl.layout2.LayoutBrief2` from a prose brief, or None.
+
+    Regex-scrapes the program out of natural language and synthesises the same
+    structured brief TEXT that ``examples/oakline.brief`` is written in, then
+    parses it with :func:`~barndsl.layout2.parse_brief2` — reusing the tested
+    parser keeps one format source of truth rather than hand-building the dataclass.
+    Returns ``None`` unless a bedroom count >= 1 was found: that count is the
+    signal the text describes a *program* at all, so nonsense ("hello world") and
+    non-program prose fall through to no-seed.
+
+    Room areas mirror oakline (living 380, kitchen 280, dining 170, hall 150,
+    master 224, extra bedrooms 156, ensuite+shared baths 100/90). When a floor
+    area is stated, every room is scaled by ``target / base_total`` clamped to
+    ``[0.7, 1.6]`` so a 1400- and a 2600-sqft brief both land on believable rooms
+    without the tiler ever failing on an absurd envelope.
+    """
+    m = _PROSE_BED_RE.search(text)
+    if not m:
+        return None
+    beds = int(m.group(1))
+    if beds < 1:
+        return None
+    bm = _PROSE_BATH_RE.search(text)
+    # Floor to int, min 1: a half-bath adds no extra program room (see _RE above).
+    baths = max(1, int(float(bm.group(1)))) if bm else 1
+    am = _PROSE_AREA_RE.search(text)
+    target = float(am.group(1).replace(",", "")) if am else None
+
+    has_shop = bool(_PROSE_SHOP_RE.search(text))
+    has_office = bool(_PROSE_OFFICE_RE.search(text))
+    has_mudroom = bool(_PROSE_MUDROOM_RE.search(text))
+    # Dining appears when mentioned, or implicitly for 3+ bedrooms — oakline (a
+    # 3-bed) includes it, so a same-sized program should read the same way.
+    has_dining = bool(_PROSE_DINING_RE.search(text)) or beds >= 3
+
+    # (id, type, base area, min-dim-or-None) — the oakline program, extended.
+    rooms: list[tuple[str, str, int, int | None]] = [
+        ("living", "living", 380, None),
+        ("kitchen", "kitchen", 280, None),
+    ]
+    if has_dining:
+        rooms.append(("dining", "dining", 170, None))
+    rooms.append(("hall", "hallway", 150, 4))  # min 4 = comfort hallway width
+    rooms.append(("master", "bedroom", 224, None))
+    for i in range(2, beds + 1):
+        rooms.append((f"bed{i}", "bedroom", 156, None))
+    ensuite = baths >= 2
+    if ensuite:
+        rooms.append(("mbath", "bathroom", 100, None))  # master ensuite
+        rooms.append(("bath2", "bathroom", 90, None))  # shared, off the hall
+    else:
+        rooms.append(("bath", "bathroom", 100, None))  # one shared bath
+    if has_office:
+        rooms.append(("office", "office", 120, None))
+    if has_mudroom:
+        rooms.append(("mudroom", "mudroom", 80, None))
+    # Shop bay: functionally a garage (min 12 ft to take a vehicle). Kept because
+    # it costs no score and delivers what the brief asked for (verified empirically).
+    if has_shop:
+        rooms.append(("shop", "shop", 400, 12))
+
+    base_total = sum(area for _, _, area, _ in rooms)
+    # Scale to the stated floor area, clamped so a tiny or huge target can't make
+    # a room the tiler chokes on; unstated area leaves everything at oakline size.
+    scale = 1.0
+    if target is not None and base_total > 0:
+        scale = max(0.7, min(1.6, target / base_total))
+
+    lines = ['plan "Derived"', "ceiling 10"]
+    for rid, rtype, area, min_dim in rooms:
+        line = f"room {rid}: {rtype} area {round(area * scale)}"
+        if min_dim is not None:
+            line += f" min {min_dim}"
+        lines.append(line)
+
+    # Adjacencies mirror oakline: open core, hall spine off the living room, every
+    # bedroom + the shared bath off the hall, the master's ensuite, entry at living.
+    lines.append("adjacent living kitchen")
+    if has_dining:
+        lines.append("adjacent kitchen dining")
+    lines.append("adjacent living hall")
+    bedroom_ids = ["master"] + [f"bed{i}" for i in range(2, beds + 1)]
+    shared_bath = "bath2" if ensuite else "bath"
+    lines.append("adjacent hall " + " ".join(bedroom_ids + [shared_bath]))
+    if ensuite:
+        lines.append("adjacent master mbath")
+    if has_shop:
+        # Off the hall like the other private spaces (solves the same as living-shop
+        # here; the hall keeps the shop's door out of the open core).
+        lines.append("adjacent hall shop")
+    lines.append("entry living")
+
+    from .layout2 import parse_brief2
+
+    # Should never raise (we control the grammar), but a malformed synthesis must
+    # degrade to no-seed rather than crash the design loop.
+    try:
+        return parse_brief2("\n".join(lines) + "\n")
+    except Exception:
+        return None
+
+
 def _solver_candidate_sources(spec) -> list[str]:
     """Emit DSL for each solver candidate derived from ``spec``.
 
@@ -1011,6 +1514,11 @@ def _solver_candidate_sources(spec) -> list[str]:
     runtime stays bounded — every one is near-free (no API call). Returns one DSL
     string per topology that produced a plan; any failure is skipped, so seeding
     always degrades gracefully to "no seed".
+
+    A ``str`` spec is first tried as the structured brief-statement grammar
+    (``parse_brief2``); when that raises — the common case for a natural-language
+    brief — it falls back to :func:`_brief2_from_prose`. Structured briefs thus
+    keep precedence, and only when *both* fail is the spec unusable (``[]``).
     """
     from .emit import emit_dsl
     from .layout import LayoutBrief, solve_layout
@@ -1020,7 +1528,10 @@ def _solver_candidate_sources(spec) -> list[str]:
         try:
             spec = parse_brief2(spec)
         except Exception:
-            return []
+            # Not the structured grammar — try to read a program out of the prose.
+            spec = _brief2_from_prose(spec)
+            if spec is None:
+                return []
 
     results = []
     if isinstance(spec, LayoutBrief2):
