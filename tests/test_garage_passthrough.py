@@ -165,10 +165,13 @@ def _warnings(result):
 # --- the motivating regression ----------------------------------------------
 
 
-def test_failing_plan_compiles_but_fires_garage_passthrough():
+def test_failing_plan_fires_garage_passthrough_and_void_error():
+    # Historically this plan compiled 0/0/0 and scored 99.3 — that was the whole
+    # problem. Today its 80 sqft dead pocket is an AREA_VOID *error* (a house has
+    # no void areas) and the shop-as-corridor is a GARAGE_PASSTHROUGH warning.
     result = compile_source(FAILING)
     assert result.plan is not None
-    assert not result.errors  # it *does* compile — that was the whole problem
+    assert [d.code for d in result.errors] == ["AREA_VOID"]
     assert "GARAGE_PASSTHROUGH" in _warnings(result)
 
 
@@ -365,9 +368,10 @@ window bed2 north width 5 offset 8
 # --- unit: concentrated void (AREA_VOID + space term) -----------------------
 
 
-def test_area_void_fires_on_concentrated_gap_at_high_coverage():
+def test_area_void_is_an_error_on_concentrated_gap_at_high_coverage():
     # ~97% covered overall, but one 96 sqft rectangle (x 44-60, y 0-6) is a room-
-    # sized hole AREA_UNUSED (below-85%-only) never sees.
+    # sized hole AREA_UNUSED (below-85%-only) never sees. In a substantially
+    # tiled plan that hole is an ERROR — there are no void areas in a house.
     src = """\
 plan "Pocket"
 envelope 60 x 30
@@ -379,11 +383,48 @@ window living south width 8 offset 8
 window kitchen east width 5 offset 8
 """
     result = compile_source(src)
-    codes = {d.code for d in result.infos}
-    assert "AREA_VOID" in codes
-    assert "AREA_UNUSED" not in codes  # coverage is high; only the void speaks
-    void = next(d for d in result.infos if d.code == "AREA_VOID")
+    assert "AREA_VOID" in {d.code for d in result.errors}
+    all_codes = {d.code for d in result.diagnostics}
+    assert "AREA_UNUSED" not in all_codes  # coverage is high; only the void speaks
+    void = next(d for d in result.errors if d.code == "AREA_VOID")
     assert "44" in void.message and "60" in void.message  # names the gap's bbox
+
+
+def test_area_void_stays_info_in_a_sparse_sketch():
+    # Under 85% coverage the plan is an unfinished sketch AREA_UNUSED is already
+    # nagging — the concentrated void doesn't escalate to an error there.
+    src = """\
+plan "Sketch"
+envelope 60 x 30
+ceiling 9
+room living: living at 0,0 size 30 x 30
+entry living south width 3 offset 6
+window living south width 10 offset 14
+"""
+    result = compile_source(src)
+    assert not result.errors
+    codes_info = {d.code for d in result.infos}
+    assert "AREA_VOID" in codes_info
+    assert "AREA_UNUSED" in codes_info
+
+
+def test_area_void_small_pocket_is_an_info_nudge():
+    # A pocket between the note bar (20 sqft) and the error bar (45 sqft) in a
+    # well-tiled plan: visible, but not blocking.
+    src = """\
+plan "Small pocket"
+envelope 30 x 24
+ceiling 9
+room living: living  at 0,0  size 18 x 24
+room bed:    bedroom at 18,0 size 12 x 21
+door living - bed width 2.67 into bed
+entry living south width 3 offset 2
+window living south width 8 offset 8
+window bed south width 4 offset 4
+"""
+    result = compile_source(src)  # void: 12 x 3 = 36 sqft at (18,21)
+    assert not result.errors
+    assert "AREA_VOID" in {d.code for d in result.infos}
 
 
 def test_area_void_silent_on_fully_tiled_plan():

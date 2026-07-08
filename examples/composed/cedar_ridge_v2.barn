@@ -1,5 +1,9 @@
 plan "Cedar Ridge v2 (composed)"
-envelope 64 x 27
+# L-shaped massing: the house block, plus a shop wing whose 24 x 24 footprint
+# matches the stamped shop_loft part exactly — the envelope follows the rooms,
+# so no enclosed area goes unassigned (an AREA_VOID error).
+envelope 40 x 27
+wing 24 x 24 at 40,0
 ceiling 10
 
 # --- Phase 20 composition v2 showcase -----------------------------------------
@@ -24,11 +28,16 @@ use "parts/shop_loft.barn"  as sl at 40,0 with loft_depth=16
 
 # --- the host's own rooms -----------------------------------------------------
 room great: living at 12,7 size 28 x 20
+# The south strip beside the parts is the host's to claim — a plan tiles its
+# envelope completely (an unassigned pocket is an AREA_VOID error), so it works
+# as a storage/utility run off the great room.
+room store: utility at 0,0 size 28 x 7
 
 # --- circulation reaches into the stamped parts by their namespaced ids --------
 door great - fb.bath width 2.5 into fb.bath hinge near
 door great - g.bed width 3 offset 2 into g.bed hinge near
 door great - sl.shop width 3 into sl.shop hinge near
+door great - store width 3 offset 0.5 into store
 
 # --- the building entrance (+ landing) + daylight -----------------------------
 entry great north width 3 offset 12

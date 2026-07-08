@@ -17,7 +17,7 @@ ceiling 9
 room living: living at 0,0 size 20 x 18
 room kitchen: kitchen at 20,0 size 20 x 18
 room bed: bedroom at 0,18 size 20 x 12
-room bath: bathroom at 20,18 size 12 x 12
+room bath: bathroom at 20,18 size 20 x 12
 door living - kitchen width 3
 door living - bed width 2.67
 door kitchen - bath width 2.5

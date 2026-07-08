@@ -56,7 +56,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .elements import GARAGE_TYPES, HABITABLE_TYPES, Barndominium, RoomType
-from .validation import MIN_CONCENTRATED_VOID, Severity, _largest_void
+from .validation import MIN_VOID_NOTE, Severity, _largest_void
 
 #: The public core a bedroom's daily route must reach without crossing a garage.
 _PUBLIC_TYPES = frozenset({RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING})
@@ -146,12 +146,15 @@ def _space_penalty(plan: Barndominium) -> tuple[float, str | None]:
     shortfall = max(0.0, SPACE_FULL_MARKS - frac) / SPACE_FULL_MARKS
     coverage_pen = SPACE_WEIGHT * min(1.0, shortfall)
 
-    # Concentrated-void term: only room-sized gaps count (a wall-thickness sliver
-    # of slack between rooms shouldn't ping the score). Scales the void's share of
-    # the footprint into a penalty capped at VOID_SPACE_WEIGHT.
+    # Concentrated-void term: charged from the INFO bar (MIN_VOID_NOTE) so a
+    # sub-error pocket still costs points and the loop has a gradient before the
+    # cliff — a room-sized void (>= MIN_CONCENTRATED_VOID) is an ERROR now, which
+    # zeroes the score before this term matters. A wall-thickness sliver of slack
+    # between rooms still never pings. Scales the void's share of the footprint
+    # into a penalty capped at VOID_SPACE_WEIGHT.
     void_area, bbox = _largest_void(plan)
     void_pen = 0.0
-    if void_area >= MIN_CONCENTRATED_VOID:
+    if void_area >= MIN_VOID_NOTE:
         void_pen = min(VOID_SPACE_WEIGHT, VOID_SPACE_WEIGHT * (void_area / footprint) / VOID_FULL_FRAC)
 
     penalty = max(coverage_pen, void_pen)

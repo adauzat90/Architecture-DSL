@@ -266,9 +266,10 @@ def test_void_free_plans_gain_no_extra_bands():
 
 def test_a_room_sized_void_now_fires_area_void():
     # 60 sq ft slid under the original 70 sq ft bar (a live run shipped a 66 sq
-    # ft dead pocket); the lowered threshold catches any usable-room's worth.
+    # ft dead pocket); the lowered threshold catches any usable-room's worth —
+    # and in this 90%-tiled plan it is an ERROR: a house has no void areas.
     result = _void_plan()
-    assert "AREA_VOID" in [d.code for d in result.diagnostics]
+    assert "AREA_VOID" in [d.code for d in result.errors]
 
 
 def test_dxf_walls_match_the_bands_for_a_void_plan():

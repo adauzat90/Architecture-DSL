@@ -27,22 +27,28 @@ def _codes(result, severity: str) -> set[str]:
 
 
 def test_scattered_wet_rooms_nudge_to_cluster():
-    # kitchen, bath, and laundry each sit alone (no two share a wall).
+    # kitchen, bath, and laundry each sit alone (no two share a wall); the
+    # office and bedroom fill the envelope so no AREA_VOID error muddies it.
     src = """\
 plan "Scattered plumbing"
 envelope 40 x 30
 ceiling 9
 room living:  living   at 0,0   size 16 x 30
 room kitchen: kitchen  at 16,0  size 12 x 12
-room bath:    bathroom at 28,18 size 12 x 12
-room laundry: laundry  at 16,18 size 10 x 12
+room office:  office   at 28,0  size 12 x 12
 room hall:    hallway  at 16,12 size 24 x 6
+room laundry: laundry  at 16,18 size 8 x 12
+room bed:     bedroom  at 24,18 size 8 x 12
+room bath:    bathroom at 32,18 size 8 x 12
 door living - hall width 3
 door living - kitchen width 6
+door hall - office width 2.67
 door hall - bath width 2.67
 door hall - laundry width 2.67
+door hall - bed width 2.67
 entry living south width 3 offset 6
 window bath east width 3 offset 4
+window bed north width 4 offset 2
 """
     r = compile_source(src)
     assert "WET_GROUP" in _codes(r, "info")

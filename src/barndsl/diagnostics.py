@@ -38,7 +38,9 @@ class CodeInfo:
 
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
-_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING"})
+_VARYING = frozenset(
+    {"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING", "AREA_VOID"}
+)
 
 
 def _c(code: str, severity: Severity, title: str, explanation: str) -> tuple[str, CodeInfo]:
@@ -266,10 +268,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "overlap or the envelope is too small."),
         _c("AREA_UNUSED", I, "Footprint under-used",
            "A large share of the footprint isn't assigned to any room."),
-        _c("AREA_VOID", I, "Concentrated unassigned void",
+        _c("AREA_VOID", E, "Concentrated unassigned void",
            "One connected, room-sized patch of the footprint is assigned to no "
            "room — a real hole in the plan (an unfinished space, a mis-sized "
-           "neighbour, a gap the tiling left). Unlike AREA_UNUSED — which sums "
+           "neighbour, a gap the tiling left). A house has no void areas: an "
+           "enclosed pocket no one can enter is framed, roofed and "
+           "foundation-poured dead space, so a room-sized void is an ERROR (a "
+           "smaller pocket, under the error bar but over ~20 sq ft, is an INFO "
+           "nudge). Unlike AREA_UNUSED — which sums "
            "diffuse slack and only speaks below 85% coverage — this fires on the "
            "largest single gap regardless of overall coverage, so a dead pocket on "
            "an otherwise well-covered footprint stays visible. Fill it with a room, "

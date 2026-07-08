@@ -150,14 +150,18 @@ MAX_ROOM_ASPECT_BY_TYPE: dict[RoomType, float] = {
 #: the diffuse slack AREA_UNUSED measures. AREA_UNUSED only speaks below 85%
 #: coverage and sums *all* slack, so a room-sized rectangle of dead space on an
 #: otherwise well-covered footprint (95%+) is invisible to it; this fires on the
-#: largest connected gap regardless of overall coverage. Set just below a walk-in
-#: closet / powder-room's worth of floor so any genuinely usable pocket trips it,
-#: but a strip of wall-thickness slack between rooms (a few sq ft) never does.
-#: (It was 70 at first — "just below a small bedroom" — until a live agent run
-#: shipped a 6x11 = 66 sq ft dead pocket that slid under the bar.) Verified
-#: against every shipped example: only the intentionally-gappy composed showcase
-#: carries a gap this big, and it already tolerates INFO-level notes.
+#: largest connected gap regardless of overall coverage. Severity is tiered:
+#: at or above MIN_CONCENTRATED_VOID — a walk-in closet / powder room's worth
+#: of floor — the void is an ERROR (an enclosed pocket you'd frame, roof and
+#: pour foundation around, that no one can enter, is not a buildable intent);
+#: between MIN_VOID_NOTE and that bar it is an INFO nudge. Below MIN_VOID_NOTE
+#: — wall-thickness slack between rooms, a few sq ft — it never speaks. (The
+#: error bar was 70 at first, "just below a small bedroom", until a live agent
+#: run shipped a 6x11 = 66 sq ft dead pocket that slid under it.) Verified
+#: against every shipped example compiled with its real base_dir: the only
+#: void anywhere is the composed v2 showcase's, fixed alongside this change.
 MIN_CONCENTRATED_VOID = 45.0
+MIN_VOID_NOTE = 20.0
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
 #: Minimum plan overlap (sq ft) between an upper-floor wet room and a wet room
 #: below for their plumbing to share one straight vertical waste stack. A mere
@@ -1604,11 +1608,14 @@ def _largest_void(plan: Barndominium) -> tuple[float, tuple[float, float, float,
     axis-aligned rectangles, like ``footprint_area``), mark each cell inside the
     footprint but inside no room, then find the largest 4-connected component of
     those cells. Returns ``(0.0, None)`` when the footprint is fully covered.
+
+    Every declared room counts as coverage — including porch-type rooms: an
+    in-envelope porch is intentional, claimed space, not a hole in the plan.
     """
     secs = plan.footprint_sections()
     if not secs:
         return 0.0, None
-    rooms = [r for r in plan.rooms if r.level == 0 and r.type is not RoomType.PORCH]
+    rooms = [r for r in plan.rooms if r.level == 0]
     xs: set[float] = set()
     ys: set[float] = set()
     for x, y, w, l in secs:
@@ -1827,21 +1834,32 @@ def _validate_geometry(plan: Barndominium, add) -> None:
         # slips past AREA_UNUSED whenever overall coverage is high (it only speaks
         # below 85% and sums diffuse slack). Flag the largest single gap on its own
         # so an 80 sq ft rectangle of nothing on a 95%-covered footprint is still
-        # visible. INFO: the plan builds; it just has a hole to fill or trim away.
+        # visible. Severity is tiered: in a substantially-tiled plan (>= 85%
+        # coverage — the same bar that silences AREA_UNUSED) a room-sized void is
+        # an ERROR — a house has no void areas; you'd frame, roof and pour
+        # foundation around dead space no one can even enter. A smaller pocket,
+        # or any void in a sparse plan (an unfinished sketch that AREA_UNUSED is
+        # already nagging), stays an INFO nudge.
         if frac <= 1.001:
             void_area, bbox = _largest_void(plan)
-            if void_area >= MIN_CONCENTRATED_VOID and bbox is not None:
+            if void_area >= MIN_VOID_NOTE and bbox is not None:
                 x1, y1, x2, y2 = bbox
+                sev = (
+                    Severity.ERROR
+                    if void_area >= MIN_CONCENTRATED_VOID and frac >= 0.85
+                    else Severity.INFO
+                )
                 add(
                     Issue(
-                        Severity.INFO,
+                        sev,
                         "AREA_VOID",
                         f"A single {_f(void_area)} sq ft patch of the footprint "
                         f"(around {_f(x1)},{_f(y1)} to {_f(x2)},{_f(y2)}) is "
                         "assigned to no room — a concentrated void, not diffuse slack.",
-                        hint="Fill the gap with a room (a closet, mechanical space "
-                        "or storage), enlarge a neighbour to cover it, or shrink the "
-                        "envelope so the footprint has no dead pocket.",
+                        hint="Every enclosed square foot must belong to a room: "
+                        "extend an adjacent room to cover the patch, or declare a "
+                        "room there (storage, closet, pantry, utility), or shrink "
+                        "the envelope so the footprint has no dead pocket.",
                     )
                 )
 

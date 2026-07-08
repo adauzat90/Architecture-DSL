@@ -251,8 +251,10 @@ BARNDOMINIUM IDIOMS worth reaching for:
   triangle, dining on the kitchen's open side, with a door out to the porch.
 
 LINT the compiler enforces (satisfy these too):
-- Rooms stay inside the envelope, don't overlap, and tile it with little waste
-  (a room-sized unassigned void is wasted money - absorb it or use it).
+- Rooms stay inside the envelope, don't overlap, and tile it COMPLETELY -
+  a room-sized unassigned pocket (AREA_VOID) is a compile ERROR: every
+  enclosed square foot must belong to a room, so absorb any gap into a
+  neighbour or declare a room (storage/closet/pantry/utility) there.
 - An interior `door` only joins two rooms that SHARE A WALL; every room must be
   reachable from an `entry` through interior doors/opens.
 - Bedrooms >= 70 sqft, smallest side >= 7 ft, each with an egress `window` on
