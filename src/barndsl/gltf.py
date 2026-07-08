@@ -82,6 +82,7 @@ from .materials import (
     PORCH_MATERIAL,
     SLAB_MATERIAL,
     STAIR_MATERIAL,
+    TRIM_MATERIAL,
     Material,
     floor_material,
     roof_material,
@@ -210,7 +211,13 @@ class Scene:
     nodes: list[MeshNode] = field(default_factory=list)
 
     #: Layer order (parents in the glTF scene, and the viewer's toggle order).
-    LAYERS = ("floors", "walls", "openings", "roof", "frame", "porches", "stairs", "fixtures")
+    #: ``trim`` (baseboards) sits with the openings finish work; ``ceilings`` sits
+    #: with the roof as the other overhead plane, so a client can strip the roof to
+    #: look inside yet keep the flat ceilings, or drop both.
+    LAYERS = (
+        "floors", "walls", "openings", "trim", "ceilings", "roof",
+        "frame", "porches", "stairs", "fixtures",
+    )
 
     def node(
         self, name: str, layer: str, material: Material, tint: str | None = None
@@ -339,6 +346,12 @@ def _opening_boxes(wall: RevitWall, openings: list[RevitOpening], base: float) -
 _LEAF_THICKNESS = 0.15
 _GLASS_THICKNESS = 0.1
 _MULLION = 0.1  # square section of a window bar / a thin jamb casing
+#: Perimeter frame/casing around a window and the head+jamb trim of an exterior
+#: door: a slim band ~0.25 ft wide, proud of both wall faces by ~0.05 ft each side,
+#: in painted-trim material. Deterministic and subtle — a reveal, not a moulding
+#: profile — so the model reads as a finished house without over-modelling.
+_FRAME_WIDTH = 0.25       # how far the band reaches into the opening (along + up)
+_FRAME_PROUD = 0.05       # how far it stands proud of each wall face
 
 
 def _opening_span(wall: RevitWall, o: RevitOpening) -> tuple[float, float] | None:
@@ -374,6 +387,34 @@ def _panel_box(wall: RevitWall, a: float, b: float, z0: float, z1: float,
     if wall.orientation == "v":
         return Box(c - t / 2.0, a, z0, c + t / 2.0, b, z1)
     return Box(a, c - t / 2.0, z0, b, c + t / 2.0, z1)
+
+
+def _add_opening_frame(scene: Scene, wall: RevitWall, o: RevitOpening, name: str,
+                       a: float, b: float, z0: float, z1: float,
+                       sides: str = "all") -> None:
+    """Add a perimeter casing/frame around the opening rect ``[a,b] x [z0,z1]``.
+
+    Four slim boxes — head, sill and two jambs — each ``_FRAME_WIDTH`` ft wide and
+    standing ``_FRAME_PROUD`` ft proud of both wall faces, in the painted-trim
+    material. ``sides`` is ``"all"`` (a window's full casing) or ``"nosill"`` (an
+    exterior door's head + two jambs, no threshold band). One node per opening,
+    named ``<name>:frame``, on the ``openings`` layer, so it toggles with the rest
+    of the opening and exports as real trim. Deterministic; skipped if the opening
+    is too small to carry a frame.
+    """
+    fw = _FRAME_WIDTH
+    if b - a <= 2 * fw or z1 - z0 <= 2 * fw:
+        return  # opening too small to seat a casing without the bands overlapping
+    t = wall.thickness + 2 * _FRAME_PROUD
+    node = scene.node(f"{name}:frame", "openings", TRIM_MATERIAL)
+    add = node.add_box
+    # Jambs run the full opening height on each running-axis edge; the head (and,
+    # for a window, the sill) span the width between them.
+    add(_panel_box(wall, a, a + fw, z0, z1, t))          # near jamb
+    add(_panel_box(wall, b - fw, b, z0, z1, t))          # far jamb
+    add(_panel_box(wall, a + fw, b - fw, z1 - fw, z1, t))  # head casing
+    if sides != "nosill":
+        add(_panel_box(wall, a + fw, b - fw, z0, z0 + fw, t))  # sill / apron
 
 
 def _door_record(wall: RevitWall, o: RevitOpening, a: float, b: float,
@@ -458,9 +499,18 @@ def _add_opening_geometry(
         z1 = z0 + o.height
         if o.category == "window":
             _add_window(scene, wall, o, a, b, z0, z1)
-        elif o.category == "cased_opening":
+            continue
+        if o.category == "cased_opening":
             _add_cased_casing(scene, wall, o, a, b, z0, z1)
-        elif o.kind == "overhead":
+            continue
+        # An exterior door gets a painted head + jamb trim (no threshold band)
+        # proud of the wall, so the entry reads as cased like the windows. Interior
+        # doors keep only their leaf. Added before the leaf so the node order is
+        # frame-then-leaf, deterministically.
+        if o.exterior:
+            _add_opening_frame(scene, wall, o, f"door:{o.id}", a, b, z0, z1,
+                               sides="nosill")
+        if o.kind == "overhead":
             _add_overhead(scene, wall, o, a, b, z0, z1)
         elif o.kind in _SLIDE_KINDS:
             _add_slider(scene, wall, o, a, b, z0, z1, room_pt)
@@ -470,7 +520,9 @@ def _add_opening_geometry(
 
 def _add_window(scene: Scene, wall: RevitWall, o: RevitOpening,
                 a: float, b: float, z0: float, z1: float) -> None:
-    """A thin glazing pane centred in the wall, plus a centre cross of mullions."""
+    """A thin glazing pane centred in the wall, a centre cross of mullions, and a
+    perimeter casing frame proud of both wall faces so the window reads as framed."""
+    _add_opening_frame(scene, wall, o, f"window:{o.id}", a, b, z0, z1, sides="all")
     glass = scene.node(f"window:{o.id}:glass", "openings", GLASS_MATERIAL)
     glass.add_box(_panel_box(wall, a, b, z0, z1, _GLASS_THICKNESS))
     bars = scene.node(f"window:{o.id}:mullions", "openings", OPENING_MATERIAL)
@@ -752,10 +804,16 @@ def _add_walls(scene: Scene) -> None:
             hosted.setdefault(o.host_wall, []).append(o)
     plate = roof_plate(model)
     gl = gable_line(model)
-    wall_mat = wall_material(scene.plan)
+    # The exterior shell wears the plan's siding hint (ribbed metal by default); an
+    # interior partition is painted drywall, not corrugated steel. Split by the
+    # run's `exterior` flag — single-material boxes, so we don't split the interior
+    # face of an exterior wall, only whole partition runs (Phase 6 requirement A).
+    siding_mat = wall_material(scene.plan)
+    partition_mat = PALETTE["drywall"]
     for w in model.walls:
         base = elev.get(w.level, 0.0)
         ops = hosted.get(w.id, [])
+        wall_mat = siding_mat if w.exterior else partition_mat
         node = scene.node(f"wall:{w.id}", "walls", wall_mat)
         intervals = wall_top_intervals(w, model)
         for box in wall_solids(w, ops, base, intervals):
@@ -1008,6 +1066,162 @@ def _legs(add, x0, y0, x1, y1, z, top: float, s: float = 0.2) -> None:
             add(Box(cx, cy, z, cx + s, cy + s, z + top))
 
 
+# --- interior realism: baseboards + flat ceilings ----------------------------
+#
+# Phase 7 ships two finish layers as *real geometry* (they export like everything
+# else, unlike the renderer-only sky/ground): a skirting run around each finished
+# room's perimeter, and a flat ceiling slab over each private room. Both are thin,
+# schematic and deterministic — a reveal, not a moulding profile — so the model
+# reads as a finished interior without over-modelling. The walkthrough is the
+# audience: a baseboard grounds the walls and a ceiling encloses a bedroom, while
+# the great room stays open to the roof (the barndominium's vaulted signature).
+
+#: Skirting: 0.35 ft tall, set 0.05 ft into the room off the finish-face, sitting
+#: on the finished floor tile top (:data:`FLOOR_TILE_THICKNESS`). A door/cased gap
+#: is punched where an opening touches the room edge.
+_BASEBOARD_HEIGHT = 0.35
+_BASEBOARD_DEPTH = 0.05
+#: A flat ceiling slab thickness (ft) at the room's clear storey height.
+_CEILING_THICKNESS = 0.1
+
+#: Bare-slab spaces skip a baseboard (a garage/shop is unfinished; a porch is not
+#: an interior room and never reaches this code): they get no skirting run.
+_NO_BASEBOARD_TYPES = frozenset({"garage", "shop", "porch"})
+
+#: Rooms that get a **flat ceiling** slab — the private, enclosed spaces where a
+#: dropped ceiling reads right. Living / great / kitchen / dining / loft stay open
+#: to the roof (the vaulted barndominium look), as do bare-slab garage/shop and
+#: the porch. Names match :class:`~barndsl.elements.RoomType` values.
+_CEILING_ROOM_TYPES = frozenset(
+    {"bedroom", "bathroom", "half_bath", "closet", "pantry",
+     "office", "laundry", "utility", "mudroom", "hallway"}
+)
+
+
+def _edge_openings(model, walls_by_id, room, coord: float, vertical: bool) -> list[
+    tuple[float, float]
+]:
+    """The door/cased-opening spans that touch ``room``'s edge, as running-axis gaps.
+
+    A skirting run stops at a doorway. An opening touches the edge when its host
+    wall lies on the edge line (constant coord ``coord``: the room's ``x``/``x2``
+    for a vertical W/E edge, ``y``/``y2`` for a horizontal S/N edge) and its span
+    overlaps the room's extent along that edge. Windows never punch a baseboard (a
+    sill sits above it), so only door-category and cased openings are gaps.
+    ``walls_by_id`` is the run lookup the caller builds once. Returned sorted, so the
+    skirting decomposition is deterministic.
+    """
+    lo_room = room.y if vertical else room.x
+    hi_room = (room.y + room.length) if vertical else (room.x + room.width)
+    gaps: list[tuple[float, float]] = []
+    for o in model.openings:
+        if o.category not in ("door", "cased_opening"):
+            continue
+        w = walls_by_id.get(o.host_wall)
+        if w is None:
+            continue
+        if (w.orientation == "v") != vertical:
+            continue
+        if abs(w.const_coord - coord) > 0.5:  # host wall not on this room edge
+            continue
+        along = o.location[1] if vertical else o.location[0]
+        a = max(lo_room, along - o.width / 2.0)
+        b = min(hi_room, along + o.width / 2.0)
+        if b - a > 1e-6:
+            gaps.append((a, b))
+    gaps.sort()
+    return gaps
+
+
+def _runs_minus_gaps(lo: float, hi: float, gaps: list[tuple[float, float]]) -> list[
+    tuple[float, float]
+]:
+    """``[lo, hi]`` with each ``gap`` cut out — the surviving solid skirting pieces."""
+    runs = [(lo, hi)]
+    for ga, gb in gaps:
+        out: list[tuple[float, float]] = []
+        for a, b in runs:
+            if gb <= a + 1e-9 or ga >= b - 1e-9:
+                out.append((a, b))
+                continue
+            if ga > a:
+                out.append((a, min(ga, b)))
+            if gb < b:
+                out.append((max(gb, a), b))
+        runs = out
+    return [(a, b) for a, b in runs if b - a > 1e-6]
+
+
+def _add_baseboards(scene: Scene) -> None:
+    """A skirting run around each finished room's perimeter, with door gaps punched.
+
+    One node per room (``baseboard:<id>``) on the ``trim`` layer in the painted-trim
+    material. The run hugs the four room edges, set :data:`_BASEBOARD_DEPTH` ft into
+    the room off the finish face and standing :data:`_BASEBOARD_HEIGHT` ft on the
+    finished floor. Garage/shop bays (bare slab) get none. Door and cased-opening
+    gaps are cut so the skirting reads as stopping at each casing. Deterministic:
+    rooms in model order, each edge S, N, W, E, each edge's runs low→high.
+    """
+    model = scene.model
+    elev = {lvl.index: lvl.elevation for lvl in model.levels}
+    walls_by_id = {w.id: w for w in model.walls}
+    d = _BASEBOARD_DEPTH
+    for r in model.rooms:
+        if r.type in _NO_BASEBOARD_TYPES:
+            continue
+        z0 = elev.get(r.level, 0.0) + FLOOR_TILE_THICKNESS
+        z1 = z0 + _BASEBOARD_HEIGHT
+        x0, y0 = r.x, r.y
+        x1, y1 = r.x + r.width, r.y + r.length
+        node = scene.node(f"baseboard:{r.id}", "trim", TRIM_MATERIAL)
+
+        def edge(coord, vertical):
+            return _edge_openings(model, walls_by_id, r, coord, vertical)
+
+        # Horizontal edges (S at y0, N at y1) run along x; vertical edges (W at x0,
+        # E at x1) run along y. Each edge's skirting box is a thin band along the
+        # edge, `d` deep into the room, minus the door/cased gaps on that edge.
+        # South edge (y = y0), running along x, band reaches north into the room.
+        for lo, hi in _runs_minus_gaps(x0, x1, edge(y0, False)):
+            node.add_box(Box(lo, y0, z0, hi, y0 + d, z1))
+        # North edge (y = y1), band reaches south into the room.
+        for lo, hi in _runs_minus_gaps(x0, x1, edge(y1, False)):
+            node.add_box(Box(lo, y1 - d, z0, hi, y1, z1))
+        # West edge (x = x0), running along y, band reaches east into the room;
+        # trim the y-range to skip the corners the S/N bands already cover.
+        for lo, hi in _runs_minus_gaps(y0, y1, edge(x0, True)):
+            node.add_box(Box(x0, max(lo, y0 + d), z0, x0 + d, min(hi, y1 - d), z1))
+        # East edge (x = x1), band reaches west into the room.
+        for lo, hi in _runs_minus_gaps(y0, y1, edge(x1, True)):
+            node.add_box(Box(x1 - d, max(lo, y0 + d), z0, x1, min(hi, y1 - d), z1))
+
+
+def _add_ceilings(scene: Scene) -> None:
+    """A flat ceiling slab over each private room at its clear storey height.
+
+    One node per qualifying room (``ceiling:<id>``) on the ``ceilings`` layer in the
+    drywall material. The slab sits at the room's finished ceiling — the level floor
+    elevation plus the room's clear ceiling height (its override or the plan default)
+    — exactly where the walls' plate is computed (see :mod:`barndsl.wallheights`,
+    which extrudes every run to ``elevation + ceiling_height``), so the ceiling caps
+    the walls with no gap. Only the private, enclosed room types get one (see
+    :data:`_CEILING_ROOM_TYPES`); living/great/kitchen/dining/loft stay open to the
+    roof (the vaulted barndominium signature), and a room the author marked
+    ``vaulted`` is skipped too. Deterministic: rooms in model order.
+    """
+    model = scene.model
+    plan = scene.plan
+    elev = {lvl.index: lvl.elevation for lvl in model.levels}
+    for r in model.rooms:
+        if r.type not in _CEILING_ROOM_TYPES or r.vaulted:
+            continue
+        ch = r.ceiling_height if r.ceiling_height else plan.ceiling_height
+        top = elev.get(r.level, 0.0) + ch
+        node = scene.node(f"ceiling:{r.id}", "ceilings", PALETTE["drywall"])
+        node.add_box(Box(r.x, r.y, top - _CEILING_THICKNESS, r.x + r.width,
+                         r.y + r.length, top))
+
+
 def build_scene(plan: Barndominium) -> Scene:
     """Lower ``plan`` into the intermediate box/quad :class:`Scene` (pure)."""
     model = to_revit_model(plan)
@@ -1019,6 +1233,8 @@ def build_scene(plan: Barndominium) -> Scene:
     _add_porches(scene)
     _add_stairs(scene)
     _add_fixtures(scene)
+    _add_baseboards(scene)
+    _add_ceilings(scene)
     return scene
 
 

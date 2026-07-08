@@ -76,6 +76,9 @@ PALETTE: dict[str, Material] = {
     "carpet": Material("carpet", "#B4AA9C", 1.0, 0.0, "speckle", 0.3),
     # --- interior / structure / glazing --------------------------------------
     "drywall": Material("drywall", "#E7E3DA", 0.90, 0.0, "none", 1.0),
+    # Painted trim: window/door casing, a hair warmer and cleaner than drywall so a
+    # frame reads as a distinct painted band around an opening (Phase 6).
+    "trim": Material("painted trim", "#F1ECE1", 0.75, 0.0, "none", 1.0),
     "glass": Material("glass", "#AFC7D6", 0.10, 0.0, "none", 1.0),
     "timber_frame": Material("timber frame", "#8A5E2E", 0.70, 0.0, "plank", 1.2),
     # A warm painted-wood door leaf — interior and exterior swing/slide leaves
@@ -106,6 +109,9 @@ STAIR_MATERIAL = PALETTE["wood_plank"]
 PORCH_MATERIAL = PALETTE["wood_plank"]
 #: The header/sill boxes over and under openings: a painted interior reveal.
 OPENING_MATERIAL = PALETTE["drywall"]
+#: The perimeter casing/frame around a window and the head+jamb trim of an exterior
+#: door — a painted-trim band proud of the wall face (Phase 6, real geometry).
+TRIM_MATERIAL = PALETTE["trim"]
 #: The swinging/sliding door leaf, its jamb casing, and window mullions.
 DOOR_MATERIAL = PALETTE["door_leaf"]
 #: Window glazing — a translucent-reading pale blue pane.
