@@ -679,17 +679,39 @@ def test_renderer_has_the_sky_and_ground_hooks():
     assert "setGround" in RENDERER_JS            # the toggle / test hook
 
 
-def test_renderer_has_the_ground_shadow_hooks():
-    # A planar projected shadow pass onto the ground, stencil-guarded against double
-    # darkening, driven by the live sun direction.
-    assert "drawShadows" in RENDERER_JS          # the shadow pass
-    assert "shadowMatrix" in RENDERER_JS         # planar flattening along the light
-    assert "uShadowColor" in RENDERER_JS         # the translucent dark uniform
-    assert "shProg" in RENDERER_JS               # the third (shadow) program
-    assert "STENCIL_TEST" in RENDERER_JS         # stencil avoids double-darkening
-    assert "stencil: true" in RENDERER_JS        # the context requests a stencil buffer
-    assert "SHADOW_LAYERS" in RENDERER_JS        # walls/roof/porches/frame cast
-    assert "POLYGON_OFFSET_FILL" in RENDERER_JS  # + z-offset vs the ground
+def test_renderer_has_the_shadow_map_hooks():
+    # Phase 7 replaces the planar ground-shadow pass with a real depth shadow map so
+    # sun falls THROUGH window openings onto the interior floor. The old planar hooks
+    # are gone; the shadow-map hooks are present.
+    assert "drawShadowMap" in RENDERER_JS        # the offscreen sun-depth pass
+    assert "buildLightMatrix" in RENDERER_JS     # ortho light view-proj fit to bounds
+    assert "uLightVP" in RENDERER_JS             # light view-proj uniform (vs + fs)
+    assert "shadowFactor" in RENDERER_JS         # PCF sample + compare in the shader
+    assert "uShadowTex" in RENDERER_JS           # the sampled depth map
+    assert "uShadowOn" in RENDERER_JS            # gates shadows (off = disabled)
+    assert "createFramebuffer" in RENDERER_JS    # the offscreen FBO
+    assert "WEBGL_depth_texture" in RENDERER_JS  # preferred depth path
+    assert "packDepth" in RENDERER_JS and "unpackDepth" in RENDERER_JS  # RGBA8 fallback
+    assert "SHADOW_LAYERS" in RENDERER_JS        # the caster set (glass excluded)
+    # 3x3 PCF loop present.
+    assert "for(int i=-1;i<=1;i++)" in RENDERER_JS
+    # The old planar-shadow machinery is REMOVED (deliberate Phase 7 switch).
+    assert "shadowMatrix" not in RENDERER_JS     # no planar flattening matrix
+    assert "drawShadows(" not in RENDERER_JS     # no planar pass
+    assert "uShadowColor" not in RENDERER_JS     # no translucent-dark uniform
+    assert "STENCIL_TEST" not in RENDERER_JS     # no stencil guard
+    assert "stencil: true" not in RENDERER_JS    # context no longer asks for stencil
+
+
+def test_renderer_has_the_transparent_glass_pass_hooks():
+    # Glass draws LAST in a separate blended pass with depth-write off, so a client
+    # standing inside can see out through the windows.
+    assert "uGlassAlpha" in RENDERER_JS          # the glass-pass alpha uniform
+    assert "n.isGlass" in RENDERER_JS            # routes glazing into the glass pass
+    assert "nd.glass" in RENDERER_JS             # the per-node glass flag
+    assert "SRC_ALPHA" in RENDERER_JS            # standard alpha blend
+    assert "depthMask(false)" in RENDERER_JS     # glass never writes depth
+    assert "drawOne" in RENDERER_JS              # shared per-node draw for both passes
 
 
 def test_renderer_has_the_walk_velocity_smoothing_hooks():
@@ -715,9 +737,11 @@ def test_sky_ground_shadows_do_not_leak_into_glb_or_ifc_or_scene_nodes():
     for banned in ("ground", "sky", "shadow"):
         assert not any(banned in nm.lower() for nm in names), banned
     # Every node name is a known architectural prefix (the trim rides the existing
-    # window:/door: opening names), so exports stay clean.
+    # window:/door: opening names; Phase 7 adds baseboard:/ceiling: finish geometry),
+    # so exports stay clean.
     known = ("wall:", "room:", "slab:", "roof", "post:", "beam:", "porch:",
-             "stair:", "fixture:", "window:", "door:", "cased:", "opening:")
+             "stair:", "fixture:", "window:", "door:", "cased:", "opening:",
+             "baseboard:", "ceiling:")
     for nm in names:
         assert nm.startswith(known), nm
     # And the atmosphere never perturbs the export bytes.

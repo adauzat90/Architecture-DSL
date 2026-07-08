@@ -50,6 +50,7 @@ import math
 
 from .elements import Barndominium
 from .gltf import Scene, _to_gltf, build_scene, effective_linear
+from .materials import GLASS_MATERIAL
 
 #: Human labels for the layer toggles, in display order.
 _LAYER_LABELS = {
@@ -59,6 +60,8 @@ _LAYER_LABELS = {
     "floors": "Floors",
     "porches": "Porches",
     "openings": "Openings",
+    "trim": "Trim",
+    "ceilings": "Ceilings",
     "stairs": "Stairs",
     "fixtures": "Fixtures",
 }
@@ -372,6 +375,14 @@ def scene_json(scene: Scene) -> dict:
         # the orbit path and the exported glb — which bake closed geometry — agree.
         if n.door is not None:
             entry["door"] = n.door
+        # A glazing pane ships ``isGlass`` so the renderer can draw it LAST in a
+        # blended, depth-write-off pass (see-through windows) and keep it out of the
+        # shadow-caster set (a window lets sun THROUGH, it doesn't cast a dark
+        # patch). Identified by the shared glass material, so only true glazing
+        # carries it; every opaque surface omits the key. Viewer-JSON only — the
+        # glTF/IFC exporters never see it.
+        if n.material is GLASS_MATERIAL:
+            entry["isGlass"] = True
         nodes.append(entry)
     layers = [ly for ly in Scene.LAYERS if any(nd["layer"] == ly for nd in nodes)]
     return {"nodes": nodes, "layers": layers, "walk": _walk_block(scene),
@@ -447,10 +458,9 @@ def _esc(s: str) -> str:
 # it is never run through str.format. Returns null when WebGL is unavailable.
 RENDERER_JS = r"""
 function mountScene(canvas, labels, togglesEl) {
-  // A stencil buffer is requested so the planar ground-shadow pass can mark each
-  // shadowed pixel once and never double-darken where projected triangles overlap
-  // (Phase 6). Falls back gracefully if the context has no stencil bits.
-  const gl = canvas.getContext('webgl', {antialias: true, stencil: true});
+  // Phase 7 replaces the planar ground-shadow pass with a real depth shadow map, so
+  // no stencil buffer is needed; a plain antialiased context is enough.
+  const gl = canvas.getContext('webgl', {antialias: true});
   if (!gl) {
     const msg = document.createElement('p');
     msg.style.cssText = 'padding:2em;font:16px sans-serif;color:#7a8494';
@@ -469,6 +479,11 @@ function mountScene(canvas, labels, togglesEl) {
   function perspective(fovy, aspect, n, f) { const t = 1 / Math.tan(fovy / 2);
     return [t / aspect, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1,
       0, 0, (2 * f * n) / (n - f), 0]; }
+  // A column-major orthographic projection (the sun\'s shadow camera is a parallel
+  // projection). Maps [l,r]x[b,t]x[n,f] to the unit clip cube.
+  function ortho(l, r, b, t, n, f) {
+    return [2 / (r - l), 0, 0, 0, 0, 2 / (t - b), 0, 0, 0, 0, -2 / (f - n), 0,
+      -(r + l) / (r - l), -(t + b) / (t - b), -(f + n) / (f - n), 1]; }
   function lookAt(e, c, up) {
     const z = norm(sub(e, c)), x = norm(cross(up, z)), y = cross(z, x);
     return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
@@ -494,28 +509,6 @@ function mountScene(canvas, labels, togglesEl) {
   function translate(dx, dy, dz) {
     return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, dx, dy, dz, 1];
   }
-  // A planar-projection matrix (column-major) that flattens any point onto the
-  // ground plane y = planeY along the light direction L (glTF frame, surface->sun,
-  // so light travels -L). For a point P the shadow lands at
-  //   S = P - ((P.y - planeY) / L.y) * L                                   (i)
-  // A very low sun makes (P.y - planeY)/L.y huge and stretches shadows to the
-  // horizon; `maxLen` clamps the along-light travel so they stay bounded (the
-  // shader can't clamp per-vertex cheaply, so we soften L's downward slope toward a
-  // floor when the sun is low — the existing 5-degree altitude floor bounds L.y).
-  // Deterministic and exact for a normal-height sun; the clamp only bites near dusk.
-  function shadowMatrix(L, planeY) {
-    // Guard a near-horizontal light so we never divide by ~0; SUN_MIN_ALT already
-    // keeps L.y above ~sin(5deg)=0.087, but clamp defensively.
-    const ly = Math.max(L[1], 0.09);
-    const lx = L[0], lz = L[2];
-    // Column-major 4x4 implementing (i): S.x = x - (lx/ly)*(y-planeY), etc.
-    // Written so M * [x,y,z,1] gives [S.x, planeY, S.z, 1].
-    return [
-      1, 0, 0, 0,
-      -lx / ly, 0, -lz / ly, 0,
-      0, 0, 1, 0,
-      (lx / ly) * planeY, planeY, (lz / ly) * planeY, 1];
-  }
   // A dimension for a room-name toast: one decimal only when the value isn't a
   // whole number, so "14 x 16 ft" stays clean but "14.5" keeps its half. ASCII
   // only ("x", "sq ft") per the viewer's plain-text rule.
@@ -535,9 +528,12 @@ function mountScene(canvas, labels, togglesEl) {
   // upper 3x3 (rigid rotations only, so no inverse-transpose is needed).
   const vs = 'attribute vec3 aPos; attribute vec3 aNorm;'
     + ' uniform mat4 uMVP; uniform mat4 uModel;'
-    + ' varying vec3 vN; varying vec3 vWorld;'
+    // uLightVP is the sun\'s ortho view-projection; vLightPos carries the world
+    // point into the shadow map\'s clip space so the fragment can compare depths.
+    + ' uniform mat4 uLightVP;'
+    + ' varying vec3 vN; varying vec3 vWorld; varying vec4 vLightPos;'
     + ' void main(){ vec4 wp=uModel*vec4(aPos,1.0); vWorld=wp.xyz;'
-    + '   vN=mat3(uModel)*aNorm; gl_Position=uMVP*wp; }';
+    + '   vN=mat3(uModel)*aNorm; vLightPos=uLightVP*wp; gl_Position=uMVP*wp; }';
   const fs = 'precision mediump float;'
     + ' varying vec3 vN; varying vec3 vWorld;'
     + ' uniform vec3 uColor; uniform vec3 uEye;'
@@ -556,6 +552,37 @@ function mountScene(canvas, labels, togglesEl) {
     // edge dissolves into the sky instead of showing a hard rim. uFogNear >= uFogFar
     // (the JS default when fog is off) is a no-op.
     + ' uniform vec3 uFogColor; uniform float uFogNear; uniform float uFogFar;'
+    // uGlassAlpha is 0 in the opaque pass (fragments stay fully opaque) and ~0.35 in
+    // the glass pass, where a slight view-angle (fresnel-ish) boost makes grazing
+    // panes read a touch more solid. A constant is acceptable for a schematic.
+    + ' uniform float uGlassAlpha;'
+    // Shadow map: uShadowTex is the sun\'s depth render; uShadowOn gates the whole
+    // feature (0 = shadows disabled, e.g. FBO setup failed); uShadowTexel is 1/size
+    // for the 3x3 PCF tap spacing; uShadowPack is 1 when depth is packed into RGBA8
+    // (no WEBGL_depth_texture), 0 when it is a real depth texture sampled in .r.
+    + ' uniform sampler2D uShadowTex; uniform float uShadowOn;'
+    + ' uniform float uShadowTexel; uniform float uShadowPack;'
+    // Unpack a depth in [0,1] from an RGBA8 texel (classic 4-byte pack); when using
+    // a real depth texture the value already lives in .r, so uShadowPack picks.
+    + ' float unpackDepth(vec4 c){'
+    + '   return dot(c, vec4(1.0, 1.0/255.0, 1.0/65025.0, 1.0/16581375.0)); }'
+    // 3x3 PCF: fraction of the neighbourhood in shadow. `ndc` is the fragment in the
+    // light\'s clip space; `bias` is subtracted from the stored depth to kill acne.
+    + ' float shadowFactor(vec4 lp, float bias){'
+    + '   if(uShadowOn < 0.5) return 1.0;'
+    + '   vec3 ndc = lp.xyz / lp.w;'
+    + '   ndc = ndc * 0.5 + 0.5;'
+    // Outside the light frustum: treat as lit (no shadow beyond the fitted bounds).
+    + '   if(ndc.x < 0.0 || ndc.x > 1.0 || ndc.y < 0.0 || ndc.y > 1.0 || ndc.z > 1.0)'
+    + '     return 1.0;'
+    + '   float cur = ndc.z - bias; float lit = 0.0;'
+    + '   for(int i=-1;i<=1;i++){ for(int j=-1;j<=1;j++){'
+    + '     vec2 off = vec2(float(i), float(j)) * uShadowTexel;'
+    + '     vec4 s = texture2D(uShadowTex, ndc.xy + off);'
+    + '     float d = (uShadowPack > 0.5) ? unpackDepth(s) : s.r;'
+    + '     lit += (cur <= d) ? 1.0 : 0.0; } }'
+    + '   return lit / 9.0; }'
+    + ' varying vec4 vLightPos;'
     + ' void main(){'
     + '   if(vWorld.y > uClipY) discard;'
     + '   vec3 n=normalize(vN); vec3 an=abs(n); vec2 uv;'
@@ -575,8 +602,15 @@ function mountScene(canvas, labels, togglesEl) {
     + '   vec3 sunCol=mix(vec3(1.0),vec3(1.0,0.85,0.7),uSunWarmth);'
     + '   float amb=(0.28+0.22*(0.5+0.5*n.y))*(1.0-0.22*uSunWarmth);'
     + '   vec3 ambCol=mix(vec3(1.0),vec3(0.82,0.86,1.0),uSunWarmth*0.6);'
+    // Shadow the DIRECT term only (this diffuse + the specular below): a
+    // normal-offset bias that grows at grazing angles kills acne on faces
+    // near-parallel to the sun. Ambient/sky/fill stay untouched, so a shadowed
+    // interior floor still reads (the sun THROUGH a window brightens the patch it
+    // reaches; the surrounding floor just loses the sun\'s direct contribution).
+    + '   float sbias=mix(0.0009, 0.004, 1.0 - max(dot(n,L),0.0));'
+    + '   float shadow=shadowFactor(vLightPos, sbias);'
     // Metals carry little diffuse; fade it out as metallic rises.
-    + '   vec3 col=albedo*(amb*ambCol+diff*0.72*sunCol)*(1.0-0.65*uMetal);'
+    + '   vec3 col=albedo*(amb*ambCol+diff*0.72*sunCol*shadow)*(1.0-0.65*uMetal);'
     // Eye-attached fill (walk mode only; uFill=0 in orbit is a true no-op): lights
     // surfaces facing the camera so first-person interiors don't read flat and
     // dim. A gentle distance falloff keeps far walls from glowing.
@@ -586,13 +620,20 @@ function mountScene(canvas, labels, togglesEl) {
     + '   float sh=mix(10.0,90.0,1.0-uRough);'
     + '   float spec=pow(max(dot(n,H),0.0),sh);'
     + '   vec3 specCol=mix(vec3(0.05),uColor,uMetal);'
-    + '   col+=specCol*spec*(0.25+0.75*uMetal);'
+    // The sun\'s specular highlight is a direct term too, so it darkens in shadow.
+    + '   col+=specCol*spec*(0.25+0.75*uMetal)*shadow;'
     + '   vec3 outc=pow(min(col,vec3(1.4)), vec3(1.0/2.2));'
     // Fold in distance fog after tone-mapping so the mix meets the (already
     // gamma-space) sky gradient the sky pass drew. No-op when uFogFar<=uFogNear.
     + '   float fog=clamp((length(uEye-vWorld)-uFogNear)/max(uFogFar-uFogNear,1e-3),0.0,1.0);'
     + '   outc=mix(outc, uFogColor, fog);'
-    + '   gl_FragColor=vec4(outc, 1.0);'
+    // Opaque pass: uGlassAlpha=0 -> alpha 1.0. Glass pass: uGlassAlpha=0.35 with a
+    // fresnel-ish boost toward grazing angles (up to ~+0.3), so windows are
+    // see-through head-on and read a little more solid at the edges.
+    + '   float alpha=1.0;'
+    + '   if(uGlassAlpha>0.0){ float fres=pow(1.0-abs(dot(n,V)),3.0);'
+    + '     alpha=clamp(uGlassAlpha+0.3*fres, 0.0, 1.0); }'
+    + '   gl_FragColor=vec4(outc, alpha);'
     + ' }';
   function compileShader(type, src) { const s = gl.createShader(type);
     gl.shaderSource(s, src); gl.compileShader(s);
@@ -620,6 +661,12 @@ function mountScene(canvas, labels, togglesEl) {
   const uFogColor = gl.getUniformLocation(prog, 'uFogColor');
   const uFogNear = gl.getUniformLocation(prog, 'uFogNear');
   const uFogFar = gl.getUniformLocation(prog, 'uFogFar');
+  const uGlassAlpha = gl.getUniformLocation(prog, 'uGlassAlpha');
+  const uLightVP = gl.getUniformLocation(prog, 'uLightVP');
+  const uShadowTex = gl.getUniformLocation(prog, 'uShadowTex');
+  const uShadowOn = gl.getUniformLocation(prog, 'uShadowOn');
+  const uShadowTexel = gl.getUniformLocation(prog, 'uShadowTexel');
+  const uShadowPack = gl.getUniformLocation(prog, 'uShadowPack');
   gl.getExtension('OES_element_index_uint');
   gl.enable(gl.DEPTH_TEST);
 
@@ -654,27 +701,115 @@ function mountScene(canvas, labels, togglesEl) {
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]),
     gl.STATIC_DRAW);
 
-  // SHADOW: positions only, flattened onto the ground by uShadowMat (built each
-  // draw from the live sun direction), painted a single translucent dark colour.
-  // No texture, no lighting — the stencil buffer keeps overlaps from stacking.
-  const shVs = 'attribute vec3 aPos; uniform mat4 uMVP; uniform mat4 uShadowMat;'
-    + ' void main(){ gl_Position=uMVP*uShadowMat*vec4(aPos,1.0); }';
-  const shFs = 'precision mediump float; uniform vec4 uShadowColor;'
-    + ' void main(){ gl_FragColor=uShadowColor; }';
-  const shProg = gl.createProgram();
-  gl.attachShader(shProg, compileShader(gl.VERTEX_SHADER, shVs));
-  gl.attachShader(shProg, compileShader(gl.FRAGMENT_SHADER, shFs));
-  gl.linkProgram(shProg);
-  const shAPos = gl.getAttribLocation(shProg, 'aPos');
-  const shMVP = gl.getUniformLocation(shProg, 'uMVP');
-  const uShadowMat = gl.getUniformLocation(shProg, 'uShadowMat');
-  const uShadowColor = gl.getUniformLocation(shProg, 'uShadowColor');
-  const hasStencil = gl.getContextAttributes && gl.getContextAttributes().stencil;
+  // SHADOW MAP (Phase 7, replaces the old planar ground-shadow pass): the scene is
+  // rendered from the sun into an offscreen depth buffer each frame, and the main
+  // shader compares each fragment\'s light-space depth to it, so sun falls THROUGH a
+  // window opening onto the interior floor (the most persuasive interior effect).
+  // The depth program writes only depth — packed into an RGBA8 colour when there is
+  // no WEBGL_depth_texture (the classic 4-byte pack), or a real depth texture when
+  // there is. Per-node uModel is honoured so an open door lets light through
+  // (animated doors handled for free). Everything but glass + the ground casts.
+  const depthExt = gl.getExtension('WEBGL_depth_texture')
+    || gl.getExtension('WEBKIT_WEBGL_depth_texture')
+    || gl.getExtension('MOZ_WEBGL_depth_texture');
+  const shadowPack = depthExt ? 0 : 1;    // 1 = pack depth into RGBA8 colour
+  const smVs = 'attribute vec3 aPos; uniform mat4 uLightVP; uniform mat4 uModel;'
+    + ' varying vec4 vPos;'
+    + ' void main(){ vPos=uLightVP*uModel*vec4(aPos,1.0); gl_Position=vPos; }';
+  // When packing, encode gl_Position.z/w (0..1) into RGBA8; a real depth texture
+  // fills its own depth attachment, so the colour output is unused (write white).
+  const smFs = 'precision highp float; varying vec4 vPos; uniform float uPack;'
+    + ' vec4 packDepth(float d){'
+    + '   vec4 e = vec4(1.0, 255.0, 65025.0, 16581375.0) * d;'
+    + '   e = fract(e);'
+    + '   e -= e.yzww * vec4(1.0/255.0, 1.0/255.0, 1.0/255.0, 0.0);'
+    + '   return e; }'
+    + ' void main(){'
+    + '   if(uPack > 0.5){ float d = vPos.z / vPos.w * 0.5 + 0.5;'
+    + '     gl_FragColor = packDepth(clamp(d, 0.0, 1.0)); }'
+    + '   else gl_FragColor = vec4(1.0); }';
+  const smProg = gl.createProgram();
+  gl.attachShader(smProg, compileShader(gl.VERTEX_SHADER, smVs));
+  gl.attachShader(smProg, compileShader(gl.FRAGMENT_SHADER, smFs));
+  gl.linkProgram(smProg);
+  const smAPos = gl.getAttribLocation(smProg, 'aPos');
+  const smLightVP = gl.getUniformLocation(smProg, 'uLightVP');
+  const smModel = gl.getUniformLocation(smProg, 'uModel');
+  const smPack = gl.getUniformLocation(smProg, 'uPack');
 
-  // Which layers cast a ground shadow: the massing that reads as the building's
-  // silhouette. Floors/openings/fixtures/stairs are skipped (flat on the slab, or
-  // too fine to matter) so the pass stays one cheap redraw of ~4 layers.
-  const SHADOW_LAYERS = { walls: 1, roof: 1, porches: 1, frame: 1 };
+  // Which layers CAST a sun shadow: everything opaque that reads as building mass.
+  // Openings cast (a door leaf / mullion / trim throws a real shadow; the glass
+  // node inside them is filtered out by isGlass so a window casts light, not dark).
+  // The ground plane is a receiver only, never a caster, so it is not a scene node
+  // here and simply isn\'t drawn into the map.
+  const SHADOW_LAYERS = { walls: 1, roof: 1, openings: 1, trim: 1, ceilings: 1,
+    frame: 1, porches: 1, floors: 1, stairs: 1, fixtures: 1 };
+
+  // --- shadow-map framebuffer (guarded; disables shadows on any failure) -----
+  // A 2048^2 depth target (falls back to 1024 if the allocation fails), with either
+  // a real depth texture (WEBGL_depth_texture) or a packed-RGBA8 colour target. Any
+  // setup failure (no extensions, stubbed GL in the headless harness, incomplete
+  // FBO) leaves `shadowOK` false: shadows are disabled, the main shader\'s uShadowOn
+  // is 0, and rendering proceeds unshadowed — never broken.
+  let shadowOK = false, shadowFBO = null, shadowTex = null, shadowDepthRB = null;
+  let shadowSize = 2048;
+  function buildShadowTarget(size) {
+    const fb = gl.createFramebuffer();
+    const tex = gl.createTexture();
+    let depthRB = null;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (depthExt) {
+      // Real depth texture: colour is unused, depth lives in the texture.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT, size, size, 0,
+        gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    if (depthExt) {
+      // Colour attachment needs a (dummy) renderbuffer for a complete FBO.
+      const colorRB = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, colorRB);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA4, size, size);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+        gl.RENDERBUFFER, colorRB);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT,
+        gl.TEXTURE_2D, tex, 0);
+    } else {
+      depthRB = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, depthRB);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, size, size);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D, tex, 0);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT,
+        gl.RENDERBUFFER, depthRB);
+    }
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return ok ? { fb, tex, depthRB } : null;
+  }
+  function initShadow() {
+    // Some GL contexts / harness stubs throw on FBO calls; wrap the whole thing so a
+    // failure just leaves shadows off. Try 2048, then 1024.
+    try {
+      if (!gl.createFramebuffer || !gl.checkFramebufferStatus) return;
+      let t = buildShadowTarget(2048);
+      if (!t) { t = buildShadowTarget(1024); shadowSize = t ? 1024 : shadowSize; }
+      if (!t) return;
+      shadowFBO = t.fb; shadowTex = t.tex; shadowDepthRB = t.depthRB;
+      shadowOK = true;
+    } catch (e) { shadowOK = false; }
+  }
+  initShadow();
+  // The sun\'s ortho view-projection, rebuilt each draw from lightDir + scene bounds
+  // by buildLightMatrix(); identity until the first scene sizes it.
+  let lightVP = IDENTITY.slice();
 
   // --- procedural pattern textures ------------------------------------------
   // One detail map per pattern, drawn on an offscreen canvas (no network) and
@@ -773,6 +908,9 @@ function mountScene(canvas, labels, togglesEl) {
   // --- state (survives setScene so the view/toggles persist on recompile) ---
   let nodes = [];
   let center = [0, 0, 0], radius = 1;
+  // World-frame (glTF: y up) scene AABB, kept so the shadow camera can fit an ortho
+  // frustum around the whole model along the sun direction each frame.
+  let sceneMin = [0, 0, 0], sceneMax = [1, 1, 1];
   let yaw = -0.7, pitch = 0.6, dist = 2.6;
   const target = [0, 0, 0];
   const hidden = {};
@@ -982,11 +1120,15 @@ function mountScene(canvas, labels, togglesEl) {
       // buffers hold) so ray picking (measure + click-to-identify) can Moller-
       // Trumbore against the triangles without reading them back from WebGL; `name`
       // + `mat` name the surface for the identify toast.
+      // `isGlass` (shipped by scene_json for glazing) routes the node into the LAST,
+      // blended, depth-write-off draw pass so windows read see-through, and keeps it
+      // out of the shadow-caster set so a window casts LIGHT, not a dark patch.
       return { layer: n.layer, color: n.color, name: n.name || '', mat: n.mat || '',
         rough: n.roughness == null ? 0.8 : n.roughness,
         metal: n.metallic == null ? 0.0 : n.metallic,
         patScale: n.patternScale || 1.0, tex: patternTexture(pattern),
         door: n.door || null, open: 0, target: 0, pinned: false,
+        glass: !!n.isGlass,
         pos: pos, idx: n.indices,
         pb, nb, ib, count: n.indices.length };
     });
@@ -997,6 +1139,8 @@ function mountScene(canvas, labels, togglesEl) {
       // Vertical scene bounds drive the section-cut slider range (just above the
       // ground floor up to above the ridge). World Y is up in the glTF frame.
       sceneMinY = bmin[1]; sceneMaxY = bmax[1];
+      // Full world AABB for the shadow camera to fit an ortho frustum around.
+      sceneMin = bmin.slice(); sceneMax = bmax.slice();
       buildGround();   // (re)size the ground plane + fog band to the new scene
     }
     if (!framed && nodes.length) {  // frame once, then keep the user's view
@@ -1133,14 +1277,66 @@ function mountScene(canvas, labels, togglesEl) {
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
     gl.viewport(0, 0, canvas.width, canvas.height); }
 
+  // The sun\'s orthographic view-projection, fitted to the scene AABB along the
+  // light direction, so the shadow map covers the whole model at full resolution.
+  // Eye sits back along the sun from the scene centre by the bounding radius; the
+  // ortho half-extent is the radius (a hair padded), near/far bracket the depth
+  // along the light. Rebuilt each draw from lightDir (moves with the time/season
+  // slider). Deterministic; the returned matrix is column-major for uniformMatrix4fv.
+  function buildLightMatrix() {
+    const c = [(sceneMin[0] + sceneMax[0]) / 2, (sceneMin[1] + sceneMax[1]) / 2,
+      (sceneMin[2] + sceneMax[2]) / 2];
+    // A world-space radius that comfortably encloses the scene AABB corners.
+    const r = Math.max(1, 0.5 * Math.hypot(sceneMax[0] - sceneMin[0],
+      sceneMax[1] - sceneMin[1], sceneMax[2] - sceneMin[2])) * 1.15;
+    const L = lightDir;                       // surface->sun, so the eye is +L * r
+    const eye = [c[0] + L[0] * r * 2, c[1] + L[1] * r * 2, c[2] + L[2] * r * 2];
+    // Guard an up vector parallel to the light (sun near straight overhead).
+    const up = (Math.abs(L[1]) > 0.99) ? [0, 0, 1] : [0, 1, 0];
+    const v = lookAt(eye, c, up);
+    const p = ortho(-r, r, -r, r, 0.01, r * 4);
+    return mul(p, v);
+  }
+
+  // Render the shadow-caster scene from the sun into the depth FBO. Casters are all
+  // opaque building layers EXCEPT glass (a window must pass light, not block it) and
+  // the ground (a receiver only, not a scene node here). Per-node uModel is applied
+  // so an OPEN door lets sun through the doorway — animated doors handled for free.
+  // Hidden layers don\'t cast (a toggled-off roof throws no shadow). Casters ignore
+  // the section cut (simplest and acceptable — a dollhouse cut still lights sanely).
+  function drawShadowMap() {
+    if (!shadowOK) return;
+    lightVP = buildLightMatrix();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFBO);
+    gl.viewport(0, 0, shadowSize, shadowSize);
+    gl.clearColor(1, 1, 1, 1);   // far depth = white (packed) / unused (depth tex)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(smProg);
+    gl.uniformMatrix4fv(smLightVP, false, new Float32Array(lightVP));
+    gl.uniform1f(smPack, shadowPack);
+    for (const nd of nodes) {
+      if (nd.glass || hidden[nd.layer] || !SHADOW_LAYERS[nd.layer]) continue;
+      gl.uniformMatrix4fv(smModel, false, new Float32Array(
+        (walking && nd.door) ? doorModelMatrix(nd) : IDENTITY));
+      gl.bindBuffer(gl.ARRAY_BUFFER, nd.pb);
+      gl.enableVertexAttribArray(smAPos);
+      gl.vertexAttribPointer(smAPos, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, nd.ib);
+      gl.drawElements(gl.TRIANGLES, nd.count, gl.UNSIGNED_INT, 0);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
   function draw() {
     if (!hasScene) return;
     resize();
+    // Shadow map first (its own FBO + viewport), before anything hits the screen, so
+    // the main pass can sample it. Skipped entirely when shadows are unavailable.
+    if (showGround && shadowOK) drawShadowMap();
     // Clear colour is a true no-op under the sky pass (which repaints every pixel);
-    // it only shows for the split-second before the first sky draw. Stencil is
-    // cleared for the shadow pass's single-darken mark.
+    // it only shows for the split-second before the first sky draw.
     gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const aspect = canvas.width / Math.max(1, canvas.height);
     let eye, view, proj, fill, clip;
     if (walking) {
@@ -1167,10 +1363,10 @@ function mountScene(canvas, labels, togglesEl) {
     }
     const mvp = new Float32Array(mul(proj, view));
     // Atmosphere first: the sky gradient behind everything, then the ground plane,
-    // then the sun's ground shadow, then the model. All renderer-only.
+    // then the model (opaque then glass). All renderer-only.
     if (showGround) drawSky();
-    // The main program's per-frame camera + sun + fog uniforms (shared by the
-    // ground draw and drawNodes).
+    // The main program's per-frame camera + sun + fog + shadow uniforms (shared by
+    // the ground draw and drawNodes).
     gl.useProgram(prog);
     gl.uniformMatrix4fv(uMVP, false, mvp);
     gl.uniform3fv(uEye, new Float32Array(eye));
@@ -1182,7 +1378,22 @@ function mountScene(canvas, labels, togglesEl) {
     gl.uniform3fv(uFogColor, new Float32Array(skyHorizon));
     gl.uniform1f(uFogNear, showGround ? fogNear : 1e9);
     gl.uniform1f(uFogFar, showGround ? fogFar : 1e9);
-    if (showGround) { drawGround(); drawShadows(mvp); gl.useProgram(prog); }
+    // Shadow uniforms: bind the depth map to unit 1, feed the light view-proj + PCF
+    // texel size. uShadowOn gates the whole feature (off when unavailable, or when
+    // the ground/atmosphere is toggled off so an unlit orbit stays flat as before).
+    const shadowLive = showGround && shadowOK;
+    gl.uniform1f(uShadowOn, shadowLive ? 1.0 : 0.0);
+    if (shadowLive) {
+      gl.uniformMatrix4fv(uLightVP, false, new Float32Array(lightVP));
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+      gl.uniform1i(uShadowTex, 1);
+      gl.uniform1f(uShadowTexel, 1.0 / shadowSize);
+      gl.uniform1f(uShadowPack, shadowPack);
+    } else {
+      gl.uniformMatrix4fv(uLightVP, false, new Float32Array(IDENTITY));
+    }
+    if (showGround) { drawGround(); }
     drawNodes();
   }
 
@@ -1220,49 +1431,6 @@ function mountScene(canvas, labels, togglesEl) {
     gl.drawArrays(gl.TRIANGLES, 0, groundCount);
   }
 
-  // Ground shadows: re-draw the shadow-casting layers flattened onto y=0.005 along
-  // the live sun direction, in a translucent dark. The classic double-darkening
-  // where projected triangles overlap is solved with the STENCIL buffer: we mark a
-  // pixel the first time it is shadowed (stencil 0 -> 1) and reject it thereafter,
-  // so every shadowed pixel is darkened exactly once regardless of how many
-  // casters project onto it. A tiny y-offset (0.005) + polygonOffset avoids
-  // z-fighting with the ground plane. Moves live with the Phase 4 time/season
-  // slider because uShadowMat is rebuilt from lightDir every frame.
-  function drawShadows(mvp) {
-    if (!groundCount) return;
-    const smat = new Float32Array(shadowMatrix(lightDir, 0.005));
-    gl.useProgram(shProg);
-    gl.uniformMatrix4fv(shMVP, false, mvp);
-    gl.uniformMatrix4fv(uShadowMat, false, smat);
-    // A soft translucent dark; warms almost imperceptibly at dusk with the sky.
-    gl.uniform4fv(uShadowColor, new Float32Array([0.10, 0.11, 0.13, 0.28]));
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.depthMask(false);                       // don't perturb the depth buffer
-    gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(-1.0, -1.0);
-    let stencilOn = false;
-    if (hasStencil) {
-      gl.enable(gl.STENCIL_TEST);
-      gl.stencilFunc(gl.EQUAL, 0, 0xFF);       // draw only where not yet shadowed
-      gl.stencilOp(gl.KEEP, gl.KEEP, gl.INCR); // ...then mark it shadowed
-      stencilOn = true;
-    }
-    for (const nd of nodes) {
-      if (!SHADOW_LAYERS[nd.layer] || hidden[nd.layer]) continue;
-      gl.bindBuffer(gl.ARRAY_BUFFER, nd.pb);
-      gl.enableVertexAttribArray(shAPos);
-      gl.vertexAttribPointer(shAPos, 3, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, nd.ib);
-      gl.drawElements(gl.TRIANGLES, nd.count, gl.UNSIGNED_INT, 0);
-    }
-    if (stencilOn) gl.disable(gl.STENCIL_TEST);
-    gl.disable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(0, 0);
-    gl.depthMask(true); gl.disable(gl.BLEND);
-  }
-
-  // The layer-respecting node draw, shared by the orbit and walk cameras (the
-  // MVP/eye uniforms are set by the caller). Hidden layers (e.g. the roof toggled
-  // off to look inside) are skipped in walk mode too.
   // The model matrix for a door leaf at its current open fraction (0 closed, 1
   // fully open). Swing rotates up to ~100 deg about the hinge toward `out`;
   // slide translates ~90% of the width along `dir`; overhead lifts ~90% of the
@@ -1284,26 +1452,59 @@ function mountScene(canvas, labels, togglesEl) {
     return rotY(d.hinge[0], d.hinge[1], ang);
   }
 
+  // Draw one node with the main program (uModel/material/texture/geometry). Shared
+  // by the opaque and glass passes; the caller sets the blend/depth state.
+  function drawOne(nd) {
+    gl.uniformMatrix4fv(uModel, false, new Float32Array(
+      (walking && nd.door) ? doorModelMatrix(nd) : IDENTITY));
+    gl.uniform3fv(uColor, nd.color);
+    gl.uniform1f(uRough, nd.rough);
+    gl.uniform1f(uMetal, nd.metal);
+    gl.uniform1f(uPatScale, nd.patScale);
+    if (nd.tex) { gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, nd.tex); gl.uniform1i(uTex, 0);
+      gl.uniform1f(uHasTex, 1.0); }
+    else { gl.uniform1f(uHasTex, 0.0); }
+    gl.bindBuffer(gl.ARRAY_BUFFER, nd.pb);
+    gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, nd.nb);
+    gl.enableVertexAttribArray(aNorm); gl.vertexAttribPointer(aNorm, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, nd.ib);
+    gl.drawElements(gl.TRIANGLES, nd.count, gl.UNSIGNED_INT, 0);
+  }
+
+  // The layer-respecting node draw, shared by the orbit and walk cameras (the
+  // MVP/eye/sun/shadow uniforms are set by the caller). Two passes so glass reads
+  // see-through: (1) OPAQUE — every non-glass visible node, depth write on; (2)
+  // GLASS — the glazing panes LAST, with alpha blending on and depth WRITE off (so
+  // a pane never occludes the pane behind it) but depth TEST on (so a wall in front
+  // still hides it). Hidden layers (e.g. the roof toggled off to look inside) are
+  // skipped in both passes and in walk mode too. A constant ~0.35 alpha with a
+  // light view-facing fresnel boost is enough for a schematic — windows rarely
+  // stack, so glass-over-glass artefacts are acceptable and no per-triangle sort is
+  // done. `uGlassAlpha` 0 in the opaque pass keeps that pass fully opaque.
   function drawNodes() {
+    // (1) Opaque pass.
+    gl.uniform1f(uGlassAlpha, 0.0);
     for (const nd of nodes) {
-      if (hidden[nd.layer]) continue;
-      gl.uniformMatrix4fv(uModel, false, new Float32Array(
-        (walking && nd.door) ? doorModelMatrix(nd) : IDENTITY));
-      gl.uniform3fv(uColor, nd.color);
-      gl.uniform1f(uRough, nd.rough);
-      gl.uniform1f(uMetal, nd.metal);
-      gl.uniform1f(uPatScale, nd.patScale);
-      if (nd.tex) { gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, nd.tex); gl.uniform1i(uTex, 0);
-        gl.uniform1f(uHasTex, 1.0); }
-      else { gl.uniform1f(uHasTex, 0.0); }
-      gl.bindBuffer(gl.ARRAY_BUFFER, nd.pb);
-      gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ARRAY_BUFFER, nd.nb);
-      gl.enableVertexAttribArray(aNorm); gl.vertexAttribPointer(aNorm, 3, gl.FLOAT, false, 0, 0);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, nd.ib);
-      gl.drawElements(gl.TRIANGLES, nd.count, gl.UNSIGNED_INT, 0);
+      if (hidden[nd.layer] || nd.glass) continue;
+      drawOne(nd);
     }
+    // (2) Glass pass: blended, depth-test on, depth-write off.
+    let anyGlass = false;
+    for (const nd of nodes) { if (nd.glass && !hidden[nd.layer]) { anyGlass = true; break; } }
+    if (!anyGlass) return;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    gl.uniform1f(uGlassAlpha, 0.35);
+    for (const nd of nodes) {
+      if (hidden[nd.layer] || !nd.glass) continue;
+      drawOne(nd);
+    }
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.uniform1f(uGlassAlpha, 0.0);
   }
 
   // === first-person walk mode ==============================================
@@ -2105,13 +2306,16 @@ function mountScene(canvas, labels, togglesEl) {
       orientation: sunOrient, latitude: sunLat,
       clipY: clipY, clipActive: clipY < NO_CLIP - 1, level: levelIdx,
       walking: walking,
-      // Atmosphere (Phase 6): the derived sky/horizon/ground colours + the fog band
-      // + the current ground-shadow projection matrix, so a headless test can check
-      // the horizon warms with the sun and the shadow flattening maps a raised point
-      // to the ground along the light. `showGround` reports the session toggle.
+      // Atmosphere (Phase 6): the derived sky/horizon/ground colours + the fog band,
+      // so a headless test can check the horizon warms with the sun. `showGround`
+      // reports the session toggle.
       skyZenith: skyZenith.slice(), skyHorizon: skyHorizon.slice(),
       groundColor: GROUND_COLOR.slice(), fogNear: fogNear, fogFar: fogFar,
-      showGround: showGround, shadowMat: shadowMatrix(lightDir, 0.005),
+      showGround: showGround,
+      // Shadow map (Phase 7): whether shadows are live, and the sun\'s current
+      // orthographic view-projection, so a headless test can map a known world
+      // point through it and assert it lands inside the unit shadow frustum.
+      shadowOn: shadowOK, shadowSize: shadowSize, lightVP: buildLightMatrix(),
     };
   }
   // Toggle the sky+ground+shadow atmosphere (renderer-only; session flag). The test
