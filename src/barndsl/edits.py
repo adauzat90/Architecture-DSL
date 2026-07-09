@@ -221,126 +221,236 @@ class EditResult:
 
 
 def edit_from_json(obj: object) -> Edit | EditError:
-    """Build an :class:`Edit` from the JSON body the server received, or an
-    :class:`EditError` if the envelope is structurally wrong. Value-level checks
-    (finite numbers, positive sizes) happen in :func:`apply_edit`."""
+    """Build an :class:`Edit` from the JSON body the server received."""
     if not isinstance(obj, dict):
         return EditError("malformed", "edit must be a JSON object")
     kind = obj.get("kind")
-    if kind == "move_room":
-        return Edit("move_room", room=_as_str(obj.get("room")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
-    if kind == "resize_room":
-        return Edit("resize_room", room=_as_str(obj.get("room")),
-                    w=_as_num(obj.get("w")), l=_as_num(obj.get("l")))
-    if kind == "move_opening":
-        return Edit("move_opening", opening=_as_str(obj.get("opening")),
-                    key=_as_str(obj.get("key")), offset=_as_num(obj.get("offset")))
-    if kind == "move_fixture":
-        return Edit("move_fixture", key=_as_str(obj.get("key")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
-    if kind == "add_fixture":
-        return Edit("add_fixture", room=_as_str(obj.get("room")),
-                    fkind=_as_str(obj.get("fkind")), wall=_as_str(obj.get("wall")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
-                    along=_as_str(obj.get("along")),
-                    run_from=_as_num(obj.get("from")), run_to=_as_num(obj.get("to")),
-                    depth=_as_num(obj.get("depth")))
-    if kind == "set_room_type":
-        return Edit("set_room_type", room=_as_str(obj.get("room")),
-                    rtype=_as_str(obj.get("type")))
-    if kind == "rename_room":
-        return Edit("rename_room", room=_as_str(obj.get("room")),
-                    to=_as_str(obj.get("to")))
-    if kind == "add_room":
-        ax, ay = _as_pair(obj.get("at"))
-        return Edit("add_room", room=_as_str(obj.get("id")),
-                    rtype=_as_str(obj.get("type")),
-                    w=_as_num(obj.get("w")), l=_as_num(obj.get("l")),
-                    x=ax, y=ay,
-                    anchor=_as_str(obj.get("anchor")), of=_as_str(obj.get("of")),
-                    level=_as_int(obj.get("level")),
-                    auto=obj.get("auto") is True)
-    if kind == "fit_envelope":
-        return Edit("fit_envelope")
-    if kind == "delete_room":
-        return Edit("delete_room", room=_as_str(obj.get("room")))
-    if kind == "add_opening":
-        return Edit("add_opening", opening=_as_str(obj.get("opening")),
-                    a=_as_str(obj.get("a")), b=_as_str(obj.get("b")),
-                    room=_as_str(obj.get("room")), side=_as_str(obj.get("side")),
-                    width=_as_num(obj.get("width")), offset=_as_num(obj.get("offset")))
-    if kind == "delete_opening":
-        return Edit("delete_opening", opening=_as_str(obj.get("opening")),
-                    key=_as_str(obj.get("key")))
-    if kind == "set_opening":
-        return Edit("set_opening", opening=_as_str(obj.get("opening")),
-                    key=_as_str(obj.get("key")),
-                    width=_as_num(obj.get("width")), offset=_as_num(obj.get("offset")),
-                    sill=_as_num(obj.get("sill")),
-                    into=_as_str(obj.get("into")), into_set=("into" in obj),
-                    hinge=_as_str(obj.get("hinge")))
-    if kind == "delete_fixture":
-        return Edit("delete_fixture", key=_as_str(obj.get("id")))
-    if kind == "set_fixture":
-        return Edit("set_fixture", key=_as_str(obj.get("id")),
-                    rotate=_as_num(obj.get("rotate")), wall=_as_str(obj.get("wall")),
-                    width=_as_num(obj.get("width")))
-    if kind == "set_plan":
-        ew, el = _as_pair(obj.get("envelope"))
-        return Edit("set_plan", pname=_as_str(obj.get("name")),
-                    env_w=ew, env_l=el, ceiling=_as_num(obj.get("ceiling")))
-    if kind == "add_note":
-        return Edit("add_note", text=_as_str(obj.get("text")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
-                    level=_as_int(obj.get("level")))
-    if kind == "move_note":
-        return Edit("move_note", index=_as_int(obj.get("index")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
-    if kind == "set_note":
-        return Edit("set_note", index=_as_int(obj.get("index")),
-                    text=_as_str(obj.get("text")) if "text" in obj else None,
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
-    if kind == "delete_note":
-        return Edit("delete_note", index=_as_int(obj.get("index")))
-    if kind == "add_outlet":
-        return Edit("add_outlet", room=_as_str(obj.get("room")),
-                    wall=_as_str(obj.get("wall")), offset=_as_num(obj.get("offset")),
-                    gfci=bool(obj.get("gfci")))
-    if kind == "add_switch":
-        return Edit("add_switch", room=_as_str(obj.get("room")),
-                    wall=_as_str(obj.get("wall")), offset=_as_num(obj.get("offset")))
-    if kind == "add_light":
-        return Edit("add_light", room=_as_str(obj.get("room")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
-                    fkind=_as_str(obj.get("lkind")))
-    if kind == "add_alarm":
-        return Edit("add_alarm", room=_as_str(obj.get("room")),
-                    fkind=_as_str(obj.get("akind")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
-    if kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
-        return Edit(kind, index=_as_int(obj.get("index")))
-    if kind == "add_use":
-        return Edit("add_use", relpath=_as_str(obj.get("relpath")),
-                    alias=_as_str(obj.get("alias")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")),
-                    level=_as_int(obj.get("level")),
-                    mirror=_as_str(obj.get("mirror")),
-                    rotate=_as_num(obj.get("rotate")))
-    if kind == "move_use":
-        return Edit("move_use", alias=_as_str(obj.get("alias")),
-                    x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
-    if kind == "set_use":
-        return Edit("set_use", alias=_as_str(obj.get("alias")),
-                    level=_as_int(obj.get("level")),
-                    mirror=_as_str(obj.get("mirror")), mirror_set=("mirror" in obj),
-                    rotate=_as_num(obj.get("rotate")), rotate_set=("rotate" in obj))
-    if kind == "delete_use":
-        return Edit("delete_use", alias=_as_str(obj.get("alias")))
-    if kind == "inline_use":
-        return Edit("inline_use", alias=_as_str(obj.get("alias")))
-    return EditError("malformed", f"unknown edit kind {kind!r}")
+    builder = _EDIT_BUILDERS.get(kind) if isinstance(kind, str) else None
+    if builder is None:
+        return EditError("malformed", f"unknown edit kind {kind!r}")
+    return builder(obj)
 
+
+def _build_move_room(obj: dict) -> Edit:
+    return Edit("move_room", room=_as_str(obj.get("room")), x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+
+
+def _build_resize_room(obj: dict) -> Edit:
+    return Edit("resize_room", room=_as_str(obj.get("room")), w=_as_num(obj.get("w")), l=_as_num(obj.get("l")))
+
+
+def _build_move_opening(obj: dict) -> Edit:
+    return Edit("move_opening", opening=_as_str(obj.get("opening")), key=_as_str(obj.get("key")), offset=_as_num(obj.get("offset")))
+
+
+def _build_move_fixture(obj: dict) -> Edit:
+    return Edit("move_fixture", key=_as_str(obj.get("key")), x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+
+
+def _build_add_fixture(obj: dict) -> Edit:
+    return Edit(
+        "add_fixture",
+        room=_as_str(obj.get("room")),
+        fkind=_as_str(obj.get("fkind")),
+        wall=_as_str(obj.get("wall")),
+        x=_as_num(obj.get("x")),
+        y=_as_num(obj.get("y")),
+        along=_as_str(obj.get("along")),
+        run_from=_as_num(obj.get("from")),
+        run_to=_as_num(obj.get("to")),
+        depth=_as_num(obj.get("depth")),
+    )
+
+
+def _build_set_room_type(obj: dict) -> Edit:
+    return Edit("set_room_type", room=_as_str(obj.get("room")), rtype=_as_str(obj.get("type")))
+
+
+def _build_rename_room(obj: dict) -> Edit:
+    return Edit("rename_room", room=_as_str(obj.get("room")), to=_as_str(obj.get("to")))
+
+
+def _build_add_room(obj: dict) -> Edit:
+    ax, ay = _as_pair(obj.get("at"))
+    return Edit(
+        "add_room",
+        room=_as_str(obj.get("id")),
+        rtype=_as_str(obj.get("type")),
+        w=_as_num(obj.get("w")),
+        l=_as_num(obj.get("l")),
+        x=ax,
+        y=ay,
+        anchor=_as_str(obj.get("anchor")),
+        of=_as_str(obj.get("of")),
+        level=_as_int(obj.get("level")),
+        auto=obj.get("auto") is True,
+    )
+
+
+def _build_delete_room(obj: dict) -> Edit:
+    return Edit("delete_room", room=_as_str(obj.get("room")))
+
+
+def _build_add_opening(obj: dict) -> Edit:
+    return Edit(
+        "add_opening",
+        opening=_as_str(obj.get("opening")),
+        a=_as_str(obj.get("a")),
+        b=_as_str(obj.get("b")),
+        room=_as_str(obj.get("room")),
+        side=_as_str(obj.get("side")),
+        width=_as_num(obj.get("width")),
+        offset=_as_num(obj.get("offset")),
+    )
+
+
+def _build_delete_opening(obj: dict) -> Edit:
+    return Edit("delete_opening", opening=_as_str(obj.get("opening")), key=_as_str(obj.get("key")))
+
+
+def _build_set_opening(obj: dict) -> Edit:
+    return Edit(
+        "set_opening",
+        opening=_as_str(obj.get("opening")),
+        key=_as_str(obj.get("key")),
+        width=_as_num(obj.get("width")),
+        offset=_as_num(obj.get("offset")),
+        sill=_as_num(obj.get("sill")),
+        into=_as_str(obj.get("into")),
+        into_set=("into" in obj),
+        hinge=_as_str(obj.get("hinge")),
+    )
+
+
+def _build_delete_fixture(obj: dict) -> Edit:
+    return Edit("delete_fixture", key=_as_str(obj.get("id")))
+
+
+def _build_set_fixture(obj: dict) -> Edit:
+    return Edit(
+        "set_fixture",
+        key=_as_str(obj.get("id")),
+        rotate=_as_num(obj.get("rotate")),
+        wall=_as_str(obj.get("wall")),
+        width=_as_num(obj.get("width")),
+    )
+
+
+def _build_set_plan(obj: dict) -> Edit:
+    ew, el = _as_pair(obj.get("envelope"))
+    return Edit("set_plan", pname=_as_str(obj.get("name")), env_w=ew, env_l=el, ceiling=_as_num(obj.get("ceiling")))
+
+
+def _build_add_note(obj: dict) -> Edit:
+    return Edit("add_note", text=_as_str(obj.get("text")), x=_as_num(obj.get("x")), y=_as_num(obj.get("y")), level=_as_int(obj.get("level")))
+
+
+def _build_move_note(obj: dict) -> Edit:
+    return Edit("move_note", index=_as_int(obj.get("index")), x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+
+
+def _build_set_note(obj: dict) -> Edit:
+    return Edit(
+        "set_note",
+        index=_as_int(obj.get("index")),
+        text=_as_str(obj.get("text")) if "text" in obj else None,
+        x=_as_num(obj.get("x")),
+        y=_as_num(obj.get("y")),
+    )
+
+
+def _build_delete_note(obj: dict) -> Edit:
+    return Edit("delete_note", index=_as_int(obj.get("index")))
+
+
+def _build_add_outlet(obj: dict) -> Edit:
+    return Edit("add_outlet", room=_as_str(obj.get("room")), wall=_as_str(obj.get("wall")), offset=_as_num(obj.get("offset")), gfci=bool(obj.get("gfci")))
+
+
+def _build_add_switch(obj: dict) -> Edit:
+    return Edit("add_switch", room=_as_str(obj.get("room")), wall=_as_str(obj.get("wall")), offset=_as_num(obj.get("offset")))
+
+
+def _build_add_light(obj: dict) -> Edit:
+    return Edit("add_light", room=_as_str(obj.get("room")), x=_as_num(obj.get("x")), y=_as_num(obj.get("y")), fkind=_as_str(obj.get("lkind")))
+
+
+def _build_add_alarm(obj: dict) -> Edit:
+    return Edit("add_alarm", room=_as_str(obj.get("room")), fkind=_as_str(obj.get("akind")), x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+
+
+def _build_delete_electrical(kind: str):
+    return lambda obj: Edit(kind, index=_as_int(obj.get("index")))
+
+
+def _build_add_use(obj: dict) -> Edit:
+    return Edit(
+        "add_use",
+        relpath=_as_str(obj.get("relpath")),
+        alias=_as_str(obj.get("alias")),
+        x=_as_num(obj.get("x")),
+        y=_as_num(obj.get("y")),
+        level=_as_int(obj.get("level")),
+        mirror=_as_str(obj.get("mirror")),
+        rotate=_as_num(obj.get("rotate")),
+    )
+
+
+def _build_move_use(obj: dict) -> Edit:
+    return Edit("move_use", alias=_as_str(obj.get("alias")), x=_as_num(obj.get("x")), y=_as_num(obj.get("y")))
+
+
+def _build_set_use(obj: dict) -> Edit:
+    return Edit(
+        "set_use",
+        alias=_as_str(obj.get("alias")),
+        level=_as_int(obj.get("level")),
+        mirror=_as_str(obj.get("mirror")),
+        mirror_set=("mirror" in obj),
+        rotate=_as_num(obj.get("rotate")),
+        rotate_set=("rotate" in obj),
+    )
+
+
+def _build_alias_edit(kind: str):
+    return lambda obj: Edit(kind, alias=_as_str(obj.get("alias")))
+
+
+_EDIT_BUILDERS = {
+    "move_room": _build_move_room,
+    "resize_room": _build_resize_room,
+    "move_opening": _build_move_opening,
+    "move_fixture": _build_move_fixture,
+    "add_fixture": _build_add_fixture,
+    "set_room_type": _build_set_room_type,
+    "rename_room": _build_rename_room,
+    "add_room": _build_add_room,
+    "fit_envelope": lambda obj: Edit("fit_envelope"),
+    "delete_room": _build_delete_room,
+    "add_opening": _build_add_opening,
+    "delete_opening": _build_delete_opening,
+    "set_opening": _build_set_opening,
+    "delete_fixture": _build_delete_fixture,
+    "set_fixture": _build_set_fixture,
+    "set_plan": _build_set_plan,
+    "add_note": _build_add_note,
+    "move_note": _build_move_note,
+    "set_note": _build_set_note,
+    "delete_note": _build_delete_note,
+    "add_outlet": _build_add_outlet,
+    "add_switch": _build_add_switch,
+    "add_light": _build_add_light,
+    "add_alarm": _build_add_alarm,
+    "delete_outlet": _build_delete_electrical("delete_outlet"),
+    "delete_switch": _build_delete_electrical("delete_switch"),
+    "delete_light": _build_delete_electrical("delete_light"),
+    "delete_alarm": _build_delete_electrical("delete_alarm"),
+    "add_use": _build_add_use,
+    "move_use": _build_move_use,
+    "set_use": _build_set_use,
+    "delete_use": _build_alias_edit("delete_use"),
+    "inline_use": _build_alias_edit("inline_use"),
+}
 
 def _as_str(v: object) -> str | None:
     return v if isinstance(v, str) else None
@@ -516,366 +626,482 @@ def opening_overlays(plan) -> list[dict]:
 
 
 def apply_edit(source: str, edit: Edit, base_dir: str | None = None) -> EditResult:
-    """Apply one :class:`Edit` to DSL ``source``, returning an :class:`EditResult`.
-
-    Compiles ``source`` to locate the target statement, rewrites only the tokens
-    that changed on that one line, and preserves every other byte — comments,
-    blank lines, alignment and any inline ``# comment`` on the touched line. A
-    no-op (moving/resizing to the current value) returns the source byte-identical
-    with ``changed=False``; a relative placement is only converted to absolute
-    when the coordinates actually change. Bad edits return a typed
-    :class:`EditError`, never an exception.
-
-    ``base_dir`` is the directory ``use "<relpath>"`` paths resolve against (the
-    served file's folder) — so composition edits and the stamped-member guard see
-    the real composed plan. ``None`` leaves ``use`` unresolved (see
-    :func:`barndsl.compiler.compile_source`).
-    """
+    """Apply one :class:`Edit` to DSL ``source``, returning an :class:`EditResult`."""
     shape = _validate_shape(edit)
     if shape is not None:
         return EditResult(source, error=shape)
     result = compile_source(source, base_dir=base_dir)
     if result.plan is None:
-        return EditResult(
-            source, error=EditError("not_editable", "source does not compile to a plan")
-        )
-    # Cross-file composition edits act on the `use` line, not a stamped member.
-    if edit.kind == "add_use":
-        return _add_use(source, result, edit)
-    if edit.kind == "move_use":
-        return _move_use(source, result, edit)
-    if edit.kind == "set_use":
-        return _set_use(source, result, edit)
-    if edit.kind == "delete_use":
-        return _delete_use(source, result, edit)
-    if edit.kind == "inline_use":
-        return _inline_use(source, result, edit)
-    # Stamped members are read-only — an edit that would mutate one is refused with
-    # a typed teaching error (edit the part file, or Inline the instance).
+        return EditResult(source, error=EditError("not_editable", "source does not compile to a plan"))
+    handled = _apply_composition_edit(source, result, edit)
+    if handled is not None:
+        return handled
     member_err = _refuse_stamped(result, edit)
     if member_err is not None:
         return EditResult(source, error=member_err)
-    if edit.kind == "move_room":
-        return _move_room(source, result, edit)
-    if edit.kind == "resize_room":
-        return _resize_room(source, result, edit)
-    if edit.kind == "move_fixture":
-        return _move_fixture(source, result, edit)
-    if edit.kind == "add_fixture":
-        return _add_fixture(source, result, edit)
-    if edit.kind == "set_room_type":
-        return _set_room_type(source, result, edit)
-    if edit.kind == "rename_room":
-        return _rename_room(source, result, edit)
-    if edit.kind == "add_room":
-        return _add_room(source, result, edit)
-    if edit.kind == "fit_envelope":
-        return _fit_envelope(source, result, edit)
-    if edit.kind == "delete_room":
-        return _delete_room(source, result, edit)
-    if edit.kind == "add_opening":
-        return _add_opening(source, result, edit)
-    if edit.kind == "delete_opening":
-        return _delete_opening(source, result, edit)
-    if edit.kind == "set_opening":
-        return _set_opening(source, result, edit)
-    if edit.kind == "delete_fixture":
-        return _delete_fixture(source, result, edit)
-    if edit.kind == "set_fixture":
-        return _set_fixture(source, result, edit)
-    if edit.kind == "set_plan":
-        return _set_plan(source, result, edit)
-    if edit.kind == "add_note":
-        return _add_note(source, result, edit)
-    if edit.kind == "move_note":
-        return _move_note(source, result, edit)
-    if edit.kind == "set_note":
-        return _set_note(source, result, edit)
-    if edit.kind == "delete_note":
-        return _delete_note(source, result, edit)
-    if edit.kind == "add_outlet":
-        return _add_outlet(source, result, edit)
-    if edit.kind == "add_switch":
-        return _add_switch(source, result, edit)
-    if edit.kind == "add_light":
-        return _add_light(source, result, edit)
-    if edit.kind == "add_alarm":
-        return _add_alarm(source, result, edit)
-    if edit.kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
-        return _delete_electrical(source, result, edit)
-    return _move_opening(source, result, edit)
+    return _apply_plan_edit(source, result, edit)
 
+
+def _apply_composition_edit(source: str, result: CompileResult, edit: Edit) -> EditResult | None:
+    handlers = {
+        "add_use": _add_use,
+        "move_use": _move_use,
+        "set_use": _set_use,
+        "delete_use": _delete_use,
+        "inline_use": _inline_use,
+    }
+    handler = handlers.get(edit.kind)
+    return None if handler is None else handler(source, result, edit)
+
+
+def _apply_plan_edit(source: str, result: CompileResult, edit: Edit) -> EditResult:
+    handlers = {
+        "move_room": _move_room,
+        "resize_room": _resize_room,
+        "move_fixture": _move_fixture,
+        "add_fixture": _add_fixture,
+        "set_room_type": _set_room_type,
+        "rename_room": _rename_room,
+        "add_room": _add_room,
+        "fit_envelope": _fit_envelope,
+        "delete_room": _delete_room,
+        "add_opening": _add_opening,
+        "delete_opening": _delete_opening,
+        "set_opening": _set_opening,
+        "delete_fixture": _delete_fixture,
+        "set_fixture": _set_fixture,
+        "set_plan": _set_plan,
+        "add_note": _add_note,
+        "move_note": _move_note,
+        "set_note": _set_note,
+        "delete_note": _delete_note,
+        "add_outlet": _add_outlet,
+        "add_switch": _add_switch,
+        "add_light": _add_light,
+        "add_alarm": _add_alarm,
+        "delete_outlet": _delete_electrical,
+        "delete_switch": _delete_electrical,
+        "delete_light": _delete_electrical,
+        "delete_alarm": _delete_electrical,
+        "move_opening": _move_opening,
+    }
+    handler = handlers.get(edit.kind, _move_opening)
+    return handler(source, result, edit)
 
 def _validate_shape(edit: Edit) -> EditError | None:
-    if edit.kind == "move_room":
-        if not edit.room:
-            return EditError("malformed", "move_room needs a room id")
-        if not _finite(edit.x) or not _finite(edit.y):
-            return EditError("malformed", "move_room needs finite x and y")
-        return None
-    if edit.kind == "resize_room":
-        if not edit.room:
-            return EditError("malformed", "resize_room needs a room id")
-        if not _finite(edit.w) or not _finite(edit.l):
-            return EditError("malformed", "resize_room needs finite w and l")
-        if edit.w <= 0 or edit.l <= 0:  # type: ignore[operator]
-            return EditError("malformed", "resize_room needs positive w and l")
-        return None
-    if edit.kind == "move_opening":
-        if edit.opening not in OPENING_KINDS:
-            return EditError("malformed", f"move_opening kind must be one of {OPENING_KINDS}")
-        if not edit.key:
-            return EditError("malformed", "move_opening needs a key")
-        if not _finite(edit.offset) or edit.offset < 0:  # type: ignore[operator]
-            return EditError("malformed", "move_opening needs a finite, non-negative offset")
-        return None
-    if edit.kind == "move_fixture":
-        if not edit.key:
-            return EditError("malformed", "move_fixture needs a fixture key")
-        if not _finite(edit.x) or not _finite(edit.y):
-            return EditError("malformed", "move_fixture needs finite x and y")
-        return None
-    if edit.kind == "add_fixture":
-        if not edit.room or not edit.fkind:
-            return EditError("malformed", "add_fixture needs a room and a kind")
-        if edit.along is not None:  # an `along` counter run
-            if _fixture_wall(edit.along) is None:
-                return EditError("bad_value", "add_fixture along must be N|S|E|W")
-            if (edit.run_from is None) != (edit.run_to is None):
-                return EditError("malformed", "add_fixture needs both `from` and `to`")
-            if edit.run_from is not None and (
-                not _finite(edit.run_from) or not _finite(edit.run_to)
-                or edit.run_to <= edit.run_from  # type: ignore[operator]
-            ):
-                return EditError("malformed", "add_fixture `to` must be past `from`")
-            return None
+    validator = _SHAPE_VALIDATORS.get(edit.kind)
+    if validator is None:
+        return EditError("malformed", f"unknown edit kind {edit.kind!r}")
+    return validator(edit)
+
+
+def _validate_move_room_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "move_room needs a room id")
+    if not _finite(edit.x) or not _finite(edit.y):
+        return EditError("malformed", "move_room needs finite x and y")
+    return None
+
+
+def _validate_resize_room_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "resize_room needs a room id")
+    if not _finite(edit.w) or not _finite(edit.l):
+        return EditError("malformed", "resize_room needs finite w and l")
+    if edit.w <= 0 or edit.l <= 0:  # type: ignore[operator]
+        return EditError("malformed", "resize_room needs positive w and l")
+    return None
+
+
+def _validate_move_opening_shape(edit: Edit) -> EditError | None:
+    if edit.opening not in OPENING_KINDS:
+        return EditError("malformed", f"move_opening kind must be one of {OPENING_KINDS}")
+    if not edit.key:
+        return EditError("malformed", "move_opening needs a key")
+    if not _finite(edit.offset) or edit.offset < 0:  # type: ignore[operator]
+        return EditError("malformed", "move_opening needs a finite, non-negative offset")
+    return None
+
+
+def _validate_move_fixture_shape(edit: Edit) -> EditError | None:
+    if not edit.key:
+        return EditError("malformed", "move_fixture needs a fixture key")
+    if not _finite(edit.x) or not _finite(edit.y):
+        return EditError("malformed", "move_fixture needs finite x and y")
+    return None
+
+
+def _validate_add_fixture_shape(edit: Edit) -> EditError | None:
+    if not edit.room or not edit.fkind:
+        return EditError("malformed", "add_fixture needs a room and a kind")
+    if edit.along is None:
         if not _finite(edit.x) or not _finite(edit.y):
             return EditError("malformed", "add_fixture needs finite x and y")
         return None
-    if edit.kind == "set_room_type":
-        if not edit.room:
-            return EditError("malformed", "set_room_type needs a room id")
-        return _validate_room_type(edit.rtype)
-    if edit.kind == "rename_room":
-        if not edit.room:
-            return EditError("malformed", "rename_room needs a room id")
-        if not edit.to:
-            return EditError("malformed", "rename_room needs a target id")
-        if not _IDENT_RE.match(edit.to):
-            return EditError("bad_value",
-                             f"{edit.to!r} is not a valid room id (letters, digits, "
-                             "underscore; not starting with a digit)")
-        return None
-    if edit.kind == "add_room":
-        if not edit.room:
-            return EditError("malformed", "add_room needs an id")
-        if not _IDENT_RE.match(edit.room):
-            return EditError("bad_value",
-                             f"{edit.room!r} is not a valid room id (letters, digits, "
-                             "underscore; not starting with a digit)")
-        type_err = _validate_room_type(edit.rtype)
-        if type_err is not None:
-            return type_err
-        if not _finite(edit.w) or not _finite(edit.l):
-            return EditError("malformed", "add_room needs finite w and l")
-        if edit.w <= 0 or edit.l <= 0:  # type: ignore[operator]
-            return EditError("bad_value", "add_room needs positive w and l")
-        has_at = edit.x is not None or edit.y is not None
-        if has_at:
-            if not _finite(edit.x) or not _finite(edit.y):
-                return EditError("malformed", "add_room `at` needs finite x and y")
-        elif edit.anchor is not None:
-            if edit.anchor not in _PLACEMENT:
-                return EditError("bad_value", f"unknown anchor {edit.anchor!r}")
-            if not edit.of:
-                return EditError("malformed", "add_room anchor needs an `of` room")
-        elif edit.auto:
-            pass  # auto-placement — the free spot is found at apply time
-        else:
-            return EditError("malformed",
-                             "add_room needs a placement: `at` [x,y], `anchor`+`of`, "
-                             "or `auto`")
-        if edit.level is not None and edit.level < 0:
-            return EditError("bad_value", "add_room level must be >= 0")
-        return None
-    if edit.kind == "fit_envelope":
-        return None
-    if edit.kind == "delete_room":
-        if not edit.room:
-            return EditError("malformed", "delete_room needs a room id")
-        return None
-    if edit.kind == "add_opening":
-        if edit.opening not in _OPENING_STATEMENTS:
-            return EditError("malformed",
-                             f"add_opening kind must be one of {_OPENING_STATEMENTS}")
-        if not _finite(edit.width) or edit.width <= 0:  # type: ignore[operator]
-            return EditError("bad_value", "add_opening needs a positive width")
-        if edit.offset is not None and (not _finite(edit.offset) or edit.offset < 0):
-            return EditError("bad_value", "add_opening offset must be finite and >= 0")
-        if edit.opening in ("door", "open"):
-            if not edit.a or not edit.b:
-                return EditError("malformed", f"{edit.opening} opening needs rooms a and b")
-            if edit.a == edit.b:
-                return EditError("bad_value", "a door/open joins two different rooms")
-        else:
-            if not edit.room:
-                return EditError("malformed", f"{edit.opening} opening needs a room")
-            if edit.side not in _SIDES:
-                return EditError("bad_value", f"side must be one of {_SIDES}")
-        return None
-    if edit.kind == "delete_opening":
-        if edit.opening not in OPENING_KINDS:
-            return EditError("malformed",
-                             f"delete_opening kind must be one of {OPENING_KINDS}")
-        if not edit.key:
-            return EditError("malformed", "delete_opening needs a key")
-        return None
-    if edit.kind == "set_opening":
-        if edit.opening not in OPENING_KINDS:
-            return EditError("malformed",
-                             f"set_opening kind must be one of {OPENING_KINDS}")
-        if not edit.key:
-            return EditError("malformed", "set_opening needs a key")
-        if not (edit.width is not None or edit.offset is not None
-                or edit.into is not None or edit.into_set
-                or edit.hinge is not None or edit.sill is not None):
-            return EditError("malformed", "set_opening needs a property to set")
-        if edit.width is not None and (not _finite(edit.width) or edit.width <= 0):
-            return EditError("bad_value", "set_opening width must be positive")
-        if edit.offset is not None and (not _finite(edit.offset) or edit.offset < 0):
-            return EditError("bad_value", "set_opening offset must be finite and >= 0")
-        if edit.sill is not None:
-            if edit.opening != "window":
-                return EditError("bad_value", "sill applies only to windows")
-            if not _finite(edit.sill):
-                return EditError("bad_value", "set_opening sill must be finite")
-        if ((edit.into is not None or edit.into_set or edit.hinge is not None)
-                and edit.opening != "interior"):
-            return EditError("bad_value", "into/hinge apply only to interior doors")
-        if edit.hinge is not None and edit.hinge not in ("near", "far"):
-            return EditError("bad_value", "hinge must be 'near' or 'far'")
-        return None
-    if edit.kind == "delete_fixture":
-        if not edit.key:
-            return EditError("malformed", "delete_fixture needs a fixture id")
-        return None
-    if edit.kind == "set_fixture":
-        if not edit.key:
-            return EditError("malformed", "set_fixture needs a fixture id")
-        if edit.rotate is None and edit.wall is None and edit.width is None:
-            return EditError("malformed", "set_fixture needs rotate, wall, or width")
-        if edit.rotate is not None and not _finite(edit.rotate):
-            return EditError("bad_value", "set_fixture rotate must be finite")
-        if edit.wall is not None and _fixture_wall(edit.wall) is None:
-            return EditError("bad_value", "set_fixture wall must be N|S|E|W")
-        if edit.width is not None and (not _finite(edit.width) or edit.width <= 0):
-            return EditError("bad_value", "set_fixture width must be positive")
-        return None
-    if edit.kind == "set_plan":
-        if edit.pname is None and edit.env_w is None and edit.env_l is None \
-                and edit.ceiling is None:
-            return EditError("malformed", "set_plan needs name, envelope, or ceiling")
-        if edit.pname is not None and not edit.pname.strip():
-            return EditError("bad_value", "plan name must be non-empty")
-        if edit.env_w is not None or edit.env_l is not None:
-            if not _finite(edit.env_w) or not _finite(edit.env_l):
-                return EditError("bad_value", "envelope needs finite W and L")
-            if edit.env_w <= 0 or edit.env_l <= 0:  # type: ignore[operator]
-                return EditError("bad_value", "envelope W and L must be positive")
-        if edit.ceiling is not None and (not _finite(edit.ceiling) or edit.ceiling <= 0):
-            return EditError("bad_value", "ceiling must be positive")
-        return None
-    if edit.kind == "add_note":
-        if edit.text is None or not edit.text.strip():
-            return EditError("malformed", "add_note needs a non-empty text")
-        if not _finite(edit.x) or not _finite(edit.y):
-            return EditError("malformed", "add_note needs finite x and y")
-        if edit.level is not None and edit.level < 0:
-            return EditError("bad_value", "add_note level must be >= 0")
-        return None
-    if edit.kind == "move_note":
-        if edit.index is None or edit.index < 0:
-            return EditError("malformed", "move_note needs a note index >= 0")
-        if not _finite(edit.x) or not _finite(edit.y):
-            return EditError("malformed", "move_note needs finite x and y")
-        return None
-    if edit.kind == "set_note":
-        if edit.index is None or edit.index < 0:
-            return EditError("malformed", "set_note needs a note index >= 0")
-        if edit.text is None and edit.x is None and edit.y is None:
-            return EditError("malformed", "set_note needs text, x, or y")
-        if edit.text is not None and not edit.text.strip():
-            return EditError("bad_value", "note text must be non-empty")
-        if edit.x is not None and not _finite(edit.x):
-            return EditError("bad_value", "set_note x must be finite")
-        if edit.y is not None and not _finite(edit.y):
-            return EditError("bad_value", "set_note y must be finite")
-        return None
-    if edit.kind == "delete_note":
-        if edit.index is None or edit.index < 0:
-            return EditError("malformed", "delete_note needs a note index >= 0")
-        return None
-    if edit.kind in ("add_outlet", "add_switch"):
-        if not edit.room:
-            return EditError("malformed", f"{edit.kind} needs a room")
-        if not edit.wall or _fixture_wall(edit.wall) is None:
-            return EditError("bad_value", f"{edit.kind} wall must be N|S|E|W")
-        if edit.offset is not None and (not _finite(edit.offset) or edit.offset < 0):
-            return EditError("bad_value", f"{edit.kind} offset must be finite and >= 0")
-        return None
-    if edit.kind == "add_light":
-        if not edit.room:
-            return EditError("malformed", "add_light needs a room")
-        if not _finite(edit.x) or not _finite(edit.y):
-            return EditError("malformed", "add_light needs finite x and y")
-        if edit.fkind is not None and edit.fkind.lower() not in LIGHT_KINDS:
-            return EditError("bad_value",
-                             f"add_light kind must be one of {', '.join(LIGHT_KINDS)}")
-        return None
-    if edit.kind == "add_alarm":
-        if not edit.room:
-            return EditError("malformed", "add_alarm needs a room")
-        kind = (edit.fkind or "smoke").lower()
-        if kind not in ALARM_KINDS:
-            return EditError("bad_value",
-                             f"add_alarm kind must be one of {', '.join(ALARM_KINDS)}")
-        if edit.x is not None and (not _finite(edit.x) or not _finite(edit.y)):
-            return EditError("malformed", "add_alarm x needs a matching finite y")
-        return None
-    if edit.kind in ("delete_outlet", "delete_switch", "delete_light", "delete_alarm"):
-        if edit.index is None or edit.index < 0:
-            return EditError("malformed", f"{edit.kind} needs an index >= 0")
-        return None
-    if edit.kind == "add_use":
-        if not edit.relpath:
-            return EditError("malformed", "add_use needs a part path")
-        if not edit.alias or not _IDENT_RE.match(edit.alias):
-            return EditError("bad_value", "add_use needs a valid alias (a plain identifier)")
-        if not _finite(edit.x) or not _finite(edit.y):
-            return EditError("malformed", "add_use needs finite x and y")
-        if edit.level is not None and edit.level < 0:
-            return EditError("bad_value", "add_use level must be >= 0")
-        return None
-    if edit.kind == "move_use":
-        if not edit.alias:
-            return EditError("malformed", "move_use needs an alias")
-        if not _finite(edit.x) or not _finite(edit.y):
-            return EditError("malformed", "move_use needs finite x and y")
-        return None
-    if edit.kind == "set_use":
-        if not edit.alias:
-            return EditError("malformed", "set_use needs an alias")
-        if edit.level is not None and edit.level < 0:
-            return EditError("malformed", "set_use level must be >= 0")
-        if edit.level is None and not edit.mirror_set and not edit.rotate_set:
-            return EditError("malformed", "set_use needs a level, mirror or rotate")
-        return None
-    if edit.kind in ("delete_use", "inline_use"):
-        if not edit.alias:
-            return EditError("malformed", f"{edit.kind} needs an alias")
-        return None
-    return EditError("malformed", f"unknown edit kind {edit.kind!r}")
+    if _fixture_wall(edit.along) is None:
+        return EditError("bad_value", "add_fixture along must be N|S|E|W")
+    if (edit.run_from is None) != (edit.run_to is None):
+        return EditError("malformed", "add_fixture needs both `from` and `to`")
+    if edit.run_from is not None and (
+        not _finite(edit.run_from) or not _finite(edit.run_to) or edit.run_to <= edit.run_from  # type: ignore[operator]
+    ):
+        return EditError("malformed", "add_fixture `to` must be past `from`")
+    return None
 
+
+def _validate_set_room_type_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "set_room_type needs a room id")
+    return _validate_room_type(edit.rtype)
+
+
+def _validate_rename_room_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "rename_room needs a room id")
+    if not edit.to:
+        return EditError("malformed", "rename_room needs a target id")
+    return _validate_identifier(edit.to, "room id")
+
+
+def _validate_add_room_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "add_room needs an id")
+    id_err = _validate_identifier(edit.room, "room id")
+    if id_err is not None:
+        return id_err
+    type_err = _validate_room_type(edit.rtype)
+    if type_err is not None:
+        return type_err
+    size_err = _validate_positive_size(edit.w, edit.l, "add_room")
+    if size_err is not None:
+        return size_err
+    placement_err = _validate_add_room_placement(edit)
+    if placement_err is not None:
+        return placement_err
+    if edit.level is not None and edit.level < 0:
+        return EditError("bad_value", "add_room level must be >= 0")
+    return None
+
+
+def _validate_positive_size(w: float | None, l: float | None, label: str) -> EditError | None:
+    if not _finite(w) or not _finite(l):
+        return EditError("malformed", f"{label} needs finite w and l")
+    if w <= 0 or l <= 0:  # type: ignore[operator]
+        return EditError("bad_value", f"{label} needs positive w and l")
+    return None
+
+
+def _validate_add_room_placement(edit: Edit) -> EditError | None:
+    has_at = edit.x is not None or edit.y is not None
+    if has_at:
+        if not _finite(edit.x) or not _finite(edit.y):
+            return EditError("malformed", "add_room `at` needs finite x and y")
+        return None
+    if edit.anchor is not None:
+        if edit.anchor not in _PLACEMENT:
+            return EditError("bad_value", f"unknown anchor {edit.anchor!r}")
+        if not edit.of:
+            return EditError("malformed", "add_room anchor needs an `of` room")
+        return None
+    if edit.auto:
+        return None
+    return EditError("malformed", "add_room needs a placement: `at` [x,y], `anchor`+`of`, or `auto`")
+
+
+def _validate_identifier(value: str, label: str) -> EditError | None:
+    if _IDENT_RE.match(value):
+        return None
+    return EditError(
+        "bad_value",
+        f"{value!r} is not a valid {label} (letters, digits, underscore; not starting with a digit)",
+    )
+
+
+def _validate_delete_room_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "delete_room needs a room id")
+    return None
+
+
+def _validate_add_opening_shape(edit: Edit) -> EditError | None:
+    if edit.opening not in _OPENING_STATEMENTS:
+        return EditError("malformed", f"add_opening kind must be one of {_OPENING_STATEMENTS}")
+    width_err = _validate_positive_width(edit.width, "add_opening")
+    if width_err is not None:
+        return width_err
+    if edit.offset is not None and (not _finite(edit.offset) or edit.offset < 0):
+        return EditError("bad_value", "add_opening offset must be finite and >= 0")
+    return _validate_opening_endpoints(edit)
+
+
+def _validate_opening_endpoints(edit: Edit) -> EditError | None:
+    if edit.opening in ("door", "open"):
+        if not edit.a or not edit.b:
+            return EditError("malformed", f"{edit.opening} opening needs rooms a and b")
+        if edit.a == edit.b:
+            return EditError("bad_value", "a door/open joins two different rooms")
+        return None
+    if not edit.room:
+        return EditError("malformed", f"{edit.opening} opening needs a room")
+    if edit.side not in _SIDES:
+        return EditError("bad_value", f"side must be one of {_SIDES}")
+    return None
+
+
+def _validate_delete_opening_shape(edit: Edit) -> EditError | None:
+    if edit.opening not in OPENING_KINDS:
+        return EditError("malformed", f"delete_opening kind must be one of {OPENING_KINDS}")
+    if not edit.key:
+        return EditError("malformed", "delete_opening needs a key")
+    return None
+
+
+def _validate_set_opening_shape(edit: Edit) -> EditError | None:
+    base_err = _validate_set_opening_base(edit)
+    if base_err is not None:
+        return base_err
+    size_err = _validate_set_opening_numbers(edit)
+    if size_err is not None:
+        return size_err
+    return _validate_set_opening_door_fields(edit)
+
+
+def _validate_set_opening_base(edit: Edit) -> EditError | None:
+    if edit.opening not in OPENING_KINDS:
+        return EditError("malformed", f"set_opening kind must be one of {OPENING_KINDS}")
+    if not edit.key:
+        return EditError("malformed", "set_opening needs a key")
+    if not (
+        edit.width is not None or edit.offset is not None or edit.into is not None
+        or edit.into_set or edit.hinge is not None or edit.sill is not None
+    ):
+        return EditError("malformed", "set_opening needs a property to set")
+    return None
+
+
+def _validate_set_opening_numbers(edit: Edit) -> EditError | None:
+    if edit.width is not None and (not _finite(edit.width) or edit.width <= 0):
+        return EditError("bad_value", "set_opening width must be positive")
+    if edit.offset is not None and (not _finite(edit.offset) or edit.offset < 0):
+        return EditError("bad_value", "set_opening offset must be finite and >= 0")
+    if edit.sill is None:
+        return None
+    if edit.opening != "window":
+        return EditError("bad_value", "sill applies only to windows")
+    if not _finite(edit.sill):
+        return EditError("bad_value", "set_opening sill must be finite")
+    return None
+
+
+def _validate_set_opening_door_fields(edit: Edit) -> EditError | None:
+    if (edit.into is not None or edit.into_set or edit.hinge is not None) and edit.opening != "interior":
+        return EditError("bad_value", "into/hinge apply only to interior doors")
+    if edit.hinge is not None and edit.hinge not in ("near", "far"):
+        return EditError("bad_value", "hinge must be 'near' or 'far'")
+    return None
+
+
+def _validate_delete_fixture_shape(edit: Edit) -> EditError | None:
+    if not edit.key:
+        return EditError("malformed", "delete_fixture needs a fixture id")
+    return None
+
+
+def _validate_set_fixture_shape(edit: Edit) -> EditError | None:
+    if not edit.key:
+        return EditError("malformed", "set_fixture needs a fixture id")
+    if edit.rotate is None and edit.wall is None and edit.width is None:
+        return EditError("malformed", "set_fixture needs rotate, wall, or width")
+    if edit.rotate is not None and not _finite(edit.rotate):
+        return EditError("bad_value", "set_fixture rotate must be finite")
+    if edit.wall is not None and _fixture_wall(edit.wall) is None:
+        return EditError("bad_value", "set_fixture wall must be N|S|E|W")
+    if edit.width is not None and (not _finite(edit.width) or edit.width <= 0):
+        return EditError("bad_value", "set_fixture width must be positive")
+    return None
+
+
+def _validate_set_plan_shape(edit: Edit) -> EditError | None:
+    if edit.pname is None and edit.env_w is None and edit.env_l is None and edit.ceiling is None:
+        return EditError("malformed", "set_plan needs name, envelope, or ceiling")
+    if edit.pname is not None and not edit.pname.strip():
+        return EditError("bad_value", "plan name must be non-empty")
+    env_err = _validate_set_plan_envelope(edit)
+    if env_err is not None:
+        return env_err
+    if edit.ceiling is not None and (not _finite(edit.ceiling) or edit.ceiling <= 0):
+        return EditError("bad_value", "ceiling must be positive")
+    return None
+
+
+def _validate_set_plan_envelope(edit: Edit) -> EditError | None:
+    if edit.env_w is None and edit.env_l is None:
+        return None
+    if not _finite(edit.env_w) or not _finite(edit.env_l):
+        return EditError("bad_value", "envelope needs finite W and L")
+    if edit.env_w <= 0 or edit.env_l <= 0:  # type: ignore[operator]
+        return EditError("bad_value", "envelope W and L must be positive")
+    return None
+
+
+def _validate_add_note_shape(edit: Edit) -> EditError | None:
+    if edit.text is None or not edit.text.strip():
+        return EditError("malformed", "add_note needs a non-empty text")
+    if not _finite(edit.x) or not _finite(edit.y):
+        return EditError("malformed", "add_note needs finite x and y")
+    if edit.level is not None and edit.level < 0:
+        return EditError("bad_value", "add_note level must be >= 0")
+    return None
+
+
+def _validate_move_note_shape(edit: Edit) -> EditError | None:
+    index_err = _validate_note_index(edit, "move_note")
+    if index_err is not None:
+        return index_err
+    if not _finite(edit.x) or not _finite(edit.y):
+        return EditError("malformed", "move_note needs finite x and y")
+    return None
+
+
+def _validate_set_note_shape(edit: Edit) -> EditError | None:
+    index_err = _validate_note_index(edit, "set_note")
+    if index_err is not None:
+        return index_err
+    if edit.text is None and edit.x is None and edit.y is None:
+        return EditError("malformed", "set_note needs text, x, or y")
+    if edit.text is not None and not edit.text.strip():
+        return EditError("bad_value", "note text must be non-empty")
+    if edit.x is not None and not _finite(edit.x):
+        return EditError("bad_value", "set_note x must be finite")
+    if edit.y is not None and not _finite(edit.y):
+        return EditError("bad_value", "set_note y must be finite")
+    return None
+
+
+def _validate_delete_note_shape(edit: Edit) -> EditError | None:
+    return _validate_note_index(edit, "delete_note")
+
+
+def _validate_note_index(edit: Edit, kind: str) -> EditError | None:
+    if edit.index is None or edit.index < 0:
+        return EditError("malformed", f"{kind} needs a note index >= 0")
+    return None
+
+
+def _validate_add_device_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", f"{edit.kind} needs a room")
+    if not edit.wall or _fixture_wall(edit.wall) is None:
+        return EditError("bad_value", f"{edit.kind} wall must be N|S|E|W")
+    if edit.offset is not None and (not _finite(edit.offset) or edit.offset < 0):
+        return EditError("bad_value", f"{edit.kind} offset must be finite and >= 0")
+    return None
+
+
+def _validate_add_light_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "add_light needs a room")
+    if not _finite(edit.x) or not _finite(edit.y):
+        return EditError("malformed", "add_light needs finite x and y")
+    if edit.fkind is not None and edit.fkind.lower() not in LIGHT_KINDS:
+        return EditError("bad_value", f"add_light kind must be one of {', '.join(LIGHT_KINDS)}")
+    return None
+
+
+def _validate_add_alarm_shape(edit: Edit) -> EditError | None:
+    if not edit.room:
+        return EditError("malformed", "add_alarm needs a room")
+    kind = (edit.fkind or "smoke").lower()
+    if kind not in ALARM_KINDS:
+        return EditError("bad_value", f"add_alarm kind must be one of {', '.join(ALARM_KINDS)}")
+    if edit.x is not None and (not _finite(edit.x) or not _finite(edit.y)):
+        return EditError("malformed", "add_alarm x needs a matching finite y")
+    return None
+
+
+def _validate_delete_electrical_shape(edit: Edit) -> EditError | None:
+    if edit.index is None or edit.index < 0:
+        return EditError("malformed", f"{edit.kind} needs an index >= 0")
+    return None
+
+
+def _validate_add_use_shape(edit: Edit) -> EditError | None:
+    if not edit.relpath:
+        return EditError("malformed", "add_use needs a part path")
+    if not edit.alias or not _IDENT_RE.match(edit.alias):
+        return EditError("bad_value", "add_use needs a valid alias (a plain identifier)")
+    if not _finite(edit.x) or not _finite(edit.y):
+        return EditError("malformed", "add_use needs finite x and y")
+    if edit.level is not None and edit.level < 0:
+        return EditError("bad_value", "add_use level must be >= 0")
+    return None
+
+
+def _validate_move_use_shape(edit: Edit) -> EditError | None:
+    if not edit.alias:
+        return EditError("malformed", "move_use needs an alias")
+    if not _finite(edit.x) or not _finite(edit.y):
+        return EditError("malformed", "move_use needs finite x and y")
+    return None
+
+
+def _validate_set_use_shape(edit: Edit) -> EditError | None:
+    if not edit.alias:
+        return EditError("malformed", "set_use needs an alias")
+    if edit.level is not None and edit.level < 0:
+        return EditError("malformed", "set_use level must be >= 0")
+    if edit.level is None and not edit.mirror_set and not edit.rotate_set:
+        return EditError("malformed", "set_use needs a level, mirror or rotate")
+    return None
+
+
+def _validate_alias_edit_shape(edit: Edit) -> EditError | None:
+    if not edit.alias:
+        return EditError("malformed", f"{edit.kind} needs an alias")
+    return None
+
+
+def _validate_positive_width(width: float | None, kind: str) -> EditError | None:
+    if not _finite(width) or width <= 0:  # type: ignore[operator]
+        return EditError("bad_value", f"{kind} needs a positive width")
+    return None
+
+
+_SHAPE_VALIDATORS = {
+    "move_room": _validate_move_room_shape,
+    "resize_room": _validate_resize_room_shape,
+    "move_opening": _validate_move_opening_shape,
+    "move_fixture": _validate_move_fixture_shape,
+    "add_fixture": _validate_add_fixture_shape,
+    "set_room_type": _validate_set_room_type_shape,
+    "rename_room": _validate_rename_room_shape,
+    "add_room": _validate_add_room_shape,
+    "fit_envelope": lambda edit: None,
+    "delete_room": _validate_delete_room_shape,
+    "add_opening": _validate_add_opening_shape,
+    "delete_opening": _validate_delete_opening_shape,
+    "set_opening": _validate_set_opening_shape,
+    "delete_fixture": _validate_delete_fixture_shape,
+    "set_fixture": _validate_set_fixture_shape,
+    "set_plan": _validate_set_plan_shape,
+    "add_note": _validate_add_note_shape,
+    "move_note": _validate_move_note_shape,
+    "set_note": _validate_set_note_shape,
+    "delete_note": _validate_delete_note_shape,
+    "add_outlet": _validate_add_device_shape,
+    "add_switch": _validate_add_device_shape,
+    "add_light": _validate_add_light_shape,
+    "add_alarm": _validate_add_alarm_shape,
+    "delete_outlet": _validate_delete_electrical_shape,
+    "delete_switch": _validate_delete_electrical_shape,
+    "delete_light": _validate_delete_electrical_shape,
+    "delete_alarm": _validate_delete_electrical_shape,
+    "add_use": _validate_add_use_shape,
+    "move_use": _validate_move_use_shape,
+    "set_use": _validate_set_use_shape,
+    "delete_use": _validate_alias_edit_shape,
+    "inline_use": _validate_alias_edit_shape,
+}
 
 def _validate_room_type(rtype: str | None) -> EditError | None:
     """Shared shape check: ``rtype`` names a real :class:`RoomType` value."""
@@ -1204,50 +1430,59 @@ def _add_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
 
 
 def _room_ref_indices(toks: list) -> list[int]:
-    """Token indices on one statement's line that name a **room id**.
-
-    Purely positional, from the compiler's grammar (see :mod:`barndsl.compiler`),
-    so a rename touches only real references — never a type token, a quoted string,
-    a comment, or a prefix-collision (``bed`` must not match ``bedroom`` or a room
-    named ``bed2``). Includes the room's own id on a ``room`` line (index 1, the
-    definition), the two ids on ``door``/``open``/``wall`` interior lines, the
-    single id on ``door``/``window``/``entry`` exterior lines, the ``in <room>``
-    id on a ``fixture`` line, ``require``/``suite``/``zone`` members, and every
-    ``<dir>-of <room>`` anchor on a ``room`` line's placement.
-    """
+    """Token indices on one statement's line that name a **room id**."""
     if not toks:
         return []
-    head = toks[0].text.lower()
-    refs: list[int] = []
-    if head == "room":
-        refs.append(1)  # the room being defined
-        for i in range(3, len(toks)):
-            if toks[i].text.lower() in _PLACEMENT and i + 1 < len(toks):
-                refs.append(i + 1)
-    elif head in ("door", "open", "wall"):
-        if len(toks) > 3 and toks[2].text.lower() in ("-", "to"):
-            refs.extend((1, 3))  # interior `a - b`
-        else:
-            refs.append(1)  # exterior `door <id> <wall> …`
-        for i in range(len(toks) - 1):  # `into <room>` swing target (interior door)
-            if toks[i].text.lower() == "into":
-                refs.append(i + 1)
-    elif head in ("window", "entry"):
-        refs.append(1)
-    elif head == "fixture":
-        for i in range(len(toks) - 1):
-            if toks[i].text.lower() == "in":
-                refs.append(i + 1)
-                break
-    elif head == "require" and len(toks) > 1:
-        sub = toks[1].text.lower()
-        if sub in ("adjacent", "separate"):
-            refs.extend(j for j in (2, 3) if j < len(toks))
-        elif sub in ("exterior", "area") and len(toks) > 2:
-            refs.append(2)
-    elif head in ("suite", "zone"):
-        refs.extend(range(2, len(toks)))  # index 1 is the suite/zone id, not a room
+    finder = _ROOM_REF_FINDERS.get(toks[0].text.lower())
+    return [] if finder is None else finder(toks)
+
+
+def _room_statement_refs(toks: list) -> list[int]:
+    refs = [1]  # the room being defined
+    refs.extend(i + 1 for i in range(3, len(toks)) if toks[i].text.lower() in _PLACEMENT and i + 1 < len(toks))
     return refs
+
+
+def _opening_statement_refs(toks: list) -> list[int]:
+    refs = [1, 3] if len(toks) > 3 and toks[2].text.lower() in ("-", "to") else [1]
+    refs.extend(i + 1 for i in range(len(toks) - 1) if toks[i].text.lower() == "into")
+    return refs
+
+
+def _fixture_statement_refs(toks: list) -> list[int]:
+    for i in range(len(toks) - 1):
+        if toks[i].text.lower() == "in":
+            return [i + 1]
+    return []
+
+
+def _require_statement_refs(toks: list) -> list[int]:
+    if len(toks) <= 1:
+        return []
+    sub = toks[1].text.lower()
+    if sub in ("adjacent", "separate"):
+        return [j for j in (2, 3) if j < len(toks)]
+    if sub in ("exterior", "area") and len(toks) > 2:
+        return [2]
+    return []
+
+
+def _members_statement_refs(toks: list) -> list[int]:
+    return list(range(2, len(toks)))  # index 1 is the suite/zone id, not a room
+
+
+_ROOM_REF_FINDERS = {
+    "room": _room_statement_refs,
+    "door": _opening_statement_refs,
+    "open": _opening_statement_refs,
+    "wall": _opening_statement_refs,
+    "window": lambda toks: [1],
+    "entry": lambda toks: [1],
+    "fixture": _fixture_statement_refs,
+    "require": _require_statement_refs,
+    "suite": _members_statement_refs,
+    "zone": _members_statement_refs,
+}
 
 
 def _rebuild_without(
@@ -1342,58 +1577,63 @@ def _add_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
     assert result.plan is not None
     plan = result.plan
     if plan.room(edit.room) is not None:  # type: ignore[arg-type]
-        return EditResult(source, error=EditError("bad_value",
-                          f"room id {edit.room!r} is already taken"))
+        return EditResult(source, error=EditError("bad_value", f"room id {edit.room!r} is already taken"))
+    level = int(edit.level) if edit.level is not None else 0
+    placement = _new_room_placement(plan, edit, level)
+    if isinstance(placement, EditError):
+        return EditResult(source, error=placement)
+    stmt, placed, rtype = _new_room_statement(edit, placement)
+    lines = _lines(source)
+    after = _new_room_insert_after(result, plan, lines, level)
+    lines.insert(after, stmt)
+    return EditResult(
+        "\n".join(lines), changed=True, line=after + 1,
+        summary=f"added room {edit.room} ({rtype})", placed=placed,
+    )
+
+
+def _new_room_placement(plan, edit: Edit, level: int) -> tuple[str, float, float, str | None] | EditError:
+    w, l = float(edit.w), float(edit.l)  # type: ignore[arg-type]
+    if edit.anchor is not None:
+        if plan.room(edit.of) is None:
+            return EditError("unknown_room", f"anchor room {edit.of!r} not in the plan")
+        return f"{edit.anchor} {edit.of}", w, l, None
+    if edit.x is not None or edit.y is not None:
+        return f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}", w, l, None  # type: ignore[arg-type]
+    return _auto_room_placement(plan, level, w, l)
+
+
+def _auto_room_placement(plan, level: int, w: float, l: float) -> tuple[str, float, float, str]:
+    spot = _free_spot(plan, level, w, l)
+    if spot is None and (w > 8.0 or l > 8.0):
+        sw, sl = min(w, 8.0), min(l, 8.0)
+        shrunk = _free_spot(plan, level, sw, sl)
+        if shrunk is not None:
+            spot, w, l = shrunk, sw, sl
+    placed = "auto"
+    if spot is None:
+        spot = (0.0, 0.0)
+        placed = "fallback"
+    return f"at {_fmt(spot[0])},{_fmt(spot[1])}", w, l, placed
+
+
+def _new_room_statement(edit: Edit, placement: tuple[str, float, float, str | None]) -> tuple[str, str | None, str]:
+    placement_text, w, l, placed = placement
     rtype = RoomType(edit.rtype.lower()).value  # type: ignore[union-attr]
     level = int(edit.level) if edit.level is not None else 0
-    w, l = float(edit.w), float(edit.l)  # type: ignore[arg-type]
-    placed: str | None = None
-    has_at = edit.x is not None or edit.y is not None
-    if edit.anchor is not None:  # relative placement — the target must exist
-        if plan.room(edit.of) is None:  # type: ignore[arg-type]
-            return EditResult(source, error=EditError("unknown_room",
-                              f"anchor room {edit.of!r} not in the plan"))
-        placement = f"{edit.anchor} {edit.of}"
-    elif has_at:
-        placement = f"at {_fmt(float(edit.x))},{_fmt(float(edit.y))}"  # type: ignore[arg-type]
-    else:
-        # Auto-placement: scan the envelope for the first free spot the room fits,
-        # preferring one that abuts an existing room (so it can get a door). If it
-        # won't fit anywhere at its size, retry at a minimum 8×8; failing that,
-        # drop it at the origin so the compiler's overlap diagnostic can teach —
-        # add_room never refuses.
-        spot = _free_spot(plan, level, w, l)
-        if spot is None and (w > 8.0 or l > 8.0):
-            sw, sl = min(w, 8.0), min(l, 8.0)
-            shrunk = _free_spot(plan, level, sw, sl)
-            if shrunk is not None:
-                spot, w, l = shrunk, sw, sl
-        if spot is None:
-            # No free spot at all (the envelope is fully tiled). Drop it at the
-            # origin so the compiler's overlap diagnostic can teach — but flag the
-            # fallback so the UI can offer to enlarge the envelope.
-            spot = (0.0, 0.0)
-            placed = "fallback"
-        else:
-            placed = "auto"
-        placement = f"at {_fmt(spot[0])},{_fmt(spot[1])}"
-    stmt = (f"room {edit.room}: {rtype} {placement} "
-            f"size {_fmt(w)} x {_fmt(l)}")
+    stmt = f"room {edit.room}: {rtype} {placement_text} size {_fmt(w)} x {_fmt(l)}"
     if level:
         stmt += f" level {level}"
+    return stmt, placed, rtype
 
-    lines = _lines(source)
-    same_level = [result.room_lines[r.id] for r in plan.rooms
-                  if r.level == level and r.id in result.room_lines]
+
+def _new_room_insert_after(result: CompileResult, plan, lines: list[str], level: int) -> int:
+    same_level = [result.room_lines[r.id] for r in plan.rooms if r.level == level and r.id in result.room_lines]
     if same_level:
-        after = max(same_level)
-    elif result.room_lines:
-        after = max(result.room_lines.values())
-    else:
-        after = _envelope_line(lines) or len(lines)
-    lines.insert(after, stmt)
-    return EditResult("\n".join(lines), changed=True, line=after + 1,
-                      summary=f"added room {edit.room} ({rtype})", placed=placed)
+        return max(same_level)
+    if result.room_lines:
+        return max(result.room_lines.values())
+    return _envelope_line(lines) or len(lines)
 
 
 def _rects_overlap(ax: float, ay: float, aw: float, al: float, r) -> bool:
@@ -1499,52 +1739,64 @@ def _delete_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
     plan = result.plan
     rid = edit.room
     assert rid is not None  # _validate_shape guaranteed
+    room_line, err = _deletable_room_line(plan, result, rid)
+    if err is not None:
+        return EditResult(source, error=err)
+    assert room_line is not None
+    delete = _room_dependent_lines(plan, rid, room_line)
+    lines = _lines(source)
+    convert = _room_anchor_conversions(plan, result, lines, rid, delete)
+    new_source = _rebuild_without(lines, delete, convert)
+    return EditResult(
+        new_source, changed=True, line=room_line,
+        summary=f"deleted room {rid} and {len(delete) - 1} dependent line(s)",
+    )
+
+
+def _deletable_room_line(plan, result: CompileResult, rid: str) -> tuple[int | None, EditError | None]:
     if plan.room(rid) is None:
-        return EditResult(source, error=EditError("unknown_room",
-                          f"no room {rid!r} in the plan"))
+        return None, EditError("unknown_room", f"no room {rid!r} in the plan")
     room_line = result.room_lines.get(rid)
     if room_line is None:
-        return EditResult(source, error=EditError("not_editable",
-                          f"room {rid!r} has no source line"))
+        return None, EditError("not_editable", f"room {rid!r} has no source line")
+    return room_line, None
 
-    # Lines to remove: the room, plus every opening/fixture that references it.
+
+def _room_dependent_lines(plan, rid: str, room_line: int) -> set[int]:
     delete: set[int] = {room_line}
-    for d in plan.interior_doors:
-        if rid in (d.room_a, d.room_b) and d.line is not None:
-            delete.add(d.line)
-    for xd in plan.exterior_doors:
-        if xd.room == rid and xd.line is not None:
-            delete.add(xd.line)
-    for w in plan.windows:
-        if w.room == rid and w.line is not None:
-            delete.add(w.line)
-    for pf in plan.fixtures:
-        if pf.room == rid and pf.line is not None:
-            delete.add(pf.line)
+    delete.update(d.line for d in plan.interior_doors if rid in (d.room_a, d.room_b) and d.line is not None)
+    delete.update(door.line for door in plan.exterior_doors if door.room == rid and door.line is not None)
+    delete.update(window.line for window in plan.windows if window.room == rid and window.line is not None)
+    delete.update(fixture.line for fixture in plan.fixtures if fixture.room == rid and fixture.line is not None)
+    return delete
 
-    # Rooms anchored to the doomed room would dangle — pin each to the absolute
-    # position the compiler already resolved for it (mirrors _move_room's convert).
-    lines = _lines(source)
+
+def _room_anchor_conversions(plan, result: CompileResult, lines: list[str], rid: str, delete: set[int]) -> dict[int, str]:
     convert: dict[int, str] = {}
     for other in plan.rooms:
-        if other.id == rid:
-            continue
-        oline = result.room_lines.get(other.id)
-        if oline is None or oline in delete:
-            continue
-        toks = _tokenize_line(lines[oline - 1], oline)
-        anchors = [i for i in _room_ref_indices(toks) if i != 1]
-        if any(toks[i].text == rid for i in anchors):
-            size_idx = _room_size_index(toks)
-            placement = toks[3:size_idx]
-            convert[oline] = _splice(lines[oline - 1], [
-                (placement[0].col - 1, placement[-1].end_col - 1,
-                 f"at {_fmt(other.x)},{_fmt(other.y)}"),
-            ])
+        rewrite = _anchor_conversion_for_room(other, result, lines, rid, delete)
+        if rewrite is not None:
+            line_no, raw = rewrite
+            convert[line_no] = raw
+    return convert
 
-    new_source = _rebuild_without(lines, delete, convert)
-    return EditResult(new_source, changed=True, line=room_line,
-                      summary=f"deleted room {rid} and {len(delete) - 1} dependent line(s)")
+
+def _anchor_conversion_for_room(other, result: CompileResult, lines: list[str], rid: str, delete: set[int]) -> tuple[int, str] | None:
+    if other.id == rid:
+        return None
+    line_no = result.room_lines.get(other.id)
+    if line_no is None or line_no in delete:
+        return None
+    toks = _tokenize_line(lines[line_no - 1], line_no)
+    anchors = [i for i in _room_ref_indices(toks) if i != 1]
+    if not any(toks[i].text == rid for i in anchors):
+        return None
+    size_idx = _room_size_index(toks)
+    placement = toks[3:size_idx]
+    raw = _splice(lines[line_no - 1], [
+        (placement[0].col - 1, placement[-1].end_col - 1, f"at {_fmt(other.x)},{_fmt(other.y)}"),
+    ])
+    return line_no, raw
 
 
 # --- opening edits -----------------------------------------------------------
@@ -1688,77 +1940,86 @@ def _delete_fixture(source: str, result: CompileResult, edit: Edit) -> EditResul
 
 def _set_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
     assert result.plan is not None
-    f = _resolved_fixture(result.plan, edit.key)  # type: ignore[arg-type]
-    if f is None:
-        return EditResult(source, error=EditError("unknown_opening",
-                          f"no fixture {edit.key!r}"))
+    fixture = _resolved_fixture(result.plan, edit.key)  # type: ignore[arg-type]
+    if fixture is None:
+        return EditResult(source, error=EditError("unknown_opening", f"no fixture {edit.key!r}"))
     room = result.plan.room(edit.key.split("~", 1)[0])  # type: ignore[union-attr]
     assert room is not None
     wall = _fixture_wall(edit.wall) if edit.wall is not None else None
+    if fixture.seed or fixture.source_line is None:
+        return _materialize_fixture_seed(source, result, edit, fixture, room, wall)
+    return _rewrite_authored_fixture(source, edit, fixture, wall)
 
-    if f.seed or f.source_line is None:
-        # Materialise the seed exactly like the drag path (_add_fixture): a new
-        # `fixture` line at the seed's current room-local spot, then apply the props.
-        lx, ly = _fmt(f.x - room.x), _fmt(f.y - room.y)
-        stmt = f"fixture {f.kind} in {room.id} at {lx},{ly}"
-        w = wall or (f.wall or None)
-        if w:
-            stmt += f" wall {w}"
-        if edit.rotate is not None:
-            stmt += f" rotate {_fmt(float(edit.rotate))}"
-        if edit.width is not None:
-            stmt += f" width {_fmt(float(edit.width))}"
-        line_no = result.room_lines.get(room.id)
-        if line_no is None:
-            return EditResult(source, error=EditError("not_editable",
-                              f"room {room.id!r} has no source line"))
-        lines = _lines(source)
-        lines.insert(line_no, stmt)
-        return EditResult("\n".join(lines), changed=True, line=line_no + 1,
-                          summary=f"materialised {f.kind} in {room.id}")
 
-    # Authored fixture: rewrite/add the requested clauses on its own line.
+def _materialize_fixture_seed(source: str, result: CompileResult, edit: Edit, fixture, room, wall: str | None) -> EditResult:
+    stmt = _fixture_seed_statement(edit, fixture, room, wall)
+    line_no = result.room_lines.get(room.id)
+    if line_no is None:
+        return EditResult(source, error=EditError("not_editable", f"room {room.id!r} has no source line"))
     lines = _lines(source)
-    raw = lines[f.source_line - 1]
-    toks = _tokenize_line(raw, f.source_line)
-    along_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "along"), None)
+    lines.insert(line_no, stmt)
+    return EditResult("\n".join(lines), changed=True, line=line_no + 1, summary=f"materialised {fixture.kind} in {room.id}")
+
+
+def _fixture_seed_statement(edit: Edit, fixture, room, wall: str | None) -> str:
+    lx, ly = _fmt(fixture.x - room.x), _fmt(fixture.y - room.y)
+    stmt = f"fixture {fixture.kind} in {room.id} at {lx},{ly}"
+    fixture_wall = wall or (fixture.wall or None)
+    if fixture_wall:
+        stmt += f" wall {fixture_wall}"
+    if edit.rotate is not None:
+        stmt += f" rotate {_fmt(float(edit.rotate))}"
+    if edit.width is not None:
+        stmt += f" width {_fmt(float(edit.width))}"
+    return stmt
+
+
+def _rewrite_authored_fixture(source: str, edit: Edit, fixture, wall: str | None) -> EditResult:
+    lines = _lines(source)
+    raw = lines[fixture.source_line - 1]
+    toks = _tokenize_line(raw, fixture.source_line)
+    along_idx = next((i for i, token in enumerate(toks) if token.text.lower() == "along"), None)
     if along_idx is not None:
-        # An `along` counter run: `width` adjusts the RUN (to = from + width),
-        # preserving the along sugar; wall/rotate don't apply to a run.
-        if edit.width is None:
-            return EditResult(source, changed=False, line=f.source_line,
-                              summary=f"fixture {edit.key} unchanged")
-        run = float(edit.width)
-        from_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "from"), None)
-        to_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "to"), None)
-        if from_idx is not None and to_idx is not None:
-            base = _as_feet(toks[from_idx + 1].text)
-            tt = toks[to_idx + 1]
-            new = _splice(raw, [(tt.col - 1, tt.end_col - 1, _fmt(base + run))])
-        else:  # full-wall run: pin from 0 to width
-            wall_tok = toks[along_idx + 1]
-            ins = wall_tok.end_col - 1
-            new = raw[:ins] + f" from 0 to {_fmt(run)}" + raw[ins:]
-        if new == raw:
-            return EditResult(source, changed=False, line=f.source_line,
-                              summary=f"fixture {edit.key} unchanged")
-        lines[f.source_line - 1] = new
-        return EditResult("\n".join(lines), changed=True, line=f.source_line,
-                          summary=f"set counter run {edit.key} to {_fmt(run)} ft")
+        return _rewrite_counter_run_fixture(source, lines, raw, toks, along_idx, edit, fixture.source_line)
+    new = _rewrite_fixture_clauses(raw, fixture.source_line, edit, wall)
+    if new == raw:
+        return EditResult(source, changed=False, line=fixture.source_line, summary=f"fixture {edit.key} unchanged")
+    lines[fixture.source_line - 1] = new
+    return EditResult("\n".join(lines), changed=True, line=fixture.source_line, summary=f"set fixture {edit.key}")
+
+
+def _rewrite_counter_run_fixture(source: str, lines: list[str], raw: str, toks: list, along_idx: int, edit: Edit, line_no: int) -> EditResult:
+    if edit.width is None:
+        return EditResult(source, changed=False, line=line_no, summary=f"fixture {edit.key} unchanged")
+    run = float(edit.width)
+    new = _counter_run_width_line(raw, toks, along_idx, run)
+    if new == raw:
+        return EditResult(source, changed=False, line=line_no, summary=f"fixture {edit.key} unchanged")
+    lines[line_no - 1] = new
+    return EditResult("\n".join(lines), changed=True, line=line_no, summary=f"set counter run {edit.key} to {_fmt(run)} ft")
+
+
+def _counter_run_width_line(raw: str, toks: list, along_idx: int, run: float) -> str:
+    from_idx = next((i for i, token in enumerate(toks) if token.text.lower() == "from"), None)
+    to_idx = next((i for i, token in enumerate(toks) if token.text.lower() == "to"), None)
+    if from_idx is not None and to_idx is not None:
+        base = _as_feet(toks[from_idx + 1].text)
+        target = toks[to_idx + 1]
+        return _splice(raw, [(target.col - 1, target.end_col - 1, _fmt(base + run))])
+    wall_tok = toks[along_idx + 1]
+    insert_at = wall_tok.end_col - 1
+    return raw[:insert_at] + f" from 0 to {_fmt(run)}" + raw[insert_at:]
+
+
+def _rewrite_fixture_clauses(raw: str, line_no: int, edit: Edit, wall: str | None) -> str:
     new = raw
     if wall is not None:
-        new = _apply_clause(new, f.source_line, "wall", wall)
+        new = _apply_clause(new, line_no, "wall", wall)
     if edit.rotate is not None:
-        new = _apply_clause(new, f.source_line, "rotate",
-                            _fmt(float(edit.rotate)), aliases=("rotation",))
+        new = _apply_clause(new, line_no, "rotate", _fmt(float(edit.rotate)), aliases=("rotation",))
     if edit.width is not None:
-        new = _apply_clause(new, f.source_line, "width", _fmt(float(edit.width)))
-    if new == raw:
-        return EditResult(source, changed=False, line=f.source_line,
-                          summary=f"fixture {edit.key} unchanged")
-    lines[f.source_line - 1] = new
-    return EditResult("\n".join(lines), changed=True, line=f.source_line,
-                      summary=f"set fixture {edit.key}")
+        new = _apply_clause(new, line_no, "width", _fmt(float(edit.width)))
+    return new
 
 
 # --- plan edits --------------------------------------------------------------
@@ -1766,58 +2027,74 @@ def _set_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
 
 def _set_plan(source: str, result: CompileResult, edit: Edit) -> EditResult:
     lines = _lines(source)
-
-    def _head(name: str) -> int | None:
-        for i, raw in enumerate(lines, start=1):
-            toks = _tokenize_line(raw, i)
-            if toks and toks[0].text.lower() == name:
-                return i
-        return None
-
-    if edit.pname is not None:
-        pl = _head("plan")
-        if pl is None:
-            return EditResult(source, error=EditError("not_editable",
-                              "no `plan` line to rename"))
-        toks = _tokenize_line(lines[pl - 1], pl)
-        nt = next((t for t in toks[1:] if t.quoted), None)
-        if nt is None:
-            return EditResult(source, error=EditError("not_editable",
-                              "the `plan` line has no quoted name to rewrite"))
-        escaped = edit.pname.replace("\\", "\\\\").replace('"', '\\"')
-        lines[pl - 1] = _splice(lines[pl - 1], [(nt.col - 1, nt.end_col - 1, f'"{escaped}"')])
-
-    if edit.env_w is not None or edit.env_l is not None:
-        el = _head("envelope")
-        if el is None:
-            return EditResult(source, error=EditError("not_editable",
-                              "no `envelope` line to rewrite"))
-        toks = _tokenize_line(lines[el - 1], el)  # envelope <W> x <L>
-        wt, lt = toks[1], toks[3]
-        lines[el - 1] = _splice(lines[el - 1], [
-            (wt.col - 1, wt.end_col - 1, _fmt(float(edit.env_w))),  # type: ignore[arg-type]
-            (lt.col - 1, lt.end_col - 1, _fmt(float(edit.env_l))),  # type: ignore[arg-type]
-        ])
-
-    if edit.ceiling is not None:
-        cl = _head("ceiling")
-        if cl is not None:
-            toks = _tokenize_line(lines[cl - 1], cl)  # ceiling <H>
-            ht = toks[1]
-            lines[cl - 1] = _splice(lines[cl - 1], [
-                (ht.col - 1, ht.end_col - 1, _fmt(float(edit.ceiling))),
-            ])
-        else:  # add a ceiling line right after the envelope (else after the plan)
-            anchor = _head("envelope") or _head("plan")
-            if anchor is None:
-                return EditResult(source, error=EditError("not_editable",
-                                  "nowhere to add a `ceiling` line"))
-            lines.insert(anchor, f"ceiling {_fmt(float(edit.ceiling))}")
-
+    for updater in (_set_plan_name, _set_plan_envelope, _set_plan_ceiling):
+        err = updater(lines, edit)
+        if err is not None:
+            return EditResult(source, error=err)
     new_source = "\n".join(lines)
     if new_source == source:
         return EditResult(source, changed=False, summary="plan unchanged")
     return EditResult(new_source, changed=True, summary="updated plan")
+
+
+def _statement_head_line(lines: list[str], name: str) -> int | None:
+    for i, raw in enumerate(lines, start=1):
+        toks = _tokenize_line(raw, i)
+        if toks and toks[0].text.lower() == name:
+            return i
+    return None
+
+
+def _set_plan_name(lines: list[str], edit: Edit) -> EditError | None:
+    if edit.pname is None:
+        return None
+    line_no = _statement_head_line(lines, "plan")
+    if line_no is None:
+        return EditError("not_editable", "no `plan` line to rename")
+    toks = _tokenize_line(lines[line_no - 1], line_no)
+    name_token = next((token for token in toks[1:] if token.quoted), None)
+    if name_token is None:
+        return EditError("not_editable", "the `plan` line has no quoted name to rewrite")
+    escaped = edit.pname.replace("\\", "\\\\").replace('"', '\\"')
+    lines[line_no - 1] = _splice(lines[line_no - 1], [(name_token.col - 1, name_token.end_col - 1, f'"{escaped}"')])
+    return None
+
+
+def _set_plan_envelope(lines: list[str], edit: Edit) -> EditError | None:
+    if edit.env_w is None and edit.env_l is None:
+        return None
+    line_no = _statement_head_line(lines, "envelope")
+    if line_no is None:
+        return EditError("not_editable", "no `envelope` line to rewrite")
+    toks = _tokenize_line(lines[line_no - 1], line_no)  # envelope <W> x <L>
+    width_token, length_token = toks[1], toks[3]
+    lines[line_no - 1] = _splice(lines[line_no - 1], [
+        (width_token.col - 1, width_token.end_col - 1, _fmt(float(edit.env_w))),  # type: ignore[arg-type]
+        (length_token.col - 1, length_token.end_col - 1, _fmt(float(edit.env_l))),  # type: ignore[arg-type]
+    ])
+    return None
+
+
+def _set_plan_ceiling(lines: list[str], edit: Edit) -> EditError | None:
+    if edit.ceiling is None:
+        return None
+    line_no = _statement_head_line(lines, "ceiling")
+    if line_no is not None:
+        _rewrite_ceiling_line(lines, line_no, float(edit.ceiling))
+        return None
+    anchor = _statement_head_line(lines, "envelope") or _statement_head_line(lines, "plan")
+    if anchor is None:
+        return EditError("not_editable", "nowhere to add a `ceiling` line")
+    lines.insert(anchor, f"ceiling {_fmt(float(edit.ceiling))}")
+    return None
+
+
+def _rewrite_ceiling_line(lines: list[str], line_no: int, ceiling: float) -> None:
+    toks = _tokenize_line(lines[line_no - 1], line_no)  # ceiling <H>
+    height_token = toks[1]
+    lines[line_no - 1] = _splice(lines[line_no - 1], [
+        (height_token.col - 1, height_token.end_col - 1, _fmt(ceiling)),
+    ])
 
 
 # --- positioned-note edits ---------------------------------------------------

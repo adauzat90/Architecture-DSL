@@ -328,8 +328,6 @@ def locate(query: str, *, max_results: int = 80) -> dict[str, Any]:
     raw = query.strip()
     key = raw.lower()
     code = raw.upper()
-    from .playground import _STATEMENT_KEYWORDS
-
     kinds: list[str] = []
     exact: dict[str, Any] = {}
     parser = SRC / "barndsl" / "compiler.py"

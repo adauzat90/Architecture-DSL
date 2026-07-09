@@ -33,7 +33,7 @@ east / ``y`` north matching world XY.
 import math
 import sys
 
-from pyrevit import DB, revit
+from pyrevit import DB
 
 from . import exchange as _exchange
 from . import naming as _naming

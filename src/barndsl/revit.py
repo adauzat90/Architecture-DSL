@@ -1168,291 +1168,10 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
     """Lower ``plan`` to a :class:`RevitModel` (the Revit-shaped exchange)."""
     height = plan.ceiling_height
     level_indexes = plan.levels()
-    levels = [
-        RevitLevel(
-            index=i,
-            name=f"Level {i + 1}",
-            # Stack by floor-to-floor (ceiling + inter-floor assembly), so an
-            # upper level sits on the structure below it, not on its ceiling plane.
-            elevation=float(plan.level_elevation(i)),
-            height=float(height),
-        )
-        for i in level_indexes
-    ]
-
-    # Stable id generators (w0, w1, … / o0, o1, …) for deterministic output.
-    def _ids(prefix):
-        n = 0
-        while True:
-            yield f"{prefix}{n}"
-            n += 1
-
-    wall_ids = _ids("w")
-    walls: list[RevitWall] = []
-    walls_by_level: dict[int, list[RevitWall]] = {}
-    for i in level_indexes:
-        lvl_walls = _extract_walls(plan, i, height, wall_ids)
-        walls_by_level[i] = lvl_walls
-        walls.extend(lvl_walls)
-    # Declared wall attributes (`wall a - b plumbing|bearing|rated`) were
-    # applied per atomic segment inside the extraction, so kinds never bleed
-    # across colinear neighbours and each declaration keeps its own run.
-
-    # Openings, hosted onto the walls just derived.
-    op_ids = _ids("o")
-    openings: list[RevitOpening] = []
-
-    for d in plan.interior_doors:
-        geom = _opening_geometry(plan, d, "interior")
-        if geom is None:
-            continue
-        orientation, pos, lo, hi, lvl = geom
-        host = _find_host(walls_by_level.get(lvl, []), orientation, pos, lo, hi)
-        cased = d.kind == "cased"
-        openings.append(
-            RevitOpening(
-                id=next(op_ids),
-                category="cased_opening" if cased else "door",
-                kind=d.kind,
-                level=lvl,
-                location=_location(orientation, pos, lo, hi),
-                width=float(hi - lo),
-                height=DEFAULT_CASED_HEIGHT if cased else DEFAULT_DOOR_HEIGHT,
-                sill=0.0,
-                exterior=False,
-                # InteriorDoor has no egress concept (egress routes through
-                # exterior doors/windows), so interior openings are never egress.
-                egress=False,
-                rooms=[d.room_a, d.room_b],
-                host_wall=host,
-                # Carry the authored swing side/hinge so the consumer can flip
-                # the built instance instead of landing at the family default.
-                swing_into=d.swing_into,
-                hinge=d.hinge,
-            )
-        )
-
-    for xd in plan.exterior_doors:
-        geom = _opening_geometry(plan, xd, "exterior")
-        if geom is None:
-            continue
-        orientation, pos, lo, hi, lvl = geom
-        host = _find_host(walls_by_level.get(lvl, []), orientation, pos, lo, hi)
-        xkind = getattr(xd, "kind", "entry")
-        overhead = xkind == "overhead"
-        if overhead:
-            out_kind = "overhead"  # so the consumer picks a garage-door family
-        elif xkind in DOUBLE_LEAF_KINDS:
-            out_kind = xkind  # "double"/"french": a two-leaf exterior pair
-        else:
-            out_kind = "exterior"  # a single people-door, the historical kind
-        openings.append(
-            RevitOpening(
-                id=next(op_ids),
-                category="door",
-                kind=out_kind,
-                level=lvl,
-                location=_location(orientation, pos, lo, hi),
-                width=float(hi - lo),
-                height=(
-                    float(xd.height)
-                    if overhead and xd.height is not None
-                    else DEFAULT_DOOR_HEIGHT
-                ),
-                sill=0.0,
-                exterior=True,
-                # An overhead door is never an egress route (entrance() forces
-                # the flag; the kind guard covers a hand-built door too).
-                egress=bool(xd.egress) and not overhead,
-                rooms=[xd.room],
-                host_wall=host,
-            )
-        )
-
-    for w in plan.windows:
-        geom = _opening_geometry(plan, w, "exterior")
-        if geom is None:
-            continue
-        orientation, pos, lo, hi, lvl = geom
-        host = _find_host(walls_by_level.get(lvl, []), orientation, pos, lo, hi)
-        openings.append(
-            RevitOpening(
-                id=next(op_ids),
-                category="window",
-                # The window kind (casement/slider/fixed/double-hung) folds into
-                # `kind` so the consumer can map families; the category stays
-                # "window", which is what the builder switches on.
-                kind=getattr(w, "kind", "casement"),
-                level=lvl,
-                location=_location(orientation, pos, lo, hi),
-                width=float(hi - lo),
-                height=float(max(0.0, w.head_height - w.sill_height)),
-                sill=float(w.sill_height),
-                exterior=True,
-                egress=False,
-                rooms=[w.room],
-                host_wall=host,
-            )
-        )
-
-    # Map each room to its declared zone (first-declared wins; suite members
-    # inherit the zone that lists their suite). Empty when no zones declared.
-    suite_members = {
-        s.id: s.members for s in (getattr(plan, "suites", None) or [])
-    }
-    zone_of: dict[str, str] = {}
-    for z in getattr(plan, "zones", None) or []:
-        for m in z.members:
-            for rid in suite_members.get(m, (m,)):
-                zone_of.setdefault(rid, z.id)
-
-    rooms = []
-    for r in plan.rooms:
-        clear_w, clear_l = clear_dimensions(plan, r)
-        rooms.append(
-            RevitRoom(
-                id=r.id,
-                name=r.display_name,
-                type=r.type.value,
-                level=getattr(r, "level", 0),
-                point=(float(r.center[0]), float(r.center[1])),
-                area=float(r.area),
-                x=float(r.x),
-                y=float(r.y),
-                width=float(r.width),
-                length=float(r.length),
-                clear_width=float(clear_w),
-                clear_length=float(clear_l),
-                clear_area=float(clear_w * clear_l),
-                ceiling_height=float(
-                    r.ceiling_height if r.ceiling_height is not None
-                    else height
-                ),
-                vaulted=bool(getattr(r, "vaulted", False)),
-                zone=zone_of.get(r.id),
-            )
-        )
-
-    # Structure sits at the top of the storey, not on the floor: posts rise from
-    # the level to the plate (level + ceiling), bents span at the plate, and the
-    # ridge rides a roof-rise above it. Precompute the roof rise so the ridge lands
-    # at the true apex.
-    roof_rise = roof_plan(plan, max(level_indexes))["rise"] if plan.rooms else 0.0
-
-    def _plate_z(lvl: int) -> float:
-        return float(plan.level_elevation(lvl)) + float(height)
-
-    columns = [
-        RevitColumn(
-            point=(float(p.x), float(p.y)),
-            size=float(p.size),
-            role=p.role,
-            level=getattr(p, "level", 0),
-            base=float(plan.level_elevation(getattr(p, "level", 0))),
-            top=_plate_z(getattr(p, "level", 0)),
-        )
-        for p in plan.posts
-    ]
-    # The frame carries no per-beam section; in this MVP the ridge/bent beams
-    # share the posts' nominal square section (a 6x6 frame gets 6x6 beams), so
-    # the consumer can size a framing type the way it sizes columns.
-    beam_size = max((float(p.size) for p in plan.posts), default=0.0)
-    framing = [
-        RevitFraming(
-            start=(float(b.x1), float(b.y1)),
-            end=(float(b.x2), float(b.y2)),
-            role=b.role,
-            level=getattr(b, "level", 0),
-            z=_plate_z(getattr(b, "level", 0))
-            + (float(roof_rise) if b.role == "ridge" else 0.0),
-            size=beam_size,
-        )
-        for b in plan.beams
-    ]
-
-    areas: list[RevitArea] = []
-    for p in plan.porches:
-        areas.append(
-            RevitArea(
-                id=p.id,
-                kind="porch",
-                x=float(p.x),
-                y=float(p.y),
-                width=float(p.width),
-                length=float(p.length),
-                level=0,
-                meta={"covered": bool(p.covered)},
-            )
-        )
-    for s in plan.stairs:
-        rise = float(height) * abs(s.to_level - s.from_level)
-        stair_plan = plan_stair_runs(s.x, s.y, s.width, s.length, rise)
-        areas.append(
-            RevitArea(
-                id=s.id,
-                kind="stair",
-                x=float(s.x),
-                y=float(s.y),
-                width=float(s.width),
-                length=float(s.length),
-                level=s.from_level,
-                meta={
-                    "from_level": s.from_level,
-                    "to_level": s.to_level,
-                    "rise": rise,
-                    "plan": stair_plan,
-                },
-            )
-        )
-
-    # Floor slabs: the footprint at ground, each upper level's room extent above.
-    slabs: list[RevitSlab] = []
-    for sx, sy, sw, sl in plan.footprint_sections():
-        slabs.append(RevitSlab(0, float(sx), float(sy), float(sw), float(sl)))
-    for lvl in level_indexes:
-        if lvl == 0:
-            continue
-        rs = [r for r in plan.rooms if getattr(r, "level", 0) == lvl]
-        if not rs:
-            continue
-        x0 = min(r.x for r in rs)
-        y0 = min(r.y for r in rs)
-        slabs.append(
-            RevitSlab(lvl, float(x0), float(y0),
-                      float(max(r.x2 for r in rs) - x0), float(max(r.y2 for r in rs) - y0))
-        )
-
-    grids = structural_grids(plan)
-    top_level = max(level_indexes)
-    roof = roof_plan(plan, top_level) if plan.rooms else None
-    if roof is not None and roof.get("style") != "shed":
-        # A shed has no gable ends (both short walls stay at the plate/rake); a
-        # gable and a monitor peak, so their end walls rise to the ridge.
-        _mark_gable_walls(walls_by_level.get(top_level, []), roof, height)
-
-    foundation = foundation_plan(plan) if plan.rooms else None
-
-    fixtures: list[RevitFixture] = []
-    for r in plan.rooms:
-        for fx in resolve_room_fixtures(plan, r):
-            fixtures.append(
-                RevitFixture(
-                    id=fx.id or f"{r.id}~{fx.kind}",
-                    kind=fx.kind,
-                    room=r.id,
-                    level=getattr(r, "level", 0),
-                    x=float(fx.x),
-                    y=float(fx.y),
-                    width=float(fx.width),
-                    length=float(fx.length),
-                    wall=fx.wall,
-                    point=(float(fx.center[0]), float(fx.center[1])),
-                    rotation=float(fx.rotation),
-                    seed=bool(fx.seed),
-                    source_line=fx.source_line,
-                )
-            )
-
+    levels = _revit_levels(plan, level_indexes, height)
+    walls, walls_by_level = _revit_walls(plan, level_indexes, height)
+    openings = _revit_openings(plan, walls_by_level)
+    roof = _revit_roof(plan, walls_by_level, level_indexes, height)
     return RevitModel(
         name=plan.name,
         ceiling_height=float(height),
@@ -1460,18 +1179,18 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         envelope_width=float(plan.envelope_width),
         envelope_length=float(plan.envelope_length),
         wings=[(float(w.x), float(w.y), float(w.width), float(w.length)) for w in plan.wings],
-        slabs=slabs,
-        grids=grids,
+        slabs=_revit_slabs(plan, level_indexes),
+        grids=structural_grids(plan),
         roof=roof,
         levels=levels,
         walls=walls,
         openings=openings,
-        rooms=rooms,
-        columns=columns,
-        framing=framing,
-        areas=areas,
-        fixtures=fixtures,
-        foundation=foundation,
+        rooms=_revit_rooms(plan, height),
+        columns=_revit_columns(plan, height),
+        framing=_revit_framing(plan, height, level_indexes),
+        areas=_revit_areas(plan, height),
+        fixtures=_revit_fixtures(plan),
+        foundation=foundation_plan(plan) if plan.rooms else None,
         orientation=float(getattr(plan, "orientation", None) or 0.0),
         siding=getattr(plan, "siding", None),
         roofing=getattr(plan, "roofing", None),
@@ -1482,16 +1201,297 @@ def to_revit_model(plan: Barndominium) -> RevitModel:
         accessible=bool(getattr(plan, "accessible", False)),
         program=_program_block(plan),
         frame=_frame_block(plan),
-        suites=[
-            {"id": st.id, "members": list(st.members)}
-            for st in (getattr(plan, "suites", None) or [])
-        ] or None,
-        zones=[
-            {"id": z.id, "members": list(z.members)}
-            for z in (getattr(plan, "zones", None) or [])
-        ] or None,
+        suites=_suite_blocks(plan),
+        zones=_zone_blocks(plan),
     )
 
+
+def _revit_ids(prefix: str):
+    index = 0
+    while True:
+        yield f"{prefix}{index}"
+        index += 1
+
+
+def _revit_levels(plan: Barndominium, level_indexes: list[int], height: float) -> list[RevitLevel]:
+    return [
+        RevitLevel(index=i, name=f"Level {i + 1}", elevation=float(plan.level_elevation(i)), height=float(height))
+        for i in level_indexes
+    ]
+
+
+def _revit_walls(plan: Barndominium, level_indexes: list[int], height: float) -> tuple[list[RevitWall], dict[int, list[RevitWall]]]:
+    wall_ids = _revit_ids("w")
+    walls: list[RevitWall] = []
+    walls_by_level: dict[int, list[RevitWall]] = {}
+    for level in level_indexes:
+        level_walls = _extract_walls(plan, level, height, wall_ids)
+        walls_by_level[level] = level_walls
+        walls.extend(level_walls)
+    return walls, walls_by_level
+
+
+def _revit_openings(plan: Barndominium, walls_by_level: dict[int, list[RevitWall]]) -> list[RevitOpening]:
+    op_ids = _revit_ids("o")
+    openings: list[RevitOpening] = []
+    openings.extend(_revit_interior_openings(plan, walls_by_level, op_ids))
+    openings.extend(_revit_exterior_doors(plan, walls_by_level, op_ids))
+    openings.extend(_revit_window_openings(plan, walls_by_level, op_ids))
+    return openings
+
+
+def _revit_interior_openings(plan: Barndominium, walls_by_level: dict[int, list[RevitWall]], op_ids) -> list[RevitOpening]:
+    openings: list[RevitOpening] = []
+    for door in plan.interior_doors:
+        geom = _opening_geometry(plan, door, "interior")
+        if geom is None:
+            continue
+        orientation, pos, lo, hi, level = geom
+        cased = door.kind == "cased"
+        openings.append(RevitOpening(
+            id=next(op_ids),
+            category="cased_opening" if cased else "door",
+            kind=door.kind,
+            level=level,
+            location=_location(orientation, pos, lo, hi),
+            width=float(hi - lo),
+            height=DEFAULT_CASED_HEIGHT if cased else DEFAULT_DOOR_HEIGHT,
+            sill=0.0,
+            exterior=False,
+            egress=False,
+            rooms=[door.room_a, door.room_b],
+            host_wall=_find_host(walls_by_level.get(level, []), orientation, pos, lo, hi),
+            swing_into=door.swing_into,
+            hinge=door.hinge,
+        ))
+    return openings
+
+
+def _revit_exterior_doors(plan: Barndominium, walls_by_level: dict[int, list[RevitWall]], op_ids) -> list[RevitOpening]:
+    openings: list[RevitOpening] = []
+    for door in plan.exterior_doors:
+        geom = _opening_geometry(plan, door, "exterior")
+        if geom is None:
+            continue
+        orientation, pos, lo, hi, level = geom
+        overhead = getattr(door, "kind", "entry") == "overhead"
+        openings.append(RevitOpening(
+            id=next(op_ids),
+            category="door",
+            kind=_revit_exterior_door_kind(door),
+            level=level,
+            location=_location(orientation, pos, lo, hi),
+            width=float(hi - lo),
+            height=float(door.height) if overhead and door.height is not None else DEFAULT_DOOR_HEIGHT,
+            sill=0.0,
+            exterior=True,
+            egress=bool(door.egress) and not overhead,
+            rooms=[door.room],
+            host_wall=_find_host(walls_by_level.get(level, []), orientation, pos, lo, hi),
+        ))
+    return openings
+
+
+def _revit_exterior_door_kind(door) -> str:
+    kind = getattr(door, "kind", "entry")
+    if kind == "overhead":
+        return "overhead"
+    if kind in DOUBLE_LEAF_KINDS:
+        return kind
+    return "exterior"
+
+
+def _revit_window_openings(plan: Barndominium, walls_by_level: dict[int, list[RevitWall]], op_ids) -> list[RevitOpening]:
+    openings: list[RevitOpening] = []
+    for window in plan.windows:
+        geom = _opening_geometry(plan, window, "exterior")
+        if geom is None:
+            continue
+        orientation, pos, lo, hi, level = geom
+        openings.append(RevitOpening(
+            id=next(op_ids),
+            category="window",
+            kind=getattr(window, "kind", "casement"),
+            level=level,
+            location=_location(orientation, pos, lo, hi),
+            width=float(hi - lo),
+            height=float(max(0.0, window.head_height - window.sill_height)),
+            sill=float(window.sill_height),
+            exterior=True,
+            egress=False,
+            rooms=[window.room],
+            host_wall=_find_host(walls_by_level.get(level, []), orientation, pos, lo, hi),
+        ))
+    return openings
+
+
+def _revit_rooms(plan: Barndominium, height: float) -> list[RevitRoom]:
+    zone_of = _revit_room_zones(plan)
+    return [_revit_room(plan, room, height, zone_of) for room in plan.rooms]
+
+
+def _revit_room_zones(plan: Barndominium) -> dict[str, str]:
+    suite_members = {suite.id: suite.members for suite in (getattr(plan, "suites", None) or [])}
+    zone_of: dict[str, str] = {}
+    for zone in getattr(plan, "zones", None) or []:
+        for member in zone.members:
+            for room_id in suite_members.get(member, (member,)):
+                zone_of.setdefault(room_id, zone.id)
+    return zone_of
+
+
+def _revit_room(plan: Barndominium, room, height: float, zone_of: dict[str, str]) -> RevitRoom:
+    clear_w, clear_l = clear_dimensions(plan, room)
+    return RevitRoom(
+        id=room.id,
+        name=room.display_name,
+        type=room.type.value,
+        level=getattr(room, "level", 0),
+        point=(float(room.center[0]), float(room.center[1])),
+        area=float(room.area),
+        x=float(room.x),
+        y=float(room.y),
+        width=float(room.width),
+        length=float(room.length),
+        clear_width=float(clear_w),
+        clear_length=float(clear_l),
+        clear_area=float(clear_w * clear_l),
+        ceiling_height=float(room.ceiling_height if room.ceiling_height is not None else height),
+        vaulted=bool(getattr(room, "vaulted", False)),
+        zone=zone_of.get(room.id),
+    )
+
+
+def _revit_plate_z(plan: Barndominium, level: int, height: float) -> float:
+    return float(plan.level_elevation(level)) + float(height)
+
+
+def _revit_columns(plan: Barndominium, height: float) -> list[RevitColumn]:
+    return [
+        RevitColumn(
+            point=(float(post.x), float(post.y)),
+            size=float(post.size),
+            role=post.role,
+            level=getattr(post, "level", 0),
+            base=float(plan.level_elevation(getattr(post, "level", 0))),
+            top=_revit_plate_z(plan, getattr(post, "level", 0), height),
+        )
+        for post in plan.posts
+    ]
+
+
+def _revit_framing(plan: Barndominium, height: float, level_indexes: list[int]) -> list[RevitFraming]:
+    roof_rise = roof_plan(plan, max(level_indexes))["rise"] if plan.rooms else 0.0
+    beam_size = max((float(post.size) for post in plan.posts), default=0.0)
+    return [
+        RevitFraming(
+            start=(float(beam.x1), float(beam.y1)),
+            end=(float(beam.x2), float(beam.y2)),
+            role=beam.role,
+            level=getattr(beam, "level", 0),
+            z=_revit_plate_z(plan, getattr(beam, "level", 0), height) + (float(roof_rise) if beam.role == "ridge" else 0.0),
+            size=beam_size,
+        )
+        for beam in plan.beams
+    ]
+
+
+def _revit_areas(plan: Barndominium, height: float) -> list[RevitArea]:
+    areas = [_revit_porch_area(porch) for porch in plan.porches]
+    areas.extend(_revit_stair_area(stair, height) for stair in plan.stairs)
+    return areas
+
+
+def _revit_porch_area(porch) -> RevitArea:
+    return RevitArea(
+        id=porch.id,
+        kind="porch",
+        x=float(porch.x),
+        y=float(porch.y),
+        width=float(porch.width),
+        length=float(porch.length),
+        level=0,
+        meta={"covered": bool(porch.covered)},
+    )
+
+
+def _revit_stair_area(stair, height: float) -> RevitArea:
+    rise = float(height) * abs(stair.to_level - stair.from_level)
+    return RevitArea(
+        id=stair.id,
+        kind="stair",
+        x=float(stair.x),
+        y=float(stair.y),
+        width=float(stair.width),
+        length=float(stair.length),
+        level=stair.from_level,
+        meta={"from_level": stair.from_level, "to_level": stair.to_level, "rise": rise, "plan": plan_stair_runs(stair.x, stair.y, stair.width, stair.length, rise)},
+    )
+
+
+def _revit_slabs(plan: Barndominium, level_indexes: list[int]) -> list[RevitSlab]:
+    slabs = [RevitSlab(0, float(x), float(y), float(w), float(l)) for x, y, w, l in plan.footprint_sections()]
+    for level in level_indexes:
+        if level != 0:
+            slab = _upper_level_slab(plan, level)
+            if slab is not None:
+                slabs.append(slab)
+    return slabs
+
+
+def _upper_level_slab(plan: Barndominium, level: int) -> RevitSlab | None:
+    rooms = [room for room in plan.rooms if getattr(room, "level", 0) == level]
+    if not rooms:
+        return None
+    x0 = min(room.x for room in rooms)
+    y0 = min(room.y for room in rooms)
+    return RevitSlab(level, float(x0), float(y0), float(max(room.x2 for room in rooms) - x0), float(max(room.y2 for room in rooms) - y0))
+
+
+def _revit_roof(plan: Barndominium, walls_by_level: dict[int, list[RevitWall]], level_indexes: list[int], height: float) -> dict | None:
+    top_level = max(level_indexes)
+    roof = roof_plan(plan, top_level) if plan.rooms else None
+    if roof is not None and roof.get("style") != "shed":
+        _mark_gable_walls(walls_by_level.get(top_level, []), roof, height)
+    return roof
+
+
+def _revit_fixtures(plan: Barndominium) -> list[RevitFixture]:
+    fixtures: list[RevitFixture] = []
+    for room in plan.rooms:
+        fixtures.extend(_revit_room_fixtures(plan, room))
+    return fixtures
+
+
+def _revit_room_fixtures(plan: Barndominium, room) -> list[RevitFixture]:
+    return [
+        RevitFixture(
+            id=fixture.id or f"{room.id}~{fixture.kind}",
+            kind=fixture.kind,
+            room=room.id,
+            level=getattr(room, "level", 0),
+            x=float(fixture.x),
+            y=float(fixture.y),
+            width=float(fixture.width),
+            length=float(fixture.length),
+            wall=fixture.wall,
+            point=(float(fixture.center[0]), float(fixture.center[1])),
+            rotation=float(fixture.rotation),
+            seed=bool(fixture.seed),
+            source_line=fixture.source_line,
+        )
+        for fixture in resolve_room_fixtures(plan, room)
+    ]
+
+
+def _suite_blocks(plan: Barndominium) -> list[dict] | None:
+    blocks = [{"id": suite.id, "members": list(suite.members)} for suite in (getattr(plan, "suites", None) or [])]
+    return blocks or None
+
+
+def _zone_blocks(plan: Barndominium) -> list[dict] | None:
+    blocks = [{"id": zone.id, "members": list(zone.members)} for zone in (getattr(plan, "zones", None) or [])]
+    return blocks or None
 
 def _program_block(plan: Barndominium) -> dict | None:
     """The exchange's optional ``program`` block from a declared ``program``.
@@ -1905,92 +1905,86 @@ def _infer_interior_offset(a: Room, b: Room, location, width: float):
 
 
 def exchange_to_plan(data: dict) -> Barndominium:
-    """Reconstruct a :class:`Barndominium` from a ``barndsl.revit/1`` exchange.
+    """Reconstruct a :class:`Barndominium` from a ``barndsl.revit/1`` exchange."""
+    data = _validated_exchange_data(data)
+    plan = _exchange_plan_shell(data)
+    _exchange_restore_rooms(plan, data)
+    _exchange_restore_wall_specs(plan, data)
+    _exchange_restore_openings(plan, data)
+    _exchange_restore_areas(plan, data)
+    return plan
 
-    The inverse of :func:`to_revit_model`. Rebuilds the envelope/wings, rooms,
-    interior and exterior doors, windows, porches and stairs by re-deriving each
-    opening's wall and offset from its geometry. The exchange-v2 declared intent
-    — roof style/pitch, notes, the accessibility opt-in, the ``program`` and the
-    ``frame`` request — round-trips too when present (each is an optional key, so
-    an older document without it still loads). The declared program surviving the
-    trip is what keeps ``PROGRAM_MISMATCH`` guarding edits made in Revit. A
-    metric document (``units`` = ``meters``/``metres``/``m``) is normalised to
-    feet before reconstruction; ``feet`` passes through untouched. Raises
-    :class:`RevitImportError` on a document that isn't this schema or whose units
-    are unsupported.
-    """
+
+def _validated_exchange_data(data: dict) -> dict:
     if not isinstance(data, dict) or data.get("schema") != EXCHANGE_SCHEMA:
         raise RevitImportError(
             "not a %s exchange (got schema %r)" % (EXCHANGE_SCHEMA, (data or {}).get("schema"))
         )
-    # Normalise units to feet up front: feet passes through untouched, a metric
-    # document is converted, anything else raises. Everything below reads feet.
-    data = normalize_exchange_units(data)
+    return normalize_exchange_units(data)
 
+
+def _exchange_plan_shell(data: dict) -> Barndominium:
     from .elements import Barndominium
 
     pinfo = data.get("plan", {})
     plan = Barndominium(name=pinfo.get("name", "Imported Plan"))
-    plan.envelope(
-        float(pinfo.get("envelope_width", 0.0)),
-        float(pinfo.get("envelope_length", 0.0)),
-    )
+    plan.envelope(float(pinfo.get("envelope_width", 0.0)), float(pinfo.get("envelope_length", 0.0)))
     plan.ceiling(float(pinfo.get("ceiling_height", feet(9))))
+    _exchange_restore_plan_options(plan, pinfo, data)
+    _exchange_restore_grouping(plan, pinfo)
+    _exchange_restore_wings_and_frame(plan, pinfo)
+    return plan
+
+
+def _exchange_restore_plan_options(plan: Barndominium, pinfo: dict, data: dict) -> None:
     if pinfo.get("floor_depth") is not None:
         plan.floors(float(pinfo["floor_depth"]))
     if pinfo.get("orientation"):
         plan.orient(float(pinfo["orientation"]))
     if pinfo.get("siding") or pinfo.get("roofing"):
         plan.finish(siding=pinfo.get("siding"), roof=pinfo.get("roofing"))
-    site = data.get("site")
-    if (
-        isinstance(site, dict)
-        and site.get("width") is not None
-        and site.get("length") is not None
-    ):
-        plan.site(float(site["width"]), float(site["length"]))
-        setbacks = site.get("setbacks") or {}
-        if setbacks:
-            plan.setback(
-                front=setbacks.get("front"),
-                side=setbacks.get("side"),
-                rear=setbacks.get("rear"),
-            )
-    # Roof form/pitch intent. The *effective* pitch lives in the geometric roof
-    # block, but the authored **override** rides `plan.roof_pitch` — carry it so
-    # a plan with no override round-trips back to the default (a fixed point),
-    # rather than freezing the default number as an override.
-    roof_style = pinfo.get("roof_style")
-    roof_pitch = pinfo.get("roof_pitch")
-    if roof_style is not None or roof_pitch is not None:
-        plan.roof(roof_style or "gable", pitch=roof_pitch)
+    _exchange_restore_site(plan, data.get("site"))
+    if pinfo.get("roof_style") is not None or pinfo.get("roof_pitch") is not None:
+        plan.roof(pinfo.get("roof_style") or "gable", pitch=pinfo.get("roof_pitch"))
     if pinfo.get("notes"):
         plan.note(str(pinfo["notes"]))
     if pinfo.get("accessible"):
         plan.mark_accessible(True)
-    prog = pinfo.get("program")
+    _exchange_restore_program(plan, pinfo.get("program"))
+
+
+def _exchange_restore_site(plan: Barndominium, site) -> None:
+    if not (isinstance(site, dict) and site.get("width") is not None and site.get("length") is not None):
+        return
+    plan.site(float(site["width"]), float(site["length"]))
+    setbacks = site.get("setbacks") or {}
+    if setbacks:
+        plan.setback(front=setbacks.get("front"), side=setbacks.get("side"), rear=setbacks.get("rear"))
+
+
+def _exchange_restore_program(plan: Barndominium, prog) -> None:
     if isinstance(prog, dict) and prog.get("beds") is not None:
         plan.program(
             int(prog["beds"]),
             prog.get("baths"),
-            requires={k: int(v) for k, v in (prog.get("required") or {}).items()},
+            requires={key: int(value) for key, value in (prog.get("required") or {}).items()},
             min_area=prog.get("min_area"),
         )
 
-    for st in pinfo.get("suites", []) or []:
-        if st.get("members"):
-            plan.suite(st["id"], *st["members"])
-    for z in pinfo.get("zones", []) or []:
-        if z.get("members"):
-            plan.zone(z["id"], *z["members"])
 
+def _exchange_restore_grouping(plan: Barndominium, pinfo: dict) -> None:
+    for suite in pinfo.get("suites", []) or []:
+        if suite.get("members"):
+            plan.suite(suite["id"], *suite["members"])
+    for zone in pinfo.get("zones", []) or []:
+        if zone.get("members"):
+            plan.zone(zone["id"], *zone["members"])
+
+
+def _exchange_restore_wings_and_frame(plan: Barndominium, pinfo: dict) -> None:
     for wing in pinfo.get("wings", []) or []:
         wx, wy, ww, wl = wing
         plan.wing(float(ww), float(wl), x=float(wx), y=float(wy))
-
-    # The frame *request* re-places the post-and-beam skeleton (posts/beams
-    # aren't stored directly). Placed after the footprint (envelope + wings) is
-    # complete so the placer sees the whole building.
     frame = pinfo.get("frame")
     if isinstance(frame, dict):
         plan.frame(
@@ -2000,139 +1994,163 @@ def exchange_to_plan(data: dict) -> Barndominium:
             ridge=bool(frame.get("ridge", True)),
         )
 
-    # Rooms first — openings resolve against them.
-    plan_ceiling = float(pinfo.get("ceiling_height", feet(9)))
-    for r in data.get("rooms", []):
-        # A per-room ceiling equal to the plan default isn't an override — only
-        # carry one that actually differs, so the round-trip stays a fixed point.
-        rc = r.get("ceiling_height")
-        override = None if rc is None or abs(float(rc) - plan_ceiling) <= 1e-9 else float(rc)
+
+def _exchange_restore_rooms(plan: Barndominium, data: dict) -> None:
+    plan_ceiling = float(data.get("plan", {}).get("ceiling_height", feet(9)))
+    for room in data.get("rooms", []):
+        ceiling = _exchange_room_ceiling(room, plan_ceiling)
         plan.add_room(
-            r["id"],
-            r["type"],
-            x=float(r["x"]),
-            y=float(r["y"]),
-            width=float(r["width"]),
-            length=float(r["length"]),
-            level=int(r.get("level", 0)),
-            ceiling_height=override,
-            vaulted=bool(r.get("vaulted", False)),
+            room["id"],
+            room["type"],
+            x=float(room["x"]),
+            y=float(room["y"]),
+            width=float(room["width"]),
+            length=float(room["length"]),
+            level=int(room.get("level", 0)),
+            ceiling_height=ceiling,
+            vaulted=bool(room.get("vaulted", False)),
         )
 
-    # Declared wall kinds ride the wall segments; re-derive the room pair each
-    # tagged segment separates so `wall a - b ...` statements survive the trip
-    # (a plumbing-thickness hint on a rated segment restores both attributes).
+
+def _exchange_room_ceiling(room: dict, plan_ceiling: float) -> float | None:
+    ceiling = room.get("ceiling_height")
+    if ceiling is None or abs(float(ceiling) - plan_ceiling) <= 1e-9:
+        return None
+    return float(ceiling)
+
+
+def _exchange_restore_wall_specs(plan: Barndominium, data: dict) -> None:
     specs: dict[tuple[str, str], set[str]] = {}
-    for w in data.get("walls", []):
-        kind = w.get("kind")
-        if not kind or w.get("exterior"):
-            continue
-        (sx, sy), (ex, ey) = w.get("start", (0.0, 0.0)), w.get("end", (0.0, 0.0))
-        vertical = abs(sx - ex) <= 1e-9
-        orientation = "v" if vertical else "h"
-        const = sx if vertical else sy
-        lo, hi = sorted((sy, ey) if vertical else (sx, ex))
-        lvl_rooms = [r for r in plan.rooms if getattr(r, "level", 0) == w.get("level", 0)]
-        for i, ra in enumerate(lvl_rooms):
-            for rb in lvl_rooms[i + 1 :]:
-                edge = shared_edge(ra, rb)
-                if (
-                    edge is None
-                    or edge.orientation != orientation
-                    or abs(edge.pos - const) > 1e-4
-                ):
-                    continue
-                if min(hi, edge.hi) - max(lo, edge.lo) <= TOL:
-                    continue
-                attrs = specs.setdefault((ra.id, rb.id), set())
+    for wall in data.get("walls", []):
+        _exchange_collect_wall_spec(plan, wall, specs)
+    for (room_a, room_b), attrs in specs.items():
+        plan.wall(room_a, room_b, *sorted(attrs))
+
+
+def _exchange_collect_wall_spec(plan: Barndominium, wall: dict, specs: dict[tuple[str, str], set[str]]) -> None:
+    kind = wall.get("kind")
+    if not kind or wall.get("exterior"):
+        return
+    orientation, const, lo, hi = _exchange_wall_axis(wall)
+    level_rooms = [room for room in plan.rooms if getattr(room, "level", 0) == wall.get("level", 0)]
+    for i, room_a in enumerate(level_rooms):
+        for room_b in level_rooms[i + 1:]:
+            if _wall_segment_matches_pair(room_a, room_b, orientation, const, lo, hi):
+                attrs = specs.setdefault((room_a.id, room_b.id), set())
                 attrs.add(kind)
-                if float(w.get("thickness", 0.0)) >= PLUMBING_WALL_THICKNESS - 1e-9:
+                if float(wall.get("thickness", 0.0)) >= PLUMBING_WALL_THICKNESS - 1e-9:
                     attrs.add("plumbing")
-    for (ra_id, rb_id), attrs in specs.items():
-        plan.wall(ra_id, rb_id, *sorted(attrs))
 
-    for o in data.get("openings", []):
-        rooms = o.get("rooms", [])
-        width = float(o.get("width", 0.0))
-        loc = o.get("location", [0.0, 0.0])
-        if o.get("category") == "window":
-            room = plan.room(rooms[0]) if rooms else None
-            if room is None:
-                continue
-            wall, offset = _infer_exterior_wall(room, loc, width)
-            if wall is None:
-                continue
-            head = float(o.get("sill", 0.0)) + float(o.get("height", 0.0))
-            # Window kind round-trips; an old document's generic "window" (or a
-            # missing kind) falls back to the casement default.
-            wkind = o.get("kind")
-            if wkind not in WINDOW_KINDS:
-                wkind = "casement"
-            plan.add_window(
-                room.id, wall, width=width, offset=max(0.0, offset),
-                sill_height=float(o.get("sill", 0.0)), head_height=head,
-                kind=wkind,
-            )
-        elif o.get("exterior"):
-            room = plan.room(rooms[0]) if rooms else None
-            if room is None:
-                continue
-            wall, offset = _infer_exterior_wall(room, loc, width)
-            if wall is None:
-                continue
-            raw_kind = o.get("kind")
-            overhead = raw_kind == "overhead"
-            if overhead:
-                dkind = "overhead"
-            elif raw_kind in DOUBLE_LEAF_KINDS:
-                dkind = raw_kind  # a double/french pair round-trips its kind
-            else:
-                dkind = "entry"  # the historical "exterior" single door
-            plan.entrance(
-                room.id, wall, width=width, offset=max(0.0, offset),
-                egress=bool(o.get("egress", True)),
-                # An overhead door round-trips its kind and panel height;
-                # entrance() re-forces egress=False for it.
-                kind=dkind,
-                height=(
-                    float(o["height"])
-                    if overhead and o.get("height") is not None
-                    else None
-                ),
-            )
-        else:  # interior door or cased opening
-            if len(rooms) < 2:
-                continue
-            a, b = plan.room(rooms[0]), plan.room(rooms[1])
-            if a is None or b is None:
-                continue
-            offset = _infer_interior_offset(a, b, loc, width)
-            plan.connect(
-                a.id, b.id, width=width, kind=o.get("kind", "swing"),
-                offset=None if offset is None else max(0.0, offset),
-                # Optional swing side/hinge (additive fields; absent on old docs).
-                swing_into=o.get("swing_into"),
-                hinge=o.get("hinge"),
-            )
 
+def _exchange_wall_axis(wall: dict) -> tuple[str, float, float, float]:
+    (sx, sy), (ex, ey) = wall.get("start", (0.0, 0.0)), wall.get("end", (0.0, 0.0))
+    vertical = abs(sx - ex) <= 1e-9
+    orientation = "v" if vertical else "h"
+    const = sx if vertical else sy
+    lo, hi = sorted((sy, ey) if vertical else (sx, ex))
+    return orientation, const, lo, hi
+
+
+def _wall_segment_matches_pair(room_a, room_b, orientation: str, const: float, lo: float, hi: float) -> bool:
+    edge = shared_edge(room_a, room_b)
+    if edge is None or edge.orientation != orientation or abs(edge.pos - const) > 1e-4:
+        return False
+    return min(hi, edge.hi) - max(lo, edge.lo) > TOL
+
+
+def _exchange_restore_openings(plan: Barndominium, data: dict) -> None:
+    for opening in data.get("openings", []):
+        if opening.get("category") == "window":
+            _exchange_add_window(plan, opening)
+        elif opening.get("exterior"):
+            _exchange_add_exterior_door(plan, opening)
+        else:
+            _exchange_add_interior_opening(plan, opening)
+
+
+def _exchange_add_window(plan: Barndominium, opening: dict) -> None:
+    room, wall, offset, width = _exchange_exterior_opening_target(plan, opening)
+    if room is None or wall is None:
+        return
+    raw_kind = opening.get("kind")
+    window_kind = str(raw_kind) if raw_kind in WINDOW_KINDS else "casement"
+    sill = float(opening.get("sill", 0.0))
+    plan.add_window(
+        room.id, wall, width=width, offset=max(0.0, offset),
+        sill_height=sill, head_height=sill + float(opening.get("height", 0.0)), kind=window_kind,
+    )
+
+
+def _exchange_add_exterior_door(plan: Barndominium, opening: dict) -> None:
+    room, wall, offset, width = _exchange_exterior_opening_target(plan, opening)
+    if room is None or wall is None:
+        return
+    raw_kind = opening.get("kind")
+    overhead = raw_kind == "overhead"
+    plan.entrance(
+        room.id, wall, width=width, offset=max(0.0, offset), egress=bool(opening.get("egress", True)),
+        kind=_exchange_door_kind(raw_kind),
+        height=float(opening["height"]) if overhead and opening.get("height") is not None else None,
+    )
+
+
+def _exchange_exterior_opening_target(plan: Barndominium, opening: dict):
+    rooms = opening.get("rooms", [])
+    room = plan.room(rooms[0]) if rooms else None
+    if room is None:
+        return None, None, 0.0, float(opening.get("width", 0.0))
+    width = float(opening.get("width", 0.0))
+    wall, offset = _infer_exterior_wall(room, opening.get("location", [0.0, 0.0]), width)
+    return room, wall, offset, width
+
+
+def _exchange_door_kind(raw_kind: str | None) -> str:
+    if raw_kind == "overhead":
+        return "overhead"
+    if raw_kind in DOUBLE_LEAF_KINDS:
+        return raw_kind
+    return "entry"
+
+
+def _exchange_add_interior_opening(plan: Barndominium, opening: dict) -> None:
+    rooms = opening.get("rooms", [])
+    if len(rooms) < 2:
+        return
+    room_a, room_b = plan.room(rooms[0]), plan.room(rooms[1])
+    if room_a is None or room_b is None:
+        return
+    width = float(opening.get("width", 0.0))
+    offset = _infer_interior_offset(room_a, room_b, opening.get("location", [0.0, 0.0]), width)
+    plan.connect(
+        room_a.id, room_b.id, width=width, kind=opening.get("kind", "swing"),
+        offset=None if offset is None else max(0.0, offset),
+        swing_into=opening.get("swing_into"), hinge=opening.get("hinge"),
+    )
+
+
+def _exchange_restore_areas(plan: Barndominium, data: dict) -> None:
     for area in data.get("areas", []):
-        meta = area.get("meta", {})
         if area.get("kind") == "porch":
-            plan.add_porch(
-                area["id"], x=float(area["x"]), y=float(area["y"]),
-                width=float(area["width"]), length=float(area["length"]),
-                covered=bool(meta.get("covered", True)),
-            )
+            _exchange_add_porch(plan, area)
         elif area.get("kind") == "stair":
-            plan.add_stair(
-                area["id"], x=float(area["x"]), y=float(area["y"]),
-                width=float(area["width"]), length=float(area["length"]),
-                from_level=int(meta.get("from_level", area.get("level", 0))),
-                to_level=int(meta.get("to_level", 1)),
-            )
+            _exchange_add_stair(plan, area)
 
-    return plan
 
+def _exchange_add_porch(plan: Barndominium, area: dict) -> None:
+    meta = area.get("meta", {})
+    plan.add_porch(
+        area["id"], x=float(area["x"]), y=float(area["y"]),
+        width=float(area["width"]), length=float(area["length"]), covered=bool(meta.get("covered", True)),
+    )
+
+
+def _exchange_add_stair(plan: Barndominium, area: dict) -> None:
+    meta = area.get("meta", {})
+    plan.add_stair(
+        area["id"], x=float(area["x"]), y=float(area["y"]),
+        width=float(area["width"]), length=float(area["length"]),
+        from_level=int(meta.get("from_level", area.get("level", 0))), to_level=int(meta.get("to_level", 1)),
+    )
 
 def exchange_to_dsl(data: dict) -> str:
     """Reconstruct a plan from an exchange and serialise it to DSL source."""

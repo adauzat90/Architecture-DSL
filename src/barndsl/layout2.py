@@ -675,7 +675,7 @@ def _order_in_band(rooms: list[RoomSpec2], adj: dict[str, set[str]]) -> list[Roo
         # walk stops at a dead end; if the component still has unplaced members
         # (a branch), the next walk resumes from the unplaced room nearest the
         # chain (fewest unseen neighbours), and its run is appended contiguously.
-        pending = start
+        pending: str | None = start
         while pending is not None:
             cur: str | None = pending
             while cur is not None:

@@ -483,6 +483,38 @@ def _cmd_layout(args: argparse.Namespace) -> int:
 
 
 def _cmd_design(args: argparse.Namespace) -> int:
+    agent_api = _load_agent_api()
+    if agent_api is None:
+        return 2
+    BarndoAgent, _, resolve_max_iterations, resolve_model, _ = agent_api
+    if not _agent_available(agent_api):
+        return 2
+
+    model = resolve_model(args.model)
+    iterations = args.iterations if args.iterations is not None else resolve_max_iterations()
+    target_score = _resolve_cli_target_score(args, agent_api)
+    seed = None if args.no_seed_solver else args.brief
+
+    print(f"Designing with {model} (up to {iterations} iteration(s))...\n")
+    try:
+        result = BarndoAgent(model=model).design(
+            args.brief,
+            max_iterations=iterations,
+            critique=not args.no_critique,
+            on_step=_print_design_step,
+            target_score=target_score,
+            seed_with_solver=seed,
+        )
+    except Exception as exc:  # pragma: no cover - network/runtime errors
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    _print_design_seed_note(seed, result)
+    _print_design_result(result, args.out)
+    return 0 if result.result.ok else 1
+
+
+def _load_agent_api():
     try:
         from .agent import (
             BarndoAgent,
@@ -492,90 +524,71 @@ def _cmd_design(args: argparse.Namespace) -> int:
             resolve_target_score,
         )
     except ImportError:
-        # The base install is dependency-free; the design agent's libraries
-        # (anthropic/pydantic) live in the `agent` extra.
-        print(
-            'error: the design agent needs the agent extra — pip install "barndsl[agent]"',
-            file=sys.stderr,
-        )
-        return 2
+        print('error: the design agent needs the agent extra — pip install "barndsl[agent]"', file=sys.stderr)
+        return None
+    return BarndoAgent, agent_availability, resolve_max_iterations, resolve_model, resolve_target_score
 
+
+def _agent_available(agent_api) -> bool:
+    _, agent_availability, _, _, _ = agent_api
     available, reason = agent_availability()
     if not available:
         print(f"error: {reason}", file=sys.stderr)
-        return 2
+    return available
 
-    # Each flag defaults to None so an omitted flag falls through to the matching
-    # $BARNDSL_* env var (then the built-in default), keeping the CLI and the
-    # playground on one configuration. An explicit flag always wins.
-    model = resolve_model(args.model)
-    iterations = args.iterations if args.iterations is not None else resolve_max_iterations()
+
+def _resolve_cli_target_score(args: argparse.Namespace, agent_api) -> float | None:
+    _, _, _, _, resolve_target_score = agent_api
     if args.target_score is None:
-        target_score: float | None = resolve_target_score()
-    elif args.target_score <= 0:
-        target_score = None  # `--target-score 0` disables the gate
-    else:
-        target_score = args.target_score
+        return resolve_target_score()
+    if args.target_score <= 0:
+        return None
+    return args.target_score
 
-    def on_step(step) -> None:
-        crit = ""
-        if step.critique is not None:
-            crit = "  (critic: satisfied)" if step.critique.satisfied else "  (critic: needs work)"
-        score = f"  score {step.score.total:g}/100" if step.score is not None else ""
-        # Iteration 0 is the deterministic solver seed, not a model round — label
-        # it so the printed floor isn't mistaken for the agent's first attempt.
-        label = "solver seed" if step.iteration == 0 else f"iteration {step.iteration}"
-        # Restructure/blocked notes (getattr: stay decoupled from the concurrently
-        # edited agent module and tolerate older DesignStep shapes in tests).
-        notes = ""
-        if getattr(step, "repaired", False):
-            notes += "  (repair round)"
-        elif getattr(step, "restructured", False):
-            notes += "  (restructure round)"
-        if getattr(step, "salvaged", False):
-            notes += "  (compile fixed in-round)"
-        crit_obj = step.critique
-        if crit_obj is not None and getattr(crit_obj, "blocking_issues", None):
-            notes += "  (blocked: capped at 65)"
-        print(f"  {label}: {step.result.summary()}{score}{crit}{notes}")
-        # A degraded critique (the call failed or returned no parseable JSON) is
-        # otherwise invisible here — surface it so the miss isn't silent. The
-        # sentinel prefix is a stable contract in agent.py; match it by string so
-        # this stays decoupled from a concurrently-edited module.
-        if step.critique is not None and step.critique.assessment.startswith(
-            "(critique skipped"
-        ):
-            print(f"    note: critique unavailable {step.critique.assessment}")
 
-    # Seed iteration 0 from the deterministic layout engines unless opted out; the
-    # brief text doubles as the solver program (parsed as a v2 brief), and seeding
-    # degrades to no-seed when it isn't parseable, so defaulting it on is safe.
-    seed = None if args.no_seed_solver else args.brief
+def _print_design_step(step) -> None:
+    crit = _design_step_critique_label(step)
+    score = f"  score {step.score.total:g}/100" if step.score is not None else ""
+    label = "solver seed" if step.iteration == 0 else f"iteration {step.iteration}"
+    notes = _design_step_notes(step)
+    print(f"  {label}: {step.result.summary()}{score}{crit}{notes}")
+    _print_design_critique_skip(step)
 
-    print(f"Designing with {model} (up to {iterations} iteration(s))...\n")
-    agent = BarndoAgent(model=model)
-    try:
-        result = agent.design(
-            args.brief,
-            max_iterations=iterations,
-            critique=not args.no_critique,
-            on_step=on_step,
-            target_score=target_score,
-            seed_with_solver=seed,
-        )
-    except Exception as exc:  # pragma: no cover - network/runtime errors
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
 
-    # Seeding was requested but the solver drafted no iteration-0 step (the brief
-    # wasn't a program it could solve — e.g. a vague natural-language brief). That
-    # used to degrade silently; surface it so the missing floor is visible.
-    if seed is not None and not any(s.iteration == 0 for s in result.history):
+def _design_step_critique_label(step) -> str:
+    if step.critique is None:
+        return ""
+    return "  (critic: satisfied)" if step.critique.satisfied else "  (critic: needs work)"
+
+
+def _design_step_notes(step) -> str:
+    notes = ""
+    if getattr(step, "repaired", False):
+        notes += "  (repair round)"
+    elif getattr(step, "restructured", False):
+        notes += "  (restructure round)"
+    if getattr(step, "salvaged", False):
+        notes += "  (compile fixed in-round)"
+    crit_obj = step.critique
+    if crit_obj is not None and getattr(crit_obj, "blocking_issues", None):
+        notes += "  (blocked: capped at 65)"
+    return notes
+
+
+def _print_design_critique_skip(step) -> None:
+    if step.critique is not None and step.critique.assessment.startswith("(critique skipped"):
+        print(f"    note: critique unavailable {step.critique.assessment}")
+
+
+def _print_design_seed_note(seed: str | None, result) -> None:
+    if seed is not None and not any(step.iteration == 0 for step in result.history):
         print(
             "  note: the layout solver could not draft a seed from this brief; "
             "the model designed from a blank page."
         )
 
+
+def _print_design_result(result, out: str) -> None:
     print(
         f"\n--- final DSL (best of {result.iterations} iteration(s): "
         f"iteration {result.best_iteration}, score {result.score.total:g}/100) ---"
@@ -586,13 +599,11 @@ def _cmd_design(args: argparse.Namespace) -> int:
     if result.plan is not None:
         print()
         _print_metrics(result.plan)
-        save_svg(result.plan, args.out)
-        print(f"\nWrote {args.out}")
+        save_svg(result.plan, out)
+        print(f"\nWrote {out}")
     if result.history and result.history[-1].critique is not None:
         print("\nArchitect's assessment:")
         print(f"  {result.history[-1].critique.assessment}")
-    return 0 if result.result.ok else 1
-
 
 def _cmd_revit(args: argparse.Namespace) -> int:
     try:
@@ -670,49 +681,44 @@ def _cmd_revit_import(args: argparse.Namespace) -> int:
 
 
 def _cmd_fmt(args: argparse.Namespace) -> int:
-    """Canonically reformat .barn files with the comment-preserving normalizer.
-
-    Unlike an emit round-trip, `fmt` keeps every comment (teaching notes and
-    suppression pragmas) — it re-renders each statement line from its own tokens
-    and normalizes only spacing/number formatting/keyword case. It refuses to
-    touch a file that doesn't compile without parse errors, so it can't mask
-    breakage."""
-    from .fmt import format_source
-
-    quiet = getattr(args, "quiet", False)
-    rc = 0
+    """Canonically reformat .barn files with the comment-preserving normalizer."""
     changed_any = False
     for path in args.files:
-        original, _ = read_source_file(path)  # `-` reads stdin; clean I/O errors
-        # Refuse to format a file with parse errors — fmt must never mask breakage.
-        result = compile_source(original)
-        if result.plan is None or result.recovered:
-            # Errors go to stderr regardless of --quiet.
-            print(f"{path}: cannot format — fix parse errors first", file=sys.stderr)
-            print(result.report(os.path.basename(path)), file=sys.stderr)
-            rc = 2
-            continue
-        formatted = format_source(original)
-        changed = formatted != original
-        if args.check:
-            if changed:
-                if not quiet:
-                    print(f"would reformat {path}")
-                changed_any = True
-        elif args.write and path != "-":
-            if changed:
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(formatted)
-                if not quiet:
-                    print(f"reformatted {path}")
-        elif not quiet:
-            # stdin (or no --write): emit the formatted source to stdout.
-            print(formatted, end="")
-    if rc:
-        return rc
-    if args.check and changed_any:
-        return 1
-    return 0
+        outcome = _format_one_file(path, args)
+        if outcome == "error":
+            return 2
+        changed_any = changed_any or outcome == "changed"
+    return 1 if args.check and changed_any else 0
+
+
+def _format_one_file(path: str, args: argparse.Namespace) -> str:
+    from .fmt import format_source
+
+    original, _ = read_source_file(path)  # `-` reads stdin; clean I/O errors
+    result = compile_source(original)
+    if result.plan is None or result.recovered:
+        print(f"{path}: cannot format — fix parse errors first", file=sys.stderr)
+        print(result.report(os.path.basename(path)), file=sys.stderr)
+        return "error"
+    formatted = format_source(original)
+    if formatted == original:
+        return "same"
+    _write_or_report_formatted(path, formatted, args)
+    return "changed"
+
+
+def _write_or_report_formatted(path: str, formatted: str, args: argparse.Namespace) -> None:
+    quiet = getattr(args, "quiet", False)
+    if args.check:
+        if not quiet:
+            print(f"would reformat {path}")
+    elif args.write and path != "-":
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(formatted)
+        if not quiet:
+            print(f"reformatted {path}")
+    elif not quiet:
+        print(formatted, end="")
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
@@ -1008,69 +1014,80 @@ def _cmd_revit_diff(args: argparse.Namespace) -> int:
 
 def _cmd_cost(args: argparse.Namespace) -> int:
     """Assembly-based construction cost estimate from the plan's takeoff."""
-    from .cost import (
-        cost_text,
-        estimate_cost,
-        unit_cost_key_rows,
-        unit_cost_key_table,
-    )
-
-    # `--print-keys` is a reference dump, not an estimate — it needs no plan, so
-    # the positional file is optional when it's set. `--json` gives a machine
-    # shape [{key, default, unit, meaning}, ...]; otherwise the text table.
     if getattr(args, "print_keys", False):
-        if getattr(args, "json", False):
-            import json
-
-            print(json.dumps(unit_cost_key_rows(), indent=2))
-        else:
-            print(unit_cost_key_table())
-        return 0
+        return _print_cost_keys(args)
     if args.file is None:
         print("error: the following arguments are required: file", file=sys.stderr)
         return 2
-
-    try:
-        result = compile_file(args.file)
-    except OSError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    result = _compile_cost_plan(args.file)
+    if not hasattr(result, "plan"):
         return 2
-    if result.plan is None or result.errors:
-        # A cost estimate is a deliverable, not a diagnostic: pricing a plan
-        # that failed to compile (including the parser's partial recoveries)
-        # is misleading — fail like an unreadable file (exit 2), unlike
-        # score/compare which still show partial signal.
-        print(result.report(os.path.basename(args.file)), file=sys.stderr)
+    overrides = _load_cost_overrides(args.costs)
+    if isinstance(overrides, str):
+        print(overrides, file=sys.stderr)
         return 2
+    return _estimate_and_print_cost(args, result, overrides)
 
-    overrides = None
-    if args.costs:
-        import json
 
-        try:
-            with open(args.costs, encoding="utf-8") as fh:
-                overrides = json.load(fh)
-        except (OSError, ValueError) as exc:
-            print(f"error: reading --costs: {exc}", file=sys.stderr)
-            return 2
+def _print_cost_keys(args: argparse.Namespace) -> int:
+    from .cost import unit_cost_key_rows, unit_cost_key_table
 
-    try:
-        est = estimate_cost(result, overrides=overrides, multiplier=args.multiplier)
-    except (ValueError, TypeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
-    if getattr(args, "quiet", False):
-        # Makefile contract: a clean estimate prints nothing; a compile failure
-        # already returned 2 with its report on stderr above.
-        return 0
     if getattr(args, "json", False):
         import json
 
-        print(json.dumps(est, indent=2))
+        print(json.dumps(unit_cost_key_rows(), indent=2))
     else:
-        print(cost_text(est))
+        print(unit_cost_key_table())
     return 0
+
+
+def _compile_cost_plan(path: str):
+    try:
+        result = compile_file(path)
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+    if result.plan is None or result.errors:
+        print(result.report(os.path.basename(path)), file=sys.stderr)
+        return None
+    return result
+
+
+def _load_cost_overrides(path: str | None) -> dict | None | str:
+    if not path:
+        return None
+    import json
+
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        return f"error: reading --costs: {exc}"
+
+
+def _estimate_and_print_cost(args: argparse.Namespace, result, overrides: dict | None) -> int:
+    from .cost import estimate_cost
+
+    try:
+        estimate = estimate_cost(result, overrides=overrides, multiplier=args.multiplier)
+    except (ValueError, TypeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "quiet", False):
+        return 0
+    _print_cost_estimate(estimate, json_output=getattr(args, "json", False))
+    return 0
+
+
+def _print_cost_estimate(estimate: dict, *, json_output: bool) -> None:
+    from .cost import cost_text
+
+    if json_output:
+        import json
+
+        print(json.dumps(estimate, indent=2))
+    else:
+        print(cost_text(estimate))
 
 
 def _cmd_packet(args: argparse.Namespace) -> int:
@@ -1140,96 +1157,149 @@ def _cmd_dev(args: argparse.Namespace) -> int:
     """Developer/harness commands used by CI and agent tooling."""
     from . import devtools
 
-    cmd = args.dev_command
-    if cmd == "audit":
-        out = devtools.repo_audit()
-        print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "rule-probe":
-        if args.file:
-            source = open(args.file, encoding="utf-8").read()
-        elif args.source is not None:
-            source = args.source
-        else:
-            source = sys.stdin.read()
-        expect = json.loads(args.expect) if args.expect else None
-        out = devtools.rule_probe(source, expect, name=args.name, profile=args.profile)
-        print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "diag-diff":
-        out = devtools.diagnostic_diff(args.before, args.after, profile=args.profile)
-        print(devtools.dumps(out))
-        return 0
-    if cmd == "gallery-gate":
-        out = devtools.diagnostic_diff(args.paths or ["examples"], profile=args.profile)
-        print(devtools.dumps(out))
-        return 0
-    if cmd == "lsp-smoke":
-        out = devtools.lsp_smoke(args.file, strict_composed=args.strict_composed)
-        print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "doctor":
-        out = devtools.doctor(
-            paths=args.paths or None,
-            lsp_strict=not args.no_strict_lsp,
-            run_impact=args.run_impact,
-            export_plan=args.export_plan,
-            profile=args.profile,
-        )
-        print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "feature-check":
-        out = devtools.feature_check(args.name, statement=not args.no_statement)
-        print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "locate":
-        out = devtools.locate(args.query, max_results=args.max_results)
-        print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "diag-matrix":
-        out = devtools.diagnostic_matrix(args.paths or ["examples"], max_hits=args.max_hits)
-        if args.markdown or args.out:
-            md = devtools.diagnostic_matrix_markdown(out)
-            if args.out:
-                out_path = Path(args.out)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(md, encoding="utf-8")
-            else:
-                print(md)
-        else:
-            print(devtools.dumps(out))
-        return 0
-    if cmd == "fixtures":
-        out = devtools.fixture_catalog(args.paths or ["examples"])
-        if args.markdown or args.out:
-            md = devtools.fixture_catalog_markdown(out)
-            if args.out:
-                out_path = Path(args.out)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(md, encoding="utf-8")
-            else:
-                print(md)
-        else:
-            print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "impact":
-        out = devtools.impact_tests(args.changed, run=args.run, quiet=not args.verbose)
-        print(devtools.dumps(out))
-        return int(out.get("exit", 0) or 0)
-    if cmd == "export-parity":
-        out = devtools.export_parity(args.file, args.prefix)
-        print(devtools.dumps(out))
-        return 0 if out["ok"] else 1
-    if cmd == "rule-scaffold":
-        out = devtools.rule_scaffold(args.code, args.severity, args.test_file, write=args.write)
-        print(devtools.dumps(out))
-        return 0
-    if cmd == "feature-scaffold":
-        out = devtools.feature_scaffold(args.name, args.out, write=not args.no_write)
-        print(devtools.dumps(out))
-        return 0
-    raise SystemExit(f"unknown dev command {cmd}")
+    handler = _DEV_COMMAND_HANDLERS.get(args.dev_command)
+    if handler is None:
+        raise SystemExit(f"unknown dev command {args.dev_command}")
+    return handler(args, devtools)
 
+
+def _print_dev_json(devtools, out: dict) -> None:
+    print(devtools.dumps(out))
+
+
+def _dev_ok_exit(out: dict) -> int:
+    return 0 if out["ok"] else 1
+
+
+def _dev_audit(args: argparse.Namespace, devtools) -> int:
+    out = devtools.repo_audit()
+    _print_dev_json(devtools, out)
+    return _dev_ok_exit(out)
+
+
+def _dev_rule_probe(args: argparse.Namespace, devtools) -> int:
+    source = _dev_probe_source(args)
+    expect = json.loads(args.expect) if args.expect else None
+    out = devtools.rule_probe(source, expect, name=args.name, profile=args.profile)
+    _print_dev_json(devtools, out)
+    return _dev_ok_exit(out)
+
+
+def _dev_probe_source(args: argparse.Namespace) -> str:
+    if args.file:
+        return open(args.file, encoding="utf-8").read()
+    if args.source is not None:
+        return args.source
+    return sys.stdin.read()
+
+
+def _dev_diag_diff(args: argparse.Namespace, devtools) -> int:
+    out = devtools.diagnostic_diff(args.before, args.after, profile=args.profile)
+    _print_dev_json(devtools, out)
+    return 0
+
+
+def _dev_gallery_gate(args: argparse.Namespace, devtools) -> int:
+    out = devtools.diagnostic_diff(args.paths or ["examples"], profile=args.profile)
+    _print_dev_json(devtools, out)
+    return 0
+
+
+def _dev_lsp_smoke(args: argparse.Namespace, devtools) -> int:
+    out = devtools.lsp_smoke(args.file, strict_composed=args.strict_composed)
+    _print_dev_json(devtools, out)
+    return _dev_ok_exit(out)
+
+
+def _dev_doctor(args: argparse.Namespace, devtools) -> int:
+    out = devtools.doctor(
+        paths=args.paths or None,
+        lsp_strict=not args.no_strict_lsp,
+        run_impact=args.run_impact,
+        export_plan=args.export_plan,
+        profile=args.profile,
+    )
+    _print_dev_json(devtools, out)
+    return _dev_ok_exit(out)
+
+
+def _dev_feature_check(args: argparse.Namespace, devtools) -> int:
+    out = devtools.feature_check(args.name, statement=not args.no_statement)
+    _print_dev_json(devtools, out)
+    return _dev_ok_exit(out)
+
+
+def _dev_locate(args: argparse.Namespace, devtools) -> int:
+    out = devtools.locate(args.query, max_results=args.max_results)
+    _print_dev_json(devtools, out)
+    return _dev_ok_exit(out)
+
+
+def _dev_diag_matrix(args: argparse.Namespace, devtools) -> int:
+    out = devtools.diagnostic_matrix(args.paths or ["examples"], max_hits=args.max_hits)
+    _print_dev_markdown_or_json(args, devtools, out, devtools.diagnostic_matrix_markdown)
+    return 0
+
+
+def _dev_fixtures(args: argparse.Namespace, devtools) -> int:
+    out = devtools.fixture_catalog(args.paths or ["examples"])
+    _print_dev_markdown_or_json(args, devtools, out, devtools.fixture_catalog_markdown)
+    return _dev_ok_exit(out)
+
+
+def _print_dev_markdown_or_json(args: argparse.Namespace, devtools, out: dict, markdown_fn) -> None:
+    if not (args.markdown or args.out):
+        _print_dev_json(devtools, out)
+        return
+    markdown = markdown_fn(out)
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(markdown, encoding="utf-8")
+    else:
+        print(markdown)
+
+
+def _dev_impact(args: argparse.Namespace, devtools) -> int:
+    out = devtools.impact_tests(args.changed, run=args.run, quiet=not args.verbose)
+    _print_dev_json(devtools, out)
+    return int(out.get("exit", 0) or 0)
+
+
+def _dev_export_parity(args: argparse.Namespace, devtools) -> int:
+    out = devtools.export_parity(args.file, args.prefix)
+    _print_dev_json(devtools, out)
+    return _dev_ok_exit(out)
+
+
+def _dev_rule_scaffold(args: argparse.Namespace, devtools) -> int:
+    out = devtools.rule_scaffold(args.code, args.severity, args.test_file, write=args.write)
+    _print_dev_json(devtools, out)
+    return 0
+
+
+def _dev_feature_scaffold(args: argparse.Namespace, devtools) -> int:
+    out = devtools.feature_scaffold(args.name, args.out, write=not args.no_write)
+    _print_dev_json(devtools, out)
+    return 0
+
+
+_DEV_COMMAND_HANDLERS = {
+    "audit": _dev_audit,
+    "rule-probe": _dev_rule_probe,
+    "diag-diff": _dev_diag_diff,
+    "gallery-gate": _dev_gallery_gate,
+    "lsp-smoke": _dev_lsp_smoke,
+    "doctor": _dev_doctor,
+    "feature-check": _dev_feature_check,
+    "locate": _dev_locate,
+    "diag-matrix": _dev_diag_matrix,
+    "fixtures": _dev_fixtures,
+    "impact": _dev_impact,
+    "export-parity": _dev_export_parity,
+    "rule-scaffold": _dev_rule_scaffold,
+    "feature-scaffold": _dev_feature_scaffold,
+}
 
 def _cmd_explain(args: argparse.Namespace) -> int:
     from .diagnostics import REGISTRY, explain
@@ -1263,16 +1333,29 @@ window living west width 8 offset 10
 """
 
 
-def main(argv: list[str] | None = None) -> int:
-    _harden_stdio()
-    _load_dotenv()
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="barndsl",
         description="DSL compiler and agentic workflow for barndominium floor plans.",
     )
     parser.add_argument("--version", action="version", version=f"barndsl {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
+    _add_compile_build_commands(sub)
+    _add_score_inspect_demo_commands(sub)
+    _add_layout_design_commands(sub)
+    _add_revit_fmt_commands(sub)
+    _add_schedule_new_commands(sub)
+    _add_export_3d_commands(sub)
+    _add_serve_lsp_commands(sub)
+    _add_drawing_watch_compare_commands(sub)
+    _add_diff_cost_packet_commands(sub)
+    _add_rlog_explain_commands(sub)
+    _add_dev_commands(sub)
+    _add_profiles_command(sub)
+    return parser
 
+
+def _add_compile_build_commands(sub) -> None:
     p_compile = sub.add_parser("compile", help="compile a .barn file and print diagnostics")
     p_compile.add_argument("file", help="path to a .barn DSL file")
     p_compile.add_argument(
@@ -1334,6 +1417,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_dims_flag(p_build)
     p_build.set_defaults(func=_cmd_build)
 
+
+def _add_score_inspect_demo_commands(sub) -> None:
     p_score = sub.add_parser(
         "score", help="compile and print the 0-100 design score with its components"
     )
@@ -1368,6 +1453,8 @@ def main(argv: list[str] | None = None) -> int:
     p_demo.add_argument("--out", default="barndo.svg", help="output SVG path")
     p_demo.set_defaults(func=_cmd_demo)
 
+
+def _add_layout_design_commands(sub) -> None:
     p_layout = sub.add_parser(
         "layout", help="solve room placement from an adjacency brief (no API key)"
     )
@@ -1422,6 +1509,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_design.set_defaults(func=_cmd_design)
 
+
+def _add_revit_fmt_commands(sub) -> None:
     p_revit = sub.add_parser(
         "revit", help="lower a plan to the Revit exchange JSON for the pyRevit add-in"
     )
@@ -1462,6 +1551,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_fmt.set_defaults(func=_cmd_fmt)
 
+
+def _add_schedule_new_commands(sub) -> None:
     p_sched = sub.add_parser(
         "schedule", help="emit room/door/window schedules (Markdown or CSV), no Revit"
     )
@@ -1487,6 +1578,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_new.set_defaults(func=_cmd_new)
 
+
+def _add_export_3d_commands(sub) -> None:
     p_dxf = sub.add_parser("dxf", help="export a plan to DXF (CAD interchange)")
     p_dxf.add_argument("file", help="path to a .barn DSL file")
     p_dxf.add_argument("--out", default="plan.dxf", help="output DXF path")
@@ -1536,6 +1629,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_view3d.set_defaults(func=_cmd_view3d)
 
+
+def _add_serve_lsp_commands(sub) -> None:
     p_serve = sub.add_parser(
         "serve",
         help="start the local web playground (editor, live diagnostics, 2D/3D; "
@@ -1564,6 +1659,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_lsp.set_defaults(func=_cmd_lsp)
 
+
+def _add_drawing_watch_compare_commands(sub) -> None:
     p_elev = sub.add_parser(
         "elevation", help="render a schematic exterior elevation (one face) to SVG"
     )
@@ -1609,6 +1706,8 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("--json", action="store_true", help="emit the comparison as JSON")
     p_compare.set_defaults(func=_cmd_compare)
 
+
+def _add_diff_cost_packet_commands(sub) -> None:
     p_revit_diff = sub.add_parser(
         "revit-diff",
         help="report drift (moved/added/removed/changed) between a Revit model "
@@ -1682,6 +1781,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_dims_flag(p_packet)
     p_packet.set_defaults(func=_cmd_packet)
 
+
+def _add_rlog_explain_commands(sub) -> None:
     p_rlog = sub.add_parser(
         "revit-log",
         help="translate a *.buildlog.json from the pyRevit build into diagnostics",
@@ -1698,6 +1799,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_explain.set_defaults(func=_cmd_explain)
 
+
+def _add_dev_commands(sub) -> None:
     p_dev = sub.add_parser(
         "dev",
         help="developer/harness helpers for rule and DSL feature work",
@@ -1705,6 +1808,12 @@ def main(argv: list[str] | None = None) -> int:
     dev_sub = p_dev.add_subparsers(dest="dev_command", required=True)
     p_dev_audit = dev_sub.add_parser("audit", help="audit diagnostic/statement wiring drift")
     p_dev_audit.set_defaults(func=_cmd_dev)
+    _add_dev_quality_commands(dev_sub)
+    _add_dev_discovery_commands(dev_sub)
+    _add_dev_artifact_commands(dev_sub)
+
+
+def _add_dev_quality_commands(dev_sub) -> None:
     p_dev_probe = dev_sub.add_parser("rule-probe", help="compile inline/source-file DSL and assert diagnostic codes")
     p_dev_probe.add_argument("--source", default=None, help="inline .barn source (default stdin unless --file)")
     p_dev_probe.add_argument("--file", default=None, help="read .barn source from a file")
@@ -1732,6 +1841,9 @@ def main(argv: list[str] | None = None) -> int:
     p_dev_doctor.add_argument("--export-plan", default=None, help="optional .barn plan for SVG/glTF/IFC/packet export parity")
     _add_profile_flag(p_dev_doctor)
     p_dev_doctor.set_defaults(func=_cmd_dev)
+
+
+def _add_dev_discovery_commands(dev_sub) -> None:
     p_dev_feature_check = dev_sub.add_parser("feature-check", help="verify a DSL feature/statement is wired across key surfaces")
     p_dev_feature_check.add_argument("name", help="feature or statement name")
     p_dev_feature_check.add_argument("--no-statement", action="store_true", help="treat as model-only feature; skip statement keyword requirements")
@@ -1751,6 +1863,9 @@ def main(argv: list[str] | None = None) -> int:
     p_dev_fixtures.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
     p_dev_fixtures.add_argument("--out", default=None, help="write Markdown catalog to this path")
     p_dev_fixtures.set_defaults(func=_cmd_dev)
+
+
+def _add_dev_artifact_commands(dev_sub) -> None:
     p_dev_impact = dev_sub.add_parser("impact", help="map changed files to likely pytest targets")
     p_dev_impact.add_argument("changed", nargs="*", help="changed files (default: git status)")
     p_dev_impact.add_argument("--run", action="store_true", help="run the selected pytest targets")
@@ -1772,6 +1887,8 @@ def main(argv: list[str] | None = None) -> int:
     p_dev_feat_scaf.add_argument("--no-write", action="store_true")
     p_dev_feat_scaf.set_defaults(func=_cmd_dev)
 
+
+def _add_profiles_command(sub) -> None:
     p_profiles = sub.add_parser(
         "profiles",
         help="list the built-in jurisdiction profiles and the thresholds they set",
@@ -1785,19 +1902,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_profiles.set_defaults(func=_cmd_profiles)
 
+
+def main(argv: list[str] | None = None) -> int:
+    _harden_stdio()
+    _load_dotenv()
+    parser = _build_parser()
     args = parser.parse_args(argv)
     try:
         return args.func(args)
     except SourceReadError as exc:
-        # A file-taking command pointed at something unreadable (missing file, a
-        # directory, no permission, non-UTF-8): a clean one-liner + exit 2, never
-        # a traceback — the same exit convention as a fatal input error below.
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except SystemExit as exc:
-        # A command signalling a fatal input error (e.g. an unresolvable
-        # --profile) raises SystemExit(code); surface it as an int return so
-        # callers/tests get the exit code uniformly, like the other commands.
         return exc.code if isinstance(exc.code, int) else 2
 
 

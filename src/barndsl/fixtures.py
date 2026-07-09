@@ -635,7 +635,8 @@ def _place_explicit(
                     wall, x0, y0, cw, cl, (run - width) / 2.0, width, depth
                 )
                 if not any(_rects_overlap(rect, o) for o in occupied):
-                    return Fixture(pf.kind, *rect, wall, rotation=pf.rotation)
+                    rx, ry, rw, rl = rect
+                    return Fixture(pf.kind, rx, ry, rw, rl, wall, rotation=pf.rotation)
         # Auto-place against the named wall: first free slot along its run.
         rx, ry, rw, rl = _first_free_on_wall(x0, y0, cw, cl, wall, width, depth, occupied)
         return Fixture(pf.kind, rx, ry, rw, rl, wall, rotation=pf.rotation)
@@ -1180,37 +1181,37 @@ def _door_swing_rects(plan: Barndominium, room: Room) -> list:
     from .geometry import shared_edge
 
     out = []
-    for d in plan.exterior_doors:
-        if d.room != room.id or getattr(d, "overhead", False):
+    for ext_door in plan.exterior_doors:
+        if ext_door.room != room.id or getattr(ext_door, "overhead", False):
             continue
-        if getattr(d, "kind", "entry") in ("pocket", "sliding"):
+        if getattr(ext_door, "kind", "entry") in ("pocket", "sliding"):
             continue
-        w = d.width
-        x1, y1, x2, y2 = opening_endpoints(room, d.wall, d.offset, d.width)
-        if d.wall is Direction.SOUTH:
+        w = ext_door.width
+        x1, y1, x2, y2 = opening_endpoints(room, ext_door.wall, ext_door.offset, ext_door.width)
+        if ext_door.wall is Direction.SOUTH:
             out.append((min(x1, x2), room.y, w, min(w, room.length)))
-        elif d.wall is Direction.NORTH:
+        elif ext_door.wall is Direction.NORTH:
             d_in = min(w, room.length)
             out.append((min(x1, x2), room.y2 - d_in, w, d_in))
-        elif d.wall is Direction.WEST:
+        elif ext_door.wall is Direction.WEST:
             out.append((room.x, min(y1, y2), min(w, room.width), w))
         else:  # EAST
             d_in = min(w, room.width)
             out.append((room.x2 - d_in, min(y1, y2), d_in, w))
-    for d in plan.interior_doors:
-        if getattr(d, "kind", "swing") not in ("swing", "double", "french"):
+    for int_door in plan.interior_doors:
+        if getattr(int_door, "kind", "swing") not in ("swing", "double", "french"):
             continue
-        if room.id not in (d.room_a, d.room_b):
+        if room.id not in (int_door.room_a, int_door.room_b):
             continue
-        other_id = d.room_b if d.room_a == room.id else d.room_a
+        other_id = int_door.room_b if int_door.room_a == room.id else int_door.room_a
         other = plan.room(other_id)
         if other is None:
             continue
         edge = shared_edge(room, other)
         if edge is None:
             continue
-        w = min(d.width, edge.length)
-        offset = d.offset if d.offset is not None else max(0.0, (edge.length - w) / 2.0)
+        w = min(int_door.width, edge.length)
+        offset = int_door.offset if int_door.offset is not None else max(0.0, (edge.length - w) / 2.0)
         start = edge.lo + max(0.0, min(offset, edge.length - w))
         if edge.orientation == "v":  # wall runs north-south at x = edge.pos
             inward = edge.pos < room.center[0]

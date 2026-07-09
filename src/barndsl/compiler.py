@@ -991,6 +991,1304 @@ def _param_value(text: str) -> float | None:
     return v if math.isfinite(v) else None
 
 
+# --- statement parsers: site / lot features ---------------------------------
+
+
+def _parse_site_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`site <W> x <L>` — lot dimensions (east-west x north-south feet)."""
+    w = c.number("site width")
+    c.keyword("x")
+    length = c.number("site length")
+    c.expect_end()
+    plan.site(w, length)
+    ss = plan.site_spec
+    assert ss is not None  # .site() just created it
+    ss.line, ss.col, ss.end_col = lineno, kw.col, kw.end_col
+
+
+def _parse_setback_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`setback [front <n>] [side <n>] [rear <n>]` — any subset, any order."""
+    front = side = rear = None
+    while (tok := c.peek()) is not None:
+        opt = c.take("'front', 'side', or 'rear'").text.lower()
+        if opt == "front":
+            front = c.number("the front setback")
+        elif opt == "side":
+            side = c.number("the side setback")
+        elif opt == "rear":
+            rear = c.number("the rear setback")
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown setback edge '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint="Use `setback front <n> side <n> rear <n>` (any subset; "
+                "`side` applies to both the east and west edges).",
+            )
+    if front is None and side is None and rear is None:
+        raise _ParseError(
+            "SYNTAX",
+            "A `setback` needs at least one of front/side/rear.",
+            c.eol_col,
+            end_col=c.eol_col + 1,
+            hint="e.g. `setback front 25 side 10 rear 20`.",
+        )
+    c.expect_end()
+    plan.setback(front=front, side=side, rear=rear)
+    ss = plan.site_spec
+    assert ss is not None  # .setback() just created it
+    ss.setback_line, ss.setback_col, ss.setback_end_col = lineno, kw.col, kw.end_col
+
+
+def _parse_building_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`building at <x>,<y>` — plan origin (SW envelope corner) on the lot."""
+    c.keyword("at")
+    bx = c.number("the building x on the lot")
+    by = c.number("the building y on the lot")
+    c.expect_end()
+    plan.building(bx, by)
+    ss = plan.site_spec
+    assert ss is not None  # .building() just created it
+    ss.building_line, ss.building_col, ss.building_end_col = lineno, kw.col, kw.end_col
+
+
+def _parse_drive_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`drive at <x>,<y> size <w> x <l> [gravel|concrete|asphalt]`."""
+    from .elements import Drive
+
+    c.keyword("at")
+    dx = c.number("the drive x on the lot")
+    dy = c.number("the drive y on the lot")
+    c.keyword("size")
+    dw = c.number("the drive width")
+    c.keyword("x")
+    dl = c.number("the drive length")
+    surface = "gravel"
+    if (tok := c.peek()) is not None:
+        surface = c.take("a drive surface").text.lower()
+        if surface not in DRIVE_SURFACES:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown drive surface '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint=f"Use one of: {', '.join(DRIVE_SURFACES)} (default gravel).",
+            )
+    c.expect_end()
+    plan._site().drives.append(
+        Drive(dx, dy, dw, dl, surface, line=lineno, col=kw.col, end_col=kw.end_col)
+    )
+
+
+def _parse_walk_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`walk from <room> to drive [width <ft>]`."""
+    from .elements import Walk
+
+    c.keyword("from")
+    room_tok = c.ident("a room id")
+    c.keyword("to")
+    c.keyword("drive")
+    width = WALK_DEFAULT_WIDTH
+    if (tok := c.peek()) is not None:
+        if tok.text.lower() != "width":
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown walk option '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint="A walk takes only `width <ft>`, e.g. `walk from mud to drive width 4`.",
+            )
+        c.keyword("width")
+        width = c.number("the walk width")
+    c.expect_end()
+    plan._site().walks.append(
+        Walk(room_tok.text, width, line=lineno, col=kw.col, end_col=kw.end_col)
+    )
+
+
+def _parse_well_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`well at <x>,<y>` — water well point in lot feet."""
+    from .elements import Well
+
+    c.keyword("at")
+    wx = c.number("the well x on the lot")
+    wy = c.number("the well y on the lot")
+    c.expect_end()
+    plan._site().wells.append(Well(wx, wy, line=lineno, col=kw.col, end_col=kw.end_col))
+
+
+def _parse_septic_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`septic at <x>,<y> [field <w> x <l>]`."""
+    from .elements import Septic
+
+    c.keyword("at")
+    px = c.number("the septic x on the lot")
+    py = c.number("the septic y on the lot")
+    fw = fl = None
+    if (tok := c.peek()) is not None:
+        if tok.text.lower() != "field":
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown septic option '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint="A septic takes only `field <w> x <l>`, e.g. "
+                "`septic at 90,20 field 40 x 60`.",
+            )
+        c.keyword("field")
+        fw = c.number("the drain-field width")
+        c.keyword("x")
+        fl = c.number("the drain-field length")
+    c.expect_end()
+    plan._site().septics.append(
+        Septic(px, py, fw, fl, line=lineno, col=kw.col, end_col=kw.end_col)
+    )
+
+
+def _parse_service_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`service <electric|water|gas> from <N|S|E|W>` — utility drop."""
+    from .elements import Service
+
+    util_tok = c.take("a utility (electric|water|gas)")
+    utility = util_tok.text.lower()
+    if utility not in SERVICE_UTILITIES:
+        raise _ParseError(
+            "BAD_OPTION",
+            f"Unknown service utility '{util_tok.text}'.",
+            util_tok.col,
+            end_col=util_tok.end_col,
+            hint=f"Use one of: {', '.join(SERVICE_UTILITIES)}.",
+        )
+    c.keyword("from")
+    side_tok = c.take("a lot side (N|S|E|W)")
+    svc_side = _FIXTURE_WALLS.get(side_tok.text.lower())
+    if svc_side is None:
+        raise _ParseError(
+            "BAD_WALL",
+            f"Unknown lot side '{side_tok.text}'.",
+            side_tok.col,
+            end_col=side_tok.end_col,
+            hint="Use N, S, E or W (the lot edge the service enters from).",
+        )
+    c.expect_end()
+    plan._site().services.append(
+        Service(utility, svc_side, line=lineno, col=kw.col, end_col=kw.end_col)
+    )
+
+
+# --- statement parsers: brief contract --------------------------------------
+
+
+def _parse_program_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """`program <n> bed ...` — intended counts and area/storage targets."""
+    beds = c.count("the bedroom count")
+    unit = c.take("'bed'")
+    if _program_noun(unit.text) != "bed":
+        raise _ParseError(
+            "SYNTAX",
+            f"Expected 'bed', got '{unit.text}'.",
+            unit.col,
+            end_col=unit.end_col,
+            hint="The program starts with a bedroom count, e.g. `program 3 bed`.",
+        )
+    baths = None
+    requires: dict[RoomType | str, int] = {}
+    min_area = None
+    min_storage = None
+    while (tok := c.peek()) is not None:
+        if tok.text.lower() == "area":
+            c.take("area")
+            min_area = c.number("the minimum area")
+            continue
+        if tok.text.lower() == "storage":
+            c.take("storage")
+            min_storage = c.number("the minimum storage area")
+            continue
+        n = c.count("a room count")
+        noun = c.take("a room type")
+        cat = _program_noun(noun.text)
+        if cat is None:
+            raise _ParseError(
+                "BAD_TYPE",
+                f"{_did_you_mean(noun.text, _TYPE_VALUES)}"
+                f"Unknown program room type '{noun.text}'.",
+                noun.col,
+                end_col=noun.end_col,
+                hint=f"Use 'bed', 'bath', 'area', 'storage', or a room type: {_TYPES}.",
+            )
+        if cat == "bed":
+            beds = n
+        elif cat == "bath":
+            baths = n
+        else:
+            requires[cat] = requires.get(cat, 0) + n
+    c.expect_end()
+    plan.program(beds, baths, requires=requires, min_area=min_area, min_storage=min_storage)
+    assert plan.program_spec is not None  # just set by plan.program(...)
+    plan.program_spec.line = lineno
+    plan.program_spec.col = kw.col
+    plan.program_spec.end_col = kw.end_col
+
+
+def _parse_require_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    """Parse declared spatial intent (`require ...`) and stamp its source span."""
+    kind_tok = c.take("a requirement kind (adjacent|separate|exterior|area)")
+    kind = kind_tok.text.lower()
+    if kind in ("adjacent", "separate"):
+        a = c.ident("the first room id").text
+        b = c.ident("the second room id").text
+        c.expect_end()
+        plan.require(kind, a, b)
+    elif kind == "exterior":
+        rid = c.ident("a room id").text
+        wall = c.wall() if c.peek() is not None else None
+        c.expect_end()
+        plan.require("exterior", rid, wall=wall)
+    elif kind == "area":
+        rid = c.ident("a room id").text
+        c.keyword(">=")
+        sqft_tok = c.peek()
+        sqft = c.number("the minimum area")
+        if sqft < 0:
+            assert sqft_tok is not None  # number() consumed a token
+            raise _ParseError(
+                "BAD_NUMBER",
+                "require area must be non-negative.",
+                sqft_tok.col,
+                end_col=sqft_tok.end_col,
+                hint="Give the minimum in square feet, e.g. `require area "
+                f"{rid} >= 300`.",
+            )
+        c.expect_end()
+        plan.require("area", rid, min_area=sqft)
+    else:
+        raise _ParseError(
+            "BAD_OPTION",
+            f"Unknown requirement kind '{kind_tok.text}'.",
+            kind_tok.col,
+            end_col=kind_tok.end_col,
+            hint="Use `require adjacent <a> <b>`, `require separate <a> <b>`, "
+            "`require exterior <room> [<wall>]`, or `require area <room> >= <sqft>`.",
+        )
+    req = plan.requirements[-1]
+    req.line, req.col, req.end_col = lineno, kw.col, kw.end_col
+
+
+# --- statement parsers: rooms and grouping ----------------------------------
+
+
+def _parse_room_statement(c: _Cursor, plan: Barndominium, smap: _SourceMap, lineno: int) -> None:
+    rid_tok = c.ident("a room id")
+    rid = rid_tok.text
+    rtype = c.room_type()
+    place_kwargs, ref_tok = _parse_placement(c)
+    c.keyword("size")
+    w = c.number("width")
+    c.keyword("x")
+    length = c.number("length")
+    level = 0
+    ceiling_h = None
+    vaulted = False
+    floor_finish = None
+    # Optional room suffixes in any order: `level <n>`, `ceiling <h>`,
+    # `vaulted`, `floor "<finish>"`.
+    while (tok := c.peek()) is not None:
+        opt = tok.text.lower()
+        if opt == "level":
+            c.keyword("level")
+            level = c.level_value()
+        elif opt == "ceiling":
+            c.keyword("ceiling")
+            ceiling_h = c.number("room ceiling height")
+        elif opt == "vaulted":
+            c.keyword("vaulted")
+            vaulted = True
+        elif opt == "floor":
+            c.keyword("floor")
+            floor_finish = c.take("a floor finish (quoted)").text
+        else:
+            break
+    c.expect_end()
+    try:
+        plan.add_room(
+            rid,
+            rtype,
+            width=w,
+            length=length,
+            level=level,
+            ceiling_height=ceiling_h,
+            vaulted=vaulted,
+            floor=floor_finish,
+            **place_kwargs,
+        )
+    except ValueError as exc:
+        col = ref_tok.col if ref_tok else rid_tok.col
+        end = ref_tok.end_col if ref_tok else rid_tok.end_col
+        raise _ParseError(
+            "PLACE_REF",
+            str(exc),
+            col,
+            end_col=end,
+            hint="Define the reference room before placing relative to it.",
+        )
+    smap.room_line[rid] = lineno
+    smap.room_col[rid] = (rid_tok.col, rid_tok.end_col)
+
+
+def _parse_wall_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
+    a_tok = c.ident("a room id")
+    a = a_tok.text
+    sep = c.take("'-' or 'to'")
+    if sep.text.lower() not in ("-", "to"):
+        raise _ParseError(
+            "SYNTAX", f"Expected '-' or 'to', got '{sep.text}'.", sep.col, end_col=sep.end_col,
+        )
+    b_tok = c.ident("the second room id")
+    b = b_tok.text
+    attrs: list[str] = []
+    while c.peek() is not None:
+        at_tok = c.take("a wall attribute")
+        at = at_tok.text.lower()
+        if at not in WALL_ATTRIBUTES:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown wall attribute '{at_tok.text}'.",
+                at_tok.col,
+                end_col=at_tok.end_col,
+                hint=f"Use one or more of: {_WALL_ATTRS}.",
+            )
+        if at not in attrs:
+            attrs.append(at)
+    if not attrs:
+        raise _ParseError(
+            "SYNTAX",
+            "Expected at least one wall attribute.",
+            c.eol_col,
+            end_col=c.eol_col + 1,
+            hint=f"Name what the shared wall is: {_WALL_ATTRS} "
+            f"(e.g. `wall {a} - {b} plumbing`).",
+        )
+    c.expect_end()
+    if a == b:
+        raise _ParseError(
+            "SYNTAX",
+            f"A wall statement names two different rooms, got '{a}' twice.",
+            b_tok.col,
+            end_col=b_tok.end_col,
+            hint="Name the two rooms the wall stands between.",
+        )
+    plan.wall(a, b, *attrs)
+    ws = plan.wall_specs[-1]
+    ws.line, ws.col, ws.end_col = lineno, a_tok.col, a_tok.end_col
+
+
+def _parse_suite_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    sid_tok = c.ident("a suite id")
+    members: list[str] = []
+    while c.peek() is not None:
+        members.append(c.ident("a member room id").text)
+    if not members:
+        raise _ParseError(
+            "SYNTAX",
+            "A suite needs at least one member room.",
+            c.eol_col,
+            end_col=c.eol_col + 1,
+            hint="List the rooms in the suite, e.g. "
+            f"`suite {sid_tok.text}: master_bed master_bath master_wic`.",
+        )
+    plan.suite(sid_tok.text, *members)
+    s = plan.suites[-1]
+    s.line, s.col, s.end_col = lineno, kw.col, kw.end_col
+
+
+def _parse_zone_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    zid_tok = c.ident("a zone id")
+    zmembers: list[str] = []
+    while c.peek() is not None:
+        zmembers.append(c.ident("a member room or suite id").text)
+    if not zmembers:
+        raise _ParseError(
+            "SYNTAX",
+            "A zone needs at least one member.",
+            c.eol_col,
+            end_col=c.eol_col + 1,
+            hint="List the rooms or suites in the zone, e.g. "
+            f"`zone {zid_tok.text}: primary bed_2 hall_beds`.",
+        )
+    plan.zone(zid_tok.text, *zmembers)
+    z = plan.zones[-1]
+    z.line, z.col, z.end_col = lineno, kw.col, kw.end_col
+
+
+# --- statement parsers: openings -------------------------------------------
+
+
+def _default_interior_door_width(kind: str) -> float:
+    if kind == "cased":
+        return 6.0
+    if kind in DOUBLE_LEAF_KINDS:
+        return DEFAULT_DOUBLE_DOOR_WIDTH
+    if kind == "bifold":
+        return DEFAULT_BIFOLD_DOOR_WIDTH
+    return 32 / 12
+
+
+def _parse_interior_door_statement(
+    c: _Cursor, plan: Barndominium, a_tok: _Token, a: str, lineno: int,
+) -> None:
+    c.take("'-'")  # consume the separator
+    b = c.ident("the second room id").text
+    kind = "swing"
+    if (tok := c.peek()) is not None and tok.text.lower() in _DOOR_KINDS:
+        kind = c.take("a door kind").text.lower()
+    width = _default_interior_door_width(kind)
+    offset, swing_into, hinge = None, None, None
+    while c.peek() is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "width":
+            width = c.number("door width")
+        elif opt == "offset":
+            offset = c.number("door offset")
+        elif opt == "into":
+            swing_into = c.ident("the room the door swings into").text
+        elif opt == "hinge":
+            h = c.take("'near' or 'far'")
+            if h.text.lower() not in ("near", "far"):
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Hinge must be 'near' or 'far', got '{h.text}'.",
+                    h.col,
+                    hint="Use `hinge near` or `hinge far`.",
+                    end_col=h.end_col,
+                )
+            hinge = h.text.lower()
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown door option '{opt}'.",
+                c.toks[c.i - 1].col,
+                hint="Options: a kind (swing/cased/pocket/sliding/bifold/double/french), "
+                "width <n>, offset <n>, into <room>, hinge near|far.",
+                end_col=c.toks[c.i - 1].end_col,
+            )
+    c.expect_end()
+    plan.connect(a, b, width=width, kind=kind, offset=offset, swing_into=swing_into, hinge=hinge)
+    d = plan.interior_doors[-1]
+    d.line, d.col, d.end_col = lineno, a_tok.col, a_tok.end_col
+
+
+def _parse_overhead_door_options(c: _Cursor) -> tuple[float, float, float]:
+    width, height, offset = OVERHEAD_DOOR_WIDTH, OVERHEAD_DOOR_HEIGHT, 1.0
+    while c.peek() is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "width":
+            width = c.number("door width")
+        elif opt == "height":
+            height = c.number("door height")
+        elif opt == "offset":
+            offset = c.number("offset")
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown overhead-door option '{opt}'.",
+                c.toks[c.i - 1].col,
+                hint="Options: width <n>, height <n>, offset <n> "
+                "(no-egress is implied — an overhead door never counts as egress).",
+                end_col=c.toks[c.i - 1].end_col,
+            )
+    c.expect_end()
+    return width, height, offset
+
+
+def _parse_exterior_door_options(c: _Cursor) -> tuple[float, float, bool, str]:
+    width, offset, egress, ekind = 3.0, 1.0, True, "entry"
+    width_given = False
+    while c.peek() is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "width":
+            width = c.number("door width")
+            width_given = True
+        elif opt == "offset":
+            offset = c.number("offset")
+        elif opt in ("no-egress", "nonegress"):
+            egress = False
+        elif opt in ("double", "french"):
+            ekind = opt
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown exterior-door option '{opt}'.",
+                c.toks[c.i - 1].col,
+                hint="Options: double|french, width <n>, offset <n>, no-egress.",
+                end_col=c.toks[c.i - 1].end_col,
+            )
+    if ekind in DOUBLE_LEAF_KINDS and not width_given:
+        width = DEFAULT_DOUBLE_DOOR_WIDTH
+    c.expect_end()
+    return width, offset, egress, ekind
+
+
+def _parse_exterior_door_statement(
+    c: _Cursor, plan: Barndominium, a_tok: _Token, a: str, lineno: int,
+) -> None:
+    wall = c.wall()
+    kind_tok = c.take("'exterior' or 'overhead'")
+    if kind_tok.text.lower() not in ("exterior", "overhead"):
+        raise _ParseError(
+            "SYNTAX",
+            f"Expected 'exterior' or 'overhead', got '{kind_tok.text}'.",
+            kind_tok.col,
+            end_col=kind_tok.end_col,
+        )
+    if kind_tok.text.lower() == "overhead":
+        width, height, offset = _parse_overhead_door_options(c)
+        plan.entrance(a, wall, width=width, offset=offset, kind="overhead", height=height)
+    else:
+        width, offset, egress, ekind = _parse_exterior_door_options(c)
+        plan.entrance(a, wall, width=width, offset=offset, egress=egress, kind=ekind)
+    ed = plan.exterior_doors[-1]
+    ed.line, ed.col, ed.end_col = lineno, a_tok.col, a_tok.end_col
+
+
+def _parse_door_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
+    """Unified `door` statement: interior connection or exterior/overhead opening."""
+    a_tok = c.ident("a room id")
+    a = a_tok.text
+    nxt = c.peek()
+    if nxt is not None and nxt.text.lower() in ("-", "to"):
+        _parse_interior_door_statement(c, plan, a_tok, a, lineno)
+    else:
+        _parse_exterior_door_statement(c, plan, a_tok, a, lineno)
+
+
+# --- statement parsers: simple option blocks --------------------------------
+
+
+def _parse_climate_statement(c: _Cursor, plan: Barndominium) -> None:
+    tok = c.peek()
+    czone = c.number("the IECC climate zone (1-8)")
+    if czone != int(czone) or not 1 <= int(czone) <= 8:
+        raise _ParseError(
+            "BAD_OPTION",
+            f"climate zone must be an IECC zone 1-8, got {czone:g}.",
+            tok.col if tok else 1,
+            end_col=tok.end_col if tok else None,
+            hint="Use a whole number 1 (warmest) to 8 (coldest).",
+        )
+    c.expect_end()
+    plan.set_climate(int(czone))
+
+
+def _parse_finish_statement(c: _Cursor, plan: Barndominium) -> None:
+    siding = roofing = None
+    while (tok := c.peek()) is not None:
+        opt = c.take("'siding' or 'roof'").text.lower()
+        if opt == "siding":
+            siding = c.take("a siding material (quoted)").text
+        elif opt == "roof":
+            roofing = c.take("a roof material (quoted)").text
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown finish option '{opt}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint='Use `finish siding "..." roof "..."`.',
+            )
+    c.expect_end()
+    plan.finish(siding=siding, roof=roofing)
+
+
+def _parse_roof_statement(c: _Cursor, plan: Barndominium) -> None:
+    style_tok = c.take("a roof style (gable|shed|monitor)")
+    pitch = None
+    if (tok := c.peek()) is not None and tok.text.lower() == "pitch":
+        c.keyword("pitch")
+        pitch = c.number("the roof pitch (rise:run)")
+    c.expect_end()
+    try:
+        plan.roof(style_tok.text.lower(), pitch=pitch)
+    except ValueError as exc:
+        raise _ParseError(
+            "BAD_OPTION",
+            str(exc),
+            style_tok.col,
+            end_col=style_tok.end_col,
+            hint="Use `roof gable`, `roof shed`, or `roof monitor` "
+            "(optionally `pitch <rise:run>`).",
+        )
+
+
+def _parse_note_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    text = c.take("a quoted note").text
+    nxt = c.peek()
+    if nxt is not None and nxt.text.lower() == "at":
+        c.keyword("at")
+        x = c.number("the note x")
+        y = c.number("the note y")
+        level = 0
+        if (tok := c.peek()) is not None and tok.text.lower() == "level":
+            c.keyword("level")
+            level = c.level_value()
+        c.expect_end()
+        plan.note(text, x=x, y=y, level=level)
+        nm = plan.note_marks[-1]
+        nm.line, nm.col, nm.end_col = lineno, kw.col, kw.end_col
+    else:
+        plan.note(text)
+        c.expect_end()
+
+
+# --- statement parsers: secondary openings and physical features ------------
+
+
+def _parse_open_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
+    a_tok = c.ident("the first room id")
+    a = a_tok.text
+    sep = c.take("'-' or 'to'")
+    if sep.text.lower() not in ("-", "to"):
+        raise _ParseError(
+            "SYNTAX", f"Expected '-' or 'to', got '{sep.text}'.", sep.col, end_col=sep.end_col,
+        )
+    b = c.ident("the second room id").text
+    width, offset = 6.0, None
+    while c.peek() is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "width":
+            width = c.number("opening width")
+        elif opt == "offset":
+            offset = c.number("opening offset")
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown open option '{opt}'.",
+                c.toks[c.i - 1].col,
+                hint="Options: width <n>, offset <n>.",
+                end_col=c.toks[c.i - 1].end_col,
+            )
+    c.expect_end()
+    plan.opening(a, b, width=width, offset=offset)
+    door = plan.interior_doors[-1]
+    door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
+
+
+def _parse_entry_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
+    rid_tok = c.ident("a room id")
+    rid = rid_tok.text
+    wall = c.wall()
+    width, offset, egress, ekind = _parse_exterior_door_options(c)
+    plan.entrance(rid, wall, width=width, offset=offset, egress=egress, kind=ekind)
+    ed = plan.exterior_doors[-1]
+    ed.line, ed.col, ed.end_col = lineno, rid_tok.col, rid_tok.end_col
+
+
+def _parse_window_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
+    rid_tok = c.ident("a room id")
+    rid = rid_tok.text
+    wall = c.wall()
+    kind = "casement"
+    if (tok := c.peek()) is not None and tok.text.lower() in _WINDOW_KIND_SET:
+        kind = c.take("a window kind").text.lower()
+    width, offset = 4.0, 2.0
+    sill, head = 3.0, 6.67
+    tempered = False
+    while c.peek() is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "width":
+            width = c.number("window width")
+        elif opt == "offset":
+            offset = c.number("offset")
+        elif opt == "sill":
+            sill = c.number("sill height")
+        elif opt == "head":
+            head = c.number("head height")
+        elif opt == "tempered":
+            tempered = True
+        elif opt == "fixed":
+            kind = "fixed"
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown window option '{opt}'.",
+                c.toks[c.i - 1].col,
+                hint="Options: a kind (casement/slider/fixed/double-hung, right after the wall), "
+                "width <n>, offset <n>, sill <n>, head <n>, fixed, tempered.",
+                end_col=c.toks[c.i - 1].end_col,
+            )
+    plan.add_window(
+        rid, wall, width=width, offset=offset, sill_height=sill,
+        head_height=head, kind=kind, tempered=tempered,
+    )
+    win = plan.windows[-1]
+    win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
+
+
+def _parse_porch_statement(c: _Cursor, plan: Barndominium) -> None:
+    pid = c.ident("a porch id").text
+    c.keyword("at")
+    x = c.number("x")
+    y = c.number("y")
+    c.keyword("size")
+    w = c.number("width")
+    c.keyword("x")
+    length = c.number("length")
+    covered = True
+    nxt = c.peek()
+    if nxt is not None:
+        tag = c.take("'covered' or 'open'").text.lower()
+        if tag == "open":
+            covered = False
+        elif tag != "covered":
+            raise _ParseError(
+                "SYNTAX", f"Expected 'covered' or 'open', got '{tag}'.", nxt.col, end_col=nxt.end_col,
+            )
+    c.expect_end()
+    plan.add_porch(pid, x=x, y=y, width=w, length=length, covered=covered)
+
+
+def _parse_stair_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
+    sid_tok = c.ident("a stair id")
+    c.keyword("at")
+    x = c.number("x")
+    y = c.number("y")
+    c.keyword("size")
+    w = c.number("width")
+    c.keyword("x")
+    length = c.number("length")
+    lo, hi = 0, 1
+    while (tok := c.peek()) is not None and tok.text.lower() in ("from", "to"):
+        opt = c.take("an option").text.lower()
+        if opt == "from":
+            lo = c.level_value()
+        else:
+            hi = c.level_value()
+    c.expect_end()
+    try:
+        plan.add_stair(sid_tok.text, x=x, y=y, width=w, length=length, from_level=lo, to_level=hi)
+        st = plan.stairs[-1]
+        st.line, st.col, st.end_col = lineno, sid_tok.col, sid_tok.end_col
+    except ValueError as exc:
+        raise _ParseError(
+            "BAD_LEVEL",
+            str(exc),
+            sid_tok.col,
+            end_col=sid_tok.end_col,
+            hint="A stair connects two different levels, e.g. `from 0 to 1`.",
+        )
+
+
+def _parse_frame_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    bay, span, post, ridge = 12.0, 40.0, inches(6), True
+    while c.peek() is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "bay":
+            bay = c.number("bay spacing")
+        elif opt == "span":
+            span = c.number("max beam span")
+        elif opt == "post":
+            post = inches(c.number("post size in inches"))
+        elif opt == "ridge":
+            ridge = True
+        elif opt in ("no-ridge", "noridge"):
+            ridge = False
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown frame option '{opt}'.",
+                c.toks[c.i - 1].col,
+                hint="Options: bay <ft>, span <ft>, post <in>, no-ridge.",
+                end_col=c.toks[c.i - 1].end_col,
+            )
+    if bay <= 0 or span <= 0 or post <= 0:
+        raise _ParseError(
+            "BAD_NUMBER",
+            "frame bay/span/post must be positive.",
+            kw.col,
+            hint="e.g. `frame bay 12 span 40 post 6`.",
+            end_col=kw.end_col,
+        )
+    plan.frame_spec = FrameSpec(bay, span, post, ridge, lineno, kw.col, kw.end_col)
+
+
+def _parse_fixture_wall_token(c: _Cursor) -> Direction:
+    wt = c.take("a wall (N|S|E|W)")
+    wd = _FIXTURE_WALLS.get(wt.text.lower())
+    if wd is None:
+        raise _ParseError(
+            "BAD_WALL",
+            f"Unknown wall '{wt.text}'.",
+            wt.col,
+            end_col=wt.end_col,
+            hint="Use N, S, E or W (or north/south/east/west).",
+        )
+    return wd
+
+
+@dataclass
+class _FixtureOptions:
+    x: float | None = None
+    y: float | None = None
+    wall: Direction | None = None
+    offset: float | None = None
+    rotation: float = 0.0
+    width: float | None = None
+    along: Direction | None = None
+    run_from: float | None = None
+    run_to: float | None = None
+    run_depth: float | None = None
+
+
+def _apply_fixture_option(c: _Cursor, tok: _Token, opt: str, state: _FixtureOptions) -> None:
+    if opt == "at":
+        state.x = c.number("the fixture x offset")
+        state.y = c.number("the fixture y offset")
+    elif opt in ("wall", "along"):
+        wd = _parse_fixture_wall_token(c)
+        if opt == "along":
+            state.along = wd
+        else:
+            state.wall = wd
+    elif opt == "offset":
+        state.offset = c.number("the fixture offset")
+    elif opt == "from":
+        state.run_from = c.number("the counter run start")
+    elif opt == "to":
+        state.run_to = c.number("the counter run end")
+    elif opt == "depth":
+        state.run_depth = c.number("the counter depth")
+    elif opt in ("rotate", "rotation"):
+        state.rotation = c.number("the rotation in degrees")
+    elif opt == "width":
+        state.width = c.number("the fixture width")
+    else:
+        raise _ParseError(
+            "BAD_OPTION",
+            f"Unknown fixture option '{tok.text}'.",
+            tok.col,
+            end_col=tok.end_col,
+            hint="Options: at <x>,<y>, wall N|S|E|W [offset <n>], rotate <deg>, "
+            "width <w>, or (counter) along N|S|E|W [from <a> to <b>] [depth <d>].",
+        )
+
+
+def _parse_fixture_options(c: _Cursor) -> _FixtureOptions:
+    state = _FixtureOptions()
+    while (tok := c.peek()) is not None:
+        opt = c.take("an option").text.lower()
+        _apply_fixture_option(c, tok, opt, state)
+    c.expect_end()
+    return state
+
+
+def _parse_fixture_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    from .fixtures import FIXTURES
+
+    kind_tok = c.ident("a fixture kind")
+    kind = kind_tok.text.lower()
+    if kind not in FIXTURES:
+        raise _ParseError(
+            "BAD_OPTION",
+            f"Unknown fixture kind '{kind_tok.text}'.",
+            kind_tok.col,
+            end_col=kind_tok.end_col,
+            hint=f"Use one of: {', '.join(FIXTURES)}.",
+        )
+    c.keyword("in")
+    room_tok = c.ident("a room id")
+    opts = _parse_fixture_options(c)
+    try:
+        plan.add_fixture(
+            kind,
+            room_tok.text,
+            x=opts.x,
+            y=opts.y,
+            wall=opts.wall,
+            offset=opts.offset,
+            rotation=opts.rotation,
+            width=opts.width,
+            along=opts.along,
+            run_from=opts.run_from,
+            run_to=opts.run_to,
+            depth=opts.run_depth,
+        )
+    except ValueError as exc:
+        raise _ParseError("BAD_OPTION", str(exc), kind_tok.col, end_col=kind_tok.end_col)
+    pf = plan.fixtures[-1]
+    pf.line, pf.col, pf.end_col = lineno, kw.col, kw.end_col
+
+
+def _parse_device_statement(c: _Cursor, plan: Barndominium, key: str, kw: _Token, lineno: int) -> None:
+    c.keyword("in")
+    room_tok = c.ident("a room id")
+    wall = None
+    offset = 1.0
+    gfci = False
+    while (tok := c.peek()) is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "wall":
+            wall = _parse_fixture_wall_token(c)
+        elif opt == "offset":
+            offset = c.number(f"the {key} offset")
+        elif opt == "gfci" and key == "outlet":
+            gfci = True
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown {key} option '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint=(
+                    "Options: wall N|S|E|W, offset <n>, gfci."
+                    if key == "outlet"
+                    else "Options: wall N|S|E|W, offset <n>."
+                ),
+            )
+    if wall is None:
+        raise _ParseError(
+            "BAD_WALL",
+            f"A `{key}` needs a wall: `{key} in <room> wall N|S|E|W offset <n>`.",
+            kw.col,
+            end_col=kw.end_col,
+            hint="Name the wall (N|S|E|W) the device sits on.",
+        )
+    c.expect_end()
+    if key == "outlet":
+        plan.add_outlet(room_tok.text, wall, offset=offset, gfci=gfci)
+        outlet = plan.outlets[-1]
+        outlet.line, outlet.col, outlet.end_col = lineno, kw.col, kw.end_col
+    else:
+        plan.add_switch(room_tok.text, wall, offset=offset)
+        switch = plan.switches[-1]
+        switch.line, switch.col, switch.end_col = lineno, kw.col, kw.end_col
+
+
+def _parse_light_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    c.keyword("in")
+    room_tok = c.ident("a room id")
+    c.keyword("at")
+    lx = c.number("the light x offset")
+    ly = c.number("the light y offset")
+    lkind = "ceiling"
+    while (tok := c.peek()) is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "kind":
+            kt = c.take("a light kind")
+            lkind = kt.text.lower()
+            if lkind not in _LIGHT_KIND_SET:
+                raise _ParseError(
+                    "BAD_OPTION",
+                    f"Unknown light kind '{kt.text}'.",
+                    kt.col,
+                    end_col=kt.end_col,
+                    hint=f"Use one of: {', '.join(LIGHT_KINDS)}.",
+                )
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown light option '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint="Options: kind ceiling|pendant|fan|recessed.",
+            )
+    c.expect_end()
+    plan.add_light(room_tok.text, x=lx, y=ly, kind=lkind)
+    lm = plan.lights[-1]
+    lm.line, lm.col, lm.end_col = lineno, kw.col, kw.end_col
+
+
+def _parse_alarm_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    kind_tok = c.ident("an alarm kind (smoke|co|smoke_co)")
+    akind = kind_tok.text.lower()
+    if akind not in _ALARM_KIND_SET:
+        raise _ParseError(
+            "BAD_OPTION",
+            f"Unknown alarm kind '{kind_tok.text}'.",
+            kind_tok.col,
+            end_col=kind_tok.end_col,
+            hint=f"Use one of: {', '.join(ALARM_KINDS)} (smoke_co is the combination unit).",
+        )
+    c.keyword("in")
+    room_tok = c.ident("a room id")
+    ax = ay = None
+    while (tok := c.peek()) is not None:
+        opt = c.take("an option").text.lower()
+        if opt == "at":
+            ax = c.number("the alarm x offset")
+            ay = c.number("the alarm y offset")
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown alarm option '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint="Options: at <x>,<y> (room-local; a ceiling device).",
+            )
+    c.expect_end()
+    plan.add_alarm(room_tok.text, akind, x=ax, y=ay)
+    am = plan.alarms[-1]
+    am.line, am.col, am.end_col = lineno, kw.col, kw.end_col
+
+
+# --- statement parsers: composition and params ------------------------------
+
+
+def _parse_use_param_pairs(c: _Cursor, kw: _Token, uparams: dict[str, float]) -> None:
+    c.keyword("with")
+    seen_pair = False
+    while (pt := c.peek()) is not None and "=" in pt.text and not pt.quoted:
+        c.take("a param pair")
+        seen_pair = True
+        name, _, val = pt.text.partition("=")
+        if not _PARAM_NAME_RE.match(name):
+            raise _ParseError(
+                "SYNTAX",
+                f"'{name}' is not a valid param name in `with`.",
+                pt.col,
+                end_col=pt.end_col,
+                hint="Write `with width=8, depth=7-6` — a plain name, then `=`, then a number.",
+            )
+        num = _param_value(val)
+        if num is None:
+            raise _ParseError(
+                "BAD_NUMBER",
+                f"`with {name}=` needs a number, got '{val}'.",
+                pt.col,
+                end_col=pt.end_col,
+                hint="Params are numbers only (decimal feet or ft-in, e.g. 8 or 7-6) — "
+                "no names or arithmetic in v1.",
+            )
+        if name in uparams:
+            raise _ParseError(
+                "PARAM_DUP",
+                f"param '{name}' is set twice in this `with` clause.",
+                pt.col,
+                end_col=pt.end_col,
+                hint="Set each param once per `use`.",
+            )
+        uparams[name] = num
+    if not seen_pair:
+        nxt = c.peek()
+        raise _ParseError(
+            "SYNTAX",
+            "`with` needs at least one `key=value` param pair.",
+            nxt.col if nxt else kw.col,
+            end_col=nxt.end_col if nxt else kw.end_col,
+            hint="e.g. `with width=8, depth=7-6` (no spaces around `=`).",
+        )
+
+
+@dataclass
+class _UseOptions:
+    level: int = 0
+    mirror: str | None = None
+    rotate: int = 0
+    params: dict[str, float] = field(default_factory=dict)
+
+
+def _parse_use_header(c: _Cursor) -> tuple[_Token, _Token, float, float]:
+    path_tok = c.take("a quoted part path")
+    if not path_tok.quoted:
+        raise _ParseError(
+            "SYNTAX",
+            f"Expected a quoted part path, got '{path_tok.text}'.",
+            path_tok.col,
+            end_col=path_tok.end_col,
+            hint='Quote the relative path, e.g. `use "parts/bath_core.barn" as b at 0,0`.',
+        )
+    c.keyword("as")
+    alias_tok = c.ident("an alias")
+    if not _ALIAS_RE.match(alias_tok.text):
+        raise _ParseError(
+            "SYNTAX",
+            f"'{alias_tok.text}' is not a valid alias.",
+            alias_tok.col,
+            end_col=alias_tok.end_col,
+            hint="An alias is a plain identifier (letters, digits, underscore; not starting with a digit), e.g. `as m`.",
+        )
+    c.keyword("at")
+    return path_tok, alias_tok, c.number("the use x"), c.number("the use y")
+
+
+def _parse_use_mirror(c: _Cursor) -> str:
+    c.keyword("mirror")
+    axis_tok = c.take("a mirror axis (x or y)")
+    axis = axis_tok.text.lower()
+    if axis not in ("x", "y"):
+        raise _ParseError(
+            "BAD_OPTION",
+            f"`mirror` takes an axis x or y, got '{axis_tok.text}'.",
+            axis_tok.col,
+            end_col=axis_tok.end_col,
+            hint="`mirror y` flips east↔west; `mirror x` flips north↔south.",
+        )
+    return axis
+
+
+def _parse_use_rotation(c: _Cursor) -> int:
+    c.keyword("rotate")
+    ang_tok = c.take("a rotation of 90, 180 or 270")
+    try:
+        ang = int(float(ang_tok.text))
+    except ValueError:
+        ang = -1
+    if ang_tok.quoted or ang not in (90, 180, 270):
+        raise _ParseError(
+            "BAD_OPTION",
+            f"`rotate` on `use` takes 90, 180 or 270, got '{ang_tok.text}'.",
+            ang_tok.col,
+            end_col=ang_tok.end_col,
+            hint="Rooms are axis-aligned, so a part turns in 90° steps (90, 180 or 270).",
+        )
+    return ang
+
+
+def _parse_use_options(c: _Cursor, kw: _Token) -> _UseOptions:
+    opts = _UseOptions()
+    while (tok := c.peek()) is not None:
+        opt = tok.text.lower()
+        if opt == "level":
+            c.keyword("level")
+            opts.level = c.level_value()
+        elif opt == "with":
+            _parse_use_param_pairs(c, kw, opts.params)
+        elif opt == "mirror":
+            opts.mirror = _parse_use_mirror(c)
+        elif opt == "rotate":
+            opts.rotate = _parse_use_rotation(c)
+        else:
+            raise _ParseError(
+                "BAD_OPTION",
+                f"Unknown use option '{tok.text}'.",
+                tok.col,
+                end_col=tok.end_col,
+                hint="Options: level <n>, mirror x|y, rotate 90|180|270, with k=v.",
+            )
+    return opts
+
+
+def _parse_use_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+    from .elements import UseSpec
+
+    path_tok, alias_tok, ux, uy = _parse_use_header(c)
+    opts = _parse_use_options(c, kw)
+    plan.uses.append(
+        UseSpec(
+            path_tok.text,
+            alias_tok.text,
+            ux,
+            uy,
+            opts.level,
+            mirror=opts.mirror,
+            rotate=opts.rotate,
+            params=opts.params,
+            line=lineno,
+            col=kw.col,
+            end_col=kw.end_col,
+        )
+    )
+
+
+def _parse_param_statement(tokens: list[_Token], c: _Cursor, plan: Barndominium, kw: _Token) -> None:
+    rest = "".join(t.text for t in tokens[1:])
+    pname, psep, pval = rest.partition("=")
+    if not psep or not _PARAM_NAME_RE.match(pname):
+        raise _ParseError(
+            "SYNTAX",
+            "A param is `param <name> = <number>`.",
+            kw.end_col + 1,
+            end_col=c.eol_col,
+            hint="e.g. `param width = 8` or `param depth = 7-6`.",
+        )
+    pnum = _param_value(pval)
+    if pnum is None:
+        raise _ParseError(
+            "BAD_NUMBER",
+            f"param '{pname}' needs a numeric default, got '{pval}'.",
+            kw.end_col + 1,
+            end_col=c.eol_col,
+            hint="The default is mandatory and a number (decimal feet or ft-in, e.g. 8 or 7-6) — "
+            "no names or arithmetic in v1.",
+        )
+    if pname in plan.params:
+        raise _ParseError(
+            "PARAM_DUP",
+            f"param '{pname}' is declared more than once.",
+            kw.end_col + 1,
+            end_col=c.eol_col,
+            hint="Declare each param once.",
+        )
+    plan.params[pname] = pnum
+
+
+# --- statement parsers: simple plan headers ---------------------------------
+
+
+def _parse_plan_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.name = c.ident("a plan name").text
+    c.expect_end()
+
+
+def _parse_envelope_statement(c: _Cursor, plan: Barndominium) -> None:
+    w = c.number("envelope width")
+    c.keyword("x")
+    length = c.number("envelope length")
+    plan.envelope(w, length)
+    c.expect_end()
+
+
+def _parse_wing_statement(c: _Cursor, plan: Barndominium) -> None:
+    w = c.number("wing width")
+    c.keyword("x")
+    length = c.number("wing length")
+    c.keyword("at")
+    x = c.number("wing x")
+    y = c.number("wing y")
+    c.expect_end()
+    plan.wing(w, length, x=x, y=y)
+
+
+def _parse_ceiling_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.ceiling(c.number("ceiling height"))
+    c.expect_end()
+
+
+def _parse_floor_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.floors(c.number("floor assembly depth"))
+    c.expect_end()
+
+
+def _parse_accessible_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.mark_accessible()
+    c.expect_end()
+
+
+def _parse_electrical_marker_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.mark_electrical()
+    c.expect_end()
+
+
+def _parse_street_statement(c: _Cursor, plan: Barndominium) -> None:
+    street_wall = c.wall()
+    c.expect_end()
+    plan.set_street(street_wall)
+
+
+def _parse_overhang_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.set_overhang(c.number("the overhang depth in feet"))
+    c.expect_end()
+
+
+def _parse_orientation_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.orient(c.number("the orientation in degrees"))
+    c.expect_end()
+
+
+def _parse_grade_statement(c: _Cursor, plan: Barndominium) -> None:
+    plan.set_grade(c.number("the finish-floor height above grade"))
+    c.expect_end()
+
+
 def _parse_statement(
     tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int,
     param_env: dict[str, float] | None = None,
@@ -999,1207 +2297,53 @@ def _parse_statement(
     kw = c.take("a statement keyword")
     key = kw.text.lower()
 
-    if key == "plan":
-        plan.name = c.ident("a plan name").text
-        c.expect_end()
-    elif key == "envelope":
-        w = c.number("envelope width")
-        c.keyword("x")
-        length = c.number("envelope length")
-        plan.envelope(w, length)
-        c.expect_end()
-    elif key == "wing":
-        w = c.number("wing width")
-        c.keyword("x")
-        length = c.number("wing length")
-        c.keyword("at")
-        x = c.number("wing x")
-        y = c.number("wing y")
-        c.expect_end()
-        plan.wing(w, length, x=x, y=y)
-    elif key == "ceiling":
-        plan.ceiling(c.number("ceiling height"))
-        c.expect_end()
-    elif key == "floor":
-        plan.floors(c.number("floor assembly depth"))
-        c.expect_end()
-    elif key == "accessible":
-        plan.mark_accessible()
-        c.expect_end()
-    elif key == "electrical":
-        plan.mark_electrical()
-        c.expect_end()
-    elif key == "street":
-        street_wall = c.wall()
-        c.expect_end()
-        plan.set_street(street_wall)
-    elif key == "overhang":
-        plan.set_overhang(c.number("the overhang depth in feet"))
-        c.expect_end()
-    elif key == "climate":
-        tok = c.peek()
-        czone = c.number("the IECC climate zone (1-8)")
-        if czone != int(czone) or not 1 <= int(czone) <= 8:
-            raise _ParseError(
-                "BAD_OPTION",
-                f"climate zone must be an IECC zone 1-8, got {czone:g}.",
-                tok.col if tok else 1,
-                end_col=tok.end_col if tok else None,
-                hint="Use a whole number 1 (warmest) to 8 (coldest).",
-            )
-        c.expect_end()
-        plan.set_climate(int(czone))
-    elif key == "orientation":
-        # `orientation <degrees>` — azimuth (clockwise from N) that plan-north points.
-        plan.orient(c.number("the orientation in degrees"))
-        c.expect_end()
-    elif key == "finish":
-        # `finish [siding "<name>"] [roof "<name>"]` — exterior material hints.
-        siding = roofing = None
-        while (tok := c.peek()) is not None:
-            opt = c.take("'siding' or 'roof'").text.lower()
-            if opt == "siding":
-                siding = c.take("a siding material (quoted)").text
-            elif opt == "roof":
-                roofing = c.take("a roof material (quoted)").text
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown finish option '{opt}'.",
-                    tok.col,
-                    end_col=tok.end_col,
-                    hint='Use `finish siding "..." roof "..."`.',
-                )
-        c.expect_end()
-        plan.finish(siding=siding, roof=roofing)
-    elif key == "site":
-        # `site <W> x <L>` — the lot's east-west x north-south dimensions (feet).
-        w = c.number("site width")
-        c.keyword("x")
-        length = c.number("site length")
-        c.expect_end()
-        plan.site(w, length)
-        ss = plan.site_spec
-        assert ss is not None  # .site() just created it
-        ss.line, ss.col, ss.end_col = lineno, kw.col, kw.end_col
-    elif key == "setback":
-        # `setback [front <n>] [side <n>] [rear <n>]` — any subset, in any order.
-        front = side = rear = None
-        while (tok := c.peek()) is not None:
-            opt = c.take("'front', 'side', or 'rear'").text.lower()
-            if opt == "front":
-                front = c.number("the front setback")
-            elif opt == "side":
-                side = c.number("the side setback")
-            elif opt == "rear":
-                rear = c.number("the rear setback")
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown setback edge '{tok.text}'.",
-                    tok.col,
-                    end_col=tok.end_col,
-                    hint="Use `setback front <n> side <n> rear <n>` (any subset; "
-                    "`side` applies to both the east and west edges).",
-                )
-        if front is None and side is None and rear is None:
-            raise _ParseError(
-                "SYNTAX",
-                "A `setback` needs at least one of front/side/rear.",
-                c.eol_col,
-                end_col=c.eol_col + 1,
-                hint="e.g. `setback front 25 side 10 rear 20`.",
-            )
-        c.expect_end()
-        plan.setback(front=front, side=side, rear=rear)
-        ss = plan.site_spec
-        assert ss is not None  # .setback() just created it
-        ss.setback_line, ss.setback_col, ss.setback_end_col = lineno, kw.col, kw.end_col
-    elif key == "building":
-        # `building at <x>,<y>` — the plan origin (SW envelope corner) on the lot.
-        c.keyword("at")
-        bx = c.number("the building x on the lot")
-        by = c.number("the building y on the lot")
-        c.expect_end()
-        plan.building(bx, by)
-        ss = plan.site_spec
-        assert ss is not None  # .building() just created it
-        ss.building_line, ss.building_col, ss.building_end_col = lineno, kw.col, kw.end_col
-    elif key == "drive":
-        # `drive at <x>,<y> size <w> x <l> [gravel|concrete|asphalt]` (default gravel).
-        from .elements import Drive
-
-        c.keyword("at")
-        dx = c.number("the drive x on the lot")
-        dy = c.number("the drive y on the lot")
-        c.keyword("size")
-        dw = c.number("the drive width")
-        c.keyword("x")
-        dl = c.number("the drive length")
-        surface = "gravel"
-        if (tok := c.peek()) is not None:
-            surface = c.take("a drive surface").text.lower()
-            if surface not in DRIVE_SURFACES:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown drive surface '{tok.text}'.",
-                    tok.col, end_col=tok.end_col,
-                    hint=f"Use one of: {', '.join(DRIVE_SURFACES)} (default gravel).",
-                )
-        c.expect_end()
-        plan._site().drives.append(
-            Drive(dx, dy, dw, dl, surface, line=lineno, col=kw.col, end_col=kw.end_col)
-        )
-    elif key == "walk":
-        # `walk from <room> to drive [width <ft>]` — a path from a room's exterior
-        # door to the nearest drive edge.
-        from .elements import Walk
-
-        c.keyword("from")
-        room_tok = c.ident("a room id")
-        c.keyword("to")
-        c.keyword("drive")
-        width = WALK_DEFAULT_WIDTH
-        if (tok := c.peek()) is not None:
-            if tok.text.lower() != "width":
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown walk option '{tok.text}'.",
-                    tok.col, end_col=tok.end_col,
-                    hint="A walk takes only `width <ft>`, e.g. `walk from mud to drive width 4`.",
-                )
-            c.keyword("width")
-            width = c.number("the walk width")
-        c.expect_end()
-        plan._site().walks.append(
-            Walk(room_tok.text, width, line=lineno, col=kw.col, end_col=kw.end_col)
-        )
-    elif key == "well":
-        # `well at <x>,<y>` — a water well point (lot feet).
-        from .elements import Well
-
-        c.keyword("at")
-        wx = c.number("the well x on the lot")
-        wy = c.number("the well y on the lot")
-        c.expect_end()
-        plan._site().wells.append(
-            Well(wx, wy, line=lineno, col=kw.col, end_col=kw.end_col)
-        )
-    elif key == "septic":
-        # `septic at <x>,<y> [field <w> x <l>]` — a septic tank + optional drain field.
-        from .elements import Septic
-
-        c.keyword("at")
-        px = c.number("the septic x on the lot")
-        py = c.number("the septic y on the lot")
-        fw = fl = None
-        if (tok := c.peek()) is not None:
-            if tok.text.lower() != "field":
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown septic option '{tok.text}'.",
-                    tok.col, end_col=tok.end_col,
-                    hint="A septic takes only `field <w> x <l>`, e.g. "
-                    "`septic at 90,20 field 40 x 60`.",
-                )
-            c.keyword("field")
-            fw = c.number("the drain-field width")
-            c.keyword("x")
-            fl = c.number("the drain-field length")
-        c.expect_end()
-        plan._site().septics.append(
-            Septic(px, py, fw, fl, line=lineno, col=kw.col, end_col=kw.end_col)
-        )
-    elif key == "service":
-        # `service <electric|water|gas> from <N|S|E|W>` — a utility drop.
-        from .elements import Service
-
-        util_tok = c.take("a utility (electric|water|gas)")
-        utility = util_tok.text.lower()
-        if utility not in SERVICE_UTILITIES:
-            raise _ParseError(
-                "BAD_OPTION",
-                f"Unknown service utility '{util_tok.text}'.",
-                util_tok.col, end_col=util_tok.end_col,
-                hint=f"Use one of: {', '.join(SERVICE_UTILITIES)}.",
-            )
-        c.keyword("from")
-        side_tok = c.take("a lot side (N|S|E|W)")
-        svc_side = _FIXTURE_WALLS.get(side_tok.text.lower())
-        if svc_side is None:
-            raise _ParseError(
-                "BAD_WALL",
-                f"Unknown lot side '{side_tok.text}'.",
-                side_tok.col, end_col=side_tok.end_col,
-                hint="Use N, S, E or W (the lot edge the service enters from).",
-            )
-        c.expect_end()
-        plan._site().services.append(
-            Service(utility, svc_side, line=lineno, col=kw.col, end_col=kw.end_col)
-        )
-    elif key == "grade":
-        # `grade <ft>` — finish-floor height above finished grade (flat site).
-        plan.set_grade(c.number("the finish-floor height above grade"))
-        c.expect_end()
-    elif key == "roof":
-        # `roof <style> [pitch <p>]` — style in gable|shed|monitor.
-        style_tok = c.take("a roof style (gable|shed|monitor)")
-        pitch = None
-        if (tok := c.peek()) is not None and tok.text.lower() == "pitch":
-            c.keyword("pitch")
-            pitch = c.number("the roof pitch (rise:run)")
-        c.expect_end()
-        try:
-            plan.roof(style_tok.text.lower(), pitch=pitch)
-        except ValueError as exc:
-            raise _ParseError(
-                "BAD_OPTION",
-                str(exc),
-                style_tok.col,
-                end_col=style_tok.end_col,
-                hint="Use `roof gable`, `roof shed`, or `roof monitor` "
-                "(optionally `pitch <rise:run>`).",
-            )
-    elif key == "note":
-        # `note "text"` (free-text) or, positioned, `note "text" at <x>,<y>
-        # [level <n>]` — a leader-line callout on the plan.
-        text = c.take("a quoted note").text
-        nxt = c.peek()
-        if nxt is not None and nxt.text.lower() == "at":
-            c.keyword("at")
-            x = c.number("the note x")
-            y = c.number("the note y")
-            level = 0
-            if (tok := c.peek()) is not None and tok.text.lower() == "level":
-                c.keyword("level")
-                level = c.level_value()
-            c.expect_end()
-            plan.note(text, x=x, y=y, level=level)
-            nm = plan.note_marks[-1]
-            nm.line, nm.col, nm.end_col = lineno, kw.col, kw.end_col
-        else:
-            plan.note(text)
-            c.expect_end()
-    elif key == "program":
-        # `program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>]`.
-        # The first clause (bed) is mandatory; the rest are any order. bed/bath
-        # are exact-count categories; other room types are at-least requirements.
-        beds = c.count("the bedroom count")
-        unit = c.take("'bed'")
-        if _program_noun(unit.text) != "bed":
-            raise _ParseError(
-                "SYNTAX",
-                f"Expected 'bed', got '{unit.text}'.",
-                unit.col,
-                end_col=unit.end_col,
-                hint="The program starts with a bedroom count, e.g. `program 3 bed`.",
-            )
-        baths = None
-        requires: dict[RoomType | str, int] = {}
-        min_area = None
-        min_storage = None
-        while (tok := c.peek()) is not None:
-            if tok.text.lower() == "area":
-                c.take("area")
-                min_area = c.number("the minimum area")
-                continue
-            if tok.text.lower() == "storage":
-                c.take("storage")
-                min_storage = c.number("the minimum storage area")
-                continue
-            n = c.count("a room count")
-            noun = c.take("a room type")
-            cat = _program_noun(noun.text)
-            if cat is None:
-                raise _ParseError(
-                    "BAD_TYPE",
-                    f"{_did_you_mean(noun.text, _TYPE_VALUES)}"
-                    f"Unknown program room type '{noun.text}'.",
-                    noun.col,
-                    end_col=noun.end_col,
-                    hint=f"Use 'bed', 'bath', 'area', 'storage', or a room type: {_TYPES}.",
-                )
-            if cat == "bed":
-                beds = n
-            elif cat == "bath":
-                baths = n
-            else:
-                requires[cat] = requires.get(cat, 0) + n
-        c.expect_end()
-        plan.program(
-            beds, baths, requires=requires, min_area=min_area, min_storage=min_storage
-        )
-        assert plan.program_spec is not None  # just set by plan.program(...)
-        plan.program_spec.line = lineno
-        plan.program_spec.col = kw.col
-        plan.program_spec.end_col = kw.end_col
-    elif key == "require":
-        # `require adjacent|separate <a> <b>` / `require exterior <room> [<wall>]`
-        # / `require area <room> >= <sqft>` — declared spatial intent, checked
-        # against the compiled plan by the validator (see REQUIRE_UNMET).
-        kind_tok = c.take("a requirement kind (adjacent|separate|exterior|area)")
-        kind = kind_tok.text.lower()
-        if kind in ("adjacent", "separate"):
-            a = c.ident("the first room id").text
-            b = c.ident("the second room id").text
-            c.expect_end()
-            plan.require(kind, a, b)
-        elif kind == "exterior":
-            rid = c.ident("a room id").text
-            wall = c.wall() if c.peek() is not None else None
-            c.expect_end()
-            plan.require("exterior", rid, wall=wall)
-        elif kind == "area":
-            rid = c.ident("a room id").text
-            c.keyword(">=")
-            sqft_tok = c.peek()
-            sqft = c.number("the minimum area")
-            if sqft < 0:
-                assert sqft_tok is not None  # number() consumed a token
-                raise _ParseError(
-                    "BAD_NUMBER",
-                    "require area must be non-negative.",
-                    sqft_tok.col,
-                    end_col=sqft_tok.end_col,
-                    hint="Give the minimum in square feet, e.g. `require area "
-                    f"{rid} >= 300`.",
-                )
-            c.expect_end()
-            plan.require("area", rid, min_area=sqft)
-        else:
-            raise _ParseError(
-                "BAD_OPTION",
-                f"Unknown requirement kind '{kind_tok.text}'.",
-                kind_tok.col,
-                end_col=kind_tok.end_col,
-                hint="Use `require adjacent <a> <b>`, `require separate <a> <b>`, "
-                "`require exterior <room> [<wall>]`, or `require area <room> >= "
-                "<sqft>`.",
-            )
-        req = plan.requirements[-1]
-        req.line, req.col, req.end_col = lineno, kw.col, kw.end_col
-    elif key == "room":
-        rid_tok = c.ident("a room id")
-        rid = rid_tok.text
-        rtype = c.room_type()
-        place_kwargs, ref_tok = _parse_placement(c)
-        c.keyword("size")
-        w = c.number("width")
-        c.keyword("x")
-        length = c.number("length")
-        level = 0
-        ceiling_h = None
-        vaulted = False
-        floor_finish = None
-        # Optional room suffixes in any order: `level <n>`, `ceiling <h>`,
-        # `vaulted`, `floor "<finish>"`.
-        while (tok := c.peek()) is not None:
-            opt = tok.text.lower()
-            if opt == "level":
-                c.keyword("level")
-                level = c.level_value()
-            elif opt == "ceiling":
-                c.keyword("ceiling")
-                ceiling_h = c.number("room ceiling height")
-            elif opt == "vaulted":
-                c.keyword("vaulted")
-                vaulted = True
-            elif opt == "floor":
-                c.keyword("floor")
-                floor_finish = c.take("a floor finish (quoted)").text
-            else:
-                break
-        c.expect_end()
-        try:
-            plan.add_room(
-                rid, rtype, width=w, length=length, level=level,
-                ceiling_height=ceiling_h, vaulted=vaulted, floor=floor_finish,
-                **place_kwargs
-            )
-        except ValueError as exc:
-            col = ref_tok.col if ref_tok else rid_tok.col
-            end = ref_tok.end_col if ref_tok else rid_tok.end_col
-            raise _ParseError(
-                "PLACE_REF",
-                str(exc),
-                col,
-                end_col=end,
-                hint="Define the reference room before placing relative to it.",
-            )
-        smap.room_line[rid] = lineno
-        smap.room_col[rid] = (rid_tok.col, rid_tok.end_col)
-    elif key == "wall":
-        # `wall <a> - <b> plumbing|bearing|rated` — one or more attributes of
-        # the shared wall between two abutting rooms. Checked by the validator
-        # (WALL_REF / WALL_NOADJ) like every dangling reference.
-        a_tok = c.ident("a room id")
-        a = a_tok.text
-        sep = c.take("'-' or 'to'")
-        if sep.text.lower() not in ("-", "to"):
-            raise _ParseError(
-                "SYNTAX",
-                f"Expected '-' or 'to', got '{sep.text}'.",
-                sep.col,
-                end_col=sep.end_col,
-            )
-        b_tok = c.ident("the second room id")
-        b = b_tok.text
-        attrs: list[str] = []
-        while (tok := c.peek()) is not None:
-            at_tok = c.take("a wall attribute")
-            at = at_tok.text.lower()
-            if at not in WALL_ATTRIBUTES:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown wall attribute '{at_tok.text}'.",
-                    at_tok.col,
-                    end_col=at_tok.end_col,
-                    hint=f"Use one or more of: {_WALL_ATTRS}.",
-                )
-            if at not in attrs:
-                attrs.append(at)
-        if not attrs:
-            raise _ParseError(
-                "SYNTAX",
-                "Expected at least one wall attribute.",
-                c.eol_col,
-                end_col=c.eol_col + 1,
-                hint=f"Name what the shared wall is: {_WALL_ATTRS} "
-                f"(e.g. `wall {a} - {b} plumbing`).",
-            )
-        c.expect_end()
-        if a == b:
-            raise _ParseError(
-                "SYNTAX",
-                f"A wall statement names two different rooms, got '{a}' twice.",
-                b_tok.col,
-                end_col=b_tok.end_col,
-                hint="Name the two rooms the wall stands between.",
-            )
-        plan.wall(a, b, *attrs)
-        ws = plan.wall_specs[-1]
-        ws.line, ws.col, ws.end_col = lineno, a_tok.col, a_tok.end_col
-    elif key == "suite":
-        # `suite <id>: <room> ...` — a named group of rooms (members are room
-        # ids). The `:` tokenizes away like the `room <id>:` colon. Unknown
-        # members are caught by the validator (SUITE_REF), like every reference.
-        sid_tok = c.ident("a suite id")
-        members: list[str] = []
-        while c.peek() is not None:
-            members.append(c.ident("a member room id").text)
-        if not members:
-            raise _ParseError(
-                "SYNTAX",
-                "A suite needs at least one member room.",
-                c.eol_col,
-                end_col=c.eol_col + 1,
-                hint="List the rooms in the suite, e.g. "
-                f"`suite {sid_tok.text}: master_bed master_bath master_wic`.",
-            )
-        plan.suite(sid_tok.text, *members)
-        s = plan.suites[-1]
-        s.line, s.col, s.end_col = lineno, kw.col, kw.end_col
-    elif key == "zone":
-        # `zone <id>: <member> ...` — a named band. Members are room ids OR
-        # suite ids (so a zone can group whole suites). Resolution/validation
-        # (ZONE_REF / ZONE_OVERLAP / ZONE_CROSS) happens in the validator.
-        zid_tok = c.ident("a zone id")
-        zmembers: list[str] = []
-        while c.peek() is not None:
-            zmembers.append(c.ident("a member room or suite id").text)
-        if not zmembers:
-            raise _ParseError(
-                "SYNTAX",
-                "A zone needs at least one member.",
-                c.eol_col,
-                end_col=c.eol_col + 1,
-                hint="List the rooms or suites in the zone, e.g. "
-                f"`zone {zid_tok.text}: primary bed_2 hall_beds`.",
-            )
-        plan.zone(zid_tok.text, *zmembers)
-        z = plan.zones[-1]
-        z.line, z.col, z.end_col = lineno, kw.col, kw.end_col
-    elif key == "door":
-        # Unified door statement. Two forms, told apart by what follows the id:
-        #   interior:  door <a> - <b> [swing|cased|pocket|sliding] [opts]
-        #   exterior:  door <id> <wall> exterior [opts]
-        a_tok = c.ident("a room id")
-        a = a_tok.text
-        nxt = c.peek()
-        if nxt is not None and nxt.text.lower() in ("-", "to"):
-            c.take("'-'")  # consume the separator
-            b = c.ident("the second room id").text
-            kind = "swing"
-            if (tok := c.peek()) is not None and tok.text.lower() in _DOOR_KINDS:
-                kind = c.take("a door kind").text.lower()
-            if kind == "cased":
-                width = 6.0  # cased opens wide
-            elif kind in DOUBLE_LEAF_KINDS:
-                width = DEFAULT_DOUBLE_DOOR_WIDTH  # the stock 60 in pair
-            elif kind == "bifold":
-                width = DEFAULT_BIFOLD_DOOR_WIDTH  # the stock 48 in closet pair
-            else:
-                width = 32 / 12
-            offset, swing_into, hinge = None, None, None
-            while c.peek() is not None:
-                opt = c.take("an option").text.lower()
-                if opt == "width":
-                    width = c.number("door width")
-                elif opt == "offset":
-                    offset = c.number("door offset")
-                elif opt == "into":
-                    swing_into = c.ident("the room the door swings into").text
-                elif opt == "hinge":
-                    h = c.take("'near' or 'far'")
-                    if h.text.lower() not in ("near", "far"):
-                        raise _ParseError(
-                            "BAD_OPTION",
-                            f"Hinge must be 'near' or 'far', got '{h.text}'.",
-                            h.col,
-                            hint="Use `hinge near` or `hinge far`.",
-                            end_col=h.end_col,
-                        )
-                    hinge = h.text.lower()
-                else:
-                    raise _ParseError(
-                        "BAD_OPTION",
-                        f"Unknown door option '{opt}'.",
-                        c.toks[c.i - 1].col,
-                        hint="Options: a kind (swing/cased/pocket/sliding/bifold/"
-                        "double/french), width <n>, offset <n>, into <room>, "
-                        "hinge near|far.",
-                        end_col=c.toks[c.i - 1].end_col,
-                    )
-            c.expect_end()
-            plan.connect(
-                a, b, width=width, kind=kind, offset=offset,
-                swing_into=swing_into, hinge=hinge,
-            )
-            d = plan.interior_doors[-1]
-            d.line, d.col, d.end_col = lineno, a_tok.col, a_tok.end_col
-        else:
-            # Exterior forms, told apart by the keyword after the wall:
-            #   door <id> <wall> exterior [width <w>] [offset <o>] [no-egress]
-            #   door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]
-            wall = c.wall()
-            kind_tok = c.take("'exterior' or 'overhead'")
-            if kind_tok.text.lower() not in ("exterior", "overhead"):
-                raise _ParseError(
-                    "SYNTAX",
-                    f"Expected 'exterior' or 'overhead', got '{kind_tok.text}'.",
-                    kind_tok.col,
-                    end_col=kind_tok.end_col,
-                )
-            if kind_tok.text.lower() == "overhead":
-                # A sectional garage door: 9 x 7 (the residential single) by
-                # default, 16 wide for a double. Never an egress door — there is
-                # no no-egress option because it's implied.
-                width, height, offset = OVERHEAD_DOOR_WIDTH, OVERHEAD_DOOR_HEIGHT, 1.0
-                while c.peek() is not None:
-                    opt = c.take("an option").text.lower()
-                    if opt == "width":
-                        width = c.number("door width")
-                    elif opt == "height":
-                        height = c.number("door height")
-                    elif opt == "offset":
-                        offset = c.number("offset")
-                    else:
-                        raise _ParseError(
-                            "BAD_OPTION",
-                            f"Unknown overhead-door option '{opt}'.",
-                            c.toks[c.i - 1].col,
-                            hint="Options: width <n>, height <n>, offset <n> "
-                            "(no-egress is implied — an overhead door never "
-                            "counts as egress).",
-                            end_col=c.toks[c.i - 1].end_col,
-                        )
-                c.expect_end()
-                plan.entrance(
-                    a, wall, width=width, offset=offset, kind="overhead", height=height
-                )
-            else:
-                width, offset, egress, ekind = 3.0, 1.0, True, "entry"
-                width_given = False
-                while c.peek() is not None:
-                    opt = c.take("an option").text.lower()
-                    if opt == "width":
-                        width = c.number("door width")
-                        width_given = True
-                    elif opt == "offset":
-                        offset = c.number("offset")
-                    elif opt in ("no-egress", "nonegress"):
-                        egress = False
-                    elif opt in ("double", "french"):
-                        ekind = opt
-                    else:
-                        raise _ParseError(
-                            "BAD_OPTION",
-                            f"Unknown exterior-door option '{opt}'.",
-                            c.toks[c.i - 1].col,
-                            hint="Options: double|french, width <n>, offset <n>, "
-                            "no-egress.",
-                            end_col=c.toks[c.i - 1].end_col,
-                        )
-                if ekind in DOUBLE_LEAF_KINDS and not width_given:
-                    width = DEFAULT_DOUBLE_DOOR_WIDTH  # the stock 60 in pair
-                c.expect_end()
-                plan.entrance(
-                    a, wall, width=width, offset=offset, egress=egress, kind=ekind
-                )
-            ed = plan.exterior_doors[-1]
-            ed.line, ed.col, ed.end_col = lineno, a_tok.col, a_tok.end_col
-    elif key == "open":
-        a_tok = c.ident("the first room id")
-        a = a_tok.text
-        sep = c.take("'-' or 'to'")
-        if sep.text.lower() not in ("-", "to"):
-            raise _ParseError(
-                "SYNTAX",
-                f"Expected '-' or 'to', got '{sep.text}'.",
-                sep.col,
-                end_col=sep.end_col,
-            )
-        b = c.ident("the second room id").text
-        width, offset = 6.0, None  # wide cased opening by default (DEFAULT_OPENING_WIDTH)
-        while c.peek() is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "width":
-                width = c.number("opening width")
-            elif opt == "offset":
-                offset = c.number("opening offset")
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown open option '{opt}'.",
-                    c.toks[c.i - 1].col,
-                    hint="Options: width <n>, offset <n>.",
-                    end_col=c.toks[c.i - 1].end_col,
-                )
-        c.expect_end()
-        plan.opening(a, b, width=width, offset=offset)
-        door = plan.interior_doors[-1]
-        door.line, door.col, door.end_col = lineno, a_tok.col, a_tok.end_col
-    elif key == "entry":
-        rid_tok = c.ident("a room id")
-        rid = rid_tok.text
-        wall = c.wall()
-        width, offset, egress, ekind = 3.0, 1.0, True, "entry"
-        width_given = False
-        while c.peek() is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "width":
-                width = c.number("door width")
-                width_given = True
-            elif opt == "offset":
-                offset = c.number("offset")
-            elif opt in ("no-egress", "nonegress"):
-                egress = False
-            elif opt in ("double", "french"):
-                ekind = opt
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown entry option '{opt}'.",
-                    c.toks[c.i - 1].col,
-                    hint="Options: double|french, width <n>, offset <n>, no-egress.",
-                    end_col=c.toks[c.i - 1].end_col,
-                )
-        if ekind in DOUBLE_LEAF_KINDS and not width_given:
-            width = DEFAULT_DOUBLE_DOOR_WIDTH  # the stock 60 in pair
-        plan.entrance(rid, wall, width=width, offset=offset, egress=egress, kind=ekind)
-        ed = plan.exterior_doors[-1]
-        ed.line, ed.col, ed.end_col = lineno, rid_tok.col, rid_tok.end_col
-    elif key == "window":
-        rid_tok = c.ident("a room id")
-        rid = rid_tok.text
-        wall = c.wall()
-        kind = "casement"  # the default: full glazed size = clear opening
-        if (tok := c.peek()) is not None and tok.text.lower() in _WINDOW_KIND_SET:
-            kind = c.take("a window kind").text.lower()
-        width, offset = 4.0, 2.0
-        sill, head = 3.0, 6.67  # ft above the floor; matches Window's defaults
-        tempered = False
-        while c.peek() is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "width":
-                width = c.number("window width")
-            elif opt == "offset":
-                offset = c.number("offset")
-            elif opt == "sill":
-                sill = c.number("sill height")
-            elif opt == "head":
-                head = c.number("head height")
-            elif opt == "tempered":
-                # Declared safety glazing — the R308.4 escape hatch (silences the
-                # WINDOW_TEMPERED hazard-location warning for this window).
-                tempered = True
-            elif opt == "fixed":
-                # `fixed` as a trailing flag is the same non-opening glass as the
-                # `fixed` kind (it just reads naturally after the size). It opens
-                # nothing, so it counts for daylight but not ventilation.
-                kind = "fixed"
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown window option '{opt}'.",
-                    c.toks[c.i - 1].col,
-                    hint="Options: a kind (casement/slider/fixed/double-hung, "
-                    "right after the wall), width <n>, offset <n>, sill <n>, "
-                    "head <n>, fixed, tempered.",
-                    end_col=c.toks[c.i - 1].end_col,
-                )
-        plan.add_window(
-            rid, wall, width=width, offset=offset, sill_height=sill,
-            head_height=head, kind=kind, tempered=tempered,
-        )
-        win = plan.windows[-1]
-        win.line, win.col, win.end_col = lineno, rid_tok.col, rid_tok.end_col
-    elif key == "porch":
-        pid = c.ident("a porch id").text
-        c.keyword("at")
-        x = c.number("x")
-        y = c.number("y")
-        c.keyword("size")
-        w = c.number("width")
-        c.keyword("x")
-        length = c.number("length")
-        covered = True
-        nxt = c.peek()
-        if nxt is not None:
-            tag = c.take("'covered' or 'open'").text.lower()
-            if tag == "open":
-                covered = False
-            elif tag != "covered":
-                raise _ParseError(
-                    "SYNTAX",
-                    f"Expected 'covered' or 'open', got '{tag}'.",
-                    nxt.col,
-                    end_col=nxt.end_col,
-                )
-        c.expect_end()
-        plan.add_porch(pid, x=x, y=y, width=w, length=length, covered=covered)
-    elif key == "stair":
-        sid_tok = c.ident("a stair id")
-        c.keyword("at")
-        x = c.number("x")
-        y = c.number("y")
-        c.keyword("size")
-        w = c.number("width")
-        c.keyword("x")
-        length = c.number("length")
-        lo, hi = 0, 1
-        while (tok := c.peek()) is not None and tok.text.lower() in ("from", "to"):
-            opt = c.take("an option").text.lower()
-            if opt == "from":
-                lo = c.level_value()
-            else:
-                hi = c.level_value()
-        c.expect_end()
-        try:
-            plan.add_stair(
-                sid_tok.text, x=x, y=y, width=w, length=length,
-                from_level=lo, to_level=hi,
-            )
-            st = plan.stairs[-1]
-            st.line, st.col, st.end_col = lineno, sid_tok.col, sid_tok.end_col
-        except ValueError as exc:
-            raise _ParseError(
-                "BAD_LEVEL", str(exc), sid_tok.col, end_col=sid_tok.end_col,
-                hint="A stair connects two different levels, e.g. `from 0 to 1`.",
-            )
-    elif key == "frame":
-        # `frame [bay <ft>] [span <ft>] [post <in>] [ridge|no-ridge]`.
-        # Defaults match FrameSpec; placement runs after parse (place_frame).
-        bay, span, post, ridge = 12.0, 40.0, inches(6), True
-        while c.peek() is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "bay":
-                bay = c.number("bay spacing")
-            elif opt == "span":
-                span = c.number("max beam span")
-            elif opt == "post":
-                post = inches(c.number("post size in inches"))
-            elif opt == "ridge":
-                ridge = True
-            elif opt in ("no-ridge", "noridge"):
-                ridge = False
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown frame option '{opt}'.",
-                    c.toks[c.i - 1].col,
-                    hint="Options: bay <ft>, span <ft>, post <in>, no-ridge.",
-                    end_col=c.toks[c.i - 1].end_col,
-                )
-        if bay <= 0 or span <= 0 or post <= 0:
-            raise _ParseError(
-                "BAD_NUMBER",
-                "frame bay/span/post must be positive.",
-                kw.col,
-                hint="e.g. `frame bay 12 span 40 post 6`.",
-                end_col=kw.end_col,
-            )
-        # Set the spec now; place the structure after the whole file parses (so
-        # the envelope/wings are known regardless of statement order).
-        plan.frame_spec = FrameSpec(bay, span, post, ridge, lineno, kw.col, kw.end_col)
-    elif key == "fixture":
-        # `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W [offset <n>]]
-        #  [rotate <deg>] [width <w>]`
-        from .fixtures import FIXTURES
-
-        kind_tok = c.ident("a fixture kind")
-        kind = kind_tok.text.lower()
-        if kind not in FIXTURES:
-            raise _ParseError(
-                "BAD_OPTION",
-                f"Unknown fixture kind '{kind_tok.text}'.",
-                kind_tok.col,
-                end_col=kind_tok.end_col,
-                hint=f"Use one of: {', '.join(FIXTURES)}.",
-            )
-        c.keyword("in")
-        room_tok = c.ident("a room id")
-        fx = fy = wall = width = None
-        f_offset: float | None = None
-        along: Direction | None = None
-        run_from: float | None = None
-        run_to: float | None = None
-        run_depth: float | None = None
-        rotation = 0.0
-        while (tok := c.peek()) is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "at":
-                fx = c.number("the fixture x offset")
-                fy = c.number("the fixture y offset")
-            elif opt in ("wall", "along"):
-                wt = c.take("a wall (N|S|E|W)")
-                wd = _FIXTURE_WALLS.get(wt.text.lower())
-                if wd is None:
-                    raise _ParseError(
-                        "BAD_WALL",
-                        f"Unknown wall '{wt.text}'.",
-                        wt.col,
-                        end_col=wt.end_col,
-                        hint="Use N, S, E or W (or north/south/east/west).",
-                    )
-                if opt == "along":
-                    along = wd
-                else:
-                    wall = wd
-            elif opt == "offset":
-                f_offset = c.number("the fixture offset")
-            elif opt == "from":
-                run_from = c.number("the counter run start")
-            elif opt == "to":
-                run_to = c.number("the counter run end")
-            elif opt == "depth":
-                run_depth = c.number("the counter depth")
-            elif opt in ("rotate", "rotation"):
-                rotation = c.number("the rotation in degrees")
-            elif opt == "width":
-                width = c.number("the fixture width")
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown fixture option '{tok.text}'.",
-                    tok.col,
-                    end_col=tok.end_col,
-                    hint="Options: at <x>,<y>, wall N|S|E|W [offset <n>], rotate "
-                    "<deg>, width <w>, or (counter) along N|S|E|W [from <a> to "
-                    "<b>] [depth <d>].",
-                )
-        c.expect_end()
-        try:
-            plan.add_fixture(
-                kind, room_tok.text, x=fx, y=fy, wall=wall, offset=f_offset,
-                rotation=rotation, width=width, along=along, run_from=run_from,
-                run_to=run_to, depth=run_depth,
-            )
-        except ValueError as exc:
-            raise _ParseError(
-                "BAD_OPTION", str(exc), kind_tok.col, end_col=kind_tok.end_col,
-            )
-        pf = plan.fixtures[-1]
-        pf.line, pf.col, pf.end_col = lineno, kw.col, kw.end_col
-    elif key in ("outlet", "switch"):
-        # `outlet in <room> wall <N|S|E|W> offset <n> [gfci]`
-        # `switch in <room> wall <N|S|E|W> offset <n>`
-        c.keyword("in")
-        room_tok = c.ident("a room id")
-        wall = None
-        offset = 1.0
-        gfci = False
-        while (tok := c.peek()) is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "wall":
-                wt = c.take("a wall (N|S|E|W)")
-                wall = _FIXTURE_WALLS.get(wt.text.lower())
-                if wall is None:
-                    raise _ParseError(
-                        "BAD_WALL",
-                        f"Unknown wall '{wt.text}'.",
-                        wt.col,
-                        end_col=wt.end_col,
-                        hint="Use N, S, E or W (or north/south/east/west).",
-                    )
-            elif opt == "offset":
-                offset = c.number(f"the {key} offset")
-            elif opt == "gfci" and key == "outlet":
-                gfci = True
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown {key} option '{tok.text}'.",
-                    tok.col,
-                    end_col=tok.end_col,
-                    hint=(
-                        "Options: wall N|S|E|W, offset <n>, gfci."
-                        if key == "outlet"
-                        else "Options: wall N|S|E|W, offset <n>."
-                    ),
-                )
-        if wall is None:
-            raise _ParseError(
-                "BAD_WALL",
-                f"A `{key}` needs a wall: `{key} in <room> wall N|S|E|W offset <n>`.",
-                kw.col,
-                end_col=kw.end_col,
-                hint="Name the wall (N|S|E|W) the device sits on.",
-            )
-        c.expect_end()
-        if key == "outlet":
-            plan.add_outlet(room_tok.text, wall, offset=offset, gfci=gfci)
-            plan.outlets[-1].line = lineno
-            plan.outlets[-1].col = kw.col
-            plan.outlets[-1].end_col = kw.end_col
-        else:
-            plan.add_switch(room_tok.text, wall, offset=offset)
-            plan.switches[-1].line = lineno
-            plan.switches[-1].col = kw.col
-            plan.switches[-1].end_col = kw.end_col
-    elif key == "light":
-        # `light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]`
-        c.keyword("in")
-        room_tok = c.ident("a room id")
-        c.keyword("at")
-        lx = c.number("the light x offset")
-        ly = c.number("the light y offset")
-        lkind = "ceiling"
-        while (tok := c.peek()) is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "kind":
-                kt = c.take("a light kind")
-                lkind = kt.text.lower()
-                if lkind not in _LIGHT_KIND_SET:
-                    raise _ParseError(
-                        "BAD_OPTION",
-                        f"Unknown light kind '{kt.text}'.",
-                        kt.col,
-                        end_col=kt.end_col,
-                        hint=f"Use one of: {', '.join(LIGHT_KINDS)}.",
-                    )
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown light option '{tok.text}'.",
-                    tok.col,
-                    end_col=tok.end_col,
-                    hint="Options: kind ceiling|pendant|fan|recessed.",
-                )
-        c.expect_end()
-        plan.add_light(room_tok.text, x=lx, y=ly, kind=lkind)
-        lm = plan.lights[-1]
-        lm.line, lm.col, lm.end_col = lineno, kw.col, kw.end_col
-    elif key == "alarm":
-        # `alarm <smoke|co|smoke_co> in <room> [at <x>,<y>]`
-        kind_tok = c.ident("an alarm kind (smoke|co|smoke_co)")
-        akind = kind_tok.text.lower()
-        if akind not in _ALARM_KIND_SET:
-            raise _ParseError(
-                "BAD_OPTION",
-                f"Unknown alarm kind '{kind_tok.text}'.",
-                kind_tok.col,
-                end_col=kind_tok.end_col,
-                hint=f"Use one of: {', '.join(ALARM_KINDS)} "
-                "(smoke_co is the combination unit).",
-            )
-        c.keyword("in")
-        room_tok = c.ident("a room id")
-        ax = ay = None
-        while (tok := c.peek()) is not None:
-            opt = c.take("an option").text.lower()
-            if opt == "at":
-                ax = c.number("the alarm x offset")
-                ay = c.number("the alarm y offset")
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown alarm option '{tok.text}'.",
-                    tok.col,
-                    end_col=tok.end_col,
-                    hint="Options: at <x>,<y> (room-local; a ceiling device).",
-                )
-        c.expect_end()
-        plan.add_alarm(room_tok.text, akind, x=ax, y=ay)
-        am = plan.alarms[-1]
-        am.line, am.col, am.end_col = lineno, kw.col, kw.end_col
-    elif key == "use":
-        # `use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]`
-        # — stamp a part, optionally rotated (ccw) then mirrored in its local frame.
-        from .elements import UseSpec
-
-        path_tok = c.take("a quoted part path")
-        if not path_tok.quoted:
-            raise _ParseError(
-                "SYNTAX",
-                f"Expected a quoted part path, got '{path_tok.text}'.",
-                path_tok.col, end_col=path_tok.end_col,
-                hint='Quote the relative path, e.g. `use "parts/bath_core.barn" as b at 0,0`.',
-            )
-        c.keyword("as")
-        alias_tok = c.ident("an alias")
-        if not _ALIAS_RE.match(alias_tok.text):
-            raise _ParseError(
-                "SYNTAX",
-                f"'{alias_tok.text}' is not a valid alias.",
-                alias_tok.col, end_col=alias_tok.end_col,
-                hint="An alias is a plain identifier (letters, digits, underscore; "
-                "not starting with a digit), e.g. `as m`.",
-            )
-        c.keyword("at")
-        ux = c.number("the use x")
-        uy = c.number("the use y")
-        ulevel = 0
-        umirror: str | None = None
-        urotate = 0
-        uparams: dict[str, float] = {}
-        while (tok := c.peek()) is not None:
-            opt = tok.text.lower()
-            if opt == "level":
-                c.keyword("level")
-                ulevel = c.level_value()
-            elif opt == "with":
-                # `with k=v[, k=v…]` — use-site param overrides (Phase 20). Each
-                # pair is a single `key=value` token (commas are separators, so
-                # `with w=8, d=7-6` arrives as the tokens `w=8` `d=7-6`); a value
-                # is a number (decimal feet or ft-in). Numbers only in v1. A key
-                # the part doesn't declare is caught later (PARAM_UNDECLARED, at
-                # the use line) once the part's params are known.
-                c.keyword("with")
-                seen_pair = False
-                while (pt := c.peek()) is not None and "=" in pt.text and not pt.quoted:
-                    c.take("a param pair")
-                    seen_pair = True
-                    name, _, val = pt.text.partition("=")
-                    if not _PARAM_NAME_RE.match(name):
-                        raise _ParseError(
-                            "SYNTAX",
-                            f"'{name}' is not a valid param name in `with`.",
-                            pt.col, end_col=pt.end_col,
-                            hint="Write `with width=8, depth=7-6` — a plain name, "
-                            "then `=`, then a number.",
-                        )
-                    num = _param_value(val)
-                    if num is None:
-                        raise _ParseError(
-                            "BAD_NUMBER",
-                            f"`with {name}=` needs a number, got '{val}'.",
-                            pt.col, end_col=pt.end_col,
-                            hint="Params are numbers only (decimal feet or ft-in, "
-                            "e.g. 8 or 7-6) — no names or arithmetic in v1.",
-                        )
-                    if name in uparams:
-                        raise _ParseError(
-                            "PARAM_DUP",
-                            f"param '{name}' is set twice in this `with` clause.",
-                            pt.col, end_col=pt.end_col,
-                            hint="Set each param once per `use`.",
-                        )
-                    uparams[name] = num
-                if not seen_pair:
-                    nxt = c.peek()
-                    raise _ParseError(
-                        "SYNTAX",
-                        "`with` needs at least one `key=value` param pair.",
-                        nxt.col if nxt else kw.col,
-                        end_col=nxt.end_col if nxt else kw.end_col,
-                        hint="e.g. `with width=8, depth=7-6` (no spaces around `=`).",
-                    )
-            elif opt == "mirror":
-                c.keyword("mirror")
-                axis_tok = c.take("a mirror axis (x or y)")
-                axis = axis_tok.text.lower()
-                if axis not in ("x", "y"):
-                    raise _ParseError(
-                        "BAD_OPTION",
-                        f"`mirror` takes an axis x or y, got '{axis_tok.text}'.",
-                        axis_tok.col, end_col=axis_tok.end_col,
-                        hint="`mirror y` flips east↔west; `mirror x` flips north↔south.",
-                    )
-                umirror = axis
-            elif opt == "rotate":
-                c.keyword("rotate")
-                ang_tok = c.take("a rotation of 90, 180 or 270")
-                try:
-                    ang = int(float(ang_tok.text))
-                except ValueError:
-                    ang = -1
-                if ang_tok.quoted or ang not in (90, 180, 270):
-                    raise _ParseError(
-                        "BAD_OPTION",
-                        f"`rotate` on `use` takes 90, 180 or 270, got '{ang_tok.text}'.",
-                        ang_tok.col, end_col=ang_tok.end_col,
-                        hint="Rooms are axis-aligned, so a part turns in 90° steps "
-                        "(90, 180 or 270) — a quarter, half or three-quarter turn.",
-                    )
-                urotate = ang
-            else:
-                raise _ParseError(
-                    "BAD_OPTION",
-                    f"Unknown use option '{tok.text}'.",
-                    tok.col, end_col=tok.end_col,
-                    hint="Options: level <n>, mirror x|y, rotate 90|180|270, "
-                    "with k=v.",
-                )
-        plan.uses.append(
-            UseSpec(path_tok.text, alias_tok.text, ux, uy, ulevel,
-                    mirror=umirror, rotate=urotate, params=uparams,
-                    line=lineno, col=kw.col, end_col=kw.end_col)
-        )
-    elif key == "param":
-        # `param <name> = <number>` — a part parameter (Phase 20). The default is
-        # mandatory (every param is optional at use). Numbers only in v1. The
-        # authoritative declaration: stores the default on the plan and reports
-        # PARAM diagnostics; the resolution env is built by a pre-scan (see
-        # :func:`_scan_param_defaults`) so a name may be referenced before its
-        # `param` line. Whole line joined so `w = 8` / `w=8` / `w =8` all parse.
-        rest = "".join(t.text for t in tokens[1:])
-        pname, psep, pval = rest.partition("=")
-        if not psep or not _PARAM_NAME_RE.match(pname):
-            raise _ParseError(
-                "SYNTAX",
-                "A param is `param <name> = <number>`.",
-                kw.end_col + 1, end_col=c.eol_col,
-                hint="e.g. `param width = 8` or `param depth = 7-6`.",
-            )
-        pnum = _param_value(pval)
-        if pnum is None:
-            raise _ParseError(
-                "BAD_NUMBER",
-                f"param '{pname}' needs a numeric default, got '{pval}'.",
-                kw.end_col + 1, end_col=c.eol_col,
-                hint="The default is mandatory and a number (decimal feet or "
-                "ft-in, e.g. 8 or 7-6) — no names or arithmetic in v1.",
-            )
-        if pname in plan.params:
-            raise _ParseError(
-                "PARAM_DUP",
-                f"param '{pname}' is declared more than once.",
-                kw.end_col + 1, end_col=c.eol_col,
-                hint="Declare each param once.",
-            )
-        plan.params[pname] = pnum
-    else:
+    handlers = {
+        "plan": lambda: _parse_plan_statement(c, plan),
+        "envelope": lambda: _parse_envelope_statement(c, plan),
+        "wing": lambda: _parse_wing_statement(c, plan),
+        "ceiling": lambda: _parse_ceiling_statement(c, plan),
+        "floor": lambda: _parse_floor_statement(c, plan),
+        "accessible": lambda: _parse_accessible_statement(c, plan),
+        "electrical": lambda: _parse_electrical_marker_statement(c, plan),
+        "street": lambda: _parse_street_statement(c, plan),
+        "overhang": lambda: _parse_overhang_statement(c, plan),
+        "climate": lambda: _parse_climate_statement(c, plan),
+        "orientation": lambda: _parse_orientation_statement(c, plan),
+        "finish": lambda: _parse_finish_statement(c, plan),
+        "site": lambda: _parse_site_statement(c, plan, kw, lineno),
+        "setback": lambda: _parse_setback_statement(c, plan, kw, lineno),
+        "building": lambda: _parse_building_statement(c, plan, kw, lineno),
+        "drive": lambda: _parse_drive_statement(c, plan, kw, lineno),
+        "walk": lambda: _parse_walk_statement(c, plan, kw, lineno),
+        "well": lambda: _parse_well_statement(c, plan, kw, lineno),
+        "septic": lambda: _parse_septic_statement(c, plan, kw, lineno),
+        "service": lambda: _parse_service_statement(c, plan, kw, lineno),
+        "grade": lambda: _parse_grade_statement(c, plan),
+        "roof": lambda: _parse_roof_statement(c, plan),
+        "note": lambda: _parse_note_statement(c, plan, kw, lineno),
+        "program": lambda: _parse_program_statement(c, plan, kw, lineno),
+        "require": lambda: _parse_require_statement(c, plan, kw, lineno),
+        "room": lambda: _parse_room_statement(c, plan, smap, lineno),
+        "wall": lambda: _parse_wall_statement(c, plan, lineno),
+        "suite": lambda: _parse_suite_statement(c, plan, kw, lineno),
+        "zone": lambda: _parse_zone_statement(c, plan, kw, lineno),
+        "door": lambda: _parse_door_statement(c, plan, lineno),
+        "open": lambda: _parse_open_statement(c, plan, lineno),
+        "entry": lambda: _parse_entry_statement(c, plan, lineno),
+        "window": lambda: _parse_window_statement(c, plan, lineno),
+        "porch": lambda: _parse_porch_statement(c, plan),
+        "stair": lambda: _parse_stair_statement(c, plan, lineno),
+        "frame": lambda: _parse_frame_statement(c, plan, kw, lineno),
+        "fixture": lambda: _parse_fixture_statement(c, plan, kw, lineno),
+        "outlet": lambda: _parse_device_statement(c, plan, key, kw, lineno),
+        "switch": lambda: _parse_device_statement(c, plan, key, kw, lineno),
+        "light": lambda: _parse_light_statement(c, plan, kw, lineno),
+        "alarm": lambda: _parse_alarm_statement(c, plan, kw, lineno),
+        "use": lambda: _parse_use_statement(c, plan, kw, lineno),
+        "param": lambda: _parse_param_statement(tokens, c, plan, kw),
+    }
+    handler = handlers.get(key)
+    if handler is None:
         raise _ParseError(
             "UNKNOWN_STMT",
             f"{_did_you_mean(kw.text, _KEYWORDS)}Unknown statement '{kw.text}'.",
@@ -2207,6 +2351,7 @@ def _parse_statement(
             hint=f"Statements start with one of: {', '.join(_KEYWORDS)}.",
             end_col=kw.end_col,
         )
+    handler()
 
 
 # --- Result -----------------------------------------------------------------
@@ -2320,6 +2465,240 @@ def _format_diagnostic(d: Issue, filename: str, src_lines: list[str]) -> list[st
     return out
 
 
+def _recovery_limit(what: str) -> Issue:
+    return Issue(
+        Severity.WARNING,
+        "RECOVERY_LIMIT",
+        f"{what} could not run on the partial plan; diagnostics are incomplete.",
+        hint="Fix the parse error(s) above to get the full report.",
+    )
+
+
+def _parse_source_lines(
+    source: str,
+    plan: Barndominium,
+    smap: _SourceMap,
+    diagnostics: list[Issue],
+    *,
+    fragment: bool,
+    param_env: dict[str, float] | None,
+) -> bool:
+    """Parse all source lines into ``plan``; return True if recovery skipped any."""
+    skipped = False
+    for lineno, raw in enumerate(source.splitlines(), start=1):
+        toks = _tokenize_line(raw, lineno)
+        unterminated = next((t for t in toks if t.unterminated), None)
+        if unterminated is not None:
+            ftin_hint = _ftin_string_hint(raw, unterminated.col)
+            diagnostics.append(Issue(
+                Severity.ERROR,
+                "UNTERMINATED_STRING",
+                "String literal has no closing '\"'.",
+                line=lineno,
+                col=unterminated.col,
+                end_col=unterminated.end_col,
+                hint=ftin_hint or 'Add the closing quote, e.g. `plan "Name"`.',
+            ))
+            skipped = True
+            continue
+        if not toks:
+            skipped = _record_empty_line_syntax(raw, lineno, diagnostics) or skipped
+            continue
+        key = toks[0].text.lower()
+        if _record_fragment_host_statement(key, toks[0], lineno, diagnostics, fragment):
+            skipped = True
+            continue
+        if _record_param_in_plan(key, toks[0], lineno, diagnostics, fragment):
+            skipped = True
+            continue
+        try:
+            _parse_statement(toks, plan, smap, lineno, param_env=param_env)
+        except _ParseError as err:
+            diagnostics.append(Issue(
+                Severity.ERROR,
+                err.code,
+                err.message,
+                line=lineno,
+                col=err.col,
+                end_col=err.end_col,
+                hint=err.hint,
+            ))
+            skipped = True
+    return skipped
+
+
+def _record_empty_line_syntax(raw: str, lineno: int, diagnostics: list[Issue]) -> bool:
+    """Flag punctuation-only lines; return True when a diagnostic was added."""
+    stripped = raw.split("#", 1)[0]
+    residue = [ch for ch in stripped if not ch.isspace() and ch not in _DROP]
+    if not residue:
+        return False
+    col = next(i for i, ch in enumerate(stripped) if not ch.isspace()) + 1
+    diagnostics.append(Issue(
+        Severity.ERROR,
+        "SYNTAX",
+        "Line has no statement keyword.",
+        line=lineno,
+        col=col,
+        end_col=col + 1,
+        hint=f"Each line is one statement; start with one of: {', '.join(_KEYWORDS)}.",
+    ))
+    return True
+
+
+def _record_fragment_host_statement(
+    key: str, tok: _Token, lineno: int, diagnostics: list[Issue], fragment: bool,
+) -> bool:
+    if not (fragment and key in _HOST_ONLY):
+        return False
+    diagnostics.append(Issue(
+        Severity.ERROR,
+        "PART_HOST_STMT",
+        f"`{key}` describes a whole building — a part borrows the host's. "
+        "Remove it; size the part by its rooms.",
+        line=lineno,
+        col=tok.col,
+        end_col=tok.end_col,
+        hint="A part is any `.barn` file with no `plan` header: rooms, openings, "
+        "windows, fixtures, devices — in its own local feet.",
+    ))
+    return True
+
+
+def _record_param_in_plan(
+    key: str, tok: _Token, lineno: int, diagnostics: list[Issue], fragment: bool,
+) -> bool:
+    if fragment or key != "param":
+        return False
+    diagnostics.append(Issue(
+        Severity.ERROR,
+        "PARAM_IN_PLAN",
+        "`param` declares a part parameter — a whole plan can't take one.",
+        line=lineno,
+        col=tok.col,
+        end_col=tok.end_col,
+        hint="Move `param` into a part file (a `.barn` with no `plan` header); "
+        "the host passes values with `use ... with name=value`.",
+    ))
+    return True
+
+
+def _compose_plan_uses(
+    plan: Barndominium,
+    diagnostics: list[Issue],
+    profile: "Profile | None",
+    base_dir: str | None,
+    compose_ctx: object | None,
+    self_path: str | None,
+) -> object | None:
+    if not plan.uses:
+        return None
+    from .compose import _ComposeCtx, compose_uses
+
+    ctx = compose_ctx if isinstance(compose_ctx, _ComposeCtx) else _ComposeCtx.top_level(base_dir, self_path)
+    return compose_uses(plan, base_dir, diagnostics, profile, ctx=ctx)
+
+
+def _place_frame_for_compile(plan: Barndominium, diagnostics: list[Issue], skipped: bool) -> None:
+    if plan.frame_spec is None:
+        return
+    from .structure import place_frame
+
+    try:
+        place_frame(plan)
+    except Exception:
+        if not skipped:
+            raise
+        diagnostics.append(_recovery_limit("Frame placement"))
+
+
+def _append_validation_issues(
+    plan: Barndominium,
+    diagnostics: list[Issue],
+    smap: _SourceMap,
+    profile: "Profile | None",
+    composition: object | None,
+    skipped: bool,
+) -> None:
+    try:
+        report: ValidationReport | None = validate(plan, profile)
+    except Exception:
+        if not skipped:
+            raise
+        diagnostics.append(_recovery_limit("Validation"))
+        return
+    _append_report_issues(report, diagnostics, smap, composition)
+
+
+def _anchor_issue_to_room_source(iss: Issue, smap: _SourceMap) -> None:
+    if iss.room is None:
+        return
+    if iss.line is None:
+        iss.line = smap.room_line.get(iss.room)
+    if iss.col is None and iss.room in smap.room_col:
+        iss.col, iss.end_col = smap.room_col[iss.room]
+
+
+def _append_report_issues(
+    report: ValidationReport | None,
+    diagnostics: list[Issue],
+    smap: _SourceMap,
+    composition: object | None,
+) -> None:
+    if report is None:
+        return
+    stamped_map = getattr(composition, "stamped_map", {}) if composition is not None else {}
+    part_keys = getattr(composition, "part_keys", {}) if composition is not None else {}
+    for iss in report.issues:
+        if iss.room is not None and iss.room in stamped_map:
+            local, inst = stamped_map[iss.room]
+            if (iss.code, local) in part_keys.get(inst.part_path, ()):  # part-internal duplicate
+                continue
+            iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
+            iss.message = f"instance {inst.alias}: {iss.message}"
+            diagnostics.append(iss)
+            continue
+        _anchor_issue_to_room_source(iss, smap)
+        diagnostics.append(iss)
+
+
+def _append_fragment_issue(
+    iss: Issue,
+    diagnostics: list[Issue],
+    smap: _SourceMap,
+    stamped_map: dict,
+    part_keys: dict,
+    local_codes: frozenset[str],
+) -> None:
+    if iss.code not in local_codes:
+        return
+    if iss.room is not None and iss.room in stamped_map:
+        local, inst = stamped_map[iss.room]
+        if (iss.code, local) in part_keys.get(inst.part_path, ()):  # nested part duplicate
+            return
+        iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
+        iss.message = f"instance {inst.alias}: {iss.message}"
+        diagnostics.append(iss)
+        return
+    _anchor_issue_to_room_source(iss, smap)
+    diagnostics.append(iss)
+
+
+def _append_fragment_validation_issues(
+    report: ValidationReport | None,
+    diagnostics: list[Issue],
+    smap: _SourceMap,
+    composition: object | None,
+    local_codes: frozenset[str],
+) -> None:
+    if report is None:
+        return
+    stamped_map = getattr(composition, "stamped_map", {}) if composition is not None else {}
+    part_keys = getattr(composition, "part_keys", {}) if composition is not None else {}
+    for iss in report.issues:
+        _append_fragment_issue(iss, diagnostics, smap, stamped_map, part_keys, local_codes)
+
+
 def _finish_fragment(
     plan: Barndominium,
     diagnostics: list[Issue],
@@ -2336,11 +2715,8 @@ def _finish_fragment(
     nested instances so a local finding on a nested stamped room is deduped
     against the nested part's already-folded part-internal diagnostics, exactly
     as the host does for its stamps."""
-    from .compose import Composition, PART_LOCAL_CODES, normalize_part_origin
+    from .compose import PART_LOCAL_CODES, normalize_part_origin
     from .pragma import apply_pragmas
-
-    stamped_map = composition.stamped_map if isinstance(composition, Composition) else {}
-    part_keys = composition.part_keys if isinstance(composition, Composition) else {}
 
     if not plan.rooms:
         diagnostics.append(Issue(
@@ -2368,28 +2744,7 @@ def _finish_fragment(
         report = validate(plan, profile)
     except Exception:
         report = None
-    if report is not None:
-        for iss in report.issues:
-            if iss.code not in PART_LOCAL_CODES:
-                continue  # whole-building / placement-dependent — skipped in a part
-            # A local finding on a nested stamped room (Phase 20): either a
-            # duplicate of the nested part's already-folded finding (drop it) or a
-            # placement-dependent finding of *this* part (anchor to the nested
-            # `use` line so the part author sees where the block lands).
-            if iss.room is not None and iss.room in stamped_map:
-                local, inst = stamped_map[iss.room]
-                if (iss.code, local) in part_keys.get(inst.part_path, ()):
-                    continue
-                iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
-                iss.message = f"instance {inst.alias}: {iss.message}"
-                diagnostics.append(iss)
-                continue
-            if iss.room is not None:
-                if iss.line is None:
-                    iss.line = smap.room_line.get(iss.room)
-                if iss.col is None and iss.room in smap.room_col:
-                    iss.col, iss.end_col = smap.room_col[iss.room]
-            diagnostics.append(iss)
+    _append_fragment_validation_issues(report, diagnostics, smap, composition, PART_LOCAL_CODES)
     apply_pragmas(diagnostics, pragmas)
     return CompileResult(plan, diagnostics, source, room_lines=dict(smap.room_line))
 
@@ -2432,7 +2787,6 @@ def compile_source(
       loader for nested composition (the sandbox root, depth, cycle stack, shared
       memo + instance budget). External callers leave them ``None``.
     """
-    from .compose import _ComposeCtx
     from .pragma import apply_pragmas, parse_pragmas
 
     # Strip a leading UTF-8 BOM for API callers who pass raw file text (the CLI's
@@ -2454,86 +2808,9 @@ def compile_source(
     # the skip sites themselves (not inferred from ERROR diagnostics later):
     # semantic build errors also record ERRORs but skip nothing, and they must
     # keep the historical unguarded frame/validate behaviour.
-    skipped = False
-
-    for lineno, raw in enumerate(source.splitlines(), start=1):
-        toks = _tokenize_line(raw, lineno)
-        unterminated = next((t for t in toks if t.unterminated), None)
-        if unterminated is not None:
-            ftin_hint = _ftin_string_hint(raw, unterminated.col)
-            diagnostics.append(
-                Issue(
-                    Severity.ERROR,
-                    "UNTERMINATED_STRING",
-                    "String literal has no closing '\"'.",
-                    line=lineno,
-                    col=unterminated.col,
-                    end_col=unterminated.end_col,
-                    hint=ftin_hint or 'Add the closing quote, e.g. `plan "Name"`.',
-                )
-            )
-            skipped = True
-            continue
-        if not toks:
-            # A line of only separators/punctuation (e.g. ":::") tokenizes to
-            # nothing; flag it rather than silently dropping a typo'd statement.
-            stripped = raw.split("#", 1)[0]
-            residue = [ch for ch in stripped if not ch.isspace() and ch not in _DROP]
-            if residue:
-                col = next(i for i, ch in enumerate(stripped) if not ch.isspace()) + 1
-                diagnostics.append(
-                    Issue(
-                        Severity.ERROR,
-                        "SYNTAX",
-                        "Line has no statement keyword.",
-                        line=lineno,
-                        col=col,
-                        end_col=col + 1,
-                        hint=f"Each line is one statement; start with one of: "
-                        f"{', '.join(_KEYWORDS)}.",
-                    )
-                )
-                skipped = True
-            continue
-        key = toks[0].text.lower()
-        if fragment and key in _HOST_ONLY:
-            diagnostics.append(Issue(
-                Severity.ERROR, "PART_HOST_STMT",
-                f"`{key}` describes a whole building — a part borrows the "
-                "host's. Remove it; size the part by its rooms.",
-                line=lineno, col=toks[0].col, end_col=toks[0].end_col,
-                hint="A part is any `.barn` file with no `plan` header: rooms, "
-                "openings, windows, fixtures, devices — in its own local feet.",
-            ))
-            skipped = True
-            continue
-        if not fragment and key == "param":
-            # `param` declares a *part* parameter — a whole plan has no use-site to
-            # pass values, so it's the mirror of PART_HOST_STMT.
-            diagnostics.append(Issue(
-                Severity.ERROR, "PARAM_IN_PLAN",
-                "`param` declares a part parameter — a whole plan can't take one.",
-                line=lineno, col=toks[0].col, end_col=toks[0].end_col,
-                hint="Move `param` into a part file (a `.barn` with no `plan` "
-                "header); the host passes values with `use ... with name=value`.",
-            ))
-            skipped = True
-            continue
-        try:
-            _parse_statement(toks, plan, smap, lineno, param_env=param_env)
-        except _ParseError as err:
-            diagnostics.append(
-                Issue(
-                    Severity.ERROR,
-                    err.code,
-                    err.message,
-                    line=lineno,
-                    col=err.col,
-                    end_col=err.end_col,
-                    hint=err.hint,
-                )
-            )
-            skipped = True
+    skipped = _parse_source_lines(
+        source, plan, smap, diagnostics, fragment=fragment, param_env=param_env,
+    )
 
     # Cross-file composition: resolve + stamp every `use` into `plan` BEFORE
     # validation, so overlap/envelope/egress/adjacency run on the composed plan.
@@ -2542,13 +2819,7 @@ def compile_source(
     # This runs in BOTH modes (Phase 20 — a part may `use` nested parts, depth ≤
     # 2); ``compose_ctx`` carries the recursion state (sandbox root, depth, cycle
     # stack, shared memo + instance budget), built fresh at the top level.
-    composition = None
-    if plan.uses:
-        from .compose import compose_uses
-
-        ctx = compose_ctx if isinstance(compose_ctx, _ComposeCtx) else \
-            _ComposeCtx.top_level(base_dir, self_path)
-        composition = compose_uses(plan, base_dir, diagnostics, profile, ctx=ctx)
+    composition = _compose_plan_uses(plan, diagnostics, profile, base_dir, compose_ctx, self_path)
 
     # Fragment mode (a part file): no plan/envelope required, ≥1 room, origin
     # normalized, only local checks. The loader (compose.load_part) calls this.
@@ -2579,57 +2850,8 @@ def compile_source(
     # the swallow is *recorded* so incomplete diagnostics can't pass as complete.
     # A clean or semantic-error compile keeps the original, unguarded behaviour,
     # so a real bug still bites.
-    def _recovery_limit(what: str) -> Issue:
-        return Issue(
-            Severity.WARNING,
-            "RECOVERY_LIMIT",
-            f"{what} could not run on the partial plan; "
-            "diagnostics are incomplete.",
-            hint="Fix the parse error(s) above to get the full report.",
-        )
-
-    if plan.frame_spec is not None:
-        from .structure import place_frame
-
-        try:
-            place_frame(plan)
-        except Exception:
-            if not skipped:
-                raise
-            diagnostics.append(_recovery_limit("Frame placement"))
-
-    try:
-        report: ValidationReport | None = validate(plan, profile)
-    except Exception:
-        if not skipped:
-            raise
-        report = None
-        diagnostics.append(_recovery_limit("Validation"))
-    if report is not None:
-        stamped_map = composition.stamped_map if composition is not None else {}
-        part_keys = composition.part_keys if composition is not None else {}
-        for iss in report.issues:
-            # A diagnostic on a *stamped* room is either a duplicate of a
-            # part-internal finding (already reported once, so drop it) or a
-            # placement-dependent *instance* finding (re-anchor to the `use` line,
-            # name the alias). See compose.compose_uses.
-            if iss.room is not None and iss.room in stamped_map:
-                local, inst = stamped_map[iss.room]
-                if (iss.code, local) in part_keys.get(inst.part_path, ()):
-                    continue  # part-internal — reported once via the fragment
-                iss.line, iss.col, iss.end_col = inst.line, inst.col, inst.end_col
-                iss.message = f"instance {inst.alias}: {iss.message}"
-                diagnostics.append(iss)
-                continue
-            # Anchor semantic diagnostics to the room's `room ...` line, and point
-            # the caret at the room's id token, so quality/code-check issues get the
-            # same column-accurate underline as syntax errors.
-            if iss.room is not None:
-                if iss.line is None:
-                    iss.line = smap.room_line.get(iss.room)
-                if iss.col is None and iss.room in smap.room_col:
-                    iss.col, iss.end_col = smap.room_col[iss.room]
-            diagnostics.append(iss)
+    _place_frame_for_compile(plan, diagnostics, skipped)
+    _append_validation_issues(plan, diagnostics, smap, profile, composition, skipped)
     # Suppression pragmas run last, once every diagnostic carries its resolved
     # line (semantic issues were just anchored to their room's statement line):
     # a pragma downgrades the matched warnings/infos to accepted INFOs and flags
