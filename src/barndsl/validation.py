@@ -117,11 +117,13 @@ STD_DOUBLE_DOOR_WIDTHS_IN = (48, 60, 64, 72)
 STD_BIFOLD_DOOR_WIDTHS_IN = (24, 30, 32, 36, 48, 60, 72, 96)
 DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
 # Overhead (sectional garage) door stock sizes, in **feet** — garage doors are
-# ordered in feet, unlike leaf doors: singles 8/9/10 wide, doubles 12/16; panels
-# 7 or 8 ft tall. An opening wider than OVERHEAD_HEADER_SPAN outruns a stock
-# header and wants engineering with the frame.
+# ordered in feet, unlike leaf doors: singles 8/9/10 wide, doubles 12/16. Heights
+# span the residential 7/8 ft panels AND the commercial sectional panels (10/12/14
+# ft) a barndominium shop wants for lift/RV clearance — so a compliant tall shop
+# door snaps to a real stock height, not down to 8 ft. An opening wider than
+# OVERHEAD_HEADER_SPAN outruns a stock header and wants engineering with the frame.
 STD_OVERHEAD_DOOR_WIDTHS_FT = (8, 9, 10, 12, 16)
-STD_OVERHEAD_DOOR_HEIGHTS_FT = (7, 8)
+STD_OVERHEAD_DOOR_HEIGHTS_FT = (7, 8, 10, 12, 14)
 OVERHEAD_HEADER_SPAN = 10.0
 # --- accessibility / aging-in-place (opt-in; ANSI A117.1) --------------------
 ACCESSIBLE_CLEAR_DOOR = 32 / 12  # 32 in clear opening (A117.1 §404)
@@ -198,6 +200,33 @@ CLOSET_REACH = 2.0
 #: Clear depth a clothes rod needs — hanging clothes are 2 ft deep (24 in
 #: hangers). A shallower closet is shelf-only (linen/broom) storage.
 CLOSET_HANG_DEPTH = 2.0
+#: A shop bay narrower than this (ft, shortest side) can't hold a vehicle or a
+#: workbench wall plus a working aisle — it's storage mislabeled as a shop (the
+#: shop analog of MIN_MUDROOM_WIDTH). Under the bar is a WARNING (it physically
+#: can't do the job); between it and SHOP_COMFORT_DEPTH is an INFO comfort nudge.
+#: A garage is exempt — garages are sized to cars, not equipment (GARAGE_TYPES).
+#: The solver seed's shop floor is exactly 12 ft, so a strict `< 12` keeps it clean.
+MIN_SHOP_DEPTH = 12.0
+#: A shop narrower than this but at least MIN_SHOP_DEPTH is tight for a full-size
+#: truck (8.5 ft wide + doors) plus a work zone along a wall — a comfort INFO.
+SHOP_COMFORT_DEPTH = 20.0
+#: The point of a barndo shop is clearance: an overhead door on a shop this short
+#: (ft) or shorter is a residential-height panel that defeats a 12 ft+ bay — a
+#: lift, RV or dually won't pass under it. INFO (an 8 ft door still opens; it's
+#: the *height* of the bay that's wasted). Silent on garages (car-height doors).
+SHOP_DOOR_MIN_HEIGHT = 8.0
+#: IRC R305.1 habitable-room minimum ceiling height (ft). A loft is habitable and
+#: often sleeps people, so a loft under this can't be lived in headroom-wise.
+LOFT_MIN_CEILING = 7.0
+#: An office must hold a desk (DESK_WIDTH x DESK_DEPTH) with a chair-pull behind
+#: it, clear of door swings. Desk footprint + pull is the clear box the room needs
+#: against a wall — mirrors the BED/DINING furniture-fit floors.
+DESK_WIDTH = 4.0
+DESK_DEPTH = 2.0
+DESK_CHAIR_PULL = 3.0
+#: A covered porch shallower than this (ft) can't hold a chair (a rocker/seat is
+#: ~2 ft deep) AND a walkway past it (~3 ft) — it's a stoop, not a sitting porch.
+MIN_PORCH_DEPTH = 6.0
 #: A swing door centred on a wall with at least this much clear wall on *both*
 #: flanks is floating mid-wall; backing it to a corner frees a usable wall run.
 DOOR_CORNER_MARGIN = 2.0
@@ -1602,7 +1631,14 @@ def _validate_porch_guards(plan: Barndominium, add) -> None:
     grade, every porch is a walking surface that needs a guard. Fires once per
     porch; silent when no ``grade`` is declared or grade <= 30 in (so an at-grade
     or shallow-grade plan is never nagged). This resolves the Phase 13 skip:
-    R312.1 exterior guards were unexpressible without a grade elevation."""
+    R312.1 exterior guards were unexpressible without a grade elevation.
+
+    barndsl has two porch representations — the :class:`~barndsl.elements.Porch`
+    platform (``porch <id> at ...``) and a ``RoomType.PORCH`` room. The guard
+    trigger is the plan-wide ``grade`` (finish floor above grade), shared by both,
+    so a raised room-typed porch is just as much an above-grade walking surface as
+    a platform porch — both are checked. (A room-porch's ``line``/``col`` also give
+    the diagnostic a caret the platform porch can't.)"""
     grade = getattr(plan, "grade", None)
     if grade is None or grade <= GUARD_DROP_TRIGGER + EPSILON:
         return
@@ -1614,6 +1650,21 @@ def _validate_porch_guards(plan: Barndominium, add) -> None:
                 f"Porch '{p.display_name}' sits {_f(grade)} ft above grade "
                 f"(> {GUARD_DROP_TRIGGER * 12:.0f} in), so it needs a "
                 f"{GUARD_HEIGHT * 12:.0f} in guard (IRC R312.1).",
+                hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard along the porch's open "
+                "edges (balusters blocking a 4 in sphere) and note it on the drawings.",
+            )
+        )
+    for room in plan.rooms:
+        if room.type is not RoomType.PORCH:
+            continue
+        add(
+            Issue(
+                Severity.WARNING,
+                "PORCH_GUARD",
+                f"Porch '{room.id}' sits {_f(grade)} ft above grade "
+                f"(> {GUARD_DROP_TRIGGER * 12:.0f} in), so it needs a "
+                f"{GUARD_HEIGHT * 12:.0f} in guard (IRC R312.1).",
+                room=room.id,
                 hint=f"Add a {GUARD_HEIGHT * 12:.0f} in guard along the porch's open "
                 "edges (balusters blocking a 4 in sphere) and note it on the drawings.",
             )
@@ -2634,8 +2685,9 @@ def _validate_doors(plan: Barndominium, add) -> None:
 
 
 def _check_overhead_door(xdoor, room, add) -> None:
-    """Overhead (sectional garage) door checks: an unusual host room, a
-    non-stock sectional size, and a double-width opening's header reality."""
+    """Overhead (sectional garage) door checks: an unusual host room, a shop bay's
+    clearance height, a non-stock sectional size, and a double-width opening's
+    header reality."""
     loc = _door_loc(xdoor)
     if room is not None and room.type not in GARAGE_TYPES:
         add(
@@ -2652,6 +2704,24 @@ def _check_overhead_door(xdoor, room, add) -> None:
             )
         )
     h = xdoor.height if xdoor.height is not None else float(STD_OVERHEAD_DOOR_HEIGHTS_FT[0])
+    # SHOP_DOOR_HEIGHT — a shop is a barndominium's clearance play: a 12 ft+ bay
+    # exists to swallow a lift, an RV, a dually with a topper. A 7-8 ft residential
+    # panel over it throttles the opening to car height and wastes that headroom.
+    # A garage is exempt (a car passes a 7 ft door fine); only a SHOP bay is nudged.
+    if room is not None and room.type is RoomType.SHOP and h <= SHOP_DOOR_MIN_HEIGHT + EPSILON:
+        add(
+            Issue(
+                Severity.INFO,
+                "SHOP_DOOR_HEIGHT",
+                f"The overhead door on shop '{xdoor.room}' is only {_f(h)} ft tall — "
+                "a residential-height panel that defeats a barndo shop bay: a lift, "
+                "RV or dually won't clear it.",
+                room=xdoor.room,
+                hint="Order a taller sectional — `height 10` (or 12/14) — so the "
+                "opening matches the bay's clearance; 10 ft is the usual shop door.",
+                **loc,
+            )
+        )
     near_w = _nearest_std(xdoor.width, STD_OVERHEAD_DOOR_WIDTHS_FT)
     near_h = _nearest_std(h, STD_OVERHEAD_DOOR_HEIGHTS_FT)
     tol = DOOR_SIZE_TOL_IN / 12
@@ -2664,8 +2734,8 @@ def _check_overhead_door(xdoor, room, add) -> None:
                 "ft, not a standard sectional size.",
                 room=xdoor.room,
                 hint=f"Use a stock size, e.g. `width {near_w:g} height {near_h:g}` "
-                "— widths 8/9/10/12/16 ft, heights 7/8 ft (16 x 7 is the usual "
-                "double).",
+                "— widths 8/9/10/12/16 ft, heights 7/8/10/12/14 ft (16 x 7 is the "
+                "usual double, 12 x 12 a tall shop bay).",
                 **loc,
             )
         )
@@ -3887,33 +3957,48 @@ def _dq_closet_shape(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_closet_access(plan: Barndominium, graph, by_id, add) -> None:
-    # 8c2. Reach-in access: a closet shallower than CLOSET_WALKIN_DEPTH can't be
-    #      walked into — a person stands at the opening and reaches — so its door
-    #      must open (nearly) the closet's full width, centred on it: the bifold
-    #      idiom. A person-door parked at one end strands everything past arm's
-    #      reach of the jamb. Charge the worst blind stretch. Kind-agnostic: a
-    #      narrow bifold or cased gap at one end is just as blind as a swing door.
+#: Per-room-type wording for the shared reach-in access check (CLOSET_ACCESS /
+#: PANTRY_ACCESS). A reach-in closet and a reach-in pantry share the same
+#: geometry — you stand at the opening and reach, so the single door must open
+#: (nearly) the whole width — but a closet's dead run is unreachable ROD and a
+#: pantry's is unreachable SHELF, so the prose differs. ``(code, noun, stored)``.
+_REACH_IN_ACCESS: dict[RoomType, tuple[str, str, str]] = {
+    RoomType.CLOSET: ("CLOSET_ACCESS", "closet", "rod"),
+    RoomType.PANTRY: ("PANTRY_ACCESS", "pantry", "shelf"),
+}
+
+
+def _dq_reach_in_access(plan: Barndominium, graph, by_id, add) -> None:
+    # 8c2. Reach-in access, for closets AND pantries: a store room shallower than
+    #      CLOSET_WALKIN_DEPTH can't be walked into — a person stands at the opening
+    #      and reaches — so its single door must open (nearly) the room's full
+    #      width, centred on it: the bifold idiom. A person-door parked at one end
+    #      strands everything past arm's reach of the jamb (a closet's rod of
+    #      clothes, a pantry's back shelves of groceries). Charge the worst blind
+    #      stretch. Kind-agnostic: a narrow bifold or cased gap at one end is just
+    #      as blind as a swing door. Two openings (a walk-through) is exempt — the
+    #      far end is reached from the second door.
     from .geometry import shared_edge
 
     doors_into: dict[str, list] = {}
     for d in plan.interior_doors:
         for rid in (d.room_a, d.room_b):
-            if rid in by_id and by_id[rid].type is RoomType.CLOSET:
+            if rid in by_id and by_id[rid].type in _REACH_IN_ACCESS:
                 doors_into.setdefault(rid, []).append(d)
     for cid, doors in doors_into.items():
+        room = by_id[cid]
+        code, noun, stored = _REACH_IN_ACCESS[room.type]
         if len(doors) != 1:
-            continue  # a walk-through closet reaches its rod from both openings
+            continue  # a walk-through reaches its stored goods from both openings
         d = doors[0]
-        closet = by_id[cid]
         other = by_id.get(d.room_a if d.room_b == cid else d.room_b)
         if other is None:
             continue
-        edge = shared_edge(closet, other)
+        edge = shared_edge(room, other)
         if edge is None:
             continue
-        # Depth = the closet's extent perpendicular to its door wall.
-        depth = closet.width if edge.orientation == "v" else closet.length
+        # Depth = the room's extent perpendicular to its door wall.
+        depth = room.width if edge.orientation == "v" else room.length
         if depth + EPSILON >= CLOSET_WALKIN_DEPTH:
             continue  # a walk-in: you step inside, so an ordinary door serves it
         w = min(d.width, edge.length)
@@ -3921,15 +4006,15 @@ def _dq_closet_access(plan: Barndominium, graph, by_id, add) -> None:
             start = edge.lo + (edge.length - w) / 2.0  # renderer centres it
         else:
             start = edge.lo + max(0.0, min(d.offset, edge.length - w))
-        lo = closet.y if edge.orientation == "v" else closet.x
-        hi = closet.y2 if edge.orientation == "v" else closet.x2
+        lo = room.y if edge.orientation == "v" else room.x
+        hi = room.y2 if edge.orientation == "v" else room.x2
         worst = max(start - lo, hi - (start + w))
         if worst <= CLOSET_REACH + EPSILON:
             continue
         breadth = hi - lo
-        # The fix, computed: the widest STOCK bifold that fits the closet with a
+        # The fix, computed: the widest STOCK bifold that fits the room with a
         # jamb's grace, centred on it (clamped to the shared run when a
-        # neighbour covers only part of the closet's wall).
+        # neighbour covers only part of the room's wall).
         max_w = min(breadth - 1.0, edge.length)
         fix_w = max(
             (s / 12.0 for s in STD_BIFOLD_DOOR_WIDTHS_IN if s / 12.0 <= max_w),
@@ -3938,14 +4023,14 @@ def _dq_closet_access(plan: Barndominium, graph, by_id, add) -> None:
         fix_off = max(0.0, (lo - edge.lo) + (breadth - fix_w) / 2.0)
         if (breadth - fix_w) / 2.0 <= CLOSET_REACH + EPSILON:
             fix = (
-                "Centre a near-full-width bifold on the closet so every foot "
-                f"of rod is reachable: `door {d.room_a} - {d.room_b} bifold "
+                f"Centre a near-full-width bifold on the {noun} so every foot "
+                f"of {stored} is reachable: `door {d.room_a} - {d.room_b} bifold "
                 f"width {_f(fix_w)} offset {_f(fix_off)}` (keep the blind run "
                 f"past each jamb under {_f(CLOSET_REACH)} ft)."
             )
         else:  # wider than even the 96 in double unit covers — split or reshape
             fix = (
-                "This closet is wider than one stock bifold covers — give it "
+                f"This {noun} is wider than one stock bifold covers — give it "
                 "two openings (a pair of bifold `door` statements side by "
                 f"side), or reshape it into a walk-in ({_f(CLOSET_WALKIN_DEPTH)} "
                 "ft deep or more) behind an ordinary door."
@@ -3953,11 +4038,11 @@ def _dq_closet_access(plan: Barndominium, graph, by_id, add) -> None:
         add(
             Issue(
                 Severity.WARNING,
-                "CLOSET_ACCESS",
-                f"Closet '{cid}' is a reach-in ({_f(depth)} ft deep — under "
-                f"{_f(CLOSET_WALKIN_DEPTH)} ft nobody can step inside) but its "
-                f"{_f(w)} ft door leaves {_f(worst)} ft of closet past a jamb, "
-                "beyond arm's reach.",
+                code,
+                f"{noun.capitalize()} '{cid}' is a reach-in ({_f(depth)} ft deep — "
+                f"under {_f(CLOSET_WALKIN_DEPTH)} ft nobody can step inside) but its "
+                f"{_f(w)} ft door leaves {_f(worst)} ft of {noun} past a jamb, "
+                f"beyond arm's reach of the back {stored}.",
                 room=cid,
                 line=d.line,
                 col=d.col,
@@ -4480,6 +4565,169 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
+def _dq_shop_depth(plan: Barndominium, graph, by_id, add) -> None:
+    # 8d. Shop depth: the shop analog of MUDROOM_SHAPE. A shop bay's job is to
+    #     hold a vehicle or a workbench wall PLUS a working aisle, and that needs
+    #     real width. Under MIN_SHOP_DEPTH (12 ft) the bay physically can't do it —
+    #     it's storage mislabeled as a shop — a WARNING (the geometry proves it).
+    #     Between 12 and SHOP_COMFORT_DEPTH (20 ft) it works but is tight for a
+    #     full-size truck plus a work zone — an INFO comfort nudge. A GARAGE is
+    #     exempt (garages are sized to cars, not equipment) — only a SHOP is judged.
+    for room in plan.rooms:
+        if room.type is not RoomType.SHOP:
+            continue
+        short = room.min_dimension
+        if short <= EPSILON:
+            continue
+        tight = short + EPSILON < MIN_SHOP_DEPTH
+        snug = short + EPSILON < SHOP_COMFORT_DEPTH
+        if not (tight or snug):
+            continue
+        if tight:
+            msg = (
+                f"Shop '{room.id}' is only {_f(short)} ft across — under "
+                f"{MIN_SHOP_DEPTH:g} ft it can't take a vehicle or a workbench wall "
+                "plus a working aisle; it's storage, not a shop."
+            )
+            hint = (
+                f"Widen the shop to >= {MIN_SHOP_DEPTH:g} ft (a single bay wants "
+                "~14 ft; a two-bay shop ~24 ft), or relabel the strip as storage/"
+                "utility."
+            )
+        else:
+            msg = (
+                f"Shop '{room.id}' is {_f(short)} ft across — usable, but tight for "
+                "a full-size truck (8.5 ft wide plus door swing) with a work zone "
+                f"along a wall (a comfortable bay is >= {SHOP_COMFORT_DEPTH:g} ft)."
+            )
+            hint = (
+                f"Aim for >= {SHOP_COMFORT_DEPTH:g} ft across so a vehicle parks "
+                "with a workbench and aisle beside it; deeper still for a two-bay."
+            )
+        add(
+            Issue(
+                Severity.WARNING if tight else Severity.INFO,
+                "SHOP_DEPTH",
+                msg,
+                room=room.id,
+                hint=hint,
+            )
+        )
+
+
+def _dq_loft_ceiling(plan: Barndominium, graph, by_id, add) -> None:
+    # 8e. Loft headroom: a loft is habitable (HABITABLE_TYPES) and often sleeps
+    #     people, so it needs the IRC R305.1 7 ft habitable minimum. The room's
+    #     EFFECTIVE ceiling is its per-room `ceiling_height` override, else the plan
+    #     ceiling. This is a flat-ceiling check by design — barndsl carries no
+    #     roof-slope geometry, so a sloped-ceiling loft's headroom-over-half-the-
+    #     floor (R305.1.1) can't be measured here; the explanation says so. A
+    #     `vaulted` loft is open to the ridge (its usable height rises well past
+    #     7 ft), so it's exempt — the flat effective ceiling doesn't describe it.
+    for room in plan.rooms:
+        if room.type is not RoomType.LOFT or getattr(room, "vaulted", False):
+            continue
+        eff = room.ceiling_height if room.ceiling_height is not None else plan.ceiling_height
+        if eff + EPSILON >= LOFT_MIN_CEILING:
+            continue
+        add(
+            Issue(
+                Severity.WARNING,
+                "LOFT_CEILING",
+                f"Loft '{room.id}' has a {_f(eff)} ft ceiling — under the "
+                f"{LOFT_MIN_CEILING:g} ft habitable minimum (IRC R305.1), so it "
+                "can't be lived or slept in.",
+                room=room.id,
+                hint=(
+                    f"Raise the loft's ceiling to >= {LOFT_MIN_CEILING:g} ft "
+                    "(set its `ceiling` override or the plan `ceiling`). Under a "
+                    "sloped roof, keep >= 7 ft over at least half the floor and "
+                    "note the clear-height line on the drawings."
+                ),
+            )
+        )
+
+
+def _dq_office_clearance(plan: Barndominium, graph, by_id, add) -> None:
+    # 8f. Office furnish-fit: an office has to hold a desk (DESK_WIDTH x DESK_DEPTH)
+    #     with a DESK_CHAIR_PULL behind it to push the chair back — a
+    #     DESK_WIDTH x (DESK_DEPTH + DESK_CHAIR_PULL) clear box against a wall,
+    #     clear of every door swing. Mirrors BED_CLEARANCE / DINING_CLEARANCE: uses
+    #     the clear (finish-face) interior, subtracts the door-swing keepouts the
+    #     auto-placer already computes, and asks whether the desk box still fits
+    #     against any of the four walls. INFO — livability guidance, not a gate.
+    from .fixtures import _door_swing_rects
+
+    need_along = DESK_WIDTH  # the desk's width runs along the wall
+    need_deep = DESK_DEPTH + DESK_CHAIR_PULL  # desk depth + chair-pull off the wall
+    for room in plan.rooms:
+        if room.type is not RoomType.OFFICE:
+            continue
+        x0, y0, cw, cl = clear_box(plan, room)
+        if cw <= EPSILON or cl <= EPSILON:
+            continue
+        keepouts = _door_swing_rects(plan, room)
+        if _desk_fits(x0, y0, cw, cl, need_along, need_deep, keepouts):
+            continue
+        add(
+            Issue(
+                Severity.INFO,
+                "OFFICE_CLEARANCE",
+                f"Office '{room.id}' is {_f(cw)}×{_f(cl)} ft clear — too tight to "
+                f"place a desk ({DESK_WIDTH:g}×{DESK_DEPTH:g} ft) against a wall "
+                f"with a {DESK_CHAIR_PULL:g} ft chair-pull behind it, clear of the "
+                "door swing.",
+                room=room.id,
+                hint=(
+                    "Enlarge or reshape the office so a desk backs to a wall with "
+                    f"~{DESK_CHAIR_PULL:g} ft to roll the chair back, off the door's "
+                    "approach; a ~8×10 ft office is the comfortable floor."
+                ),
+            )
+        )
+
+
+def _desk_fits(
+    x0: float, y0: float, cw: float, cl: float,
+    need_along: float, need_deep: float, keepouts,
+) -> bool:
+    """Can a ``need_along`` (wide) × ``need_deep`` (deep) box sit against one of the
+    four walls of the clear rectangle ``(x0, y0, cw, cl)`` without overlapping a
+    door-swing keepout? Slides the box along each wall in ~0.5 ft steps and takes
+    the first clear position (the same coarse perimeter walk the fixture placer
+    uses). Returns True as soon as any wall admits it, False if none does."""
+    STEP = 0.5
+
+    def _clear(bx: float, by: float, bw: float, bl: float) -> bool:
+        for kx, ky, kw, kl in keepouts:
+            if (min(bx + bw, kx + kw) - max(bx, kx) > EPSILON
+                    and min(by + bl, ky + kl) - max(by, ky) > EPSILON):
+                return False
+        return True
+
+    # South & north walls: box is need_along wide, need_deep deep.
+    if cw + EPSILON >= need_along and cl + EPSILON >= need_deep:
+        span = cw - need_along
+        n = int(span / STEP) + 1
+        for i in range(n + 1):
+            bx = x0 + min(i * STEP, span)
+            if _clear(bx, y0, need_along, need_deep):  # against south wall
+                return True
+            if _clear(bx, y0 + cl - need_deep, need_along, need_deep):  # north wall
+                return True
+    # West & east walls: box is need_along tall, need_deep deep (rotated 90°).
+    if cl + EPSILON >= need_along and cw + EPSILON >= need_deep:
+        span = cl - need_along
+        n = int(span / STEP) + 1
+        for i in range(n + 1):
+            by = y0 + min(i * STEP, span)
+            if _clear(x0, by, need_deep, need_along):  # against west wall
+                return True
+            if _clear(x0 + cw - need_deep, by, need_deep, need_along):  # east wall
+                return True
+    return False
+
+
 def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
     # 9. Garage/shop → sleeping room. IRC R302.5.1: the opening shall not open
     #    into a room used for sleeping. This is code-grounded, so it's a WARNING.
@@ -4817,7 +5065,7 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_master_ensuite,
     _dq_bed_sound,
     _dq_closet_shape,
-    _dq_closet_access,
+    _dq_reach_in_access,
     _dq_closet_depth,
     _dq_closet_window,
     _dq_hall_tight,
@@ -4831,6 +5079,9 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_envelope_module,
     _dq_window_partition,
     _dq_room_proportion,
+    _dq_shop_depth,
+    _dq_loft_ceiling,
+    _dq_office_clearance,
     _dq_garage_bedroom,
     _dq_garage_passthrough,
     _dq_garage_no_entry,

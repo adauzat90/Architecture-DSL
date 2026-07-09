@@ -167,3 +167,56 @@ def test_swing_hint_now_recommends_the_real_bifold_grammar():
     plan = _reach_in({"width": 3.5, "offset": 1.0})  # 3.5 ft leaf > 3 ft depth
     issues = _issues(plan, "CLOSET_DOOR_SWING")
     assert issues and "bifold" in issues[0].hint
+
+
+# --- PANTRY_ACCESS: the same reach-in rule generalized to pantries -------------
+# A reach-in pantry is geometrically a reach-in closet: you stand at the opening
+# and reach, so a single door parked at one end strands the back shelves. The
+# CLOSET_ACCESS logic is shared (one helper, two codes); a pantry's blind run is
+# unreachable SHELF, not clothes rod, so the prose differs.
+
+
+def _reach_in_pantry(door_kwargs, pantry_w=11.0, pantry_l=3.0):
+    """A kitchen with a reach-in pantry across its north wall, fully tiled."""
+    plan = (
+        barndominium("x").envelope(30, 12 + pantry_l).ceiling(9)
+        .add_room("kitchen", T.KITCHEN, x=0, y=0, width=pantry_w, length=12)
+        .add_room("pantry", T.PANTRY, x=0, y=12, width=pantry_w, length=pantry_l)
+        .add_room("rest", T.LIVING, x=pantry_w, y=0, width=30 - pantry_w,
+                  length=12 + pantry_l)
+    )
+    return plan.connect("kitchen", "pantry", **door_kwargs)
+
+
+def test_person_door_at_one_end_of_a_reach_in_pantry_warns():
+    # A 2.5 ft swing door at the end of an 11 ft reach-in strands 8 ft of shelf.
+    plan = _reach_in_pantry({"width": 2.5, "offset": 0.5})
+    issues = _issues(plan, "PANTRY_ACCESS")
+    assert issues and issues[0].severity.value == "warning"
+    assert "reach-in" in issues[0].message and "shelf" in issues[0].message
+    # The hint computes the centred stock bifold, exactly like CLOSET_ACCESS.
+    assert "bifold width 8 offset 1.5" in issues[0].hint
+
+
+def test_centred_stock_bifold_on_a_reach_in_pantry_is_silent():
+    plan = _reach_in_pantry({"kind": "bifold", "width": 8.0, "offset": 1.5})
+    assert "PANTRY_ACCESS" not in _codes(plan)
+
+
+def test_walk_in_pantry_takes_an_ordinary_door():
+    # 5 ft deep: you step inside, so a person-door at one end is fine.
+    plan = _reach_in_pantry({"width": 2.5, "offset": 0.5}, pantry_l=5.0)
+    assert "PANTRY_ACCESS" not in _codes(plan)
+
+
+def test_walk_through_pantry_with_two_openings_is_exempt():
+    plan = _reach_in_pantry({"width": 2.5, "offset": 0.5})
+    plan.connect("pantry", "rest", width=2.5)  # second opening covers the far end
+    assert "PANTRY_ACCESS" not in _codes(plan)
+
+
+def test_pantry_access_does_not_fire_as_closet_access():
+    # The pantry emits PANTRY_ACCESS, never CLOSET_ACCESS (and vice-versa).
+    plan = _reach_in_pantry({"width": 2.5, "offset": 0.5})
+    codes = _codes(plan)
+    assert "PANTRY_ACCESS" in codes and "CLOSET_ACCESS" not in codes

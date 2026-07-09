@@ -241,8 +241,10 @@ HOW AN ARCHITECT THINKS (do this before writing rooms):
 
 BARNDOMINIUM IDIOMS worth reaching for:
 - Anchor the shop/garage at a GABLE END (short wall) or in its own wing, its
-  `overhead` door facing the drive; buffer it from the house with a mudroom
-  or hall (never a shared wall with a bedroom). `require separate <shop> <bed>`.
+  `overhead` door facing the drive (a shop bay wants a TALL door - `height 10`
+  or more - for lift/RV clearance, not the 7 ft residential default); buffer it
+  from the house with a mudroom or hall (never a shared wall with a bedroom).
+  `require separate <shop> <bed>`.
 - A mudroom/drop-zone at the family entry (off the garage or the drive side)
   catches coats and boots before the kitchen. Keep it COMPACT - near 6 x 8 and
   at least 5 ft wide: under 5 ft a bench plus a walkway physically don't fit,
@@ -267,12 +269,21 @@ LINT the compiler enforces (satisfy these too):
 - Habitable rooms need windows >= 8% of floor area (put them on exterior walls).
 - WET_GROUP: cluster bath/kitchen/laundry on a shared plumbing wall.
 - NO_CLOSET: every bedroom needs a closet reached by a door FROM it.
-- CLOSET_ACCESS / CLOSET_DEPTH (warnings): a closet under 4 ft deep is a
-  REACH-IN - nobody steps inside, so give it a `bifold` door CENTRED on the
-  closet and nearly as wide (blind rod past a jamb tops out at arm's reach,
-  ~2 ft): `door bed - closet bifold width 8 offset 1.5` on an 11 ft closet.
-  4 ft and deeper is a walk-in and takes a normal 2.5 ft door. A bedroom's
-  closet needs >= 2 ft of depth or clothes can't hang at all.
+- CLOSET_ACCESS / PANTRY_ACCESS / CLOSET_DEPTH (warnings): a closet or pantry
+  under 4 ft deep is a REACH-IN - nobody steps inside, so give it a `bifold` door
+  CENTRED on it and nearly as wide (the blind rod/shelf past a jamb tops out at
+  arm's reach, ~2 ft): `door bed - closet bifold width 8 offset 1.5` on an 11 ft
+  closet; the same for a pantry's back shelves. 4 ft and deeper is a walk-in and
+  takes a normal 2.5 ft door. A bedroom's closet needs >= 2 ft of depth or clothes
+  can't hang at all.
+- SHOP_DEPTH (warning under 12 ft, info under 20): a shop bay needs WORKING WIDTH
+  - under 12 ft across it can't take a vehicle or a workbench wall plus an aisle
+  (it's storage mislabeled as a shop); aim >= 12 ft (a single bay ~14, a two-bay
+  ~24). Give the shop a tall overhead door too - `height 10` or more, not the 7 ft
+  residential default (SHOP_DOOR_HEIGHT), so a lift/RV clears the bay.
+- LOFT_CEILING (warning): a loft is habitable and sleeps people, so its effective
+  ceiling (its `ceiling` override or the plan ceiling) must be >= 7 ft (IRC R305);
+  don't drop a loft under a low-ceiling wing.
 - BED_SOUND: buffer two adjacent beds with closets/hall on the shared wall.
 - MASTER_ENSUITE / PRIVATE_PASSTHROUGH: the primary gets its own ensuite; never
   route the only path to a room through a bath or someone else's bedroom.
