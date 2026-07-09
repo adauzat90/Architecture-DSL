@@ -144,7 +144,7 @@ _MODIFIER_KEYWORDS = (
     "exterior", "overhead", "no-egress", "covered", "bay", "span", "post",
     "no-ridge", "pitch", "gable", "shed", "monitor", "siding", "adjacent",
     "separate", "area", "storage", "bed", "bath", "front", "side", "rear",
-    "swing", "cased", "pocket", "sliding", "double", "french", "casement",
+    "swing", "cased", "pocket", "sliding", "bifold", "double", "french", "casement",
     "slider", "fixed", "double-hung", "of",
     "east-of", "west-of", "north-of", "south-of",
     "right-of", "left-of", "above-of", "below-of",

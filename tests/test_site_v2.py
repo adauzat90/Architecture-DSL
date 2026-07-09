@@ -264,6 +264,37 @@ def test_porch_guard_fires_once_per_porch():
     assert len(guards) == 2
 
 
+def test_porch_guard_covers_a_room_typed_porch():
+    # barndsl has two porch forms: the `porch` platform AND a RoomType.PORCH room.
+    # The guard trigger is the plan-wide `grade` (shared by both), so a raised
+    # room-typed porch is just as much an above-grade walking surface — it must be
+    # guarded too. (This closed the hole where a room-porch got no guard check.)
+    src = (
+        'plan "P"\nenvelope 40 x 36\nceiling 9\ngrade 3\n'  # 36 in above grade
+        "room living: living at 0,0 size 40 x 30\n"
+        "room deck: porch at 0,30 size 40 x 6\n"  # a room-typed porch band
+        "entry living south width 3 offset 10\n"
+        "window living west width 10 offset 8\n"
+    )
+    guards = [d for d in compile_source(src).warnings if d.code == "PORCH_GUARD"]
+    assert len(guards) == 1
+    assert guards[0].room == "deck"  # anchored to the porch room
+    assert "guard" in (guards[0].hint or "")
+
+
+def test_room_porch_guard_silent_at_or_below_30_in():
+    # The same room-porch on a shallow-grade plan is never nagged (matches the
+    # platform porch's 30 in threshold exactly).
+    src = (
+        'plan "P"\nenvelope 40 x 36\nceiling 9\ngrade 2.5\n'  # exactly 30 in
+        "room living: living at 0,0 size 40 x 30\n"
+        "room deck: porch at 0,30 size 40 x 6\n"
+        "entry living south width 3 offset 10\n"
+        "window living west width 10 offset 8\n"
+    )
+    assert "PORCH_GUARD" not in _codes(compile_source(src), "warning")
+
+
 def test_walk_naming_unknown_room_is_site_ref():
     r = _compile("drive at 5,5 size 12 x 20\nwalk from garage to drive")
     assert "SITE_REF" in _codes(r, "error")

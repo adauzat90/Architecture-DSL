@@ -1174,8 +1174,9 @@ def _fmt(v: float) -> str:
 def _door_swing_rects(plan: Barndominium, room: Room) -> list:
     """Coarse swing-clearance rectangles for the leaves opening into ``room`` — a
     width-deep band inside each hinged door on one of the room's walls, interior
-    partitions and exterior entries alike (an overhead door rides its tracks and a
-    pocket/sliding leaf stays in the wall, so neither reserves an arc)."""
+    partitions and exterior entries alike (an overhead door rides its tracks, a
+    pocket/sliding leaf stays in the wall and a bifold folds flat against its
+    jambs, so none of those reserves an arc)."""
     from .geometry import shared_edge
 
     out = []

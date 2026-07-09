@@ -36,7 +36,7 @@ door hall - bath width 2.67
 
 # --- Entrances ---
 entry great_room south width 3 offset 20
-door shop south overhead width 10 offset 2   # sectional garage door on the shop bay
+door shop south overhead width 10 height 10 offset 2   # sectional garage door on the shop bay (10 ft tall for lift/RV clearance)
 
 # --- Glazing ---
 window great_room west width 6 offset 4

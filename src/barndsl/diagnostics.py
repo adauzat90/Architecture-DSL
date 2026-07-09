@@ -27,7 +27,8 @@ class CodeInfo:
     #: The severity this code is *usually* emitted at. A few codes vary by
     #: context (noted in ``explanation``): ``NO_ACCESS`` is an error for most
     #: rooms but a warning for a closet/pantry/loft; ``ENTRY_PRIVATE`` is a
-    #: warning into a bath but an info into a bedroom.
+    #: warning into a bath but an info into a bedroom; ``SHOP_DEPTH`` is a
+    #: warning under 12 ft (can't do the job) but an info under 20 (just tight).
     severity: Severity
     title: str
     explanation: str
@@ -40,7 +41,7 @@ class CodeInfo:
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
 _VARYING = frozenset(
     {"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING", "AREA_VOID",
-     "MUDROOM_SHAPE"}
+     "MUDROOM_SHAPE", "SHOP_DEPTH"}
 )
 
 
@@ -320,6 +321,14 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A dining room's clear interior is too small to seat a 4-person table "
            "(~3 ft) with ~30 in of chair-pull and circulation all round (about 8 ft "
            "clear each way). Enlarge it."),
+        _c("OFFICE_CLEARANCE", I, "Office too tight for a desk",
+           "An office's clear (finish-face) interior, minus the door-swing "
+           "keepouts, can't hold a desk (4×2 ft) against a wall with a 3 ft "
+           "chair-pull behind it to roll the chair back — it needs about a 4×5 ft "
+           "clear box on some wall, clear of the door's arc. The office analog of "
+           "BED_CLEARANCE / DINING_CLEARANCE (clear box + keepouts). A ~8×10 ft "
+           "office is the comfortable floor. Enlarge or reshape it, or move the "
+           "door off the desk wall. INFO — livability guidance, not a gate."),
         _c("ACCESS_ENTRY", I, "No-step entrance (accessible target)",
            "An accessible plan needs at least one no-step entrance (threshold ≤ ½ in) "
            "with a level landing (ANSI A117.1). Thresholds aren't in the geometry, so "
@@ -495,13 +504,25 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A swing door's width isn't a manufactured leaf size (interior "
            "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72), a declared "
            "double/french pair isn't a stock pair width (48/60/64/72 in total), "
-           "or an overhead door isn't a stock sectional size (widths 8/9/10/12/16 "
-           "ft, heights 7/8 ft). Snap it to the nearest so it's orderable "
-           "off-the-shelf."),
+           "a bifold isn't a stock opening (24/30/32/36 in singles, 48/60/72 in "
+           "pairs, 96 in for two units side by side), or an overhead door isn't "
+           "a stock sectional size (widths 8/9/10/12/16 ft; heights 7/8 ft "
+           "residential and 10/12/14 ft commercial, the tall panels a shop bay "
+           "wants for lift/RV clearance). Snap it to the nearest so it's "
+           "orderable off-the-shelf."),
         _c("OVERHEAD_ROOM", I, "Overhead door in a living space",
            "An overhead (sectional garage) door is on a room that isn't a garage "
            "or shop — unusual for a living space. Either the room should be a "
            "garage/shop bay, or the door should be a people-door (`entry`)."),
+        _c("SHOP_DOOR_HEIGHT", I, "Shop overhead door too short for clearance",
+           "An overhead door on a SHOP bay is 8 ft tall or shorter — a "
+           "residential-height panel. The whole point of a barndominium shop is "
+           "clearance: a 12 ft+ bay exists to swallow a lift, an RV, a dually with "
+           "a topper, and a 7-8 ft door throttles the opening to car height and "
+           "wastes that headroom. Order a taller sectional (`height 10`, or 12/14) "
+           "so the opening matches the bay. A GARAGE is exempt (a car clears a 7 ft "
+           "door fine) — only a SHOP door is nudged. INFO: the short door still "
+           "opens; it's the bay's clearance that's squandered."),
         _c("OVERHEAD_HEADER", I, "Wide overhead opening needs an engineered header",
            "An overhead door wider than 10 ft (a 12 or 16 ft double) spans more "
            "than a stock header carries — the header and the jamb posts over the "
@@ -611,6 +632,15 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "overlooks a double-height void. Its open edge is a walking surface "
            "more than 30 in up and needs a 36 in guard with balusters that block a "
            "4 in sphere (IRC R312)."),
+        _c("LOFT_CEILING", W, "Loft ceiling below the habitable minimum",
+           "A loft is habitable and often sleeps people, so it needs the IRC "
+           "R305.1 7 ft habitable-room minimum ceiling. Its EFFECTIVE ceiling — "
+           "the room's `ceiling` override, else the plan ceiling — is under 7 ft, "
+           "so it can't be lived or slept in. This is a flat-ceiling check: "
+           "barndsl carries no roof-slope geometry, so a sloped-ceiling loft's "
+           "'>= 7 ft over at least half the floor' (R305.1.1) can't be measured "
+           "here — the hint notes it. A `vaulted` loft is open to the ridge (its "
+           "usable height rises well past 7 ft) and is exempt."),
         _c("ALARM_CO", I, "Smoke/CO alarms",
            "Two roles, both info. On a plan that has bedrooms but declares NO "
            "`alarm`, a teaching reminder to place smoke/CO alarms (IRC R314/R315). "
@@ -821,6 +851,34 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A closet has the floor area for a walk-in but is shaped as a narrow "
            "strip (>= 4:1). A more square footprint (under ~3:1, >= 4 ft deep) is "
            "a usable walk-in. Small reach-ins and wide/shallow closets are exempt."),
+        _c("CLOSET_ACCESS", W, "Reach-in closet with a blind rod",
+           "A closet under 4 ft deep is a REACH-IN — nobody can step inside, so "
+           "everything past arm's reach (~2 ft) of the door jambs is dead "
+           "storage. Its door should be a bifold centred on the closet and "
+           "nearly as wide as it, so every foot of rod is reachable. A person-"
+           "door parked at one end of a wide reach-in strands the rest of the "
+           "closet. Walk-ins (4 ft and deeper) take an ordinary door and are "
+           "exempt, as are walk-through closets with two openings."),
+        _c("PANTRY_ACCESS", W, "Reach-in pantry with unreachable shelves",
+           "A pantry under 4 ft deep is a REACH-IN — nobody can step inside, so "
+           "the shelves past arm's reach (~2 ft) of the door jambs are beyond "
+           "reach: the groceries at the back can't be got at. Its single door "
+           "should be a bifold centred on the pantry and nearly as wide as it, so "
+           "every shelf is reachable. A person-door parked at one end of a wide "
+           "reach-in strands the far shelves. The closet analog (CLOSET_ACCESS) — "
+           "walk-in pantries (4 ft and deeper) take an ordinary door and are "
+           "exempt, as are walk-through pantries with two openings."),
+        _c("CLOSET_DEPTH", W, "Bedroom closet too shallow to hang clothes",
+           "A closet serving a bedroom is under 2 ft in its short dimension — "
+           "hanging clothes are 2 ft deep (24 in hangers), so nothing hangs in "
+           "it and the bedroom effectively has no clothes closet. 2 - 2.5 ft is "
+           "the reach-in standard. A shallow closet off a hall is exempt (a "
+           "linen/broom cabinet is legitimate shelf-only storage)."),
+        _c("CLOSET_WINDOW", I, "Window in a closet",
+           "A closet has a window: sunlight fades clothes, the glass eats the "
+           "wall the rod wants, and the stretch of exterior wall (and its "
+           "daylight) would serve a habitable room better. Bury closets on "
+           "interior walls."),
         _c("BED_SOUND", I, "Bedrooms share a party wall",
            "Two bedrooms share a wall directly, so sound carries between them. "
            "Stack each bedroom's closet on the shared wall (back-to-back) to buffer "
@@ -852,6 +910,15 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "enough but past ~2.5:1 reads as a corridor and stays an INFO nudge. "
            "Aim near a compact 6 x 8; give surplus length to the shop, laundry "
            "or pantry."),
+        _c("SHOP_DEPTH", W, "Shop bay too narrow to work in",
+           "A shop's shortest side is too small for the bay's job — the shop "
+           "analog of MUDROOM_SHAPE. Under 12 ft it CANNOT hold a vehicle or a "
+           "workbench wall plus a working aisle, so it is storage mislabeled as a "
+           "shop — a WARNING (the geometry proves it). Between 12 and 20 ft it "
+           "works but is tight for a full-size truck (8.5 ft wide plus door swing) "
+           "with a work zone along a wall — an INFO comfort nudge. A GARAGE is "
+           "exempt (garages are sized to cars, not equipment); only a SHOP bay is "
+           "judged. Widen it, or relabel a genuine storage strip as storage/utility."),
         _c("GARAGE_BEDROOM", W, "Garage/shop opens into a bedroom",
            "A garage or shop must not open directly into a sleeping room (IRC "
            "R302.5.1). A barndominium shop bay is treated as a garage."),

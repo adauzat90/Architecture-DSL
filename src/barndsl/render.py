@@ -1014,6 +1014,8 @@ class _Renderer:
                     self._door_symbol(ox + half, oy, edge.orientation, half, sgn, True)
             elif kind in ("pocket", "sliding"):
                 self._slide_symbol(ox, oy, edge.orientation, w)
+            elif kind == "bifold":
+                self._bifold_symbol(ox, oy, edge.orientation, w)
             else:  # cased opening
                 self._opening_symbol(ox, oy, edge.orientation, w)
 
@@ -1181,6 +1183,22 @@ class _Renderer:
         else:  # wall runs in +x at y=oy
             s = d if (oy + d) <= self.max_y else -d
             self._line(self.sx(ox), self.sy(oy + s), self.sx(ox + w), self.sy(oy + s), WALL, 1.6)
+
+    def _bifold_symbol(self, ox: float, oy: float, orientation: str, w: float):
+        """Draw a bifold door: two half-open panel pairs, each a shallow V with
+        its apex just off the wall — the classic plan zigzag. No swing arc; the
+        panels fold flat against the jambs."""
+        d = min(w / 4.0, 1.0)  # apex projection off the wall, ft
+        if orientation == "v":  # wall runs in +y at x=ox
+            s = d if (ox + d) <= self.max_x else -d
+            pts = [(ox, oy), (ox + s, oy + w / 4), (ox, oy + w / 2),
+                   (ox + s, oy + 3 * w / 4), (ox, oy + w)]
+        else:  # wall runs in +x at y=oy
+            s = d if (oy + d) <= self.max_y else -d
+            pts = [(ox, oy), (ox + w / 4, oy + s), (ox + w / 2, oy),
+                   (ox + 3 * w / 4, oy + s), (ox + w, oy)]
+        path = " L ".join(f"{self.sx(px):.1f} {self.sy(py):.1f}" for px, py in pts)
+        self._path(f"M {path}", WALL, 1.2)
 
     def _overhead_symbol(self, ox: float, oy: float, orientation: str, w: float, sgn: float):
         """Draw an overhead/sectional garage door: the gap plus a dashed track
