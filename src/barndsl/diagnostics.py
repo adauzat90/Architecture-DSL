@@ -38,7 +38,10 @@ class CodeInfo:
 
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
-_VARYING = frozenset({"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING"})
+_VARYING = frozenset(
+    {"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING", "AREA_VOID",
+     "MUDROOM_SHAPE"}
+)
 
 
 def _c(code: str, severity: Severity, title: str, explanation: str) -> tuple[str, CodeInfo]:
@@ -51,11 +54,13 @@ E, W, I = Severity.ERROR, Severity.WARNING, Severity.INFO
 REGISTRY: dict[str, CodeInfo] = dict(
     [
         # --- suppression pragmas (the `# barndsl: accept CODE` escape hatch) --
-        _c("ACCEPT_DENIED", W, "Error can't be accepted",
-           "An `# barndsl: accept <CODE>` pragma named a code that fired as an "
-           "ERROR on its target line. Errors are unbuildable-plan problems, not "
-           "judgement calls — they must be fixed, never waived. `accept` only "
-           "downgrades warnings and infos. Resolve the underlying error."),
+        _c("ACCEPT_DENIED", W, "Diagnostic can't be accepted",
+           "An `# barndsl: accept <CODE>` pragma named a code that can't be waived: "
+           "either it fired as an ERROR (an unbuildable-plan problem), or it is a "
+           "structural design-flaw code on the accept-denylist (e.g. "
+           "GARAGE_PASSTHROUGH — a broken *building*, not a jurisdiction judgement "
+           "call). Both must be fixed, never waived. `accept` only downgrades "
+           "ordinary warnings and infos. Resolve the underlying problem."),
         _c("ACCEPT_UNKNOWN", W, "Accept pragma names an unknown code",
            "An `# barndsl: accept <CODE>` pragma named a code the registry doesn't "
            "know (a typo, or an old name). The pragma suppresses nothing. Use a "
@@ -264,6 +269,18 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "overlap or the envelope is too small."),
         _c("AREA_UNUSED", I, "Footprint under-used",
            "A large share of the footprint isn't assigned to any room."),
+        _c("AREA_VOID", E, "Concentrated unassigned void",
+           "One connected, room-sized patch of the footprint is assigned to no "
+           "room — a real hole in the plan (an unfinished space, a mis-sized "
+           "neighbour, a gap the tiling left). A house has no void areas: an "
+           "enclosed pocket no one can enter is framed, roofed and "
+           "foundation-poured dead space, so a room-sized void is an ERROR (a "
+           "smaller pocket, under the error bar but over ~20 sq ft, is an INFO "
+           "nudge). Unlike AREA_UNUSED — which sums "
+           "diffuse slack and only speaks below 85% coverage — this fires on the "
+           "largest single gap regardless of overall coverage, so a dead pocket on "
+           "an otherwise well-covered footprint stays visible. Fill it with a room, "
+           "grow a neighbour over it, or trim the envelope."),
         # --- room programs --------------------------------------------------
         _c("BEDROOM_AREA", E, "Bedroom too small",
            "A bedroom is below the ~70 sq ft IRC minimum habitable area (R304)."),
@@ -341,11 +358,13 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "Two fixtures occupy the same floor — an author-placed one overlaps "
            "another fixture (a seed or another placement). Slide one along its "
            "wall, or back it to a different wall."),
-        _c("FIXTURE_DOOR", I, "Fixture blocks a door swing",
+        _c("FIXTURE_DOOR", W, "Fixture blocks a door swing",
            "An author-placed fixture sits in the clear floor a hinged door swings "
-           "through, so the door can't fully open past it. Keep the swing clear — "
-           "slide the fixture off the door approach, or swing the door the other "
-           "way."),
+           "through, so the door can't fully open — its leaf hits the fixture. "
+           "The auto-placer keeps its own seeds and auto-slotted pieces clear of "
+           "every swing, so only an explicit `at x,y` can land here. Keep the "
+           "swing clear — slide the fixture off the door approach, or swing the "
+           "door the other way (or make it a pocket/sliding door)."),
         _c("FIXTURE_TOILET_CLEARANCE", W, "Toilet clearance below IRC R307.1",
            "An author-placed toilet has less than 15 in from its centreline to the "
            "nearest side wall or fixture, or less than 21 in of clear floor in "
@@ -822,9 +841,31 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "its own."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
+        _c("LAUNDRY_FIT", W, "Laundry can't hold its washer/dryer",
+           "The laundry's clear interior can't fit a washer and dryer (2.25 ft "
+           "deep) with a 3 ft working aisle to load them — about 5.5 ft of clear "
+           "depth. Widen the room, or fold laundry into a bigger mudroom/utility."),
+        _c("MUDROOM_SHAPE", W, "Mudroom too narrow or too elongated",
+           "A mudroom under ~5 ft wide CANNOT do its job — a bench and hooks "
+           "(~1.5 ft) plus a 3 ft walkway physically don't fit — so that is a "
+           "WARNING (it's a hallway wearing a mudroom label). One that is wide "
+           "enough but past ~2.5:1 reads as a corridor and stays an INFO nudge. "
+           "Aim near a compact 6 x 8; give surplus length to the shop, laundry "
+           "or pantry."),
         _c("GARAGE_BEDROOM", W, "Garage/shop opens into a bedroom",
            "A garage or shop must not open directly into a sleeping room (IRC "
            "R302.5.1). A barndominium shop bay is treated as a garage."),
+        _c("GARAGE_PASSTHROUGH", W, "Bedrooms reached only through the garage/shop",
+           "The only interior route from the public core (living/kitchen/dining) to "
+           "one or more bedrooms passes through a garage or shop — the vehicle bay "
+           "is a corridor, so you must cross it (fumes, cold, no fire separation on "
+           "the path) to reach the sleeping rooms. Subtler and more dangerous than "
+           "GARAGE_BEDROOM (a direct garage↔bedroom door): here no single door is "
+           "garage↔bedroom, yet the garage is a cut vertex on the whole route. A "
+           "circulation-shape defect reachability (NO_ACCESS) can't see. This is a "
+           "structural design flaw — it cannot be waived with an `accept` pragma. "
+           "Route the bedrooms off a hall that reaches the core without crossing "
+           "the garage."),
         _c("GARAGE_NO_ENTRY", I, "Garage/shop has no people-door",
            "A garage or shop abuts the house but has no interior door into it."),
         _c("GARAGE_SEPARATION", I, "Garage/dwelling fire separation required",
@@ -940,6 +981,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
         # --- agent layer ----------------------------------------------------
         _c("DESIGN", I, "Architect's critique",
            "A design-quality suggestion folded in from the agent's architect review."),
+        _c("TRUNCATED", I, "Generated reply was cut off",
+           "The agent's generated plan hit the output token cap before it finished "
+           "(on both the write and its retry), so the source may be incomplete. "
+           "Folded into the feedback so the next revision is written more "
+           "concisely."),
         _c("NO_PROGRAM", I, "No `program` statement",
            "The source declares no `program` line, so the compiler cannot check the "
            "plan delivers the brief's beds/baths/area. Derive one from the brief — "

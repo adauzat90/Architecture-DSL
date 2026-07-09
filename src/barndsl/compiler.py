@@ -25,7 +25,7 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
     window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
     porch <id> at <x>,<y> size <W> x <L> [covered|open]
     stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
-    fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>]  # place a fixture/furnishing
+    fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W [offset <ft>]] [rotate <deg>]  # place a fixture/furnishing
     use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]  # stamp a part
     outlet in <room> wall N|S|E|W offset <ft> [gfci]      # receptacle on a room wall
     switch in <room> wall N|S|E|W offset <ft>             # wall switch
@@ -119,6 +119,15 @@ _TYPES = ", ".join(t.value for t in RoomType)
 #: The room-type names as a plain list, for did-you-mean ranking (BAD_TYPE).
 _TYPE_VALUES = tuple(t.value for t in RoomType)
 _WALLS = "north, south, east, west"
+#: Every `fixture <kind>` the parser accepts, interpolated into DSL_REFERENCE the
+#: same way _TYPES/_WALLS are — so the one enum the reference used to only sample
+#: is now enumerated in full and can never drift from the catalog. Imported
+#: locally (not at module top) to mirror the existing FIXTURES import at the point
+#: of use and stay clear of any import-order surprise; fixtures.py pulls in only
+#: elements/geometry/validation, none of which import compiler, so this is safe.
+from .fixtures import FIXTURE_KINDS as _FIXTURE_KINDS  # noqa: E402
+
+_FIXTURES = ", ".join(sorted(_FIXTURE_KINDS))
 
 
 def _did_you_mean(word: str, options: tuple[str, ...] | list[str]) -> str:
@@ -241,6 +250,9 @@ Statements:
         # walk-through (no leaf); pocket/sliding slide; double/french = a pair of
         # half-width leaves (default 5 ft total). offset = ft from the wall's
         # S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
+        # The two-room forms `wall`, `door` and `open` accept `to` in place of the
+        # `-` separator, so `door a to b` == `door a - b` (mind the spaces — the
+        # dashless `a-b` reads as one token, and `a - b` still works too).
   door <id> <wall> exterior [double|french] [width <w>] [offset <o>] [no-egress]  # exterior door, on an exterior wall
   door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]
         # overhead/sectional garage door on a garage/shop's exterior wall. Defaults
@@ -262,13 +274,16 @@ Statements:
   stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
         # vertical circulation; defaults from 0 to 1. Place its footprint over a
         # room on each level so it links them (and makes the upper floor reachable).
-  fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>]
+  fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W [offset <ft>]] [rotate <deg>] [width <w>]
   fixture counter in <room> along N|S|E|W [from <a> to <b>] [depth <d>]
-        # place a fixture / furnishing (bed_queen, sofa, dining_table, desk,
-        # washer, kitchen_island, counter, ...). `at <x>,<y>` is ROOM-LOCAL feet,
+        # place a fixture / furnishing. <kind> is one of: %s.
+        # `at <x>,<y>` is ROOM-LOCAL feet,
         # measured from the room's SW corner (unlike every other statement, which
         # is in world coordinates). Omit `at` to auto-place against `wall`, or omit
-        # both for the first free spot. `rotate` turns it in plan (snapped to a
+        # both for the first free spot. `wall ... offset <ft>` pins the piece that
+        # many feet along the wall from its S/W start corner (the door/window
+        # convention); omit the offset to auto-slot clear of door swings. `offset`
+        # needs `wall` and excludes `at`. `rotate` turns it in plan (snapped to a
         # quarter-turn); `width` overrides the run of a resizable piece (a counter).
         # `along <wall>` (COUNTER ONLY) lays a countertop RUN along a wall: the whole
         # wall, or `from <a> to <b>` (room-local ft from the wall's S/W corner), at
@@ -383,7 +398,9 @@ Statements:
 <placement> is one of:
   at <x>,<y>                      # absolute, in feet
   <dir>-of <room> [align near|far|center] [offset <n>]
-        # <dir> = east|west|north|south (aliases right|left|above|below). Abut an
+        # <dir> = east|west|north|south. Each has an equivalent alias, fully
+        # interchangeable: right-of = east-of, left-of = west-of, above = north-of,
+        # below = south-of. Abut an
         # already-defined room (shares a wall, so a `door` between them resolves).
         # By default the new room aligns to the reference's near corner; `align
         # far|center` slides it along the shared wall, and `offset <n>` shifts it
@@ -411,7 +428,7 @@ Example:
   door great_room - kitchen width 8
   entry great_room south width 3 offset 20
   window master_bed north width 5 offset 5
-""" % (_TYPES, _WALLS)
+""" % (_FIXTURES, _TYPES, _WALLS)
 
 
 # --- Lexer ------------------------------------------------------------------
@@ -1820,7 +1837,8 @@ def _parse_statement(
         # the envelope/wings are known regardless of statement order).
         plan.frame_spec = FrameSpec(bay, span, post, ridge, lineno, kw.col, kw.end_col)
     elif key == "fixture":
-        # `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W] [rotate <deg>] [width <w>]`
+        # `fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W [offset <n>]]
+        #  [rotate <deg>] [width <w>]`
         from .fixtures import FIXTURES
 
         kind_tok = c.ident("a fixture kind")
@@ -1836,6 +1854,7 @@ def _parse_statement(
         c.keyword("in")
         room_tok = c.ident("a room id")
         fx = fy = wall = width = None
+        f_offset: float | None = None
         along: Direction | None = None
         run_from: float | None = None
         run_to: float | None = None
@@ -1861,6 +1880,8 @@ def _parse_statement(
                     along = wd
                 else:
                     wall = wd
+            elif opt == "offset":
+                f_offset = c.number("the fixture offset")
             elif opt == "from":
                 run_from = c.number("the counter run start")
             elif opt == "to":
@@ -1877,15 +1898,16 @@ def _parse_statement(
                     f"Unknown fixture option '{tok.text}'.",
                     tok.col,
                     end_col=tok.end_col,
-                    hint="Options: at <x>,<y>, wall N|S|E|W, rotate <deg>, width <w>, "
-                    "or (counter) along N|S|E|W [from <a> to <b>] [depth <d>].",
+                    hint="Options: at <x>,<y>, wall N|S|E|W [offset <n>], rotate "
+                    "<deg>, width <w>, or (counter) along N|S|E|W [from <a> to "
+                    "<b>] [depth <d>].",
                 )
         c.expect_end()
         try:
             plan.add_fixture(
-                kind, room_tok.text, x=fx, y=fy, wall=wall, rotation=rotation,
-                width=width, along=along, run_from=run_from, run_to=run_to,
-                depth=run_depth,
+                kind, room_tok.text, x=fx, y=fy, wall=wall, offset=f_offset,
+                rotation=rotation, width=width, along=along, run_from=run_from,
+                run_to=run_to, depth=run_depth,
             )
         except ValueError as exc:
             raise _ParseError(

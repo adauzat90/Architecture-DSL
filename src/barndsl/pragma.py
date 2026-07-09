@@ -37,6 +37,15 @@ from dataclasses import dataclass
 from .diagnostics import REGISTRY
 from .validation import Issue, Severity
 
+#: Structural design-flaw codes that an `accept` pragma may NOT waive, even
+#: though they fire as warnings/infos rather than errors. These describe a broken
+#: *building* — a plan you can compile but shouldn't build — not a jurisdiction
+#: judgement call, so silencing them out of the design score would let a
+#: structurally-broken plan score high on a technicality. An `accept` naming one
+#: is refused exactly like an accept on an error (ACCEPT_DENIED), so the
+#: diagnostic keeps its severity and keeps deducting. Kept small and deliberate.
+ACCEPT_DENIED_CODES: frozenset[str] = frozenset({"GARAGE_PASSTHROUGH"})
+
 #: ``barndsl: accept <CODE> ["reason"]`` — matched against a comment's text (the
 #: part after ``#``). The code is an identifier; the reason is an optional quoted
 #: string (backslash escapes recognised, mirroring the lexer).
@@ -162,8 +171,16 @@ def apply_pragmas(diagnostics: list[Issue], pragmas: list[AcceptPragma]) -> None
             for d in diagnostics
             if d.line == p.target_line and d.code == code and not d.accepted
         ]
-        errs = [d for d in matched if d.severity is Severity.ERROR]
-        downgradable = [d for d in matched if d.severity is not Severity.ERROR]
+        # An error can never be accepted; nor can a structural design-flaw code on
+        # the denylist (a broken *building*, not a judgement call) — both keep
+        # their severity and draw an ACCEPT_DENIED. Everything else downgrades.
+        denied = code in ACCEPT_DENIED_CODES
+        errs = [
+            d for d in matched if d.severity is Severity.ERROR or denied
+        ]
+        downgradable = (
+            [] if denied else [d for d in matched if d.severity is not Severity.ERROR]
+        )
         if not matched:
             diagnostics.append(
                 Issue(
@@ -178,16 +195,22 @@ def apply_pragmas(diagnostics: list[Issue], pragmas: list[AcceptPragma]) -> None
             )
             continue
         if errs:
+            reason = (
+                f"{code} is a structural design flaw and can't be waived — it "
+                f"marks a broken building, not a judgement call"
+                if denied
+                else f"{code} fired as an error on line {p.target_line} and an "
+                "error can't be accepted — only fixed"
+            )
             diagnostics.append(
                 Issue(
                     Severity.WARNING,
                     "ACCEPT_DENIED",
-                    f"{code} fired as an error on line {p.target_line} and an error "
-                    "can't be accepted — only fixed.",
+                    f"{reason}.",
                     line=p.pragma_line,
                     room=errs[0].room,
                     hint="Resolve the underlying problem; `accept` only downgrades "
-                    "warnings and infos, never errors.",
+                    "warnings and infos, and never a structural design flaw.",
                 )
             )
         for d in downgradable:

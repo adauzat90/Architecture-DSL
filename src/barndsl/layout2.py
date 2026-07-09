@@ -305,13 +305,235 @@ def _score(result: LayoutResult) -> tuple:
 def _solve_bands(
     brief: LayoutBrief2, specs: list[RoomSpec2], adj: dict[str, set[str]]
 ) -> LayoutResult:
-    """Topology 1: horizontal bands (public core · hall · private row)."""
+    """Topology 1: horizontal bands (public core · hall · private row).
+
+    A single-story program with a large utility room (garage/shop) routes through
+    :func:`_solve_bands_with_column`, which seats the utility as a full-depth
+    **gable-end column** rather than a full-width band — the barndominium idiom —
+    so every habitable room keeps an exterior wall and the shop gets its own gable
+    wall for the overhead door. All other programs use the plain band stack.
+    """
     notes: list[str] = []
+    utility = [s for s in specs if s.type in _LARGE_UTILITY]
+    single_story = all(s.level == 0 for s in specs)
+    if utility and single_story:
+        column = _solve_bands_with_column(brief, specs, adj, utility, notes)
+        if column is not None:
+            return column
     bands = _build_bands(specs, adj, notes)
     env_w, env_l = _choose_envelope(bands, brief, notes)
     env_w, env_l = round(env_w, 2), round(env_l, 2)  # match the snapped grid
     placed = _dimension(bands, env_w, env_l)
     return _finalize(brief, specs, placed, env_w, env_l, notes)
+
+
+def _solve_bands_with_column(
+    brief: LayoutBrief2,
+    specs: list[RoomSpec2],
+    adj: dict[str, set[str]],
+    utility: list[RoomSpec2],
+    notes: list[str],
+) -> LayoutResult | None:
+    """Seat garage/shop rooms as a full-depth gable-end column; band the rest.
+
+    The vehicle bay takes one short end of the envelope at FULL DEPTH, giving it
+    an exterior gable wall for the overhead door and three exterior walls total.
+    The remaining rectangle gets the classic residential band stack WITHOUT the
+    utility: public on the south edge, hall(s), private on the north edge — so
+    every habitable room reaches the perimeter and the route to the bedrooms never
+    crosses the shop (no GARAGE_PASSTHROUGH). Returns ``None`` if no non-utility
+    rooms remain to band (a utility-only program falls back to the plain stack).
+    """
+    from .elements import Room
+
+    house = [s for s in specs if s.type not in _LARGE_UTILITY]
+    if not house:
+        return None
+
+    bands = _build_bands(house, adj, notes)
+
+    # The room that buffers the column from the house — the brief-declared neighbour
+    # of a utility room that lives in the public band (a mudroom, ideally). It, and
+    # the column, go on the SAME end so the shop doors straight into its buffer.
+    util_ids = {s.id for s in utility}
+    buffer_id = _column_buffer_room(bands, adj, util_ids)
+
+    # Pick the column end deterministically. Prefer WEST (matches the barndo idiom
+    # and the reference GOOD plan); the public band is then ordered so the buffer
+    # room sits at that same (west) seam.
+    on_west = True
+
+    # Size the envelope. The house bands set the residential footprint (via the
+    # same sizing the plain stack uses); the column adds its width beside them,
+    # spanning the full depth. Keep total area consistent so rooms don't shrink.
+    min_house_w = max((b.min_width for b in bands), default=feet(8))
+    house_w, env_l = _choose_envelope(bands, brief, notes)
+    if brief.envelope is not None:
+        col_w = _column_width(utility, env_l)
+        house_w = brief.envelope[0] - col_w
+        if house_w < min_house_w:
+            # A fixed envelope too narrow to seat the column beside the house
+            # at its rooms' minimum widths: squeezing the bands would shrink
+            # bedrooms/baths below code minimums (BEDROOM_DIM/BATH_CLEARANCE).
+            # Fall back to the plain band stack, which keeps the full envelope
+            # width for every band.
+            return None
+        env_w = float(brief.envelope[0])
+    else:
+        # Snap toward the 3-ft build module so the seed lands on buildable numbers
+        # (clears ENVELOPE_MODULE and gives the LLM clean door/window arithmetic):
+        # the envelope depth and the column width each snap to a 3-ft multiple, and
+        # the house-block width absorbs the remainder to hit a 3-ft total width. The
+        # bands/column still tile exactly, so area is conserved as room sizes flex.
+        col_w = _snap_module(_column_width(utility, env_l), min_val=max(
+            (u.min_dim for u in utility), default=feet(12)
+        ))
+        env_l = _snap_module(env_l, min_val=_min_stack_depth(bands))
+        env_w = _snap_module(house_w + col_w, min_val=min_house_w + col_w)
+        house_w = env_w - col_w
+    env_w, env_l, house_w, col_w = (
+        round(env_w, 2), round(env_l, 2), round(house_w, 2), round(col_w, 2)
+    )
+
+    # Place the house bands in the sub-rectangle beside the column.
+    house_x0 = col_w if on_west else 0.0
+    house_x1 = env_w if on_west else house_w
+    _order_public_band_for_seam(bands, buffer_id, on_west)
+    placed = _dimension_in(bands, house_x0, 0.0, house_x1, env_l)
+
+    # Stack the utility rooms down the full-depth column (usually one room).
+    ylines = _grid_lines(
+        [max(u.area / max(col_w, 1e-6), u.min_dim) for u in utility], 0.0, env_l
+    )
+    cx0 = 0.0 if on_west else round(env_w - col_w, 2)
+    cx1 = round(cx0 + col_w, 2)
+    for i, u in enumerate(utility):
+        y0, y1 = ylines[i], ylines[i + 1]
+        placed[u.id] = Room(
+            u.id, RoomType(u.type), cx0, y0, cx1 - cx0, y1 - y0, u.label, u.level
+        )
+
+    notes.append(
+        f"Placed {'/'.join(u.id for u in utility)} as a full-depth "
+        f"{'west' if on_west else 'east'} gable-end column (its own exterior "
+        "gable wall for the overhead door)."
+    )
+    return _finalize(brief, specs, placed, env_w, env_l, notes)
+
+
+def _column_buffer_room(
+    bands: list[_Band], adj: dict[str, set[str]], util_ids: set[str]
+) -> str | None:
+    """The public-band room the brief wires to a utility room (the shop's buffer).
+
+    Prefers a mudroom; otherwise any public-band room adjacent to a utility room.
+    Returns its id, or ``None`` when nothing buffers the column (the shop will then
+    fall back to a door onto the hall, never a bedroom — see ``_finalize``).
+    """
+    public_rooms = [r for b in bands for r in b.rooms if not b.interior_ok]
+    buffered = [r for r in public_rooms if adj[r.id] & util_ids]
+    if not buffered:
+        return None
+    buffered.sort(key=lambda r: (r.type is not RoomType.MUDROOM, r.id))
+    return buffered[0].id
+
+
+def _order_public_band_for_seam(
+    bands: list[_Band], buffer_id: str | None, on_west: bool
+) -> None:
+    """Rotate the public band so the buffer room sits at the column seam.
+
+    The column abuts the public (day-zone) band. Placing the buffer room (mudroom)
+    at the seam end lets the shop door into it directly — a short, private route
+    from the drive into the house. Reverses in place when the buffer isn't already
+    at the seam end; a no-op when there's no buffer.
+    """
+    if buffer_id is None:
+        return
+    public = next((b for b in bands if not b.interior_ok), None)
+    if public is None or len(public.rooms) < 2:
+        return
+    ids = [r.id for r in public.rooms]
+    if buffer_id not in ids:
+        return
+    # West column -> buffer at the west (index 0) end; east column -> east end.
+    at_seam = ids[0] if on_west else ids[-1]
+    if at_seam != buffer_id:
+        public.rooms.reverse()
+
+
+def _column_width(utility: list[RoomSpec2], env_l: float) -> float:
+    """Column width that seats the utility rooms at the full envelope depth.
+
+    Area / depth, but never below the widest utility room's minimum dimension (a
+    12-ft shop min keeps a vehicle bay usable). The column spans the full depth, so
+    its area is width x depth; solving for the target total gives area / depth.
+    """
+    total_area = sum(u.area for u in utility)
+    max_min = max((u.min_dim for u in utility), default=feet(12))
+    return max(total_area / max(env_l, 1e-6), max_min)
+
+
+#: The build module (ft) exterior dimensions snap to — matches
+#: :data:`barndsl.validation.BUILD_MODULE`, so a snapped envelope clears
+#: ENVELOPE_MODULE. Kept here (not imported) so layout2 stays free of validation.
+_BUILD_MODULE = 3.0
+
+
+def _snap_module(value: float, min_val: float = 0.0) -> float:
+    """Round ``value`` to the nearest :data:`_BUILD_MODULE` multiple, >= ``min_val``.
+
+    Snaps a raw dimension onto the 3-ft build module for buildable numbers, but
+    never below ``min_val`` (a room minimum or the widest band) — it rounds *up*
+    to the next module when the nearest one would violate the floor.
+    """
+    if value <= 0:
+        return value
+    snapped = round(value / _BUILD_MODULE) * _BUILD_MODULE
+    while snapped + 1e-9 < min_val:
+        snapped += _BUILD_MODULE
+    return snapped
+
+
+def _min_stack_depth(bands: list[_Band]) -> float:
+    """The shallowest the house block can be: the sum of each band's tallest room.
+
+    Every band must be at least as deep as its deepest room's minimum dimension,
+    so the stack can't be shorter than their sum — the floor for snapping the
+    envelope depth down onto the module.
+    """
+    return sum(b.max_min_dim for b in bands)
+
+
+def _dimension_in(
+    bands: list[_Band], x0: float, y0: float, x1: float, y1: float
+) -> dict:
+    """Tile ``bands`` south->north into the sub-rectangle ``[x0,x1] x [y0,y1]``.
+
+    The band-stack analogue of :func:`_dimension`, but confined to a sub-rectangle
+    (the house block beside a gable-end column) instead of the whole envelope, so
+    band widths run ``x0..x1`` and heights fill ``y0..y1``. Coordinates come from
+    shared grid lines so the dissection round-trips losslessly.
+    """
+    from .elements import Room
+
+    span_w = x1 - x0
+    raw_heights = [_band_height(b, span_w) for b in bands]
+    total_raw = sum(raw_heights) or 1.0
+    heights = [(y1 - y0) * h / total_raw for h in raw_heights]
+    ylines = _grid_lines(heights, y0, y1)
+
+    placed: dict[str, Room] = {}
+    for bi, band in enumerate(bands):
+        by0, by1 = ylines[bi], ylines[bi + 1]
+        xlines = _grid_lines(_share_widths(band, span_w), x0, x1)
+        for i, spec in enumerate(band.rooms):
+            bx0, bx1 = xlines[i], xlines[i + 1]
+            placed[spec.id] = Room(
+                spec.id, RoomType(spec.type), bx0, by0, bx1 - bx0, by1 - by0,
+                spec.label, spec.level,
+            )
+    return placed
 
 
 def _finalize(
@@ -357,14 +579,17 @@ def _finalize(
 def _build_bands(
     specs: list[RoomSpec2], adj: dict[str, set[str]], notes: list[str]
 ) -> list[_Band]:
-    """Classify rooms and stack them south→north: public, hall, private, utility.
+    """Classify rooms and stack them south→north: utility, public, hall, private.
 
-    The hall sits between the public core and the private rooms so it abuts both;
-    public and private bands reach the envelope's south/north edges, giving their
-    rooms an exterior wall. Large utility spaces (garage/shop) get their own band
-    so their bulk doesn't dictate the depth of the bedroom row (a 1,200 sq ft shop
-    sharing a band with bedrooms would stretch them long and thin). Rooms within a
-    band are ordered so requested adjacencies fall between neighbours.
+    The hall sits between the public core and the private rooms so it buffers
+    day↔night and abuts both. The garage/shop band goes **outermost** on the south
+    end (an exterior gable wall for its overhead door), never *between* the public
+    and private bands — routing it between them would make the vehicle bay the only
+    corridor from the living core to the bedrooms (the GARAGE_PASSTHROUGH defect the
+    score now punishes). Large utility spaces still get their own band so their bulk
+    doesn't dictate the depth of the bedroom row (a 1,200 sq ft shop sharing a band
+    with bedrooms would stretch them long and thin). Rooms within a band are ordered
+    so requested adjacencies fall between neighbours.
     """
     public_ids = {s.id for s in specs if s.type in _PUBLIC}
     hall_ids = {s.id for s in specs if s.type in _CIRCULATION}
@@ -388,15 +613,23 @@ def _build_bands(
         if s not in public and s.type not in _CIRCULATION and s.type not in _LARGE_UTILITY
     ]
 
-    # Habitable rooms only reach daylight in the two *end* bands, so public and
-    # private take the south/north edges and every interior-only band (hall, and
-    # the non-habitable utility band) stacks between them. Putting utility on an
-    # end instead would push the bedroom row inward and bury it.
+    # Band order (south→north): utility, public, hall(s), private.
+    #
+    # The utility (garage/shop) band goes OUTERMOST on the south end, not between
+    # the public and private bands. Two reasons: (1) circulation — a utility band
+    # wedged between day and night makes the vehicle bay the sole corridor from the
+    # living core to the bedrooms (GARAGE_PASSTHROUGH); putting it on an end keeps
+    # the hall as the day↔night buffer. (2) the shop's overhead door wants an
+    # exterior gable wall, which an end band gives it. It abuts the *public* band
+    # (never the private one), so the bedrooms stay a hall away from it. The private
+    # band still takes the far (north) edge for daylight/egress; the public band,
+    # now interior, keeps daylight through its east/west gable-end rooms (windows go
+    # on any exterior wall) and through the openings added between its rooms.
     bands: list[_Band] = []
+    if utility:  # garage/shop: outermost, exterior gable wall, off the public core
+        bands.append(_Band(_order_in_band(utility, adj), interior_ok=True))
     if public:
         bands.append(_Band(_order_in_band(public, adj)))
-    if utility:  # garage/shop: interior band (no daylight needed), nearest the core
-        bands.append(_Band(_order_in_band(utility, adj), interior_ok=True))
     for h in halls:  # usually one; multiple halls each get a thin strip
         bands.append(_Band([h], interior_ok=True))
     if private:
@@ -410,30 +643,70 @@ def _build_bands(
 def _order_in_band(rooms: list[RoomSpec2], adj: dict[str, set[str]]) -> list[RoomSpec2]:
     """Order a band's rooms so adjacent ones are neighbours (a greedy chain).
 
-    Start from the lowest-degree room and walk the adjacency graph, preferring
-    the next room that is adjacent to the one just placed. Deterministic; falls
-    back to brief order when there's no adjacency to follow.
+    Decompose the in-band adjacency graph into connected components and lay each
+    out as a contiguous chain, walked from a proper **endpoint** (a degree-1 leaf)
+    so a degree-2 room lands in the *middle* with both its neighbours abutting —
+    e.g. a master flanked by its ensuite and walk-in comes out ``mbath·master·
+    mcloset``, keeping both shared walls, rather than one neighbour stranded when
+    the chain seeds at the wrong node. Components are concatenated in brief order;
+    within a chain, ties break by (fewest remaining neighbours, brief order), so
+    the walk stays deterministic and finishes each spur before moving on.
     """
     if len(rooms) <= 2:
         return rooms
     pool = {r.id: r for r in rooms}
     order_index = {r.id: i for i, r in enumerate(rooms)}
     within = {rid: (adj[rid] & pool.keys()) for rid in pool}
-    # Seed: a room with the fewest in-band neighbours (an end of the chain).
-    start = min(pool, key=lambda rid: (len(within[rid]), order_index[rid]))
-    ordered = [start]
-    seen = {start}
-    while len(ordered) < len(rooms):
-        nbrs = [n for n in within[ordered[-1]] if n not in seen]
-        if nbrs:
-            nxt = min(nbrs, key=lambda rid: (len(within[rid]), order_index[rid]))
-        else:  # chain broke — take the next unplaced room in brief order
-            nxt = min(
-                (rid for rid in pool if rid not in seen), key=lambda rid: order_index[rid]
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    # Lay out each connected component contiguously, seeding the walk at a true
+    # endpoint (a component leaf) so an interior degree-2 room ends up flanked by
+    # both its neighbours. Components are emitted in brief order; a branch (a hub
+    # of degree >= 3, which a flat band can't fully seat) has its first-walked spur
+    # continued and the leftover spur appended right after, keeping every room in
+    # one contiguous run so the connectivity pass only ever bridges a single seam.
+    for seed_id in sorted(pool, key=lambda r: order_index[r]):
+        if seed_id in seen:
+            continue
+        comp = _component(seed_id, within)
+        start = min(comp, key=lambda c: (len(within[c]), order_index[c]))
+        # Greedy walks within this component until every member is placed. Each
+        # walk stops at a dead end; if the component still has unplaced members
+        # (a branch), the next walk resumes from the unplaced room nearest the
+        # chain (fewest unseen neighbours), and its run is appended contiguously.
+        pending = start
+        while pending is not None:
+            cur: str | None = pending
+            while cur is not None:
+                ordered.append(cur)
+                seen.add(cur)
+                nbrs = [n for n in within[cur] if n not in seen]
+                cur = (
+                    min(nbrs, key=lambda rid: (len(within[rid]), order_index[rid]))
+                    if nbrs
+                    else None
+                )
+            leftover = [c for c in comp if c not in seen]
+            pending = (
+                min(leftover, key=lambda c: (len(within[c]), order_index[c]))
+                if leftover
+                else None
             )
-        ordered.append(nxt)
-        seen.add(nxt)
     return [pool[rid] for rid in ordered]
+
+
+def _component(start: str, within: dict[str, set[str]]) -> set[str]:
+    """The connected component of ``start`` in the in-band adjacency graph."""
+    comp: set[str] = set()
+    stack = [start]
+    while stack:
+        v = stack.pop()
+        if v in comp:
+            continue
+        comp.add(v)
+        stack.extend(within[v] - comp)
+    return comp
 
 
 def _choose_envelope(

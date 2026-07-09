@@ -27,22 +27,28 @@ def _codes(result, severity: str) -> set[str]:
 
 
 def test_scattered_wet_rooms_nudge_to_cluster():
-    # kitchen, bath, and laundry each sit alone (no two share a wall).
+    # kitchen, bath, and laundry each sit alone (no two share a wall); the
+    # office and bedroom fill the envelope so no AREA_VOID error muddies it.
     src = """\
 plan "Scattered plumbing"
 envelope 40 x 30
 ceiling 9
 room living:  living   at 0,0   size 16 x 30
 room kitchen: kitchen  at 16,0  size 12 x 12
-room bath:    bathroom at 28,18 size 12 x 12
-room laundry: laundry  at 16,18 size 10 x 12
+room office:  office   at 28,0  size 12 x 12
 room hall:    hallway  at 16,12 size 24 x 6
+room laundry: laundry  at 16,18 size 8 x 12
+room bed:     bedroom  at 24,18 size 8 x 12
+room bath:    bathroom at 32,18 size 8 x 12
 door living - hall width 3
 door living - kitchen width 6
+door hall - office width 2.67
 door hall - bath width 2.67
 door hall - laundry width 2.67
+door hall - bed width 2.67
 entry living south width 3 offset 6
 window bath east width 3 offset 4
+window bed north width 4 offset 2
 """
     r = compile_source(src)
     assert "WET_GROUP" in _codes(r, "info")
@@ -201,6 +207,97 @@ window living west width 8 offset 6
 """
     r = compile_source(src)
     assert "ROOM_PROPORTION" not in _codes(r, "info")
+
+
+# --- MUDROOM_SHAPE -------------------------------------------------------------
+# A mudroom is a drop zone (bench + hooks + a 3 ft walkway), so it wants >= 5 ft
+# of width and a compact footprint. ROOM_PROPORTION never sees one (mudrooms
+# aren't habitable) — live agent plans buffered shops with 3-4 ft strips
+# labelled "mudroom" and no check said a word. Under the width bar the room
+# CANNOT do its job, so that tier is a WARNING; elongated-but-wide is an INFO.
+
+
+def test_long_skinny_mudroom_is_a_warning():
+    # The Wheatland shape: a mudroom strip running the building's full depth.
+    src = """\
+plan "Skinny mud"
+envelope 40 x 28
+ceiling 9
+room shop: shop at 0,0 size 20 x 28
+room mud: mudroom at 20,0 size 4 x 28
+room living: living at 24,0 size 16 x 28
+door mud - shop width 3 offset 1 into shop
+door mud - living width 3 offset 1
+entry living south width 3 offset 1
+entry shop south width 3 offset 2
+window living south width 8 offset 6
+window living east width 8 offset 6
+"""
+    r = compile_source(src)
+    assert "MUDROOM_SHAPE" in _codes(r, "warning")
+    msg = next(d for d in r.warnings if d.code == "MUDROOM_SHAPE").message
+    assert "corridor" in msg
+    assert r.ok  # a warning, not a compile stopper
+
+
+def test_narrow_mudroom_warns_even_when_compact():
+    # 4 x 8 is only 2:1, but 4 ft can't hold a bench plus a walkway.
+    src = """\
+plan "Narrow mud"
+envelope 28 x 20
+ceiling 9
+room living: living at 0,0 size 24 x 20
+room mud: mudroom at 24,0 size 4 x 8
+room util: utility at 24,8 size 4 x 12
+door living - mud width 3 offset 1
+door living - util width 2.67 offset 2
+entry mud south width 3 offset 0.5
+entry living south width 3 offset 6
+window living south width 10 offset 8
+window living west width 8 offset 6
+"""
+    r = compile_source(src)
+    assert "MUDROOM_SHAPE" in _codes(r, "warning")
+    msg = next(d for d in r.warnings if d.code == "MUDROOM_SHAPE").message
+    assert "only 4 ft wide" in msg
+
+
+def test_wide_but_elongated_mudroom_is_an_info_nudge():
+    # 6 ft wide holds the bench and walkway, but 6 x 18 (3:1) reads corridor.
+    src = """\
+plan "Long mud"
+envelope 30 x 18
+ceiling 9
+room living: living at 0,0 size 24 x 18
+room mud: mudroom at 24,0 size 6 x 18
+door living - mud width 3 offset 1
+entry mud south width 3 offset 1.5
+entry living south width 3 offset 6
+window living south width 10 offset 8
+window living west width 8 offset 5
+"""
+    r = compile_source(src)
+    assert "MUDROOM_SHAPE" in _codes(r, "info")
+    assert "MUDROOM_SHAPE" not in _codes(r, "warning")
+
+
+def test_compact_mudroom_is_silent():
+    # The classic 6 x 8 drop zone passes without comment.
+    src = """\
+plan "Good mud"
+envelope 30 x 24
+ceiling 9
+room living: living at 0,0 size 24 x 24
+room mud: mudroom at 24,0 size 6 x 8
+room laundry: laundry at 24,8 size 6 x 16
+door living - mud width 3 offset 1
+door living - laundry width 2.67 offset 2
+entry mud south width 3 offset 1.5
+entry living south width 3 offset 6
+window living south width 12 offset 8
+"""
+    r = compile_source(src)
+    assert "MUDROOM_SHAPE" not in _codes(r, "info")
 
 
 # --- GARAGE_BEDROOM (warning) ------------------------------------------------

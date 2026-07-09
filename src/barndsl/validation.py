@@ -136,7 +136,38 @@ R304_HABITABLE_TYPES: frozenset[RoomType] = HABITABLE_TYPES - {
     RoomType.BEDROOM,
     RoomType.KITCHEN,
 }
-MAX_ROOM_ASPECT = 3.0  # a habitable room longer than this (long:short) is awkward
+MAX_ROOM_ASPECT = 3.0  # default: a habitable room longer than this (long:short) is awkward
+#: Per-type elongation ceilings (long:short) above which ROOM_PROPORTION fires,
+#: overriding :data:`MAX_ROOM_ASPECT`. A bedroom has to hold a bed *and* a
+#: walk-around, so a 2:1 "tunnel" bedroom (an 8×16, say) is already awkward well
+#: before the generic 3:1 bar — tighten it so the lint sees the tunnel bedroom the
+#: score is penalising. Other habitable rooms keep the 3:1 default.
+MAX_ROOM_ASPECT_BY_TYPE: dict[RoomType, float] = {
+    RoomType.BEDROOM: 1.8,
+}
+#: A mudroom's job needs floor, not length: a bench (~1.5 ft) plus a 3 ft
+#: walkway means anything under ~5 ft wide can't hold the drop zone it exists
+#: for, and past ~2.5:1 it reads as a corridor wearing a mudroom label.
+#: Mudrooms aren't habitable, so ROOM_PROPORTION never sees them (MUDROOM_SHAPE).
+MIN_MUDROOM_WIDTH = 5.0
+MAX_MUDROOM_ASPECT = 2.5
+#: A single *concentrated* patch of unassigned footprint this large (sq ft) is a
+#: void — a real hole in the plan (an unfinished room, a mis-sized neighbour), not
+#: the diffuse slack AREA_UNUSED measures. AREA_UNUSED only speaks below 85%
+#: coverage and sums *all* slack, so a room-sized rectangle of dead space on an
+#: otherwise well-covered footprint (95%+) is invisible to it; this fires on the
+#: largest connected gap regardless of overall coverage. Severity is tiered:
+#: at or above MIN_CONCENTRATED_VOID — a walk-in closet / powder room's worth
+#: of floor — the void is an ERROR (an enclosed pocket you'd frame, roof and
+#: pour foundation around, that no one can enter, is not a buildable intent);
+#: between MIN_VOID_NOTE and that bar it is an INFO nudge. Below MIN_VOID_NOTE
+#: — wall-thickness slack between rooms, a few sq ft — it never speaks. (The
+#: error bar was 70 at first, "just below a small bedroom", until a live agent
+#: run shipped a 6x11 = 66 sq ft dead pocket that slid under it.) Verified
+#: against every shipped example compiled with its real base_dir: the only
+#: void anywhere is the composed v2 showcase's, fixed alongside this change.
+MIN_CONCENTRATED_VOID = 45.0
+MIN_VOID_NOTE = 20.0
 MIN_SOUND_BUFFER_WALL = 4.0  # a bedroom-bedroom shared wall this long wants a buffer
 #: Minimum plan overlap (sq ft) between an upper-floor wet room and a wet room
 #: below for their plumbing to share one straight vertical waste stack. A mere
@@ -1575,6 +1606,78 @@ def _validate_porch_guards(plan: Barndominium, add) -> None:
         )
 
 
+def _largest_void(plan: Barndominium) -> tuple[float, tuple[float, float, float, float] | None]:
+    """The largest *connected* patch of footprint assigned to no room, and its
+    bounding box, on the ground floor.
+
+    Coordinate-compress every footprint + room edge into a cell grid (exact for
+    axis-aligned rectangles, like ``footprint_area``), mark each cell inside the
+    footprint but inside no room, then find the largest 4-connected component of
+    those cells. Returns ``(0.0, None)`` when the footprint is fully covered.
+
+    Every declared room counts as coverage — including porch-type rooms: an
+    in-envelope porch is intentional, claimed space, not a hole in the plan.
+    """
+    secs = plan.footprint_sections()
+    if not secs:
+        return 0.0, None
+    rooms = [r for r in plan.rooms if r.level == 0]
+    xs: set[float] = set()
+    ys: set[float] = set()
+    for x, y, w, l in secs:
+        xs.update((x, x + w))
+        ys.update((y, y + l))
+    for r in rooms:
+        xs.update((r.x, r.x2))
+        ys.update((r.y, r.y2))
+    xg = sorted(xs)
+    yg = sorted(ys)
+    nx, ny = len(xg) - 1, len(yg) - 1
+    if nx <= 0 or ny <= 0:
+        return 0.0, None
+
+    # open[i][j]: cell centre is inside the footprint but covered by no room —
+    # i.e. an unassigned cell we might merge into a void.
+    open_cell = [[False] * ny for _ in range(nx)]
+    for i in range(nx):
+        cx = (xg[i] + xg[i + 1]) / 2.0
+        for j in range(ny):
+            cy = (yg[j] + yg[j + 1]) / 2.0
+            if not point_in_footprint(secs, cx, cy):
+                continue
+            if any(r.x <= cx <= r.x2 and r.y <= cy <= r.y2 for r in rooms):
+                continue
+            open_cell[i][j] = True
+
+    seen = [[False] * ny for _ in range(nx)]
+    best_area = 0.0
+    best_bbox: tuple[float, float, float, float] | None = None
+    for i0 in range(nx):
+        for j0 in range(ny):
+            if seen[i0][j0] or not open_cell[i0][j0]:
+                continue
+            stack = [(i0, j0)]
+            area = 0.0
+            minx = miny = math.inf
+            maxx = maxy = -math.inf
+            while stack:
+                i, j = stack.pop()
+                if seen[i][j] or not open_cell[i][j]:
+                    continue
+                seen[i][j] = True
+                area += (xg[i + 1] - xg[i]) * (yg[j + 1] - yg[j])
+                minx, maxx = min(minx, xg[i]), max(maxx, xg[i + 1])
+                miny, maxy = min(miny, yg[j]), max(maxy, yg[j + 1])
+                for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ni, nj = i + di, j + dj
+                    if 0 <= ni < nx and 0 <= nj < ny and not seen[ni][nj]:
+                        stack.append((ni, nj))
+            if area > best_area:
+                best_area = area
+                best_bbox = (minx, miny, maxx, maxy)
+    return best_area, best_bbox
+
+
 def _validate_geometry(plan: Barndominium, add) -> None:
     for room in plan.rooms:
         if not all(math.isfinite(v) for v in (room.x, room.y, room.width, room.length)):
@@ -1733,6 +1836,39 @@ def _validate_geometry(plan: Barndominium, add) -> None:
                 )
             )
 
+        # A *concentrated* void — one connected room-sized patch of dead space —
+        # slips past AREA_UNUSED whenever overall coverage is high (it only speaks
+        # below 85% and sums diffuse slack). Flag the largest single gap on its own
+        # so an 80 sq ft rectangle of nothing on a 95%-covered footprint is still
+        # visible. Severity is tiered: in a substantially-tiled plan (>= 85%
+        # coverage — the same bar that silences AREA_UNUSED) a room-sized void is
+        # an ERROR — a house has no void areas; you'd frame, roof and pour
+        # foundation around dead space no one can even enter. A smaller pocket,
+        # or any void in a sparse plan (an unfinished sketch that AREA_UNUSED is
+        # already nagging), stays an INFO nudge.
+        if frac <= 1.001:
+            void_area, bbox = _largest_void(plan)
+            if void_area >= MIN_VOID_NOTE and bbox is not None:
+                x1, y1, x2, y2 = bbox
+                sev = (
+                    Severity.ERROR
+                    if void_area >= MIN_CONCENTRATED_VOID and frac >= 0.85
+                    else Severity.INFO
+                )
+                add(
+                    Issue(
+                        sev,
+                        "AREA_VOID",
+                        f"A single {_f(void_area)} sq ft patch of the footprint "
+                        f"(around {_f(x1)},{_f(y1)} to {_f(x2)},{_f(y2)}) is "
+                        "assigned to no room — a concentrated void, not diffuse slack.",
+                        hint="Every enclosed square foot must belong to a room: "
+                        "extend an adjacent room to cover the patch, or declare a "
+                        "room there (storage, closet, pantry, utility), or shrink "
+                        "the envelope so the footprint has no dead pocket.",
+                    )
+                )
+
 
 def _validate_accessibility(plan: Barndominium, add) -> None:
     """Opt-in accessibility / aging-in-place nudges (ANSI A117.1-flavoured).
@@ -1849,13 +1985,17 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
 
     Uses the clear (finish-face) interior, so the check reflects the built room,
     not the nominal rectangle. A bath that can't fit toilet/lav/tub with
-    clearances is a ``BATH_CLEARANCE`` warning; a cramped kitchen is a
+    clearances is a ``BATH_CLEARANCE`` warning; a laundry that can't load its
+    washer/dryer is a ``LAUNDRY_FIT`` warning; a cramped kitchen is a
     ``KITCHEN_FIT`` info.
     """
     from .fixtures import fixtures_fit  # lazy: fixtures imports back from here
 
     for room in plan.rooms:
-        if room.type not in (RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN):
+        if room.type not in (
+            RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN,
+            RoomType.LAUNDRY,
+        ):
             continue
         clear_w, clear_l = clear_dimensions(plan, room)
         ok, reason = fixtures_fit(room.type, clear_w, clear_l)
@@ -1870,6 +2010,19 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
                     room=room.id,
                     hint="Enlarge it so a sink, range and refrigerator fit with a "
                     "working aisle.",
+                )
+            )
+        elif room.type is RoomType.LAUNDRY:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "LAUNDRY_FIT",
+                    f"Laundry '{room.id}' can't fit its washer/dryer with a "
+                    f"working aisle: {reason}.",
+                    room=room.id,
+                    hint="A laundry wants ~5.5 ft of clear depth — a washer/dryer "
+                    "(2.25 ft deep) plus a 3 ft aisle to load them; widen the "
+                    "room or fold it into a bigger mudroom/utility.",
                 )
             )
         else:
@@ -4114,7 +4267,8 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
         if room.type in HABITABLE_TYPES:
             short = room.min_dimension
             long = max(room.width, room.length)
-            if short > EPSILON and long / short > MAX_ROOM_ASPECT:
+            limit = MAX_ROOM_ASPECT_BY_TYPE.get(room.type, MAX_ROOM_ASPECT)
+            if short > EPSILON and long / short > limit:
                 add(
                     Issue(
                         Severity.INFO,
@@ -4123,10 +4277,54 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
                         f"{_f(room.width)} x {_f(room.length)} ({long / short:.1f}:1); "
                         "very elongated rooms are hard to furnish.",
                         room=room.id,
-                        hint="Aim for a more rectangular footprint (under ~3:1) — "
-                        "widen the short side or split the space.",
+                        hint=f"Aim for a more rectangular footprint (under ~{limit:g}:1) "
+                        "— widen the short side or split the space.",
                     )
                 )
+
+    # 8b. Mudroom shape: not habitable, so the check above never sees one — but a
+    #     long, skinny mudroom is a corridor wearing a mudroom label. Its job is a
+    #     drop zone: a bench and hooks (~1.5 ft) plus a 3 ft walkway wants >= 5 ft
+    #     of width and a compact footprint (a 6 x 8 is the classic). Severity is
+    #     tiered: under the width bar the room CANNOT do its job (a bench plus a
+    #     walkway physically doesn't fit) — that's a WARNING, not a taste note;
+    #     wide-enough-but-elongated stays an INFO nudge.
+    for room in plan.rooms:
+        if room.type is not RoomType.MUDROOM:
+            continue
+        short = room.min_dimension
+        long_side = max(room.width, room.length)
+        if short <= EPSILON:
+            continue
+        aspect = long_side / short
+        tight = short + EPSILON < MIN_MUDROOM_WIDTH
+        skinny = aspect > MAX_MUDROOM_ASPECT
+        if not (tight or skinny):
+            continue
+        if tight and skinny:
+            why = (
+                f"only {_f(short)} ft wide and {aspect:.1f}:1 — a corridor, "
+                "not a drop zone"
+            )
+        elif tight:
+            why = (
+                f"only {_f(short)} ft wide — a 1.5 ft bench plus a 3 ft walkway "
+                "doesn't fit"
+            )
+        else:
+            why = f"{aspect:.1f}:1 — a corridor, not a drop zone"
+        add(
+            Issue(
+                Severity.WARNING if tight else Severity.INFO,
+                "MUDROOM_SHAPE",
+                f"Mudroom '{room.id}' is {_f(room.width)} x {_f(room.length)}, {why}.",
+                room=room.id,
+                hint=f"A working mudroom is >= {MIN_MUDROOM_WIDTH:g} ft wide and "
+                f"compact (near 6 x 8, under ~{MAX_MUDROOM_ASPECT:g}:1); give the "
+                "surplus length to the shop, laundry or pantry, or label the "
+                "strip what it is (a hallway).",
+            )
+        )
 
 
 def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
@@ -4151,6 +4349,52 @@ def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
                         f"there instead, e.g. `door {g.id} - <mudroom_or_hall>`.",
                     )
                 )
+
+
+def _dq_garage_passthrough(plan: Barndominium, graph, by_id, add) -> None:
+    # 9b. Garage/shop as a *circulation spine*. GARAGE_BEDROOM catches a garage
+    #     that opens straight into a bedroom (one hop); this catches the subtler,
+    #     more dangerous case where the garage/shop is the ONLY interior route
+    #     from the public core to the bedrooms — you must cross the vehicle bay
+    #     (fumes, cold, no fire separation on the path) to get from the living
+    #     room to bed, even though no single door is garage↔bedroom. Remove all
+    #     garage/shop rooms from the door graph: if any bedroom is then cut off
+    #     from the component holding the public rooms, the garage was a cut vertex
+    #     on that route. A circulation-*shape* defect reachability (NO_ACCESS)
+    #     can't see, so it warrants a WARNING.
+    garages = {r.id for r in plan.rooms if r.type in GARAGE_TYPES}
+    if not garages:
+        return
+    publics = {r.id for r in plan.rooms if r.type in PUBLIC_TYPES}
+    beds = {r.id for r in plan.rooms if r.type is RoomType.BEDROOM}
+    if not publics or not beds:
+        return
+    # Drop the garages and see what's still connected. A detached shop with no
+    # interior door isn't a cut vertex — removing an isolated node leaves the
+    # public/bedroom components exactly as they were, so it never fires here.
+    comps = _components_excluding(graph, garages)
+    public_comp = next((c for c in comps if c & publics), None)
+    if public_comp is None:
+        return  # public rooms are only reachable through the garage themselves
+    severed = sorted(b for b in beds if b not in public_comp)
+    if not severed:
+        return
+    names = ", ".join(f"'{b}'" for b in severed)
+    plural = "s" if len(severed) > 1 else ""
+    add(
+        Issue(
+            Severity.WARNING,
+            "GARAGE_PASSTHROUGH",
+            f"The only interior route from the living core to bedroom{plural} "
+            f"{names} passes through a garage/shop — you must cross the vehicle "
+            "bay to reach the sleeping rooms.",
+            room=severed[0],
+            hint="Route the bedrooms off a hallway that reaches the public core "
+            "without crossing the garage/shop — e.g. add a `door` from the "
+            "bedroom hall directly to a living/kitchen/dining room, so the "
+            "garage is a dead-end bay off the plan, not a corridor through it.",
+        )
+    )
 
 
 def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
@@ -4432,6 +4676,7 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_window_partition,
     _dq_room_proportion,
     _dq_garage_bedroom,
+    _dq_garage_passthrough,
     _dq_garage_no_entry,
     _dq_garage_separation,
     _dq_garage_door,

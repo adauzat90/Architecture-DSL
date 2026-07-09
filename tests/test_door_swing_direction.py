@@ -8,7 +8,12 @@ placer change that keeps auto-placed fixtures out of a door's arc.
 from __future__ import annotations
 
 from barndsl import compile_source
-from barndsl.fixtures import _door_swing_rects, _rects_overlap, plan_room_fixtures
+from barndsl.fixtures import (
+    _door_swing_rects,
+    _rects_overlap,
+    plan_room_fixtures,
+    resolve_room_fixtures,
+)
 
 
 def _codes(src: str) -> set[str]:
@@ -140,3 +145,85 @@ door hall - bath into bath offset 2
         assert not any(
             _rects_overlap((f.x, f.y, f.width, f.length), b) for b in keepouts
         ), f"{f.kind} sits in the door swing"
+
+
+# --- the DRAWN layout (resolve path) is door-aware too -------------------------
+# resolve_room_fixtures is what the SVG/DXF/3D consume. It used to lay its seeds
+# door-blind, so a drawing could show a door leaf sweeping through a toilet or a
+# tub even while plan_room_fixtures (the check-side placer) avoided it.
+
+
+def _no_swing_overlap(plan, room) -> None:
+    keepouts = _door_swing_rects(plan, room)
+    assert keepouts, "expected the hinged door to reserve an arc"
+    for f in resolve_room_fixtures(plan, room):
+        assert not any(
+            _rects_overlap((f.x, f.y, f.width, f.length), b) for b in keepouts
+        ), f"{f.kind} is drawn in the door swing"
+
+
+def test_drawn_seed_fixtures_stay_out_of_an_interior_door_swing():
+    src = """envelope 40 x 30
+room hall: hallway at 0,0 size 6 x 30
+room bath: bathroom east-of hall size 9 x 11
+door hall - bath into bath offset 2
+"""
+    plan = compile_source(src).plan
+    _no_swing_overlap(plan, plan.room("bath"))
+
+
+def test_drawn_seed_fixtures_stay_out_of_an_entry_swing():
+    # An exterior entry swings inward too: the laundry's washer/dryer seeds must
+    # slide clear of its arc, not park inside it.
+    src = """envelope 40 x 30
+room laundry: laundry at 0,0 size 10 x 10
+room living: living east-of laundry size 30 x 30
+door laundry - living
+entry laundry south width 3 offset 1
+"""
+    plan = compile_source(src).plan
+    _no_swing_overlap(plan, plan.room("laundry"))
+
+
+def test_overhead_door_reserves_no_keepout():
+    src = """envelope 40 x 30
+room shop: garage at 0,0 size 20 x 30
+room mud: mudroom east-of shop size 20 x 30
+door shop south overhead width 10 offset 0
+door shop - mud
+"""
+    plan = compile_source(src).plan
+    shop = plan.room("shop")
+    # The only arc in the shop is the interior door's — the overhead adds none.
+    assert len(_door_swing_rects(plan, shop)) == 1
+
+
+def test_authored_wall_fixture_slides_clear_of_a_swing():
+    # An authored piece placed by wall (no `at`) auto-slots like a seed: the
+    # first free run on the wall PAST the door's arc.
+    src = """envelope 40 x 30
+room hall: hallway at 0,0 size 6 x 30
+room office: office east-of hall size 12 x 12
+door hall - office into office offset 2
+fixture wardrobe in office wall W
+"""
+    plan = compile_source(src).plan
+    office = plan.room("office")
+    keepouts = _door_swing_rects(plan, office)
+    ward = next(f for f in resolve_room_fixtures(plan, office) if f.kind == "wardrobe")
+    assert not any(
+        _rects_overlap((ward.x, ward.y, ward.width, ward.length), b) for b in keepouts
+    )
+
+
+def test_explicit_at_in_a_swing_is_a_fixture_door_warning():
+    # Only an explicit `at x,y` can still park a fixture in a swing — and doing
+    # so is now a WARNING (the leaf physically hits it), not a whisper.
+    src = """envelope 40 x 30
+room hall: hallway at 0,0 size 6 x 30
+room office: office east-of hall size 12 x 12
+door hall - office into office offset 2
+fixture wardrobe in office at 0.5,2.5
+"""
+    res = compile_source(src)
+    assert "FIXTURE_DOOR" in {d.code for d in res.warnings}

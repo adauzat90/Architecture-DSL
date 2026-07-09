@@ -183,9 +183,11 @@ def _satisfied() -> CritiqueSpec:
 
 
 def test_design_returns_the_best_scoring_iteration_not_the_last():
-    """broken → clean → broken again: the loop must hand back iteration 2."""
+    """broken → clean → broken again: the loop must hand back iteration 2. (Each
+    intended-failed round scripts TWO broken sources — the write plus its
+    in-round repair retry, which must also fail for the round to stay failed.)"""
     client = FakeClient(
-        sources=[BROKEN, CLEAN, BROKEN],
+        sources=[BROKEN, BROKEN, CLEAN, BROKEN, BROKEN],
         critiques=[_unsatisfied("Add a porch.")],  # only iter 2 has a plan to review
     )
     result = _agent(client).design("a small cottage", max_iterations=3, target_score=None)
@@ -266,15 +268,18 @@ def test_render_feedback_carries_the_score_causes():
 
 
 def test_render_feedback_appends_the_geometry_pack():
-    from barndsl.introspect import plan_summary, summary_text
+    from barndsl.introspect import plan_summary, render_ascii_plan, summary_text
 
     result = compile_source(MEDIOCRE)
     text = render_feedback(result)
     assert "  living living L0 0,0 18 x 24 | south north west" in text
     assert "Adjacency (door edges): living-bed (swing 2.67)" in text
     assert "Unplaced footprint (L0): none" in text
-    # verbatim the block `barndsl inspect` prints — one source of truth
-    assert text.endswith(summary_text(plan_summary(result.plan)))
+    # the geometry pack rides verbatim — one source of truth with `barndsl inspect`
+    assert summary_text(plan_summary(result.plan)) in text
+    # the ASCII plan view is appended after it (the drawing the table hides)
+    assert text.endswith(render_ascii_plan(result.plan))
+    assert "PLAN VIEW (north up," in text
 
 
 def test_render_feedback_without_a_plan_has_no_geometry_pack():
@@ -508,7 +513,8 @@ def test_solver_seed_is_iteration_0_and_wins_when_the_llm_never_beats_it():
         d.code == "PROGRAM_MISMATCH" for d in seed.result.warnings
     )
 
-    client = FakeClient(sources=[BROKEN, BROKEN])  # LLM never produces a plan
+    # LLM never produces a plan (each round: the write + its failed in-round retry)
+    client = FakeClient(sources=[BROKEN] * 4)
     result = _agent(client).design(
         "a small barndo", max_iterations=2, target_score=None,
         seed_with_solver=_solver_brief(),
@@ -548,7 +554,7 @@ def test_seed_accepts_a_textual_brief():
         "adjacent living kitchen bed1\n"
         "adjacent bed1 bath\n"
     )
-    client = FakeClient(sources=[BROKEN])
+    client = FakeClient(sources=[BROKEN, BROKEN])  # the write + its failed retry
     result = _agent(client).design(
         "a small barndo", max_iterations=1, target_score=None,
         seed_with_solver=brief_text,
@@ -558,8 +564,18 @@ def test_seed_accepts_a_textual_brief():
 
 
 def test_seed_degrades_gracefully_when_the_solver_yields_nothing():
-    """An unusable solver spec leaves the loop exactly as it is without seeding."""
-    client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    """An unusable solver spec leaves the loop exactly as it is without seeding.
+
+    The seed brief has no bedroom-count signal, so it now reaches the LLM-brief
+    fallback; the first scripted reply is not a parseable brief2, so that path
+    returns None and the loop runs unseeded on the remaining rounds. The first
+    scripted source is consumed by the (failed) brief-translation call, so the two
+    LLM rounds draw the two that follow.
+    """
+    client = FakeClient(
+        sources=["not a brief either", MEDIOCRE, CLEAN],
+        critiques=[_unsatisfied(), _satisfied()],
+    )
     result = _agent(client).design(
         "a starter home", max_iterations=2, target_score=None,
         seed_with_solver="this is not a valid brief statement",
@@ -576,31 +592,122 @@ def test_seed_falsy_is_todays_behaviour():
     assert [s.iteration for s in result.history] == [1]
 
 
+# -- prose-brief seeding (natural language, not the structured grammar) --------
+
+
+def _room_type_counts(step):
+    """{room-type value: count} for a scored solver-seed step's plan."""
+    counts: dict[str, int] = {}
+    for r in step.result.plan.rooms:
+        counts[r.type.value] = counts.get(r.type.value, 0) + 1
+    return counts
+
+
+def test_prose_brief_seeds_a_compiling_scored_plan():
+    """A natural-language brief the structured parser can't read now seeds the
+    loop: the derived program compiles clean and carries the expected rooms."""
+    from barndsl.agent import _solver_seed_step
+
+    step = _solver_seed_step(
+        "3 bed 2 bath barndominium around 2000 sqft with an open "
+        "living-kitchen-dining core and a shop bay"
+    )
+    assert step is not None and step.iteration == 0 and step.result.ok
+    assert step.score is not None and step.score.total > 0
+    counts = _room_type_counts(step)
+    # 3 bedrooms, 2 baths (ensuite + shared), the open core, and the shop bay the
+    # brief explicitly asked for (kept because it is score-neutral, verified).
+    assert counts.get("bedroom") == 3
+    assert counts.get("bathroom") == 2
+    assert counts.get("living") == 1 and counts.get("kitchen") == 1
+    assert counts.get("dining") == 1  # mentioned + beds >= 3
+    assert counts.get("shop") == 1
+
+
+def test_prose_brief_area_scales_the_target_total():
+    """The stated floor area scales every room, so a smaller sqft brief yields a
+    smaller total program than an otherwise-identical larger one."""
+    from barndsl.agent import _brief2_from_prose
+
+    small = _brief2_from_prose("3 bed 2 bath 1400 sqft")
+    big = _brief2_from_prose("3 bed 2 bath 2600 sqft")
+    assert small is not None and big is not None
+    small_total = sum(r.area for r in small.rooms)
+    big_total = sum(r.area for r in big.rooms)
+    assert big_total > small_total
+    # The scale tracks the stated area (clamped to [0.7, 1.6]); 1400 lands near it.
+    assert 1200 < small_total < 1700
+
+
+def test_prose_one_bath_and_no_dining_for_a_small_brief():
+    """A 2-bed 1-bath brief gets one shared bath (no ensuite) and no dining room
+    (not mentioned, and under the 3-bed dining threshold)."""
+    from barndsl.agent import _solver_seed_step
+
+    step = _solver_seed_step("2 bed 1 bath cabin")
+    assert step is not None and step.result.ok
+    counts = _room_type_counts(step)
+    assert counts.get("bedroom") == 2
+    assert counts.get("bathroom") == 1
+    assert "dining" not in counts
+
+
+def test_prose_brief_without_a_bed_count_yields_no_candidates():
+    """Nonsense (no bedroom count) is not a program: no prose brief, no seed."""
+    from barndsl.agent import (
+        _brief2_from_prose,
+        _solver_candidate_sources,
+        _solver_seed_step,
+    )
+
+    assert _brief2_from_prose("hello world") is None
+    assert _solver_candidate_sources("hello world") == []
+    assert _solver_seed_step("hello world") is None
+
+
+def test_structured_brief_keeps_parse_brief2_precedence(monkeypatch):
+    """A valid structured brief is parsed by parse_brief2 directly; the prose
+    fallback is never consulted, so structured input keeps precedence."""
+    import barndsl.agent as agent_mod
+
+    structured = (
+        'plan "Struct"\n'
+        "room living: living area 360\n"
+        "room kitchen: kitchen area 200\n"
+        "room bed1: bedroom area 170\n"
+        "room bath: bathroom area 70\n"
+        "adjacent living kitchen bed1\n"
+        "adjacent bed1 bath\n"
+    )
+
+    def _boom(_text):  # the prose fallback must not run for a structured brief
+        raise AssertionError("_brief2_from_prose called for a structured brief")
+
+    monkeypatch.setattr(agent_mod, "_brief2_from_prose", _boom)
+    srcs = agent_mod._solver_candidate_sources(structured)
+    assert srcs  # parse_brief2 handled it; the three v2 topologies produced DSL
+
+
 # -- regression legibility in the feedback header -----------------------------
 
 
-def test_feedback_stays_coherent_after_a_failed_iteration():
-    """CLEAN → BROKEN → CLEAN: after the broken round the prompt shows the best
-    valid source paired with ITS OWN feedback, names the discarded attempt, and
-    quotes the fatal diagnostics only under an attribution that says they belong
-    to the discarded source — never captioned as feedback on the shown DSL."""
+def test_failed_round_carries_its_own_source_and_diagnostics_for_repair():
+    """CLEAN, then a broken round-2 write: the NEXT prompt — round 2's in-round
+    repair retry — carries the FAILED source verbatim (so "reproduce it, fix
+    line N" is coherent) paired with that source's OWN diagnostics — it does NOT
+    revert to the best-valid source, which would invite a redesign."""
     client = FakeClient(
         sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
     )
     _agent(client).design("a cottage", max_iterations=3, target_score=None)
 
-    revision = client.stream_prompts[2]  # the prompt after the broken round 2
-    assert "did not compile and was DISCARDED" in revision
-    assert "best valid iteration (1" in revision
-    # The fatal diagnostics appear, but only AFTER the attribution line.
-    attribution = "Fatal diagnostics from the discarded attempt"
-    assert attribution in revision
-    assert revision.index("BAD_NUMBER") > revision.index(attribution)
-    # The feedback block above the attribution describes the CLEAN source: no
-    # NO_PROGRAM info (CLEAN declares a program) and no fatal-error score.
-    described = revision[: revision.index(attribution)]
-    assert "BAD_NUMBER" not in described
-    assert "NO_PROGRAM" not in described
+    revision = client.stream_prompts[2]  # the prompt after round 2's broken write
+    # Repair wording, not the old discard/best-valid revert.
+    assert "Do NOT redesign" in revision
+    assert "did not compile and was DISCARDED" not in revision
+    # The prior shown is the broken source, and its error rides the feedback.
+    assert 'plan "Broken"' in revision
+    assert "BAD_NUMBER" in revision
 
 
 def test_regression_line_absent_when_render_feedback_has_no_best_prior():
@@ -618,19 +725,20 @@ def test_render_feedback_regression_line_for_a_lower_score():
     assert "iteration 2" in text
 
 
-def test_revision_reverts_to_the_best_valid_source_after_a_broken_round():
-    """After a broken round the loop revises from the best VALID source, not the
-    broken one it just produced (a behaviour change from always-latest)."""
+def test_repair_round_revises_the_failed_source_not_the_best_valid():
+    """After a broken write the loop repairs the broken source in place (here in
+    the in-round retry); it does NOT swap in the best VALID source (that would
+    let the model redesign, the convergence regression repair mode fixes)."""
     client = FakeClient(
         sources=[CLEAN, BROKEN, CLEAN], critiques=[_unsatisfied(), _satisfied()]
     )
     _agent(client).design("a cottage", max_iterations=3, target_score=None)
 
     revision = client.stream_prompts[2]
-    assert "banana" not in revision.split("Fatal diagnostics")[0]
-    assert 'plan "Stillwater Cottage"' in revision  # CLEAN is carried forward
-    # Nothing above the attribution claims the shown (valid) source failed.
-    assert "does not compile" not in revision.split("Fatal diagnostics")[0]
+    # The failed source is the prior, NOT the earlier clean plan.
+    assert "banana" in revision  # the broken source is carried forward
+    assert 'plan "Stillwater Cottage"' not in revision
+    assert "Do NOT redesign" in revision
 
 
 # -- refinement seed (seed_source) --------------------------------------------
@@ -951,14 +1059,126 @@ def test_the_embedded_example_plan_compiles_perfect():
     assert design_score(result).total == 100.0
 
 
+def test_the_lead_hall_spine_example_compiles_with_no_errors_or_warnings():
+    """The lead worked example (_EXAMPLE_HALL_SPINE, "Birch Hollow") carries the
+    added `zone`/`suite`/`require` declarations, so it must still compile with zero
+    errors AND zero warnings (infos tolerated). No exact score is asserted here —
+    the score is being recalibrated concurrently — only the diagnostic counts."""
+    from barndsl.agent import _EXAMPLE_HALL_SPINE
+    from barndsl.validation import Severity
+
+    result = compile_source(_EXAMPLE_HALL_SPINE)
+    assert result.plan is not None
+    bad = [
+        d
+        for d in result.diagnostics
+        if d.severity in (Severity.ERROR, Severity.WARNING)
+        and not getattr(d, "accepted", False)
+    ]
+    assert not bad, [(d.severity.name, d.code) for d in bad]
+
+
+def test_embedded_lshape_example_pins_the_gallery_file_and_compiles_clean():
+    """The `wing` few-shot is a byte-for-byte copy of examples/gallery/lshape.barn
+    (a test-pinned clean plan) — the pin makes the copy unable to drift — and it
+    compiles with zero diagnostics. Read the gallery file as UTF-8 (its real
+    encoding; the em-dashes in its comments are multibyte) so the comparison is
+    portable off a cp1252 Windows locale, matching how Python parses the source."""
+    from barndsl.agent import _EXAMPLE_LSHAPE
+
+    assert _EXAMPLE_LSHAPE == (GALLERY / "lshape.barn").read_text(encoding="utf-8")
+    result = compile_source(_EXAMPLE_LSHAPE)
+    assert result.plan is not None
+    assert not result.diagnostics, [d.code for d in result.diagnostics]
+
+
+def test_embedded_two_story_example_pins_the_gallery_file_and_compiles_clean():
+    """The `level`/`stair` few-shot is a byte-for-byte copy of
+    examples/gallery/two_story.barn. It carries a documented `accept
+    STAIR_HANDRAIL` pragma (a rail the DSL can't draw), so its one diagnostic is
+    accepted, not active — assert no *unaccepted* diagnostic survives."""
+    from barndsl.agent import _EXAMPLE_TWO_STORY
+
+    assert _EXAMPLE_TWO_STORY == (GALLERY / "two_story.barn").read_text(encoding="utf-8")
+    result = compile_source(_EXAMPLE_TWO_STORY)
+    assert result.plan is not None
+    active = [d for d in result.diagnostics if not getattr(d, "accepted", False)]
+    assert not active, [d.code for d in active]
+
+
 def test_generate_system_teaches_the_anchor_rule_and_shows_the_example():
-    from barndsl.agent import _EXAMPLE_PLAN, _GENERATE_SYSTEM
+    from barndsl.agent import (
+        _EXAMPLE_HALL_SPINE,
+        _EXAMPLE_LSHAPE,
+        _EXAMPLE_TWO_STORY,
+        _GENERATE_SYSTEM,
+    )
+    from barndsl.compiler import DSL_REFERENCE
 
     assert "ANCHOR RULE" in _GENERATE_SYSTEM
     assert "TILE, THEN CONNECT" in _GENERATE_SYSTEM
-    assert _EXAMPLE_PLAN in _GENERATE_SYSTEM
+    # Furnishing: the craft block rides both prompts (the critic can ask for a
+    # bed the generator knows how to place), and the lead example models it.
+    from barndsl.agent import _CRITIQUE_SYSTEM
+
+    assert "FURNISH THE KEY ROOMS" in _GENERATE_SYSTEM
+    assert "FURNISH THE KEY ROOMS" in _CRITIQUE_SYSTEM
+    assert "fixture bed_queen in master" in _EXAMPLE_HALL_SPINE
+    # The hall-spine plan leads and the L-shaped `wing` plan follows; the
+    # two-story example is deliberately NOT in the prompt (kept as a pinned
+    # constant only), to make room for the design-process block.
+    assert _EXAMPLE_HALL_SPINE in _GENERATE_SYSTEM
+    assert _EXAMPLE_LSHAPE in _GENERATE_SYSTEM
+    assert _EXAMPLE_TWO_STORY not in _GENERATE_SYSTEM
     # The strict output contract: exactly one fenced block, complete source.
     assert "exactly ONE ```barn code block" in _GENERATE_SYSTEM
+    # Ordering: worked examples precede the rules -> process -> craft, the full
+    # grammar comes LAST under its header, and the program mandate + output
+    # contract sit at the very end (contract-last is deliberate).
+    order = [
+        _GENERATE_SYSTEM.index(_EXAMPLE_HALL_SPINE),
+        _GENERATE_SYSTEM.index(_EXAMPLE_LSHAPE),
+        _GENERATE_SYSTEM.index("HOW AN ARCHITECT THINKS"),
+        _GENERATE_SYSTEM.index("DESIGN PROCESS (follow when drafting"),
+        _GENERATE_SYSTEM.index("HOW TO PLACE ROOMS"),
+        _GENERATE_SYSTEM.index("FURNISH THE KEY ROOMS"),
+        _GENERATE_SYSTEM.index("FULL GRAMMAR REFERENCE"),
+        _GENERATE_SYSTEM.index(DSL_REFERENCE),
+        _GENERATE_SYSTEM.index("You MUST declare the brief"),
+        _GENERATE_SYSTEM.index("OUTPUT FORMAT (strict)"),
+    ]
+    assert order == sorted(order), order
+
+
+def test_critique_system_shares_the_vocabulary_without_the_grammar():
+    """The critic judges livability off the compiled diagnostics, so it drops the
+    full grammar (it doesn't need it) and instead shares the generator's rulebook
+    — _DESIGN_RULES + _PLACEMENT_CRAFT — so its suggestions land in the same
+    terms. 'senior architect' stays in the lead-in (the loop keys the critique
+    call on it)."""
+    from barndsl.agent import _CRITIQUE_SYSTEM, _DESIGN_RULES, _PLACEMENT_CRAFT
+    from barndsl.compiler import DSL_REFERENCE
+
+    assert "senior architect" in _CRITIQUE_SYSTEM
+    assert DSL_REFERENCE not in _CRITIQUE_SYSTEM
+    assert _DESIGN_RULES in _CRITIQUE_SYSTEM
+    assert _PLACEMENT_CRAFT in _CRITIQUE_SYSTEM
+
+
+def test_design_rules_list_the_quality_codes_the_score_dings():
+    """The QUALITY CODES block names real diagnostic codes (paraphrased) so the
+    generator can avoid them proactively — guard that every code exists in
+    diagnostics.py so a renamed/removed code can't leave a phantom in the prompt."""
+    from barndsl.agent import _DESIGN_RULES
+    from barndsl.diagnostics import REGISTRY
+
+    codes = (
+        "WET_GROUP", "NO_CLOSET", "BED_SOUND", "HALL_DEADEND", "DOOR_CENTERED",
+        "MASTER_ENSUITE", "PRIVATE_PASSTHROUGH", "GARAGE_BEDROOM",
+    )
+    for code in codes:
+        assert code in _DESIGN_RULES, code
+        assert code in REGISTRY, f"{code} not a real diagnostic code"
 
 
 def test_extract_source_trims_prose_around_unfenced_dsl():
@@ -1035,10 +1255,956 @@ def test_critique_prompt_asks_for_at_most_five_suggestions():
 
 
 def test_revision_prompt_pins_smallest_change_and_full_source():
+    # A compiling prior (MEDIOCRE) keeps round 2 in *refine* mode — a failed prior
+    # would force repair mode instead (see the repair-mode tests).
     client = FakeClient(
-        sources=[BROKEN, CLEAN], critiques=[_satisfied()]
+        sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied("a"), _satisfied()]
     )
     _agent(client).design("a cottage", max_iterations=2, target_score=None)
     revision = client.stream_prompts[1]
     assert "COMPLETE revised source" in revision
     assert "smallest revision" in revision
+
+
+# -- transient-API-error retry + best-so-far on failure -----------------------
+# write_source's per-attempt stream call retries a transient network/API error
+# (APIConnectionError, RateLimitError, a 5xx APIStatusError) with bounded
+# backoff; a 4xx propagates. If generation ultimately raises, design() returns
+# the best step so far when any round completed, and re-raises only on round 1.
+
+
+class _FakeError(Exception):
+    """A stand-in for a retryable anthropic exception (avoids constructing the
+    real SDK types, which want an httpx request/response). `status_code` lets a
+    test model a 5xx (retry) vs a 4xx (propagate) APIStatusError."""
+
+    def __init__(self, message: str = "boom", status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _patch_retryable(monkeypatch):
+    """Make `_FakeError` the (only) retryable type and neuter the backoff sleep,
+    so the transient-retry path runs instantly against the fakes."""
+    import barndsl.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_retryable_api_errors", lambda: (_FakeError,))
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+
+
+class _FlakyClient:
+    """A `.messages.stream(...)` that raises a scripted exception (or None for a
+    normal reply) on each generation call. Critique calls always succeed with a
+    satisfied verdict, so a test can isolate generation reliability."""
+
+    def __init__(self, sources, faults, critique: CritiqueSpec | None = None):
+        self._sources = list(sources)
+        self._faults = list(faults)  # one per generation call: exc instance or None
+        self._critique = critique or _satisfied()
+        self.gen_calls = 0
+        self.messages = self
+
+    def stream(self, **kwargs):
+        if "senior architect" in kwargs.get("system", ""):
+            reply = "```json\n" + self._critique.model_dump_json() + "\n```"
+            return _FakeStream(reply)
+        self.gen_calls += 1
+        fault = self._faults.pop(0) if self._faults else None
+        if fault is not None:
+            raise fault
+        return _FakeStream(f"```barn\n{self._sources.pop(0)}```")
+
+
+def test_transient_api_error_is_retried_then_succeeds(monkeypatch):
+    """One APIConnectionError-like fault then a good reply: the retry rescues the
+    write, and the design completes normally."""
+    _patch_retryable(monkeypatch)
+    # First generation call raises, its retry returns CLEAN.
+    client = _FlakyClient(sources=[CLEAN], faults=[_FakeError("connection reset")])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+
+    assert client.gen_calls == 2  # the initial call + one retry
+    assert result.iterations == 1 and result.result.ok
+    assert result.source == result.history[0].source
+
+
+def test_4xx_status_error_propagates_without_retry(monkeypatch):
+    """A 4xx APIStatusError is the caller's bug (bad request), not a transient
+    blip — it must propagate immediately, not be retried."""
+    import pytest
+
+    _patch_retryable(monkeypatch)
+    client = _FlakyClient(sources=[CLEAN], faults=[_FakeError("bad request", status_code=400)])
+    with pytest.raises(_FakeError):
+        _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    assert client.gen_calls == 1  # no retry on a 4xx
+
+
+def test_persistent_failure_after_a_good_round_returns_best_so_far(monkeypatch):
+    """Round 1 succeeds (MEDIOCRE), round 2's generation fails on every retry:
+    design must hand back the best completed iteration, not raise."""
+    _patch_retryable(monkeypatch)
+    # Round 1: normal MEDIOCRE (fault None). Round 2: a persistent fault that
+    # raises on all 3 attempts (initial + 2 retries), so the retry loop exhausts.
+    err = _FakeError("gateway down", status_code=503)
+    client = _FlakyClient(
+        sources=[MEDIOCRE],
+        faults=[None, err, err, err],
+        critique=_unsatisfied(),  # keeps the loop going past round 1
+    )
+    result = _agent(client).design("a home", max_iterations=3, target_score=None)
+
+    # Round 1 landed; round 2 raised after its retries and broke the loop.
+    assert [s.iteration for s in result.history] == [1]
+    assert result.best_iteration == 1
+    assert result.source == result.history[0].source
+    # 3 attempts on round 2 (initial + 2 retries), plus the 1 good round-1 call.
+    assert client.gen_calls == 4
+
+
+def test_persistent_failure_on_round_one_reraises(monkeypatch):
+    """A generation failure that survives its retries on the very first round —
+    with no history to fall back on — must re-raise, not swallow."""
+    import pytest
+
+    _patch_retryable(monkeypatch)
+    client = _FlakyClient(
+        sources=[], faults=[_FakeError("down", status_code=500)] * 3
+    )
+    with pytest.raises(_FakeError):
+        _agent(client).design("a home", max_iterations=3, target_score=None)
+    assert client.gen_calls == 3  # initial + 2 retries, then it gave up
+
+
+def test_retryable_errors_tuple_is_empty_without_anthropic(monkeypatch):
+    """The retryable tuple resolves lazily and degrades to () when anthropic is
+    absent, so catching it never requires the optional extra."""
+    import sys
+
+    from barndsl.agent import _retryable_api_errors
+
+    monkeypatch.setitem(sys.modules, "anthropic", None)  # `import anthropic` fails
+    assert _retryable_api_errors() == ()
+
+
+# -- truncation detection -----------------------------------------------------
+# A reply cut off at the token cap (stop_reason == "max_tokens") must never be
+# silently treated as complete: retry once, and if still truncated fold a
+# deterministic TRUNCATED info into that round's feedback (after scoring).
+
+
+class _TruncStream(_FakeStream):
+    """A `_FakeStream` whose final message reports a `stop_reason`, so
+    write_source can see a max_tokens truncation."""
+
+    def __init__(self, text: str, stop_reason: str | None = None):
+        super().__init__(text)
+        self._stop_reason = stop_reason
+
+    def get_final_message(self):
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=self._text)],
+            stop_reason=self._stop_reason,
+        )
+
+
+class _TruncClient:
+    """Scripts each generation call's (text, stop_reason); critique always
+    succeeds. Lets a test drive first-truncation-then-clean, or double-truncation."""
+
+    def __init__(self, replies, critique: CritiqueSpec | None = None):
+        self._replies = list(replies)  # list of (text, stop_reason)
+        self._critique = critique or _satisfied()
+        self.gen_calls = 0
+        self.messages = self
+
+    def stream(self, **kwargs):
+        if "senior architect" in kwargs.get("system", ""):
+            reply = "```json\n" + self._critique.model_dump_json() + "\n```"
+            return _FakeStream(reply)
+        self.gen_calls += 1
+        text, stop = self._replies.pop(0)
+        return _TruncStream(text, stop)
+
+
+def test_truncated_reply_is_retried_once_then_recovers():
+    """A first reply cut off at the cap is retried; a clean second reply is used,
+    and no TRUNCATED info is folded (the retry recovered)."""
+    from barndsl.agent import BarndoAgent
+
+    client = _TruncClient(
+        replies=[
+            (f"```barn\n{MEDIOCRE}```", "max_tokens"),  # truncated
+            (f"```barn\n{CLEAN}```", "end_turn"),       # clean retry
+        ]
+    )
+    result = BarndoAgent(client=client).design(
+        "a cottage", max_iterations=1, target_score=None
+    )
+    assert client.gen_calls == 2  # the truncated write + its one retry
+    codes = [d.code for d in result.history[0].result.diagnostics]
+    assert "TRUNCATED" not in codes
+    assert 'plan "Stillwater Cottage"' in result.source  # the CLEAN retry won
+
+
+def test_double_truncation_folds_a_truncated_info_into_the_feedback():
+    """When both the write and its retry are truncated, the source is still used
+    but a TRUNCATED info rides that round's feedback into the next prompt."""
+    from barndsl.agent import BarndoAgent
+
+    client = _TruncClient(
+        replies=[
+            (f"```barn\n{MEDIOCRE}```", "max_tokens"),  # truncated
+            (f"```barn\n{MEDIOCRE}```", "max_tokens"),  # retry also truncated
+            (f"```barn\n{CLEAN}```", "end_turn"),       # round 2 recovers
+        ],
+        critique=_unsatisfied(),  # keep the loop past round 1
+    )
+    result = BarndoAgent(client=client).design(
+        "a cottage", max_iterations=2, target_score=None
+    )
+    # 2 generation calls in round 1 (both truncated) + 1 in round 2.
+    assert client.gen_calls == 3
+    step1 = result.history[0]
+    assert "TRUNCATED" in [d.code for d in step1.result.diagnostics]
+    # The info is folded AFTER scoring, so it does not perturb the score contract.
+    from barndsl.agent import _fold_program_nudge
+    from barndsl.score import design_score
+
+    fresh = compile_source(MEDIOCRE)
+    _fold_program_nudge(fresh)
+    assert step1.score.total == design_score(fresh).total  # TRUNCATED did not deduct
+
+
+def test_truncated_reply_folds_message_text_reaching_the_next_prompt():
+    """The TRUNCATED info's message (concise/cut-off wording) reaches the next
+    revision prompt through the normal feedback channel."""
+    from barndsl.agent import BarndoAgent
+
+    prompts: list = []
+
+    class _Recorder(_TruncClient):
+        def stream(self, **kwargs):
+            # Round 1 makes TWO generation calls (truncated write + its retry);
+            # round 2 makes one. Record every generation prompt so the last one
+            # is the round-2 revision that must carry round-1's folded feedback.
+            if "senior architect" not in kwargs.get("system", ""):
+                prompts.append(kwargs["messages"][0]["content"])
+            return super().stream(**kwargs)
+
+    rec = _Recorder(
+        replies=[
+            (f"```barn\n{MEDIOCRE}```", "max_tokens"),
+            (f"```barn\n{MEDIOCRE}```", "max_tokens"),
+            (f"```barn\n{CLEAN}```", "end_turn"),
+        ],
+        critique=_unsatisfied(),
+    )
+    BarndoAgent(client=rec).design("a cottage", max_iterations=2, target_score=None)
+    revision = prompts[-1]  # the round-2 prompt carries round-1's folded feedback
+    assert "info TRUNCATED" in revision
+    assert "cut off at the output token cap" in revision
+
+
+# -- the critique gate on `ok`, not just a plan -------------------------------
+
+
+class _CritCountingClient(FakeClient):
+    """A FakeClient that counts critique calls, to prove one was (not) made."""
+
+    def __init__(self, sources, critiques=None):
+        super().__init__(sources, critiques)
+        self.critique_calls = 0
+
+    def stream(self, **kwargs):
+        if "senior architect" in kwargs.get("system", ""):
+            self.critique_calls += 1
+        return super().stream(**kwargs)
+
+
+# A plan that partially recovers: it builds a plan (plan is not None) but has
+# errors (overlapping rooms, no entry) — so result.ok is False. The critic must
+# NOT be called on it (it scores 0 and can never be satisfied).
+PARTIAL_WITH_ERRORS = """\
+plan "Overlap"
+envelope 30 x 24
+ceiling 9
+program 1 bed
+room living: living at 0,0 size 20 x 24
+room bed: bedroom at 10,0 size 20 x 24
+window living south width 6 offset 8
+window bed south width 4 offset 3
+"""
+
+
+def test_critique_not_called_when_plan_has_errors_even_though_plan_exists():
+    """A partially-recovered plan (plan is not None) WITH errors is not ok, so it
+    must never burn a critique call — it scores 0 and can't satisfy the critic."""
+    partial = compile_source(PARTIAL_WITH_ERRORS)
+    assert partial.plan is not None and not partial.ok  # the gated case
+
+    # The in-round retry also returns the errored plan (equal badness keeps the
+    # original) — and being a generation call, it must not tick the critic either.
+    client = _CritCountingClient(
+        sources=[PARTIAL_WITH_ERRORS, PARTIAL_WITH_ERRORS], critiques=[]
+    )
+    result = _agent(client).design("one bed", max_iterations=1, target_score=None)
+
+    assert client.critique_calls == 0  # the ok-gate skipped the critic
+    assert result.history[0].critique is None
+
+
+def test_critique_still_called_on_a_clean_plan():
+    """Sanity: the gate does NOT suppress the critic on a genuinely ok plan."""
+    client = _CritCountingClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    assert client.critique_calls == 1
+
+
+# -- CritiqueSpec.skipped ------------------------------------------------------
+
+
+def test_critique_skipped_flag_true_on_the_degraded_paths():
+    """Both degraded critique paths (no JSON / call failed) set skipped=True; a
+    real parsed critique leaves it False, and the field is additive so a reply
+    that omits it still validates."""
+    # No parseable JSON -> neutral fallback with skipped=True.
+    agent = BarndoAgent(client=_FakeStreamClient("Just prose, no JSON here."))
+    crit = agent.critique(compile_source(MEDIOCRE))
+    assert crit.skipped is True
+
+    # A real parsed critique (fenced JSON) is not skipped.
+    real = BarndoAgent(client=_FakeStreamClient(FENCED_CRITIQUE)).critique(
+        compile_source(MEDIOCRE)
+    )
+    assert real.skipped is False
+
+    # Backward compatible: a model reply that omits `skipped` still validates.
+    parsed = CritiqueSpec.model_validate_json(
+        '{"satisfied": true, "assessment": "ok", "rationale": "clean", "suggestions": []}'
+    )
+    assert parsed.skipped is False
+
+
+class _FailingCritiqueClient:
+    """A `.messages.stream(...)` that succeeds for generation but raises on the
+    critique call, to exercise the call-failed degraded path."""
+
+    def __init__(self, source: str):
+        self._source = source
+        self.messages = self
+
+    def stream(self, **kwargs):
+        if "senior architect" in kwargs.get("system", ""):
+            raise RuntimeError("critic endpoint exploded")
+        return _FakeStream(f"```barn\n{self._source}```")
+
+
+def test_critique_call_failure_sets_skipped():
+    agent = BarndoAgent(client=_FailingCritiqueClient(CLEAN))
+    crit = agent.critique(compile_source(CLEAN))
+    assert crit.skipped is True
+    assert "critique call failed" in crit.assessment
+
+
+# -- the projected-score feedback line ----------------------------------------
+
+
+def test_projected_score_line_appears_when_errors_gate_the_score():
+    """When the errors component pins the total at 0, the header carries a
+    projection with the errors deduction backed out, clamped to [0, 100]."""
+    result = compile_source(PARTIAL_WITH_ERRORS)
+    score = design_score(result)
+    assert score.components["errors"] == 100.0 and score.total == 0.0
+
+    text = render_feedback(result, score)
+    head = text.splitlines()[0]
+    assert head.startswith("Design score: 0/100 (errors block scoring; projected")
+    # The projection equals 100 minus the non-errors deductions, clamped.
+    others = sum(v for k, v in score.components.items() if k != "errors")
+    projected = max(0.0, min(100.0, 100.0 - others))
+    assert f"projected once errors are fixed: {projected:g}/100)" in head
+    assert "deductions:" in head  # the existing deductions text is kept
+
+
+def test_projected_score_absent_when_no_errors_gate():
+    """A clean or merely-warned plan keeps the plain header — no projection."""
+    text = render_feedback(compile_source(MEDIOCRE))
+    head = text.splitlines()[0]
+    assert "projected once errors are fixed" not in head
+    assert head.startswith("Design score: ")
+
+
+def test_projected_score_reaches_the_revision_prompt_after_a_broken_round():
+    """The projection rides the feedback into the next prompt (best-so-far path
+    uses the valid source's feedback, but a plain lower-scoring errored round
+    surfaces the projection directly)."""
+    # BROKEN has no plan; PARTIAL_WITH_ERRORS has a plan-with-errors. Drive a
+    # round that produces the partial so the errored feedback shows the projection.
+    client = FakeClient(
+        sources=[PARTIAL_WITH_ERRORS, CLEAN], critiques=[_satisfied()]
+    )
+    _agent(client).design("one bed", max_iterations=2, target_score=None)
+    revision = client.stream_prompts[1]
+    assert "projected once errors are fixed" in revision
+
+
+# -- the score-history feedback line ------------------------------------------
+
+
+def test_score_history_line_from_render_feedback():
+    """render_feedback adds a trajectory line when given >= 2 totals; fewer than
+    two (or None) omits it."""
+    result = compile_source(MEDIOCRE)
+    text = render_feedback(result, score_history=[41.0, 68.0, 74.0])
+    lines = text.splitlines()
+    assert lines[1] == "Score history: 41 -> 68 -> 74 (this round)"
+    # A single total (or None) draws no history line.
+    assert "Score history:" not in render_feedback(result, score_history=[68.0])
+    assert "Score history:" not in render_feedback(result)
+
+
+def test_score_history_absent_at_round_two_without_a_seed():
+    """Without a solver seed the round-2 prompt has only ONE scored step (round
+    1), so the >= 2 threshold is not met and no history line is drawn yet."""
+    client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    _agent(client).design("a starter home", max_iterations=2, target_score=None)
+    assert "Score history:" not in client.stream_prompts[1]
+
+
+def test_score_history_appears_from_round_three_without_a_seed():
+    """By round 3 two scored steps (rounds 1 and 2) precede the prompt, so the
+    trajectory line appears with the true totals."""
+    client = FakeClient(
+        sources=[MEDIOCRE, MEDIOCRE, CLEAN],
+        critiques=[_unsatisfied(), _unsatisfied(), _satisfied()],
+    )
+    result = _agent(client).design("a starter home", max_iterations=3, target_score=None)
+    revision = client.stream_prompts[2]  # the round-3 prompt
+    assert "Score history:" in revision
+    t1 = result.history[0].score.total
+    t2 = result.history[1].score.total
+    assert f"{t1:g} -> {t2:g} (this round)" in revision
+
+
+def test_score_history_shows_two_entries_with_a_solver_seed():
+    """A solver seed is iteration 0, so by the round-2 prompt there are >= 2
+    scored totals and the history line appears with the true trajectory."""
+    client = FakeClient(
+        sources=[MEDIOCRE, CLEAN],
+        # The solver seed is critiqued too now, so it consumes the first one.
+        critiques=[_unsatisfied(), _unsatisfied(), _satisfied()],
+    )
+    result = _agent(client).design(
+        "a small barndo", max_iterations=2, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    revision = client.stream_prompts[1]  # round-2 prompt
+    assert "Score history:" in revision
+    seed_total = result.history[0].score.total  # iteration 0
+    round1_total = result.history[1].score.total
+    assert f"{seed_total:g} -> {round1_total:g} (this round)" in revision
+
+
+# -- blocking issues: critique authority + gating clamp -----------------------
+# The critic gets a structured `blocking_issues` channel (room-level structural
+# defects that make a plan unshippable regardless of score). When present, the
+# loop clamps the step's *gating total* to BLOCKING_CLAMP (65) — the number used
+# for BOTH the target gate and best-step selection — while the TRUE score object
+# stays untouched. So a 99-point plan whose only path to the bedrooms runs
+# through the shop can never end the loop nor out-rank a sound lower-scoring one.
+
+
+def _blocking(*issues: str, suggestions: tuple[str, ...] = ()) -> CritiqueSpec:
+    """An unsatisfied critique carrying blocking structural issues."""
+    return CritiqueSpec(
+        satisfied=False,
+        assessment="Structurally broken.",
+        rationale="A room-level defect the score can't see.",
+        blocking_issues=list(issues) or ["The only path to the bedrooms runs through the shop."],
+        suggestions=list(suggestions) or ["Swap the shop and bed wing; buffer with a mudroom."],
+    )
+
+
+def test_blocking_issues_parsed_from_critique_json():
+    """The critique JSON's `blocking_issues` array round-trips through the parser."""
+    from barndsl.agent import _critique_from_text
+
+    text = (
+        '{"satisfied": false, "assessment": "a", "rationale": "b", '
+        '"blocking_issues": ["through-shop path to the bedrooms"], '
+        '"suggestions": ["swap the wings"]}'
+    )
+    crit = _critique_from_text(text)
+    assert crit is not None
+    assert crit.blocking_issues == ["through-shop path to the bedrooms"]
+
+
+def test_blocking_issues_default_to_empty_when_field_missing():
+    """A reply that omits `blocking_issues` (backward compat) validates to []."""
+    from barndsl.agent import _critique_from_text
+
+    text = '{"satisfied": true, "assessment": "a", "rationale": "b", "suggestions": []}'
+    crit = _critique_from_text(text)
+    assert crit is not None and crit.blocking_issues == []
+
+
+def test_blocking_issue_caps_gating_total_and_does_not_end_the_loop():
+    """A plan whose TRUE score clears the target but whose critique reports a
+    blocking issue does NOT satisfy the gate: its gating total is clamped to 65,
+    below the target, so the loop keeps going instead of shipping the broken plan."""
+    from barndsl.agent import BLOCKING_CLAMP
+
+    # Round 1 CLEAN scores ~99 (> target 90) but is blocked; round 2 is satisfied.
+    client = FakeClient(
+        sources=[CLEAN, CLEAN],
+        critiques=[_blocking(), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=90.0)
+
+    # The loop did NOT stop after round 1 despite its 99 true score.
+    assert result.iterations == 2
+    step1 = result.history[0]
+    assert step1.score.total > 90.0  # true score really did clear the target
+    assert step1.gating_total == BLOCKING_CLAMP  # clamped for gating
+    assert step1.score.total > step1.gating_total  # true score untouched
+
+
+def test_unblocked_lower_score_step_wins_best_selection_over_blocked_higher():
+    """Best-step selection ranks on the gating total: an earlier blocked step with
+    a higher TRUE score loses to a later unblocked step with a lower true score."""
+    from barndsl.agent import BLOCKING_CLAMP, _best_step, _best_valid_step
+    from barndsl.score import ScoreReport
+
+    ok = compile_source(CLEAN)  # a real compiling plan for both steps
+    blocked_high = DesignStep(
+        1, CLEAN, ok, _blocking(), ScoreReport(total=99.0),
+        gating_total=BLOCKING_CLAMP,  # clamped
+    )
+    clean_lower = DesignStep(
+        2, CLEAN, ok, _satisfied(), ScoreReport(total=80.0),
+        gating_total=80.0,
+    )
+    history = [blocked_high, clean_lower]
+
+    # True scores would pick the blocked step; gating totals pick the sound one.
+    assert blocked_high.score.total > clean_lower.score.total  # 99 > 80
+    assert blocked_high.effective_total < clean_lower.effective_total  # 65 < 80
+    assert _best_step(history) is clean_lower
+    assert _best_valid_step(history) is clean_lower
+
+
+def test_effective_total_falls_back_to_true_score_when_unclamped():
+    """A step with no stored gating_total ranks on its true score (and -1 when
+    unscored), so callers that build steps directly keep the old semantics."""
+    from barndsl.score import ScoreReport
+
+    ok = compile_source(CLEAN)
+    scored = DesignStep(1, CLEAN, ok, None, ScoreReport(total=77.0))
+    unscored = DesignStep(2, CLEAN, ok, None, None)
+    assert scored.effective_total == 77.0
+    assert unscored.effective_total == -1.0
+
+
+def test_blocking_issue_folds_into_next_round_feedback_with_marker():
+    """The blocking issue rides the diagnostic channel into the next prompt,
+    marked 'BLOCKING:' and stating the effective-score cap."""
+    client = FakeClient(
+        sources=[CLEAN, CLEAN],
+        critiques=[_blocking("through-shop path to the bedrooms"), _satisfied()],
+    )
+    _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    revision = client.stream_prompts[1]
+    assert "BLOCKING:" in revision
+    assert "through-shop path to the bedrooms" in revision
+    assert "caps this plan's effective score at 65" in revision
+
+
+# -- restructure mode ---------------------------------------------------------
+# The write path takes a `restructure` flag that swaps the revision instruction
+# from "smallest local edit" to "reconsider the LAYOUT wholesale". design() turns
+# it on for the NEXT round when the score plateaus, the critic blocks, or a
+# suggestion repeats across two rounds.
+
+REFINE_MARK = "smallest revision"
+RESTRUCTURE_MARK = "Reconsider the LAYOUT"
+
+
+def test_write_source_refine_vs_restructure_wording():
+    """The flag swaps the revision instruction; refine is the default."""
+    client = FakeClient(sources=[CLEAN, CLEAN])
+    agent = _agent(client)
+    agent.write_source("brief", prior=MEDIOCRE, diagnostics="fb")  # refine
+    agent.write_source("brief", prior=MEDIOCRE, diagnostics="fb", restructure=True)
+    assert REFINE_MARK in _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK not in _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[1])
+    assert "# concept:" in _prompt_text(client.stream_prompts[1])
+
+
+def test_restructure_triggers_on_a_blocking_issue():
+    """A blocking issue in round 1 puts round 2 into restructure mode."""
+    client = FakeClient(
+        sources=[CLEAN, CLEAN],
+        critiques=[_blocking(), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[1])
+    assert result.history[1].restructured is True
+
+
+def test_restructure_triggers_on_a_repeated_suggestion():
+    """The same suggestion in two consecutive critiques (normalized) flips round 3
+    into restructure mode."""
+    client = FakeClient(
+        sources=[MEDIOCRE, MEDIOCRE, CLEAN],
+        critiques=[
+            _unsatisfied("Widen the hall spine."),
+            _unsatisfied("  widen   the HALL   spine.  "),  # same, differently cased/spaced
+            _satisfied(),
+        ],
+    )
+    _agent(client).design("a starter home", max_iterations=3, target_score=None)
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[2])
+
+
+def test_restructure_triggers_on_a_score_plateau():
+    """Two consecutive sub-2-point score deltas plateau the loop into restructure.
+    MEDIOCRE compiles to the same score every round; after rounds 1-3 (all
+    MEDIOCRE) the totals are [44, 44, 44], so the round-4 write restructures.
+    Distinct suggestions keep the *repeated-suggestion* trigger from firing, so
+    this isolates the plateau path."""
+    client = FakeClient(
+        sources=[MEDIOCRE, MEDIOCRE, MEDIOCRE, CLEAN],
+        critiques=[_unsatisfied("a"), _unsatisfied("b"), _unsatisfied("c"), _satisfied()],
+    )
+    result = _agent(client).design("a starter home", max_iterations=4, target_score=None)
+    # The round-4 write follows three flat rounds: stream_prompts[3].
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[3])
+    assert result.history[3].restructured is True
+    # Round 2 and 3 writes precede the plateau (only 1 then 2 totals): still refine.
+    assert REFINE_MARK in _prompt_text(client.stream_prompts[1])
+
+
+def test_big_score_jump_stays_in_refine_mode():
+    """A large jump (MEDIOCRE ~44 -> CLEAN ~99) is not a plateau: round 2 keeps
+    the refine wording and is not marked restructured."""
+    client = FakeClient(
+        sources=[MEDIOCRE, CLEAN, CLEAN],
+        critiques=[_unsatisfied("a"), _unsatisfied("b"), _satisfied()],
+    )
+    result = _agent(client).design("a starter home", max_iterations=3, target_score=None)
+    # Round 2 prompt (after the big jump into round 1's mediocre... actually the
+    # jump lands at round 2's compile). The round-2 write follows round 1 (MEDIOCRE)
+    # with only one prior scored delta, so no plateau yet: refine wording, unmarked.
+    assert REFINE_MARK in _prompt_text(client.stream_prompts[1])
+    assert result.history[1].restructured is False
+
+
+# -- repair mode --------------------------------------------------------------
+# When the PREVIOUS round failed to compile, the next write is a REPAIR round:
+# the model reproduces its prior (failed) source and fixes only the erroring
+# lines. Repair takes priority over both refine and restructure — a broken plan
+# is fixed line by line, never redesigned. A failed round must NOT trigger
+# restructure, even when its 0-score makes the raw history look like a plateau.
+
+REPAIR_MARK = "Do NOT redesign"
+
+
+def test_failed_round_puts_next_write_in_repair_mode():
+    """BROKEN (write and in-round retry both fail) -> CLEAN: round 1 stays
+    failed, so round 2's write carries the repair wording (and the error
+    count), not the restructure wording."""
+    client = FakeClient(sources=[BROKEN, BROKEN, CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    revision = _prompt_text(client.stream_prompts[2])
+    assert REPAIR_MARK in revision
+    assert RESTRUCTURE_MARK not in revision
+    assert REFINE_MARK not in revision
+    assert "FAILED to compile with 1 error(s)" in revision  # the count is named
+    assert result.history[1].repaired is True
+    assert result.history[1].restructured is False
+
+
+def test_repair_prompt_carries_the_previous_failed_source():
+    """The repair prompt shows the failed source as the prior DSL, so "reproduce
+    it and fix line N" is coherent — the whole point of repair over redesign."""
+    client = FakeClient(sources=[BROKEN, BROKEN, CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    revision = _prompt_text(client.stream_prompts[2])  # round 2's write
+    assert "Your previous DSL:" in revision
+    assert 'plan "Broken"' in revision  # the failed source rides the prompt
+    assert "envelope banana" in revision
+    assert "BAD_NUMBER" in revision  # its own error rides the feedback
+
+
+def test_failed_rounds_do_not_trigger_restructure_on_a_zero_plateau():
+    """Three failed rounds (BROKEN) score 0,0,0 — a flat *raw* history. That must
+    NOT read as a plateau: every round after a failure is a repair round, never
+    a restructure round. Only a COMPILING plateau restructures. (Each failed
+    round scripts two broken sources: the write plus its failed in-round retry.)"""
+    client = FakeClient(
+        sources=[BROKEN] * 6 + [CLEAN],
+        critiques=[_satisfied()],  # only the final CLEAN round is critiqued
+    )
+    result = _agent(client).design("a cottage", max_iterations=4, target_score=None)
+
+    # Rounds 2-4 follow a failed round: repair, never restructure.
+    for prompt in client.stream_prompts[1:]:
+        assert REPAIR_MARK in _prompt_text(prompt)
+        assert RESTRUCTURE_MARK not in _prompt_text(prompt)
+    assert all(not s.restructured for s in result.history)
+    assert [s.repaired for s in result.history] == [False, True, True, True]
+
+
+def test_compiling_plateau_still_restructures_despite_earlier_failures():
+    """Failed rounds are excluded from the stagnation window, but a genuine
+    plateau over COMPILING rounds still restructures. BROKEN then three MEDIOCRE
+    (all score ~44) plateau the compiling scores, so the round-5 write
+    restructures — the earlier 0 does not disturb the compiling-only window."""
+    client = FakeClient(
+        sources=[BROKEN, BROKEN, MEDIOCRE, MEDIOCRE, MEDIOCRE, CLEAN],
+        critiques=[_unsatisfied("a"), _unsatisfied("b"), _unsatisfied("c"), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=5, target_score=None)
+
+    # Round 1 fails twice (write + in-round retry); round 2 is repair; rounds
+    # 3-4 refine while the compiling window fills; round 5 restructures once
+    # three compiling scores plateau. Prompts: [0] R1 write, [1] R1 retry,
+    # [2] R2 repair, [3] R3, [4] R4, [5] R5 restructure.
+    assert result.history[1].repaired is True
+    assert RESTRUCTURE_MARK in _prompt_text(client.stream_prompts[5])
+    assert result.history[4].restructured is True
+
+
+def test_repair_takes_priority_over_restructure_in_the_prompt():
+    """When both flags are set, the write prompt uses the repair instruction and
+    drops the restructure one — repair wins."""
+    client = FakeClient(sources=[CLEAN])
+    agent = _agent(client)
+    agent.write_source(
+        "brief", prior=MEDIOCRE, diagnostics="fb", restructure=True, repair=2
+    )
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert REPAIR_MARK in prompt
+    assert "FAILED to compile with 2 error(s)" in prompt
+    assert RESTRUCTURE_MARK not in prompt
+
+
+def test_write_source_repair_wording_is_off_by_default():
+    """repair defaults to 0 (off): a plain revision stays in refine mode."""
+    client = FakeClient(sources=[CLEAN])
+    _agent(client).write_source("brief", prior=MEDIOCRE, diagnostics="fb")
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert REPAIR_MARK not in prompt
+    assert REFINE_MARK in prompt
+
+
+# -- the in-round repair retry (salvage) ---------------------------------------
+# A round whose write fails to compile gets ONE extra generation call in the
+# same iteration — the repair-mode prompt on the just-failed source — before the
+# round is recorded. Restructure rounds are the usual patient: moving rooms
+# wholesale breaks a door offset or two, and under the old flow the redesign
+# burned the iteration and the next repair round often reverted it. The retry
+# replaces the write only when STRICTLY less broken (no plan at all is worse
+# than any recovered plan; recovered plans rank by error count).
+
+BROKEN2 = 'plan "Broken Two"\nenvelope banana\n'
+
+# MEDIOCRE plus one/two doors to rooms that don't exist: the compiler recovers a
+# plan but carries one/two errors — for ranking retries by error count.
+ONE_ERROR = MEDIOCRE + "door living - ghost width 2.5\n"
+TWO_ERRORS = MEDIOCRE + "door living - ghost width 2.5\ndoor bed - ghost2 width 2.5\n"
+
+
+def test_failed_write_is_salvaged_in_the_same_round():
+    """BROKEN then CLEAN in ONE round: the in-round retry fixes the compile, the
+    step records the compiling source, and the iteration is not burnt."""
+    client = FakeClient(sources=[BROKEN, CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+
+    assert len(result.history) == 1
+    step = result.history[0]
+    assert step.result.ok and step.salvaged is True
+    assert step.source == result.source and result.result.ok
+    assert len(client.stream_prompts) == 2  # the write + exactly one retry
+    # The retry prompt is repair mode on the just-failed source.
+    retry = _prompt_text(client.stream_prompts[1])
+    assert REPAIR_MARK in retry
+    assert "FAILED to compile with 1 error(s)" in retry
+    assert "envelope banana" in retry  # the failed source is the prior
+    # The salvaged (compiling) plan still gets its critique.
+    assert step.critique is not None and step.critique.satisfied
+
+
+def test_salvage_retry_that_still_fails_keeps_the_round_failed():
+    """When the retry is just as broken, the original write is kept, the round
+    stays failed (salvaged=False), and the NEXT round opens in cross-round
+    repair mode as before."""
+    client = FakeClient(sources=[BROKEN, BROKEN2, CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+
+    step1 = result.history[0]
+    assert not step1.result.ok and step1.salvaged is False
+    assert step1.source == BROKEN  # equal badness: the original is kept
+    step2 = result.history[1]
+    assert step2.repaired is True and step2.result.ok
+
+
+def test_salvage_keeps_a_retry_that_is_strictly_less_broken():
+    """A retry that still fails but with FEWER errors replaces the source — the
+    next (cross-round) repair starts closer — yet the round is not marked
+    salvaged and still counts as failed."""
+    two, one = compile_source(TWO_ERRORS), compile_source(ONE_ERROR)
+    assert two.plan is not None and len(two.errors) == 2
+    assert one.plan is not None and len(one.errors) == 1
+
+    client = FakeClient(sources=[TWO_ERRORS, ONE_ERROR])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    step = result.history[0]
+    assert step.source == ONE_ERROR
+    assert not step.result.ok and step.salvaged is False
+
+
+def test_compiling_write_spends_no_salvage_call():
+    """A round whose write compiles makes exactly one generation call."""
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    assert len(client.stream_prompts) == 1
+
+
+def test_salvage_write_error_keeps_the_failed_round():
+    """An exception in the retry call (here: the script runs dry) is contained:
+    the failed round is recorded exactly as before instead of crashing the loop."""
+    client = FakeClient(sources=[BROKEN])
+    result = _agent(client).design("a cottage", max_iterations=1, target_score=None)
+    step = result.history[0]
+    assert not step.result.ok and step.salvaged is False and step.source == BROKEN
+
+
+def test_a_salvaged_restructure_round_keeps_its_mode_flag():
+    """`restructured` says how the round's write was prompted; `salvaged` says
+    its compile was rescued afterwards — both can be true on one step."""
+    client = FakeClient(
+        sources=[MEDIOCRE, BROKEN, CLEAN],
+        critiques=[_blocking("The shop blocks the bedrooms."), _satisfied()],
+    )
+    result = _agent(client).design("a cottage", max_iterations=2, target_score=None)
+    step2 = result.history[1]
+    assert step2.restructured is True and step2.salvaged is True and step2.result.ok
+
+
+# -- pure trigger helpers -----------------------------------------------------
+
+
+def test_stagnating_detects_small_consecutive_deltas():
+    from barndsl.agent import _stagnating
+
+    assert _stagnating([80.0, 80.5, 81.0]) is True  # deltas 0.5, 0.5 < 2
+    assert _stagnating([80.0, 90.0, 91.0]) is False  # first delta 10 >= 2
+    assert _stagnating([80.0, 81.0, 91.0]) is False  # second delta 10 >= 2
+    assert _stagnating([80.0, 81.0]) is False  # only one delta, need window+1
+    assert _stagnating([]) is False
+
+
+def test_stagnating_window_and_eps_are_configurable():
+    from barndsl.agent import _stagnating
+
+    # window=1 needs just one small delta; a tighter eps rejects a 1.5 delta.
+    assert _stagnating([80.0, 81.0], window=1) is True
+    assert _stagnating([80.0, 81.5], window=1, eps=1.0) is False
+
+
+def test_repeated_suggestion_matches_normalized_across_rounds():
+    from barndsl.agent import _repeated_suggestion
+
+    a = _unsatisfied("Widen the hall spine.")
+    b = _unsatisfied("  WIDEN the   hall spine. ")  # same normalized
+    c = _unsatisfied("Add a porch.")
+    assert _repeated_suggestion(a, b) is True
+    assert _repeated_suggestion(a, c) is False
+    assert _repeated_suggestion(None, b) is False  # a skipped critique never repeats
+    assert _repeated_suggestion(a, None) is False
+
+
+# -- the solver seed faces the critic too -------------------------------------
+# Iteration 0 used to skip the critique entirely, so it competed on its TRUE
+# score while every LLM round was clamped to BLOCKING_CLAMP on blocking issues —
+# an unreviewed 79-point seed could out-rank a blocked true-84 round. The seed
+# is now reviewed like any compiling round: it can be clamped, its review is
+# folded into round 1's feedback, and a blocked seed licenses a restructure.
+
+
+def test_solver_seed_is_critiqued_like_any_compiling_round():
+    from barndsl.agent import BLOCKING_CLAMP
+
+    client = FakeClient(
+        sources=[CLEAN],
+        critiques=[_blocking("bedrooms only reachable through the shop"),
+                   _satisfied()],
+    )
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    seed = result.history[0]
+    assert seed.iteration == 0
+    assert seed.critique is not None and seed.critique.blocking_issues
+    # The blocked seed's gating total is clamped exactly like an LLM round's.
+    assert seed.effective_total == min(seed.score.total, BLOCKING_CLAMP)
+
+
+def test_seed_is_not_critiqued_when_critique_is_off():
+    client = FakeClient(sources=[CLEAN], critiques=[])
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None, critique=False,
+        seed_with_solver=_solver_brief(),
+    )
+    assert result.history[0].critique is None  # and no critique was consumed
+
+
+def test_blocked_seed_puts_round_one_in_restructure_mode():
+    client = FakeClient(
+        sources=[CLEAN],
+        critiques=[_blocking("bedrooms only reachable through the shop"),
+                   _satisfied()],
+    )
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    assert result.history[1].restructured is True
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK in prompt
+
+
+def test_unblocked_seed_keeps_round_one_in_refine_mode():
+    client = FakeClient(sources=[CLEAN], critiques=[_unsatisfied(), _satisfied()])
+    result = _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    assert result.history[1].restructured is False
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert RESTRUCTURE_MARK not in prompt
+
+
+def test_round_one_prompt_carries_the_seed_report_and_review():
+    """The first write sees the seed's rendered feedback (score header) with the
+    architect's review folded in — not just the bare seed source."""
+    client = FakeClient(
+        sources=[CLEAN],
+        critiques=[_unsatisfied("Swap the shop and the bedroom wing."),
+                   _satisfied()],
+    )
+    _agent(client).design(
+        "a small barndo", max_iterations=1, target_score=None,
+        seed_with_solver=_solver_brief(),
+    )
+    prompt = _prompt_text(client.stream_prompts[0])
+    assert "Compiler feedback on it" in prompt
+    assert "Design score:" in prompt
+    assert "Swap the shop and the bedroom wing." in prompt

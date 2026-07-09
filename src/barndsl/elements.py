@@ -383,8 +383,11 @@ class PlacedFixture:
     in room ``room``. Position is either explicit — ``x``/``y`` are **room-local**
     feet measured from the room's south-west corner — or omitted, in which case it
     auto-places against ``wall`` (S/N/E/W) or, failing that, the first free spot.
-    ``rotation`` turns it in plan (degrees, snapped to a quarter-turn by the
-    massing); ``width`` overrides the nominal run of a resizable piece (a counter).
+    ``offset`` pins a wall-backed piece that many feet along ``wall`` from its
+    south/west start corner — the same along-wall convention as a door, window,
+    outlet or switch; it requires ``wall`` and excludes ``at``. ``rotation``
+    turns it in plan (degrees, snapped to a quarter-turn by the massing);
+    ``width`` overrides the nominal run of a resizable piece (a counter).
 
     Authored fixtures **add** to a room's auto-seeds, except that one of a seeded
     kind **replaces** that kind's seed — see
@@ -396,6 +399,10 @@ class PlacedFixture:
     x: float | None = None  # room-local (offset from the room's SW corner), ft
     y: float | None = None
     wall: Direction | None = None
+    #: Along-wall position (ft from ``wall``'s south/west start corner). ``None``
+    #: auto-slots along the wall (sliding clear of door swings); a number pins the
+    #: piece exactly there. Requires ``wall``; mutually exclusive with ``at``.
+    offset: float | None = None
     rotation: float = 0.0
     width: float | None = None  # override the nominal run (resizable fixtures)
     #: An **along-run** counter (the ``fixture counter in <room> along <wall>``
@@ -1920,6 +1927,7 @@ class Barndominium:
         x: float | None = None,
         y: float | None = None,
         wall: Direction | str | None = None,
+        offset: float | None = None,
         rotation: float = 0.0,
         width: float | None = None,
         along: Direction | str | None = None,
@@ -1931,9 +1939,12 @@ class Barndominium:
 
         ``kind`` must be a catalog kind (see :data:`barndsl.fixtures.FIXTURE_KINDS`).
         ``x``/``y`` are **room-local** feet from the room's SW corner; omit them to
-        auto-place against ``wall`` (or the first free spot). ``rotation`` turns it
-        in plan (degrees). Authored fixtures add to a room's auto-seeds; one of a
-        seeded kind replaces that seed. See :class:`PlacedFixture`.
+        auto-place against ``wall`` (or the first free spot). ``offset`` pins a
+        ``wall`` piece that many feet along the wall from its south/west start
+        corner (the door/window/outlet convention); it needs ``wall`` and excludes
+        ``at``. ``rotation`` turns it in plan (degrees). Authored fixtures add to a
+        room's auto-seeds; one of a seeded kind replaces that seed. See
+        :class:`PlacedFixture`.
 
         ``along`` (``counter`` only) makes a wall-backed countertop run spanning a
         wall: give ``along`` a direction and, optionally, ``run_from``/``run_to``
@@ -1960,6 +1971,20 @@ class Barndominium:
         w = None if width is None else _finite(room, "fixture width", width)
         if w is not None and w <= 0:
             raise ValueError("A fixture width must be positive.")
+        off = None if offset is None else _finite(room, "fixture offset", offset)
+        if off is not None:
+            if wd is None:
+                raise ValueError(
+                    "A fixture `offset` is measured along a wall — name the wall "
+                    "too: `wall N|S|E|W offset <n>`."
+                )
+            if x is not None:
+                raise ValueError(
+                    "A fixture takes `at <x>,<y>` or `wall ... offset <n>`, not "
+                    "both — they both pin its position."
+                )
+            if off < 0:
+                raise ValueError("A fixture offset must be >= 0 (feet along the wall).")
         rf = None if run_from is None else _finite(room, "counter run start", run_from)
         rt = None if run_to is None else _finite(room, "counter run end", run_to)
         rd = None if depth is None else _finite(room, "counter depth", depth)
@@ -1988,7 +2013,10 @@ class Barndominium:
         elif rf is not None or rt is not None or rd is not None:
             raise ValueError("`from`/`to`/`depth` need an `along <wall>` counter run.")
         self.fixtures.append(
-            PlacedFixture(kind, str(room), x, y, wd, rot, w, ad, rf, rt, rd)
+            PlacedFixture(
+                kind, str(room), x, y, wd, offset=off, rotation=rot, width=w,
+                along=ad, run_from=rf, run_to=rt, run_depth=rd,
+            )
         )
         return self
 

@@ -130,7 +130,7 @@ def test_details_cover_exactly_the_nonzero_continuous_components():
         report = design_score(compile_source(src))
         expected = {
             k
-            for k in ("space", "circulation", "proportion", "daylight")
+            for k in ("space", "circulation", "proportion", "daylight", "topology")
             if report.components[k]
         }
         assert set(report.details) == expected, src
@@ -141,7 +141,7 @@ def test_details_never_touch_the_arithmetic():
     (and so every detail-backed number) stays byte-identical."""
     fixed = design_score(compile_source(FIXED))
     warned = design_score(compile_source(WARNED))
-    continuous = ("space", "circulation", "proportion", "daylight")
+    continuous = ("space", "circulation", "proportion", "daylight", "topology")
     assert [fixed.components[k] for k in continuous] == [
         warned.components[k] for k in continuous
     ]
@@ -169,10 +169,14 @@ def test_daylight_detail_names_underglazed_rooms_with_percentages():
 
 
 def test_space_detail_reports_coverage_and_unassigned_area():
+    # SPARSE is two rooms in an oversized envelope, so the whole shortfall is one
+    # connected 480 sqft rectangle — a concentrated void, which now dominates the
+    # `space` term over the diffuse-coverage reading. The detail names both the
+    # void size and the overall coverage it sits in.
     report = design_score(compile_source(SPARSE))
     assert report.components["space"] > 0
     detail = report.details["space"]
-    assert "60%" in detail and "480 sqft unassigned" in detail
+    assert "60%" in detail and "480 sqft void" in detail
 
 
 def test_circulation_detail_names_the_hallways_with_areas():
@@ -221,7 +225,7 @@ def test_cli_score_human_table_shows_causes(tmp_path, capsys):
     p.write_text(SPARSE)
     assert main(["score", str(p)]) == 0
     out = capsys.readouterr().out
-    assert "— ground-floor rooms cover 60%" in out
+    assert "60%-covered" in out and "480 sqft void" in out
     assert "bed is 2.0:1" in out
 
 
@@ -230,7 +234,7 @@ def test_cli_score_json_includes_details(tmp_path, capsys):
     p.write_text(SPARSE)
     assert main(["score", str(p), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert "sqft unassigned" in payload["details"]["space"]
+    assert "480 sqft void" in payload["details"]["space"]
 
 
 def test_cli_score_fails_on_no_plan(tmp_path, capsys):

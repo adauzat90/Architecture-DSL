@@ -434,3 +434,26 @@ def test_fixture_rotation_reflects_under_mirror_and_resolves(tmp_path):
     assert mf.x == pytest.approx(pr.width - (pf.x + pf.width))
     assert mf.y == pytest.approx(pf.y)
     assert mf.width == pytest.approx(pf.width) and mf.length == pytest.approx(pf.length)
+
+
+def test_wall_offset_fixture_remaps_under_mirror():
+    """A `wall ... offset` pin remaps exactly like a door/window offset: the
+    stamped mirrored footprint is the mirror of the plain one."""
+    from barndsl.fixtures import resolve_room_fixtures
+
+    part = _fragment(
+        "room k: kitchen at 0,0 size 12 x 10\n"
+        "fixture wardrobe in k wall S offset 1\n")
+    plain, _ = _stamp(part)
+    mirr, _ = _stamp(part, mirror="y")
+    pr = plain.room("q.k")
+    mr = mirr.room("q.k")
+    pf = next(f for f in resolve_room_fixtures(plain, pr) if f.kind == "wardrobe")
+    mf = next(f for f in resolve_room_fixtures(mirr, mr) if f.kind == "wardrobe")
+    # The stored pin stays a wall+offset (the sugar survives the stamp)…
+    stored = next(f for f in mirr.fixtures if f.kind == "wardrobe")
+    assert stored.wall is not None and stored.offset is not None
+    # …and the resolved footprint reflects about the room's centre line.
+    assert mf.x == pytest.approx(pr.width - (pf.x + pf.width))
+    assert mf.y == pytest.approx(pf.y)
+    assert mf.width == pytest.approx(pf.width) and mf.length == pytest.approx(pf.length)

@@ -1121,10 +1121,20 @@ def _move_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
             (yt.col - 1, yt.end_col - 1, _fmt(ty)),
         ])
     else:
-        # No `at` yet (an auto-placed explicit fixture): insert one right after the
-        # room id — the 4th token (`fixture <kind> in <room>`).
-        insert_at = toks[3].end_col - 1
-        newraw = raw[:insert_at] + f" at {_fmt(tx)},{_fmt(ty)}" + raw[insert_at:]
+        # No `at` yet (an auto-placed or wall-pinned explicit fixture): insert one
+        # right after the room id — the 4th token (`fixture <kind> in <room>`) —
+        # and drop any `offset <n>` clause, since `at` and `offset` are mutually
+        # exclusive position pins.
+        splices = [(toks[3].end_col - 1, toks[3].end_col - 1,
+                    f" at {_fmt(tx)},{_fmt(ty)}")]
+        off_idx = next(
+            (i for i, t in enumerate(toks) if t.text.lower() == "offset"), None
+        )
+        if off_idx is not None and off_idx + 1 < len(toks):
+            splices.append(
+                (toks[off_idx].col - 1, toks[off_idx + 1].end_col - 1, "")
+            )
+        newraw = _splice(raw, splices)
     lines[line_no - 1] = newraw
     return EditResult("\n".join(lines), changed=True, line=line_no,
                       summary=f"{edit.key} → at {_fmt(tx)},{_fmt(ty)}")
