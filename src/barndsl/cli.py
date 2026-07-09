@@ -28,7 +28,7 @@
 
     barndsl design "BRIEF" [--out FILE.svg] [--iterations N] [--model ID] [--no-critique]
                    [--target-score S]
-        Run the Claude agent: brief → DSL → compile → score → critique → refine,
+        Run the design agent: brief → DSL → compile → score → critique → refine,
         keeping the best-scoring iteration. Requires `pip install 'barndsl[agent]'`
         and ANTHROPIC_API_KEY.
 
@@ -53,7 +53,7 @@
         127.0.0.1 (no new dependency, works offline). An optional FILE preloads
         the editor; `--open` launches a browser. When the agent extra is
         installed (`pip install 'barndsl[agent]'`) and ANTHROPIC_API_KEY is set,
-        a chat pane lights up on the left: a brief in, the Claude compile-critique
+        a chat pane lights up on the left: a brief in, the agent compile-critique
         -revise loop streamed live, the best-scoring plan landed in the editor.
 
     barndsl lsp [--check]
@@ -83,6 +83,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from typing import Any
@@ -513,31 +514,119 @@ def _cmd_design(args: argparse.Namespace) -> int:
     else:
         target_score = args.target_score
 
+    critique_mode = "never" if args.no_critique else args.critique
+    seed_with_solver = None
+    if args.seed_layout:
+        try:
+            with open(args.seed_layout, "r", encoding="utf-8") as fh:
+                seed_with_solver = fh.read()
+        except OSError as exc:
+            print(
+                f"error: cannot read layout seed {args.seed_layout}: {exc.strerror or exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+    trace_fh = None
+    if args.trace:
+        try:
+            trace_fh = open(args.trace, "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot write trace {args.trace}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
+
+    def trace_event(event: str, **payload: Any) -> None:
+        if trace_fh is None:
+            return
+        row = {"event": event, **payload}
+        trace_fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        trace_fh.flush()
+
     def on_step(step) -> None:
         crit = ""
         if step.critique is not None:
             crit = "  (critic: satisfied)" if step.critique.satisfied else "  (critic: needs work)"
         score = f"  score {step.score.total:g}/100" if step.score is not None else ""
         print(f"  iteration {step.iteration}: {step.result.summary()}{score}{crit}")
+        critique_payload = None
+        if step.critique is not None:
+            dump = getattr(step.critique, "model_dump", None)
+            critique_payload = dump() if dump is not None else step.critique.dict()
+        trace_event(
+            "iteration",
+            iteration=step.iteration,
+            summary=step.result.summary(),
+            score=step.score.to_dict() if step.score is not None else None,
+            critique=critique_payload,
+            diagnostics=step.result.to_dict()["diagnostics"],
+            source=step.source,
+        )
+
+    def on_phase(phase: str, iteration: int) -> None:
+        trace_event("phase", phase=phase, iteration=iteration)
+
+    activity_key: dict[str, tuple[str, int, str] | None] = {"value": None}
+
+    def on_activity(phase: str, iteration: int, channel: str, delta: str) -> None:
+        trace_event(
+            "token", phase=phase, iteration=iteration, channel=channel, delta=delta
+        )
+        if not args.show_activity:
+            return
+        key = (phase, iteration, channel)
+        if key != activity_key["value"]:
+            activity_key["value"] = key
+            print(f"\n[{phase} {iteration} {channel}]", file=sys.stderr)
+        print(delta, end="", file=sys.stderr, flush=True)
 
     print(f"Designing with {model} (up to {iterations} iteration(s))...\n")
     agent = BarndoAgent(model=model)
     try:
+        trace_event(
+            "start",
+            model=model,
+            iterations=iterations,
+            critique=critique_mode,
+            target_score=target_score,
+            auto_seed=not args.no_auto_seed,
+            seed_layout=bool(seed_with_solver),
+        )
         result = agent.design(
             args.brief,
             max_iterations=iterations,
-            critique=not args.no_critique,
+            critique=critique_mode,
             on_step=on_step,
             target_score=target_score,
+            seed_with_solver=seed_with_solver,
+            auto_seed=not args.no_auto_seed,
+            on_phase=on_phase,
+            on_activity=on_activity if (args.show_activity or trace_fh is not None) else None,
         )
     except Exception as exc:  # pragma: no cover - network/runtime errors
+        trace_event("error", message=str(exc))
+        if trace_fh is not None:
+            trace_fh.close()
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if args.show_activity and activity_key["value"] is not None:
+            print(file=sys.stderr)
 
     print(
         f"\n--- final DSL (best of {result.iterations} iteration(s): "
         f"iteration {result.best_iteration}, score {result.score.total:g}/100) ---"
     )
+    trace_event(
+        "done",
+        best_iteration=result.best_iteration,
+        iterations=result.iterations,
+        score=result.score.to_dict(),
+        diagnostics=result.result.to_dict()["diagnostics"],
+        source=result.source,
+    )
+    if trace_fh is not None:
+        trace_fh.close()
+        print(f"\nWrote trace {args.trace}")
     print(result.source.rstrip())
     print("\n--- compiler report ---")
     print(result.result.report())
@@ -1094,6 +1183,71 @@ def _cmd_revit_log(args: argparse.Namespace) -> int:
     return 1 if any(i.severity is not Severity.INFO for i in issues) else 0
 
 
+def _cmd_dev(args: argparse.Namespace) -> int:
+    """Developer/harness commands used by CI and agent tooling."""
+    from . import devtools
+
+    cmd = args.dev_command
+    if cmd == "audit":
+        out = devtools.repo_audit()
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "rule-probe":
+        if args.file:
+            source = open(args.file, encoding="utf-8").read()
+        elif args.source is not None:
+            source = args.source
+        else:
+            source = sys.stdin.read()
+        expect = json.loads(args.expect) if args.expect else None
+        out = devtools.rule_probe(source, expect, name=args.name, profile=args.profile)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "diag-diff":
+        out = devtools.diagnostic_diff(args.before, args.after, profile=args.profile)
+        print(devtools.dumps(out))
+        return 0
+    if cmd == "gallery-gate":
+        out = devtools.diagnostic_diff(args.paths or ["examples"], profile=args.profile)
+        print(devtools.dumps(out))
+        return 0
+    if cmd == "lsp-smoke":
+        out = devtools.lsp_smoke(args.file, strict_composed=args.strict_composed)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "doctor":
+        out = devtools.doctor(
+            paths=args.paths or None,
+            lsp_strict=not args.no_strict_lsp,
+            run_impact=args.run_impact,
+            export_plan=args.export_plan,
+            profile=args.profile,
+        )
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "feature-check":
+        out = devtools.feature_check(args.name, statement=not args.no_statement)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "impact":
+        out = devtools.impact_tests(args.changed, run=args.run, quiet=not args.verbose)
+        print(devtools.dumps(out))
+        return int(out.get("exit", 0) or 0)
+    if cmd == "export-parity":
+        out = devtools.export_parity(args.file, args.prefix)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "rule-scaffold":
+        out = devtools.rule_scaffold(args.code, args.severity, args.test_file, write=args.write)
+        print(devtools.dumps(out))
+        return 0
+    if cmd == "feature-scaffold":
+        out = devtools.feature_scaffold(args.name, args.out, write=not args.no_write)
+        print(devtools.dumps(out))
+        return 0
+    raise SystemExit(f"unknown dev command {cmd}")
+
+
 def _cmd_explain(args: argparse.Namespace) -> int:
     from .diagnostics import REGISTRY, explain
 
@@ -1256,7 +1410,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_layout.set_defaults(func=_cmd_layout)
 
-    p_design = sub.add_parser("design", help="generate a plan from a brief with Claude")
+    p_design = sub.add_parser("design", help="generate a plan from a brief with the agent")
     p_design.add_argument("brief", help="natural-language design brief")
     p_design.add_argument("--out", default="barndo.svg", help="output SVG path")
     p_design.add_argument(
@@ -1268,6 +1422,32 @@ def main(argv: list[str] | None = None) -> int:
         help="model id (default: $BARNDSL_MODEL, else claude-opus-4-8)",
     )
     p_design.add_argument("--no-critique", action="store_true", help="skip the design critic")
+    p_design.add_argument(
+        "--critique",
+        choices=("each-round", "final", "never"),
+        default="each-round",
+        help="critic cadence (default: each-round; --no-critique is an alias for never)",
+    )
+    p_design.add_argument(
+        "--seed-layout",
+        metavar="BRIEF.txt",
+        help="seed iteration 0 from a textual barndsl layout brief before the model writes",
+    )
+    p_design.add_argument(
+        "--no-auto-seed",
+        action="store_true",
+        help="do not derive a deterministic solver seed from natural bed/bath briefs",
+    )
+    p_design.add_argument(
+        "--show-activity",
+        action="store_true",
+        help="stream the model's reasoning/text chunks to stderr while it runs",
+    )
+    p_design.add_argument(
+        "--trace",
+        metavar="FILE.jsonl",
+        help="write a JSONL transcript of phases, streamed tokens, iterations and final result",
+    )
     p_design.add_argument(
         "--target-score",
         type=float,
@@ -1552,6 +1732,65 @@ def main(argv: list[str] | None = None) -> int:
         "code", nargs="?", default=None, help="a code like BEDROOM_EGRESS (omit to list all)"
     )
     p_explain.set_defaults(func=_cmd_explain)
+
+    p_dev = sub.add_parser(
+        "dev",
+        help="developer/harness helpers for rule and DSL feature work",
+    )
+    dev_sub = p_dev.add_subparsers(dest="dev_command", required=True)
+    p_dev_audit = dev_sub.add_parser("audit", help="audit diagnostic/statement wiring drift")
+    p_dev_audit.set_defaults(func=_cmd_dev)
+    p_dev_probe = dev_sub.add_parser("rule-probe", help="compile inline/source-file DSL and assert diagnostic codes")
+    p_dev_probe.add_argument("--source", default=None, help="inline .barn source (default stdin unless --file)")
+    p_dev_probe.add_argument("--file", default=None, help="read .barn source from a file")
+    p_dev_probe.add_argument("--expect", default=None, help='JSON expectations, e.g. {"warning":["NAT_LIGHT"],"absent":["BEDROOM_EGRESS"]}')
+    p_dev_probe.add_argument("--name", default=None, help="optional compile name")
+    _add_profile_flag(p_dev_probe)
+    p_dev_probe.set_defaults(func=_cmd_dev)
+    p_dev_diff = dev_sub.add_parser("diag-diff", help="diagnostic-code diff across two plan sets")
+    p_dev_diff.add_argument("before", nargs="+", help="baseline files, directories, or globs")
+    p_dev_diff.add_argument("--after", nargs="*", default=None, help="comparison files/directories/globs (default: before)")
+    _add_profile_flag(p_dev_diff)
+    p_dev_diff.set_defaults(func=_cmd_dev)
+    p_dev_gallery = dev_sub.add_parser("gallery-gate", help="compile examples/gallery and summarize diagnostics/scores")
+    p_dev_gallery.add_argument("paths", nargs="*", help="paths to scan (default: examples)")
+    _add_profile_flag(p_dev_gallery)
+    p_dev_gallery.set_defaults(func=_cmd_dev)
+    p_dev_lsp = dev_sub.add_parser("lsp-smoke", help="smoke-test pure LSP features")
+    p_dev_lsp.add_argument("file", nargs="?", default=None, help="optional composed .barn fixture")
+    p_dev_lsp.add_argument("--strict-composed", action="store_true", help="fail if composed/stamped-id LSP checks fail")
+    p_dev_lsp.set_defaults(func=_cmd_dev)
+    p_dev_doctor = dev_sub.add_parser("doctor", help="run the default audit/gallery/LSP/impact maintainability gate")
+    p_dev_doctor.add_argument("paths", nargs="*", help="gallery/example paths to scan (default: examples)")
+    p_dev_doctor.add_argument("--no-strict-lsp", action="store_true", help="do not fail on composed/stamped-id LSP smoke failures")
+    p_dev_doctor.add_argument("--run-impact", action="store_true", help="run impact-selected pytest targets, not just list them")
+    p_dev_doctor.add_argument("--export-plan", default=None, help="optional .barn plan for SVG/glTF/IFC/packet export parity")
+    _add_profile_flag(p_dev_doctor)
+    p_dev_doctor.set_defaults(func=_cmd_dev)
+    p_dev_feature_check = dev_sub.add_parser("feature-check", help="verify a DSL feature/statement is wired across key surfaces")
+    p_dev_feature_check.add_argument("name", help="feature or statement name")
+    p_dev_feature_check.add_argument("--no-statement", action="store_true", help="treat as model-only feature; skip statement keyword requirements")
+    p_dev_feature_check.set_defaults(func=_cmd_dev)
+    p_dev_impact = dev_sub.add_parser("impact", help="map changed files to likely pytest targets")
+    p_dev_impact.add_argument("changed", nargs="*", help="changed files (default: git status)")
+    p_dev_impact.add_argument("--run", action="store_true", help="run the selected pytest targets")
+    p_dev_impact.add_argument("-v", "--verbose", action="store_true", help="do not pass -q to pytest")
+    p_dev_impact.set_defaults(func=_cmd_dev)
+    p_dev_export = dev_sub.add_parser("export-parity", help="smoke-test SVG/glTF/IFC/packet exports for a plan")
+    p_dev_export.add_argument("file", help="path to a .barn plan")
+    p_dev_export.add_argument("--prefix", default=None, help="artifact prefix under .pi/artifacts")
+    p_dev_export.set_defaults(func=_cmd_dev)
+    p_dev_rule_scaf = dev_sub.add_parser("rule-scaffold", help="checklist/test skeleton for a new diagnostic rule")
+    p_dev_rule_scaf.add_argument("code", help="diagnostic code, e.g. ROOM_HABITABLE")
+    p_dev_rule_scaf.add_argument("--severity", choices=("error", "warning", "info"), default="info")
+    p_dev_rule_scaf.add_argument("--test-file", default=None)
+    p_dev_rule_scaf.add_argument("--write", action="store_true", help="write test skeleton if absent")
+    p_dev_rule_scaf.set_defaults(func=_cmd_dev)
+    p_dev_feat_scaf = dev_sub.add_parser("feature-scaffold", help="checklist artifact for a new DSL feature/statement")
+    p_dev_feat_scaf.add_argument("name")
+    p_dev_feat_scaf.add_argument("--out", default=None)
+    p_dev_feat_scaf.add_argument("--no-write", action="store_true")
+    p_dev_feat_scaf.set_defaults(func=_cmd_dev)
 
     p_profiles = sub.add_parser(
         "profiles",

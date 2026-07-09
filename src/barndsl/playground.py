@@ -30,7 +30,7 @@ Routes (the *only* routes; there is no static-file serving or directory listing)
     the DSL grammar reference (:data:`~barndsl.compiler.DSL_REFERENCE`) for the
     help panel.
 ``GET /api/agent``
-    ``{available, reason}`` — whether the Claude agent can run here
+    ``{available, reason}`` — whether the design agent can run here
     (:func:`barndsl.agent.agent_availability`: ``anthropic`` importable and
     ``ANTHROPIC_API_KEY`` set). The key's value is never read or returned; only
     its presence is probed. The SPA lights up (or disables, with the reason) the
@@ -90,7 +90,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .compare import compare_plans
-from .compiler import DSL_REFERENCE, compile_source
+from .compiler import DSL_REFERENCE, _KEYWORDS, compile_source
 from .compose import (  # scan_parts moved to compose (beside the `use` loader); re-exported here
     MAX_LISTED_PARTS,  # noqa: F401 — re-exported for backward compatibility
     MAX_PART_SNIFF_BYTES,  # noqa: F401 — re-exported for backward compatibility
@@ -124,16 +124,11 @@ MAX_BODY = 1_000_000
 
 _ELEVATION_SIDES = ("south", "north", "east", "west")
 
-#: Statement heads the compiler's ``_parse_statement`` dispatch recognises — kept
-#: in step with that if/elif chain in :mod:`barndsl.compiler`. These are the DSL's
-#: line-leading keywords; the editor's syntax highlighter colours them.
-_STATEMENT_KEYWORDS = (
-    "plan", "envelope", "wing", "ceiling", "floor", "accessible", "electrical",
-    "street", "overhang", "climate", "orientation", "finish", "site", "setback",
-    "roof", "note", "program", "require", "room", "wall", "suite", "zone", "door",
-    "open", "entry", "window", "porch", "stair", "frame", "fixture", "alarm",
-    "drive", "walk", "well", "septic", "service", "grade", "param",
-)
+#: Statement heads the compiler's ``_parse_statement`` dispatch recognises.  The
+#: playground derives this from :mod:`barndsl.compiler` so editor highlighting,
+#: autocomplete and quick-fix validation cannot drift from the parser when a new
+#: DSL statement is added.
+_STATEMENT_KEYWORDS = tuple(_KEYWORDS)
 
 #: Secondary keywords — placement anchors, opening modifiers and option words that
 #: appear mid-statement (from the grammar in :data:`~barndsl.compiler.DSL_REFERENCE`).
@@ -250,7 +245,7 @@ _LAYOUT_EXTRAS: dict[str, tuple[str, int]] = {
 
 
 def _agent_availability() -> tuple[bool, str | None]:
-    """Whether the Claude design loop can run, surviving a trimmed install.
+    """Whether the design agent loop can run, surviving a trimmed install.
 
     The base package is dependency-free; the agent's libraries (anthropic,
     pydantic) live in the ``agent`` extra, so the import itself may fail — that
@@ -317,6 +312,11 @@ def layout_brief_text(
             stmt += f" min {mn}"
         lines.append(stmt)
     lines.append("")
+    if not open_kitchen:
+        lines.append(
+            'note "Brief prefers a separated kitchen; keep living and kitchen adjacent '
+            'but use a door rather than an open core if the design agent revises it."'
+        )
 
     adj: list[tuple[str, ...]] = [("living", "kitchen")]
     if hall:
@@ -705,19 +705,25 @@ def _default_designer(
     brief: str,
     *,
     seed_source: str | None,
+    seed_with_solver: Any | None = None,
+    auto_seed: bool = False,
+    critique: bool | str | None = True,
     max_iterations: int,
     on_step: Callable[[Any], None],
     on_phase: Callable[[str, int], None],
     cancel: Callable[[], bool],
     on_activity: Callable[[str, int, str, str], None] | None = None,
 ) -> Any:
-    """Run the real Claude loop. Imported lazily so ``anthropic`` stays optional."""
+    """Run the real agent loop. Imported lazily so ``anthropic`` stays optional."""
     from .agent import BarndoAgent
 
     return BarndoAgent().design(
         brief,
         max_iterations=max_iterations,
+        critique=critique,
+        seed_with_solver=seed_with_solver,
         seed_source=seed_source,
+        auto_seed=auto_seed,
         on_step=on_step,
         on_phase=on_phase,
         cancel=cancel,
@@ -1161,6 +1167,15 @@ class _Handler(BaseHTTPRequestHandler):
         rounds = data.get("iterations", default_rounds)
         if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 8:
             rounds = default_rounds
+        auto_seed = data.get("auto_seed", True) is not False
+        solver_brief = data.get("solver_brief")
+        if solver_brief is not None and not isinstance(solver_brief, str):
+            solver_brief = None
+        critique = data.get("critique", "each_round")
+        if isinstance(critique, str):
+            critique = critique.strip().lower().replace("-", "_")
+        if critique not in ("each_round", "final", "never"):
+            critique = "each_round"
 
         server: _PlaygroundServer = self.server  # type: ignore[assignment]
         if not server.design_lock.acquire(blocking=False):
@@ -1171,7 +1186,10 @@ class _Handler(BaseHTTPRequestHandler):
         with server.jobs_lock:
             server.current_job = {"id": job_id, "cancel": cancel}
         try:
-            self._stream_design(server, brief, seed_source, rounds, cancel, job_id)
+            self._stream_design(
+                server, brief, seed_source, rounds, cancel, job_id,
+                seed_with_solver=solver_brief, auto_seed=auto_seed, critique=critique,
+            )
         finally:
             with server.jobs_lock:
                 server.current_job = None
@@ -1203,6 +1221,10 @@ class _Handler(BaseHTTPRequestHandler):
         rounds: int,
         cancel: threading.Event,
         job_id: str,
+        *,
+        seed_with_solver: Any | None = None,
+        auto_seed: bool = False,
+        critique: bool | str | None = True,
     ) -> None:
         if server.designer is not None:  # an injected loop needs no anthropic/key
             available, reason = True, None
@@ -1255,6 +1277,9 @@ class _Handler(BaseHTTPRequestHandler):
             result = designer(
                 brief,
                 seed_source=seed_source,
+                seed_with_solver=seed_with_solver,
+                auto_seed=auto_seed,
+                critique=critique,
                 max_iterations=rounds,
                 on_step=on_step,
                 on_phase=on_phase,
@@ -1282,7 +1307,7 @@ class _PlaygroundServer(ThreadingHTTPServer):
     ``/api/design`` at a time (compile stays responsive on other threads), and
     ``current_job`` (guarded by ``jobs_lock``) lets ``/api/design/cancel`` reach
     the running job's cancel event. ``designer`` is the injectable loop driver —
-    the real Claude agent by default, a fake in tests.
+    the real design agent by default, a fake in tests.
     """
 
     daemon_threads = True
@@ -1325,7 +1350,7 @@ def make_server(
     that ``initial_source`` came from an explicit ``FILE`` argument, so the SPA
     prefers it over a newer autosaved session (see :func:`render_app`).
     ``designer`` overrides the agent loop driver (tests inject a keyless fake);
-    ``None`` uses the real Claude agent, imported lazily only when a design job
+    ``None`` uses the real design agent, imported lazily only when a design job
     runs. Localhost by default — this is a local tool, so it never binds
     ``0.0.0.0`` implicitly.
     """
@@ -2197,11 +2222,11 @@ _APP_HTML = r"""<!doctype html>
           <div class="agent-note" id="od-note">No API key needed — a deterministic space-filling layout you can then edit.</div>
         </div>
       </details>
-      <div class="od-or">Design with Claude (needs API key)</div>
+      <div class="od-or">Design with agent (needs API key)</div>
       <textarea id="brief" spellcheck="false"
         placeholder="Describe the barndo you want — e.g. &quot;3 bed 2 bath, open kitchen, 2-car shop bay, ~1800 sq ft&quot;. Then Design."></textarea>
       <div class="composer-row">
-        <button id="send-btn">Design with Claude</button>
+        <button id="send-btn">Design with Agent</button>
         <button id="stop-btn" hidden>Stop</button>
       </div>
       <div class="agent-note" id="agent-note"></div>
@@ -4046,9 +4071,9 @@ async function sendDesign(){
   hideNotice();
   addMsg('msg-user', brief);
   briefEl.value = '';
-  const body = { brief, iterations: 3 };
+  const body = { brief, iterations: 3, auto_seed: true, critique: 'each-round' };
   // Follow-ups refine the current editor plan; the first brief starts fresh.
-  if (hasResult) body.source = editor.value;
+  if (hasResult){ body.source = editor.value; body.auto_seed = false; }
   setRunning(true); clearStatus(); actByRound = {}; setStatus('starting'); jobId = null;
   try {
     const resp = await fetch('/api/design', { method:'POST',
@@ -4161,7 +4186,7 @@ initAgent();
 // --- offline (rule-based) Design form ---------------------------------------
 // Turns the small form into a POST /api/layout call (no API key), then loads the
 // returned DSL through setSource — the same funnel New/Open/example use, so it is
-// exactly ONE undoable checkpoint. Works whether or not the Claude agent is on.
+// exactly ONE undoable checkpoint. Works whether or not the design agent is on.
 const OD_EXTRAS = [
   ['garage', '2-car garage'], ['shop', 'shop bay'], ['office', 'office'],
   ['dining', 'dining'], ['mudroom', 'mudroom'], ['laundry', 'laundry'],

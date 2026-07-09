@@ -513,9 +513,20 @@ revise**, until it compiles clean, the critic is satisfied AND the
 deterministic 0-100 design score clears `target_score` (default 90; `None`
 disables the gate) — or the cap is hit. Every iteration is scored and the
 **best-scoring one wins** (`result.best_iteration` says which), so a
-regression on the last round is never returned. Uses Claude
-(`claude-opus-4-8`) — the compiler's structured diagnostics plus the score's
-per-component deductions are the steering signal.
+regression on the last round is never returned. The default model is
+`claude-opus-4-8`, but any Anthropic-compatible endpoint can be used via
+`ANTHROPIC_BASE_URL`/`BARNDSL_MODEL`; the compiler's structured diagnostics plus
+the score's per-component deductions are the steering signal.
+
+To watch a real run closely, capture a JSONL transcript:
+
+```bash
+barndsl design "3 bed 2 bath 40 x 30 barndo with garage" \
+  --model deepseek-v4-pro --critique final --trace agent-run.jsonl --show-activity
+```
+
+The trace records phase changes, streamed reasoning/text chunks, each iteration's
+score/diagnostics/source, and the final best-scoring plan.
 
 ## Two front-ends, one core
 
@@ -576,6 +587,8 @@ barndsl revit-log plan.buildlog.json               # what the Revit build couldn
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
+barndsl dev doctor                                 # maintainer/agent gate: audit + gallery + strict LSP + impact targets
+barndsl dev feature-check room                     # verify statement wiring across parser/docs/LSP/playground/tests
 ```
 
 **Outputs without Revit.** `barndsl schedule` emits room/door/window schedules
@@ -698,7 +711,7 @@ floors — and any stair footprint — as a dimmed underlay to align against.
 
 *Agent chat pane.* When the agent extra is installed and a key is set — `pip
 install 'barndsl[agent]'` and `export ANTHROPIC_API_KEY=…` — a chat pane lights
-up on the left: type a brief and Claude runs the `agent.py`
+up on the left: type a brief and the design agent runs the `agent.py`
 compile-critique-revise loop, streaming each round's score and diagnostics back
 as it goes (the editor and viewport update live so you watch the design evolve),
 then lands the **best-scoring** iteration in the editor. Follow-up messages ("make
@@ -757,7 +770,7 @@ keep the best, catch a regression. The full formula is the module docstring in
 
 ```bash
 pip install -e .            # compiler + renderer (no API key)
-pip install -e '.[agent]'   # + the Claude agent
+pip install -e '.[agent]'   # + the design agent
 pip install -e '.[raster]'  # + PNG/PDF render output (cairosvg)
 ```
 
@@ -780,7 +793,7 @@ src/barndsl/
   ifc.py         # export the plan → IFC4 BIM (STEP/SPF), hand-written, dependency-free
   scaffold.py    # the starter plan `barndsl new` writes
   render.py      # annotated 2D SVG renderer (+ PNG/PDF via optional cairosvg)
-  agent.py       # Claude write → compile → critique → revise loop
+  agent.py       # model write → compile → critique → revise loop
   cli.py         # `barndsl` command
 examples/
   cedar_ridge.barn   # the worked plan in DSL (used by `barndsl demo`)

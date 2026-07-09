@@ -1,4 +1,4 @@
-"""Claude-powered agentic workflow built around the compiler.
+"""Model-powered agentic workflow built around the compiler.
 
 The agent *writes architecture in the DSL*. Each round it emits DSL source, the
 compiler returns diagnostics (errors + fix hints), and those diagnostics are fed
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 import os
 import re
 from collections.abc import Callable
@@ -112,6 +113,17 @@ DEFAULT_MAX_ITERATIONS = 3
 #: more chances to converge (and more cost); fewer = faster, cheaper.
 MAX_ITERATIONS_ENV_VAR = "BARNDSL_MAX_ITERATIONS"
 
+#: How often the model critic runs. ``each_round`` preserves the original loop,
+#: ``final`` lets compiler+score drive most revisions and asks the critic when a
+#: candidate looks finishable, and ``never`` is deterministic score-only mode.
+CRITIQUE_MODE_ENV_VAR = "BARNDSL_CRITIQUE"
+CRITIQUE_MODES = {"each_round", "final", "never"}
+
+#: Whether critique may attach a rendered PNG. ``auto`` disables it for endpoints
+#: known not to accept image blocks (DeepSeek's Anthropic-compatible API), while
+#: leaving native Anthropic behavior unchanged.
+CRITIQUE_VISION_ENV_VAR = "BARNDSL_CRITIQUE_VISION"
+
 #: Sentinel for "argument not supplied" where ``None`` is itself a meaningful
 #: value — ``target_score=None`` disables the gate, so it can't double as "unset".
 _UNSET: Any = object()
@@ -131,6 +143,50 @@ def resolve_target_score() -> float:
         except ValueError:
             pass
     return DEFAULT_TARGET_SCORE
+
+
+def resolve_critique_mode(mode: bool | str | None = None) -> str:
+    """Normalize critique cadence: explicit value, env var, then ``each_round``.
+
+    Booleans keep the historical API intact: ``True`` means every round,
+    ``False`` means never. Strings accept ``each-round`` or ``each_round``.
+    Anything malformed falls back to the original every-round behavior.
+    """
+    raw: bool | str | None = mode
+    if raw is None:
+        raw = os.environ.get(CRITIQUE_MODE_ENV_VAR)
+    if raw is True:
+        return "each_round"
+    if raw is False:
+        return "never"
+    if isinstance(raw, str):
+        normalized = raw.strip().lower().replace("-", "_")
+        if normalized in CRITIQUE_MODES:
+            return normalized
+    return "each_round"
+
+
+def _is_deepseek_endpoint(model: str) -> bool:
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    return "deepseek" in model.lower() or "deepseek" in base_url.lower()
+
+
+def resolve_critique_vision(
+    value: bool | str | None = None, *, model: str | None = None
+) -> bool:
+    """Whether the critic may receive a rendered floor-plan image."""
+    raw: bool | str | None = value
+    if raw is None:
+        raw = os.environ.get(CRITIQUE_VISION_ENV_VAR, "auto")
+    if isinstance(raw, bool):
+        return raw
+    normalized = str(raw).strip().lower()
+    if normalized in {"0", "false", "no", "off", "never", "text"}:
+        return False
+    if normalized in {"1", "true", "yes", "on", "always", "vision"}:
+        return True
+    resolved_model = resolve_model(model)
+    return not _is_deepseek_endpoint(resolved_model)
 
 
 def resolve_max_iterations() -> int:
@@ -324,6 +380,165 @@ _FENCE_RE = re.compile(r"```(?:[a-zA-Z]+)?\s*\n(.*?)```", re.DOTALL)
 
 _PROGRAM_RE = re.compile(r"^\s*program\b", re.MULTILINE)
 
+_OFFSET_RE = re.compile(r"\boffset\s+[-+]?\d+(?:\.\d+)?")
+
+_NUM_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+}
+
+
+def _brief_count(text: str, noun: str, *aliases: str) -> int | None:
+    """Extract a small integer count from common natural-language brief forms."""
+    names = "|".join(re.escape(n) for n in (noun, *aliases))
+    words = "|".join(_NUM_WORDS)
+    patterns = [
+        rf"\b(?P<n>\d+|{words})\s*[- ]?(?:{names})s?\b",
+        rf"\b(?P<n>\d+)\s*(?:{noun[0]}r|{noun[0]}b)\b",
+    ]
+    for pat in patterns:
+        match = re.search(pat, text, re.IGNORECASE)
+        if not match:
+            continue
+        raw = match.group("n").lower()
+        try:
+            return int(raw)
+        except ValueError:
+            return _NUM_WORDS.get(raw)
+    return None
+
+
+def _brief_dimensions(text: str, target_area: float | None) -> tuple[float, float] | None:
+    dim = re.search(
+        r"\b(?P<w>\d+(?:\.\d+)?)\s*(?:x|by|×)\s*(?P<l>\d+(?:\.\d+)?)\s*(?:ft|feet|')?\b",
+        text,
+        re.IGNORECASE,
+    )
+    if dim:
+        return float(dim.group("w")), float(dim.group("l"))
+    if target_area is None:
+        return None
+    # Favor a buildable barndo rectangle near 4:3, rounded to 2 ft increments.
+    width = max(24.0, round(math.sqrt(target_area * 4.0 / 3.0) / 2.0) * 2.0)
+    length = max(24.0, round((target_area / width) / 2.0) * 2.0)
+    return width, length
+
+
+def solver_seed_from_brief(brief: str) -> str | None:
+    """Build a deterministic layout-brief seed from a natural-language brief.
+
+    The parser is deliberately light: it looks for program counts, envelope or
+    area hints, open-kitchen intent, and common extra rooms. When the program is
+    too vague it returns ``None`` so the model still starts fresh instead of
+    being anchored to a misleading default.
+    """
+    text = brief.strip()
+    if not text:
+        return None
+    beds = _brief_count(text, "bed", "bedroom", "br")
+    baths = _brief_count(text, "bath", "bathroom", "ba")
+    if beds is None and baths is None:
+        return None
+    beds = max(0, min(8, beds if beds is not None else 2))
+    baths = max(0, min(6, baths if baths is not None else max(1, beds // 2)))
+
+    area_match = re.search(
+        r"\b(?:(?:~|about|around|approx(?:imately)?)\s*)?(?P<a>\d{3,5})\s*(?:sq\s*ft|sf|sqft)\b",
+        text,
+        re.IGNORECASE,
+    )
+    target_area = float(area_match.group("a")) if area_match else None
+    dims = _brief_dimensions(text, target_area)
+    if dims is None:
+        room_area = 600 + beds * 185 + baths * 80
+        if re.search(r"\bgarage|shop|bay\b", text, re.IGNORECASE):
+            room_area += 420
+        dims = _brief_dimensions(text, max(900.0, room_area * 1.15))
+    width, length = dims
+
+    lower = text.lower()
+    extras: list[str] = []
+    for key, words in {
+        "garage": ("garage", "car bay", "parking"),
+        "shop": ("shop", "workshop", "shop bay"),
+        "office": ("office", "study"),
+        "dining": ("dining", "dining room"),
+        "mudroom": ("mudroom", "mud room"),
+        "laundry": ("laundry", "utility"),
+    }.items():
+        if any(w in lower for w in words):
+            extras.append(key)
+
+    open_kitchen = not re.search(r"\bclosed kitchen|separate kitchen\b", lower)
+    lines = [
+        'plan "Agent Seed"',
+        f"envelope {width:g} x {length:g}",
+        "ceiling 9",
+        "",
+        "room living: living area 360",
+        "room kitchen: kitchen area 240",
+    ]
+    extra_specs = {
+        "garage": ("garage", 480),
+        "shop": ("garage", 360),
+        "office": ("office", 120),
+        "dining": ("dining", 160),
+        "mudroom": ("mudroom", 90),
+        "laundry": ("laundry", 80),
+    }
+    for e in extras:
+        rtype, area = extra_specs[e]
+        lines.append(f"room {e}: {rtype} area {area}")
+    private = beds + baths
+    hall = private >= 2
+    if hall:
+        lines.append(f"room hall: hallway area {max(96, private * 40)} min 4")
+    bed_ids = [f"bed{i + 1}" for i in range(beds)]
+    bath_ids = [f"bath{i + 1}" for i in range(baths)]
+    for i, rid in enumerate(bed_ids):
+        lines.append(f"room {rid}: bedroom area {176 if i == 0 else 150}")
+    for i, rid in enumerate(bath_ids):
+        lines.append(f"room {rid}: bathroom area {84 if i == 0 else 70}")
+    lines.append("")
+
+    adj: list[tuple[str, ...]] = [("living", "kitchen")]
+    if not open_kitchen:
+        lines.append('note "Brief asks for a more separated kitchen; keep living and kitchen adjacent but use doors instead of an open core if needed."')
+    if hall:
+        adj.append(("living", "hall"))
+        privates = bed_ids + bath_ids
+        if privates:
+            adj.append(tuple(["hall", *privates]))
+    else:
+        if bed_ids:
+            adj.append(("living", bed_ids[0]))
+        if bath_ids:
+            adj.append((bed_ids[0] if bed_ids else "living", bath_ids[0]))
+    for e in extras:
+        if e == "garage":
+            adj.append(("mudroom" if "mudroom" in extras else "kitchen", "garage"))
+        elif e == "shop":
+            adj.append(("garage" if "garage" in extras else "living", "shop"))
+        elif e == "office":
+            adj.append(("hall" if hall else "living", "office"))
+        elif e == "dining":
+            adj.append(("kitchen", "dining"))
+        elif e == "mudroom":
+            adj.append(("kitchen", "mudroom"))
+        elif e == "laundry":
+            adj.append(("hall" if hall else "kitchen", "laundry"))
+    for pair in adj:
+        lines.append("adjacent " + " ".join(pair))
+    lines.append("entry living")
+    return "\n".join(lines) + "\n"
+
 
 def _extract_source(text: str) -> str:
     """Pull the DSL out of a model reply.
@@ -354,6 +569,38 @@ def _extract_source(text: str) -> str:
     if starts:
         return "\n".join(lines[starts[0] : starts[-1] + 1]).strip() + "\n"
     return text.strip() + "\n"
+
+
+def _repair_common_opening_errors(source: str, result: CompileResult) -> str | None:
+    """Patch fatal opening placement slips that a model often makes mechanically.
+
+    This is intentionally conservative. The compiler has already identified the
+    exact offending line, so we only touch that line and only for geometry errors
+    where a local edit is usually correct: impossible offsets are reset near the
+    corner, and a clashing window is removed because daylight can be re-added in
+    a later design pass. Returns ``None`` when no safe edit applies.
+    """
+    if not result.errors:
+        return None
+    lines = source.splitlines()
+    changed = False
+    for issue in result.errors:
+        line_no = issue.line
+        if not line_no or line_no < 1 or line_no > len(lines):
+            continue
+        idx = line_no - 1
+        line = lines[idx]
+        stripped = line.lstrip()
+        if issue.code in {"DOOR_OOB", "OPENING_OOB"} and _OFFSET_RE.search(line):
+            lines[idx] = _OFFSET_RE.sub("offset 0.5", line, count=1)
+            changed = True
+        elif issue.code == "OPENING_CLASH" and stripped.startswith("window "):
+            indent = line[: len(line) - len(stripped)]
+            lines[idx] = indent + "# barndsl agent removed overlapping window: " + stripped
+            changed = True
+    if not changed:
+        return None
+    return "\n".join(lines).strip() + "\n"
 
 
 def _json_object_from_text(text: str) -> str | None:
@@ -592,13 +839,20 @@ class DesignResult:
 class BarndoAgent:
     """Drives the write → compile → score → critique → revise loop."""
 
-    def __init__(self, model: str | None = None, client=None, max_tokens: int | None = None):
+    def __init__(
+        self,
+        model: str | None = None,
+        client=None,
+        max_tokens: int | None = None,
+        critique_vision: bool | str | None = None,
+    ):
         # ``None`` resolves via $BARNDSL_MODEL then DEFAULT_MODEL, so the endpoint
         # (Anthropic vs. a compat gateway) can pick a model it actually serves.
         self.model = resolve_model(model)
         # Output-token cap for generation and critique; big enough for a reasoning
         # model to think and still emit (see resolve_max_tokens / DEFAULT_MAX_TOKENS).
         self.max_tokens = resolve_max_tokens(max_tokens)
+        self.critique_vision = resolve_critique_vision(critique_vision, model=self.model)
         self._client = client
 
     @property
@@ -655,6 +909,18 @@ class BarndoAgent:
                 "that fixes the diagnostics: keep every line that already works, "
                 "and do not restructure or rename rooms unless a diagnostic "
                 "demands it."
+                "\n\nREVISION CONTRACT: preserve the current envelope, level count, "
+                "room ids, room count, and basic topology unless a hard compiler "
+                "error makes that impossible. If the prior plan already compiles, "
+                "treat it as the design to protect: make surgical edits such as "
+                "door offsets, closets, alarms, a second exterior entry, porch/"
+                "landing notes, or small room-size adjustments. Do NOT introduce "
+                "a second floor, stair, loft, extra structural/load-path system, "
+                "or wholesale room rearrangement unless the user's brief explicitly "
+                "asks for it. Keep every bedroom code-compliant and every exterior "
+                "opening on an exterior wall. Offsets are measured along the wall "
+                "segment they are placed on; when unsure, use a small safe offset "
+                "like 0.5 rather than copying a room coordinate."
             )
         else:
             prompt += (
@@ -712,7 +978,7 @@ class BarndoAgent:
         )
         # Give the critic eyes: attach the rendered plan when it can be
         # rasterised, and only then claim (in the system prompt) that it was.
-        png = _plan_png(result)
+        png = _plan_png(result) if self.critique_vision else None
         system = _CRITIQUE_SYSTEM
         content: str | list = prompt
         if png is not None:
@@ -780,12 +1046,13 @@ class BarndoAgent:
         self,
         brief: str,
         max_iterations: int | None = None,
-        critique: bool = True,
+        critique: bool | str | None = True,
         on_step=None,
         target_score: float | None = _UNSET,
         seed_with_solver=None,
         *,
         seed_source: str | None = None,
+        auto_seed: bool = False,
         cancel: Callable[[], bool] | None = None,
         on_phase: Callable[[str, int], None] | None = None,
         on_activity: Callable[[str, int, str, str], None] | None = None,
@@ -820,6 +1087,11 @@ class BarndoAgent:
         edit trades a point of score for the user's request. Default ``None``
         leaves the loop unchanged.
 
+        ``auto_seed`` derives a solver seed from common natural-language briefs
+        (program counts, dimensions/area, and extras like garage or office).
+        Vague briefs yield no seed instead of a misleading default, and explicit
+        ``seed_with_solver`` always wins.
+
         ``cancel`` (keyword-only) is polled once at the top of every round; when
         it returns true the loop stops and hands back the best iteration so far.
         ``on_phase`` (keyword-only) is called with ``(phase, round)`` — phase one
@@ -839,10 +1111,13 @@ class BarndoAgent:
             max_iterations = resolve_max_iterations()
         if target_score is _UNSET:
             target_score = resolve_target_score()
+        critique_mode = resolve_critique_mode(critique)
 
         history: list[DesignStep] = []
         source: str | None = None
         feedback: str | None = None
+        if not seed_with_solver and auto_seed and seed_source is None:
+            seed_with_solver = solver_seed_from_brief(brief)
 
         # Candidate 0: the deterministic solver's best plan, if one was requested
         # and it compiles. Recorded as iteration 0 so best-iteration-wins can
@@ -885,13 +1160,26 @@ class BarndoAgent:
             if on_phase is not None:
                 on_phase("compiling", i)
             result = compile_source(source, name=None)
+            repaired = _repair_common_opening_errors(source, result)
+            if repaired is not None:
+                repaired_result = compile_source(repaired, name=None)
+                if len(repaired_result.errors) < len(result.errors):
+                    source = repaired
+                    result = repaired_result
             # The program nudge is folded before scoring: it is deterministic
             # (a pure function of the source), so the score stays a contract —
             # and a missing `program` line now costs points the loop can win back.
             _fold_program_nudge(result)
             score = design_score(result)
             crit = None
-            if critique and result.plan is not None:
+            score_gate_cleared = target_score is None or score.total >= target_score
+            should_critique = False
+            if result.plan is not None:
+                if critique_mode == "each_round":
+                    should_critique = True
+                elif critique_mode == "final":
+                    should_critique = result.ok and (score_gate_cleared or i == max_iterations)
+            if should_critique:
                 if on_phase is not None:
                     on_phase("critiquing", i)
                 crit = self.critique(result, score, on_activity=activity_for("critiquing", i))
@@ -914,9 +1202,29 @@ class BarndoAgent:
                 break
             # Flag a regression against the best valid iteration *before* this one,
             # so a broken or lower-scoring round reads as a regression.
-            feedback = render_feedback(
-                result, score, best_prior=_best_valid_step(history[:-1])
-            )
+            best_prior = _best_valid_step(history[:-1])
+            feedback = render_feedback(result, score, best_prior=best_prior)
+            if (
+                result.plan is not None
+                and not result.errors
+                and best_prior is not None
+                and best_prior.score is not None
+                and score.total < best_prior.score.total
+            ):
+                source = best_prior.source
+                feedback = (
+                    f"NOTE: your newest attempt (iteration {i}) compiled but "
+                    f"scored lower ({score.total:g}) than the best valid "
+                    f"iteration ({best_prior.iteration}, scored "
+                    f"{best_prior.score.total:g}), so it was DISCARDED. The "
+                    f"DSL shown above is the best valid source; improve that "
+                    f"plan with small, score-raising edits instead of continuing "
+                    f"from the lower-scoring rewrite.\n"
+                    + render_feedback(best_prior.result, best_prior.score)
+                    + "\n\nRegression attempt summary (do not repeat these "
+                    "moves):\n"
+                    + render_feedback(result, score, best_prior=best_prior)
+                )
             # When the latest attempt failed to compile, revise from the best
             # valid source instead of stranding the model on non-compiling code.
             # The feedback must stay coherent with the source it is shown
@@ -1095,11 +1403,13 @@ def design(
     brief: str,
     model: str | None = None,
     max_iterations: int | None = None,
+    critique: bool | str | None = True,
     on_step=None,
     target_score: float | None = _UNSET,
     seed_with_solver=None,
     *,
     seed_source: str | None = None,
+    auto_seed: bool = False,
     cancel: Callable[[], bool] | None = None,
     on_phase: Callable[[str, int], None] | None = None,
     on_activity: Callable[[str, int, str, str], None] | None = None,
@@ -1112,10 +1422,12 @@ def design(
     return BarndoAgent(model=model).design(
         brief,
         max_iterations=max_iterations,
+        critique=critique,
         on_step=on_step,
         target_score=target_score,
         seed_with_solver=seed_with_solver,
         seed_source=seed_source,
+        auto_seed=auto_seed,
         cancel=cancel,
         on_phase=on_phase,
         on_activity=on_activity,

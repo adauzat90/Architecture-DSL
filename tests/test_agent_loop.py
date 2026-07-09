@@ -633,6 +633,22 @@ def test_revision_reverts_to_the_best_valid_source_after_a_broken_round():
     assert "does not compile" not in revision.split("Fatal diagnostics")[0]
 
 
+def test_revision_reverts_to_the_best_valid_source_after_a_score_regression():
+    client = FakeClient(sources=[CLEAN, MEDIOCRE, BROKEN])
+    _agent(client).design(
+        "a cottage",
+        max_iterations=3,
+        critique=False,
+        target_score=101.0,
+    )
+
+    revision = client.stream_prompts[2]
+    assert "compiled but scored lower" in revision
+    assert "Regression attempt summary" in revision
+    assert 'plan "Stillwater Cottage"' in revision
+    assert 'plan "Mediocre"' not in revision.split("Regression attempt summary")[0]
+
+
 # -- refinement seed (seed_source) --------------------------------------------
 
 
@@ -923,6 +939,80 @@ def test_design_default_iterations_come_from_env(monkeypatch):
     # no max_iterations / target_score passed → both resolve from the env
     result = _agent(client).design("a starter home", critique=False)
     assert result.iterations == 2
+
+
+def test_auto_seed_derives_a_solver_seed_from_common_brief_text():
+    client = FakeClient(sources=[BROKEN])
+    result = _agent(client).design(
+        "3 bed 2 bath 40 x 30 barndo with garage",
+        max_iterations=1,
+        target_score=None,
+        auto_seed=True,
+    )
+    assert result.history[0].iteration == 0
+    assert result.history[0].result.ok
+    assert result.best_iteration == 0
+
+
+def test_final_critique_waits_until_the_score_gate_is_reachable():
+    client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_satisfied()])
+    result = _agent(client).design(
+        "a starter home", max_iterations=2, target_score=80.0, critique="final"
+    )
+    assert result.best_iteration == 2
+    assert len(client.parse_prompts) == 1
+    assert result.history[0].critique is None
+    assert result.history[1].critique is not None
+
+
+def test_common_opening_repair_clamps_bad_offsets():
+    from barndsl.agent import _repair_common_opening_errors
+
+    src = (
+        'plan "x"\n'
+        "envelope 20 x 10\n"
+        "room garage: garage at 0,0 size 20 x 10\n"
+        "door garage west overhead width 9 offset 15.5\n"
+    )
+    result = compile_source(src)
+    assert any(d.code == "OPENING_OOB" for d in result.errors)
+
+    fixed = _repair_common_opening_errors(src, result)
+    assert fixed is not None and "offset 0.5" in fixed
+    repaired = compile_source(fixed)
+    assert not any(d.code == "OPENING_OOB" for d in repaired.errors)
+
+
+def test_common_opening_repair_removes_clashing_window():
+    from barndsl.agent import _repair_common_opening_errors
+
+    src = (
+        'plan "x"\n'
+        "envelope 10 x 10\n"
+        "room mudroom: mudroom at 0,0 size 10 x 10\n"
+        "entry mudroom south width 3 offset 0.5\n"
+        "window mudroom south width 2 offset 1.5\n"
+    )
+    result = compile_source(src)
+    assert any(d.code == "OPENING_CLASH" for d in result.errors)
+
+    fixed = _repair_common_opening_errors(src, result)
+    assert fixed is not None and "removed overlapping window" in fixed
+    repaired = compile_source(fixed)
+    assert not any(d.code == "OPENING_CLASH" for d in repaired.errors)
+
+
+def test_deepseek_critique_stays_text_only_when_png_exists(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setattr(A, "_plan_png", lambda result: b"png")
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+    result = compile_source(CLEAN)
+    BarndoAgent(model="deepseek-v4-pro", client=client).critique(
+        result, design_score(result)
+    )
+    assert isinstance(client.parse_contents[0], str)
+    assert A._CRITIQUE_VISION not in client.parse_systems[0]
 
 
 def test_design_explicit_none_target_score_still_disables_the_gate(monkeypatch):

@@ -29,8 +29,9 @@ import os
 import re
 import select
 import sys
+from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
 from .compose import scan_parts
@@ -178,19 +179,35 @@ def write_message(stream: Any, obj: dict) -> None:
 
 
 def uri_to_path(uri: str) -> str | None:
-    """``file:///a/b.barn`` → ``/a/b.barn``; ``None`` for a non-``file:`` URI
-    (an ``untitled:`` scratch buffer, say). Percent-escapes are decoded."""
+    """Return a local filesystem path for a ``file:`` URI.
+
+    Handles both POSIX ``file:///tmp/x.barn`` and Windows
+    ``file:///D:/dir/x.barn`` forms. ``None`` is returned for non-file URIs such
+    as ``untitled:`` scratch buffers. Percent-escapes are decoded.
+    """
     if not uri:
         return None
     parts = urlsplit(uri)
     if parts.scheme != "file":
         return None
-    return unquote(parts.path) or None
+    path = unquote(parts.path) or None
+    if path and os.name == "nt" and re.match(r"^/[A-Za-z]:/", path):
+        path = path[1:]
+    return path
 
 
 def path_to_uri(path: str) -> str:
-    """``/a/b.barn`` → ``file:///a/b.barn`` (a plain, portable file URI)."""
-    return "file://" + path
+    """Return a standards-compliant ``file:`` URI for ``path``.
+
+    The old ``"file://" + path`` form produced invalid Windows URIs like
+    ``file://D:\\...``; using :meth:`Path.as_uri` keeps cross-file composition
+    features (definition/hover for ``use`` parts) working on every platform.
+    """
+    if os.name == "nt" and path.startswith("/") and not re.match(r"^/[A-Za-z]:/", path):
+        # Tests and some clients use synthetic POSIX paths even on Windows; keep
+        # those stable instead of resolving them under the current drive.
+        return "file://" + quote(path)
+    return Path(path).resolve().as_uri()
 
 
 def base_dir_for(uri: str) -> str | None:

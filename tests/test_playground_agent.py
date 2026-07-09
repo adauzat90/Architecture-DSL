@@ -79,6 +79,9 @@ class FakeDesigner:
         brief: str,
         *,
         seed_source: str | None,
+        seed_with_solver=None,
+        auto_seed: bool = False,
+        critique=True,
         max_iterations: int,
         on_step,
         on_phase,
@@ -86,7 +89,12 @@ class FakeDesigner:
         on_activity=None,
     ) -> DesignResult:
         self.record.update(
-            brief=brief, seed_source=seed_source, max_iterations=max_iterations
+            brief=brief,
+            seed_source=seed_source,
+            seed_with_solver=seed_with_solver,
+            auto_seed=auto_seed,
+            critique=critique,
+            max_iterations=max_iterations,
         )
         history: list[DesignStep] = []
         for i, src in enumerate(self.sources, start=1):
@@ -113,8 +121,10 @@ class BlockingFakeDesigner:
     def __init__(self) -> None:
         self.started = threading.Event()
 
-    def __call__(self, brief, *, seed_source, max_iterations, on_step, on_phase, cancel,
-                 on_activity=None):
+    def __call__(
+        self, brief, *, seed_source, seed_with_solver=None, auto_seed=False,
+        critique=True, max_iterations, on_step, on_phase, cancel, on_activity=None
+    ):
         on_phase("writing", 1)
         self.started.set()
         while not cancel():
@@ -255,6 +265,7 @@ def test_design_refinement_seeds_the_designer(monkeypatch):
     assert status == 200
     assert fake.record["brief"] == "make the kitchen bigger"
     assert fake.record["seed_source"] == MEDIOCRE  # the editor source reached the loop
+    assert fake.record["auto_seed"] is True  # the real agent ignores this when seed_source is present
     assert _kinds(events)[-1] == "done"
 
 
@@ -264,6 +275,25 @@ def test_empty_source_is_a_fresh_generation_not_a_seed(monkeypatch):
     with running(fake) as srv:
         _design(srv, {"brief": "a cottage", "source": ""})
     assert fake.record["seed_source"] is None
+
+
+def test_design_endpoint_passes_agent_experience_options(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    fake = FakeDesigner([CLEAN])
+    solver_brief = 'plan "Seed"\nroom living: living area 300\n'
+    with running(fake) as srv:
+        _design(
+            srv,
+            {
+                "brief": "3 bed 2 bath barndo",
+                "solver_brief": solver_brief,
+                "auto_seed": False,
+                "critique": "final",
+            },
+        )
+    assert fake.record["seed_with_solver"] == solver_brief
+    assert fake.record["auto_seed"] is False
+    assert fake.record["critique"] == "final"
 
 
 def test_iterations_count_is_honoured(monkeypatch):

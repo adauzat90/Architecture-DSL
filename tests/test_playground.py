@@ -1361,6 +1361,8 @@ def test_layout_brief_text_shape():
     assert txt.startswith('plan "My Barndo"')
     assert "envelope 40 x 30" in txt
     assert "room garage: garage" in txt and "adjacent" in txt and "entry living" in txt
+    closed = layout_brief_text("My Barndo", 2, 1, 40, 30, False, [])
+    assert "separated kitchen" in closed
 
 
 def test_default_source_is_the_clean_scaffold_not_cedar():
@@ -1385,10 +1387,11 @@ def test_cedar_ridge_stays_available_as_an_example():
 
 def test_app_has_offline_design_form_and_layout_wiring():
     html = render_app(CLEAN)
-    for token in ("Design (offline — rule-based)", "Design with Claude",
+    for token in ("Design (offline — rule-based)", "Design with agent",
                   "id=\"od-btn\"", "/api/layout", "function designOffline(",
                   "od-beds", "od-extras", "open kitchen"):
         assert token in html, token
+    assert "auto_seed" in html
     # still fully offline
     assert "http://" not in html.replace("http://www.w3.org/2000/svg", "")
     assert "https://" not in html and "//cdn" not in html and "<script src" not in html

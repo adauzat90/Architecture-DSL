@@ -17,3 +17,6 @@ venv/
 # Generated artifacts
 *.svg
 !docs/**/*.svg
+.pi/artifacts/
+agent-run-*.jsonl
+agent-run-*.svg
