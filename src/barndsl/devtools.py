@@ -262,22 +262,133 @@ def diagnostic_diff(before: list[str], after: list[str] | None = None, *, profil
 # --- feature checks ----------------------------------------------------------
 
 
-def _grep_mentions(paths: list[Path], needle: str) -> list[str]:
-    out: list[str] = []
-    low = needle.lower()
+_TEXT_SUFFIXES = {".py", ".md", ".barn", ".json", ".txt", ".ts"}
+
+
+def _iter_text_files(paths: list[Path]):
     for root in paths:
         if not root.exists():
             continue
         files = root.rglob("*") if root.is_dir() else [root]
         for p in files:
-            if p.is_dir() or p.suffix.lower() not in {".py", ".md", ".barn", ".json", ".txt"}:
+            if p.is_dir() or p.suffix.lower() not in _TEXT_SUFFIXES:
                 continue
-            try:
-                if low in p.read_text(encoding="utf-8", errors="ignore").lower():
-                    out.append(_rel(p))
-            except OSError:
+            if any(part in {".git", "__pycache__", "artifacts"} for part in p.parts):
                 continue
+            yield p
+
+
+def _grep_mentions(paths: list[Path], needle: str) -> list[str]:
+    out: list[str] = []
+    low = needle.lower()
+    for p in _iter_text_files(paths):
+        try:
+            if low in p.read_text(encoding="utf-8", errors="ignore").lower():
+                out.append(_rel(p))
+        except OSError:
+            continue
     return sorted(out)
+
+
+def _line_matches(paths: list[Path], needle: str, *, max_results: int = 50) -> list[dict[str, Any]]:
+    """Return compact grep-like hits with paths relative to the repo root."""
+    out: list[dict[str, Any]] = []
+    low = needle.lower()
+    for p in _iter_text_files(paths):
+        try:
+            lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines, start=1):
+            if low not in line.lower():
+                continue
+            out.append({"path": _rel(p), "line": i, "text": line.strip()[:240]})
+            if len(out) >= max_results:
+                return out
+    return out
+
+
+def _find_line(path: Path, needle: str) -> int | None:
+    if not path.exists():
+        return None
+    low = needle.lower()
+    for i, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if low in line.lower():
+            return i
+    return None
+
+
+def locate(query: str, *, max_results: int = 80) -> dict[str, Any]:
+    """Locate likely implementation, docs and tests for a diagnostic/statement/feature.
+
+    This is a repo-native companion to ``rg`` for agents: it normalizes common
+    barndsl concepts (diagnostic codes, DSL statement heads, CLI/dev commands)
+    and returns deterministic JSON with line-numbered breadcrumbs.
+    """
+    raw = query.strip()
+    key = raw.lower()
+    code = raw.upper()
+    from .playground import _STATEMENT_KEYWORDS
+
+    kinds: list[str] = []
+    exact: dict[str, Any] = {}
+    parser = SRC / "barndsl" / "compiler.py"
+    diagnostics = SRC / "barndsl" / "diagnostics.py"
+    cli = SRC / "barndsl" / "cli.py"
+    module = SRC / "barndsl" / f"{key}.py"
+    test_module = ROOT / "tests" / f"test_{key}.py"
+
+    if code in REGISTRY:
+        info = REGISTRY[code]
+        kinds.append("diagnostic")
+        exact["diagnostic"] = {
+            "code": code,
+            "severity": info.severity.value,
+            "title": info.title,
+            "registry": {"path": _rel(diagnostics), "line": _find_line(diagnostics, f'_c("{code}"')},
+            "explain": f"barndsl explain {code}",
+        }
+    if key in _KEYWORDS:
+        kinds.append("statement")
+        exact["statement"] = {
+            "keyword": key,
+            "compiler_keywords": {"path": _rel(parser), "line": _find_line(parser, f'"{key}"')},
+            "dsl_reference": {"path": _rel(parser), "line": _find_line(parser, f"{key} ") or _find_line(parser, f"{key}:")},
+            "playground": "src/barndsl/playground.py:_STATEMENT_KEYWORDS derives from compiler._KEYWORDS",
+            "lsp": "src/barndsl/lsp.py:_QUICKFIX_STATEMENTS derives from playground._STATEMENT_KEYWORDS",
+        }
+    command_line = _find_line(cli, f'add_parser("{key}"') or _find_line(cli, f"add_parser('{key}'")
+    top_commands = {"compile", "build", "score", "inspect", "demo", "layout", "design", "revit", "revit-import", "fmt", "schedule", "new", "dxf", "ifc", "gltf", "view3d", "serve", "lsp", "elevation", "section", "watch", "compare", "revit-diff", "cost", "packet", "revit-log", "explain", "dev", "profiles"}
+    dev_commands = {"audit", "rule-probe", "diag-diff", "gallery-gate", "lsp-smoke", "doctor", "feature-check", "locate", "impact", "export-parity", "rule-scaffold", "feature-scaffold"}
+    if command_line and key in top_commands:
+        kinds.append("cli_command")
+        exact["cli_command"] = {"path": _rel(cli), "line": command_line, "run": f"barndsl {key} --help"}
+    if command_line and key in dev_commands:
+        kinds.append("dev_command")
+        exact["dev_command"] = {"path": _rel(cli), "line": command_line, "run": f"barndsl dev {key} --help"}
+    if module.exists():
+        kinds.append("module")
+        exact["module"] = {"path": _rel(module)}
+    if test_module.exists():
+        exact["test_module"] = {"path": _rel(test_module)}
+
+    source_roots = [SRC / "barndsl", ROOT / "tools", ROOT / ".pi" / "extensions"]
+    matches = {
+        "source": _line_matches(source_roots, raw, max_results=max_results),
+        "tests": _line_matches([ROOT / "tests"], raw, max_results=max_results // 2),
+        "docs": _line_matches([ROOT / "README.md", ROOT / "docs", ROOT / ".pi" / "README.md"], raw, max_results=max_results // 2),
+        "examples": _line_matches([ROOT / "examples"], raw, max_results=max_results // 4),
+    }
+    suggestions: list[str] = []
+    if code in REGISTRY:
+        suggestions.append(f"Use `barndsl explain {code}` for the human-facing rule rationale, then inspect source/tests hits.")
+    if key in _KEYWORDS:
+        suggestions.append(f"Use `barndsl dev feature-check {key}` after changing the statement wiring.")
+    if not any(matches.values()) and not exact:
+        suggestions.append("No direct hits found; try a shorter synonym or run `rg <term> src tests docs examples`.")
+    if not kinds:
+        kinds.append("text")
+    return {"ok": bool(exact or any(matches.values())), "query": raw, "kind": kinds, "exact": exact, "matches": matches, "suggestions": suggestions}
 
 
 def feature_check(name: str, *, statement: bool = True) -> dict[str, Any]:

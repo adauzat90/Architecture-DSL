@@ -16,6 +16,7 @@ Tools added by `.pi/extensions/barndsl-harness.ts`:
 - `barndsl_diagnostic_diff` — compares diagnostic-code counts across plan sets.
 - `barndsl_gallery_gate` — lightweight examples/gallery diagnostic gate.
 - `barndsl_doctor` — one-shot maintainability gate: audit, gallery scan, strict LSP smoke, impact targets/tests, and optional export parity.
+- `barndsl_locate` — finds implementation/docs/tests breadcrumbs for a diagnostic, statement, command, module, or feature.
 - `barndsl_feature_check` — verifies a feature/statement is wired across parser/docs/playground/LSP/tests.
 - `barndsl_export_parity` — smoke-tests SVG/glTF/IFC/packet exports for a plan using the repo-native `barndsl dev export-parity` implementation.
 - `barndsl_lsp_smoke` — smoke-tests LSP diagnostics, hover, completions, formatting, code actions, symbols, and composed-id behavior.
@@ -25,6 +26,6 @@ Tools added by `.pi/extensions/barndsl-harness.ts`:
 
 Also adds `/barndsl-status` as a quick extension/CLI smoke check.
 
-The same helpers are also available to non-pi tooling through `barndsl dev ...` subcommands (`audit`, `rule-probe`, `diag-diff`, `gallery-gate`, `lsp-smoke`, `doctor`, `feature-check`, `impact`, `export-parity`, `rule-scaffold`, `feature-scaffold`).
+The same helpers are also available to non-pi tooling through `barndsl dev ...` subcommands (`audit`, `rule-probe`, `diag-diff`, `gallery-gate`, `lsp-smoke`, `doctor`, `locate`, `feature-check`, `impact`, `export-parity`, `rule-scaffold`, `feature-scaffold`).
 
 Reload pi with `/reload` after pulling these files. If Python resolution is unusual, set `BARNDSL_PYTHON` to the interpreter that has the repo's dev dependencies installed; otherwise the extension prefers `.venv`, then pyenv-win's active `python.exe`, then `python` on PATH.

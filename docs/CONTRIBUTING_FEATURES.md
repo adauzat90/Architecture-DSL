@@ -10,13 +10,20 @@ This checklist is optimized for both humans and coding agents.
    barndsl dev doctor
    ```
 
-2. For a new validation rule, scaffold guidance:
+2. Before editing an unfamiliar rule/feature, locate its breadcrumbs:
+
+   ```bash
+   barndsl dev locate BEDROOM_EGRESS
+   barndsl dev locate room
+   ```
+
+3. For a new validation rule, scaffold guidance:
 
    ```bash
    barndsl dev rule-scaffold NEW_CODE
    ```
 
-3. For a new DSL statement/model feature, scaffold guidance:
+4. For a new DSL statement/model feature, scaffold guidance:
 
    ```bash
    barndsl dev feature-scaffold feature-name

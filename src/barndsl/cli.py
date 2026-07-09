@@ -1181,6 +1181,10 @@ def _cmd_dev(args: argparse.Namespace) -> int:
         out = devtools.feature_check(args.name, statement=not args.no_statement)
         print(devtools.dumps(out))
         return 0 if out["ok"] else 1
+    if cmd == "locate":
+        out = devtools.locate(args.query, max_results=args.max_results)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
     if cmd == "impact":
         out = devtools.impact_tests(args.changed, run=args.run, quiet=not args.verbose)
         print(devtools.dumps(out))
@@ -1705,6 +1709,10 @@ def main(argv: list[str] | None = None) -> int:
     p_dev_feature_check.add_argument("name", help="feature or statement name")
     p_dev_feature_check.add_argument("--no-statement", action="store_true", help="treat as model-only feature; skip statement keyword requirements")
     p_dev_feature_check.set_defaults(func=_cmd_dev)
+    p_dev_locate = dev_sub.add_parser("locate", help="find implementation/docs/tests for a diagnostic, statement, command, or feature")
+    p_dev_locate.add_argument("query", help="diagnostic code, DSL statement, command, module, or search term")
+    p_dev_locate.add_argument("--max-results", type=int, default=80, help="maximum source hits per category before truncation")
+    p_dev_locate.set_defaults(func=_cmd_dev)
     p_dev_impact = dev_sub.add_parser("impact", help="map changed files to likely pytest targets")
     p_dev_impact.add_argument("changed", nargs="*", help="changed files (default: git status)")
     p_dev_impact.add_argument("--run", action="store_true", help="run the selected pytest targets")

@@ -150,6 +150,25 @@ function formatExportParity(r: { code: number | null; stdout: string; stderr: st
   ].filter(Boolean).join("\n");
 }
 
+function formatLocate(r: { code: number | null; stdout: string; stderr: string; command: string }): string {
+  const j = tryJson(r.stdout) as any;
+  if (!j || typeof j !== "object") return resultText("barndsl locate", r);
+  const exact = Object.entries(j.exact ?? {}).map(([k, v]: any) => `${k}:${v.path ?? v.registry?.path ?? v.compiler_keywords?.path ?? "see details"}`).join(", ") || "none";
+  const counts = Object.entries(j.matches ?? {}).map(([k, v]: any) => `${k}:${Array.isArray(v) ? v.length : 0}`).join(", ");
+  const firstHits = Object.entries(j.matches ?? {}).flatMap(([k, v]: any) => Array.isArray(v) ? v.slice(0, 3).map((x: any) => `${k} ${x.path}:${x.line} ${x.text}`) : []).slice(0, 8);
+  return [
+    `barndsl locate (exit ${r.code ?? "signal"})`,
+    `ok: ${j.ok}`,
+    `query: ${j.query}`,
+    `kind: ${(j.kind ?? []).join(", ")}`,
+    `exact: ${exact}`,
+    `matches: ${counts}`,
+    ...firstHits,
+    `$ ${r.command}`,
+    r.stderr.trim() ? `stderr:\n${trim(r.stderr)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 function walkCodes(value: unknown, out: Map<string, number>): void {
   if (Array.isArray(value)) {
     for (const v of value) walkCodes(v, out);
@@ -442,6 +461,24 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const r = await run(ctx.cwd, ["tools/pi_barndsl_feature_check.py"], signal, JSON.stringify(params));
       return { content: [{ type: "text", text: resultText("barndsl feature check", r) }], details: { ...r, json: tryJson(r.stdout) } };
+    },
+  });
+
+  pi.registerTool({
+    name: "barndsl_locate",
+    label: "barndsl locate",
+    description: "Find implementation, docs, tests, and example breadcrumbs for a diagnostic code, DSL statement, command, module, or feature.",
+    promptSnippet: "Locate barndsl codebase breadcrumbs before editing unfamiliar diagnostics, DSL statements, or features.",
+    promptGuidelines: [
+      "Use barndsl_locate before changing unfamiliar validation rules or DSL features to find emitters, registry entries, tests, and docs.",
+    ],
+    parameters: Type.Object({
+      query: Type.String({ description: "Diagnostic code, DSL statement, CLI command, module, or search term" }),
+      maxResults: Type.Optional(Type.Number({ default: 80, description: "Maximum source hits per category" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_locate.py"], signal, JSON.stringify(params));
+      return { content: [{ type: "text", text: formatLocate(r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
 

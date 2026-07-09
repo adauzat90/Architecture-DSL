@@ -50,6 +50,21 @@ def test_feature_check_known_statement_is_wired():
     assert out["statement"] is True
 
 
+def test_locate_finds_diagnostic_breadcrumbs():
+    out = devtools.locate("BEDROOM_EGRESS", max_results=20)
+    assert out["ok"]
+    assert "diagnostic" in out["kind"]
+    assert out["exact"]["diagnostic"]["registry"]["line"] is not None
+    assert any(hit["path"].replace("\\", "/").startswith("src/barndsl/") for hit in out["matches"]["source"])
+
+
+def test_locate_finds_statement_breadcrumbs():
+    out = devtools.locate("room", max_results=20)
+    assert out["ok"]
+    assert "statement" in out["kind"]
+    assert out["exact"]["statement"]["compiler_keywords"]["line"] is not None
+
+
 def test_doctor_default_gate_passes_without_export():
     out = devtools.doctor(run_impact=False)
     assert out["ok"], out["next_steps"]

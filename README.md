@@ -577,6 +577,7 @@ barndsl demo --out cedar_ridge.svg                 # compile + render the exampl
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
 barndsl dev doctor                                 # maintainer/agent gate: audit + gallery + strict LSP + impact targets
+barndsl dev locate BEDROOM_EGRESS                  # find registry/emitter/tests/docs breadcrumbs for a concept
 barndsl dev feature-check room                     # verify statement wiring across parser/docs/LSP/playground/tests
 ```
 
