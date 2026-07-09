@@ -487,27 +487,33 @@ window bed north width 4 offset 2
     assert props and any("bed" in d.message and "2.0:1" in d.message for d in props)
 
 
-def test_square_bedroom_and_2_to_1_office_track_their_own_thresholds():
-    # A 2.0:1 office stays silent (office keeps the 3:1 default); a 2.0:1 bedroom
-    # does not (1.8:1 bedroom threshold).
+def test_proportion_thresholds_track_the_room_type():
+    # Bedroom AND office get the tight 1.8:1 cap (each holds one big furniture
+    # piece plus a walk-around, and the score already dings past 1.6:1); dining
+    # keeps the generic 3:1 default, so the same 2.0:1 shape stays silent as a
+    # dining room while flagging as an office or a bedroom.
     src = """\
 plan "Mixed proportions"
-envelope 40 x 16
+envelope 48 x 16
 ceiling 9
 room living: living at 0,0   size 16 x 16
-room office: office at 16,0  size 8 x 16
-room bed:    bedroom at 24,0 size 8 x 16
-door living - office width 2.67
+room dining: dining at 16,0  size 8 x 16
+room office: office at 24,0  size 8 x 16
+room bed:    bedroom at 32,0 size 8 x 16
+door living - dining width 2.67
+door dining - office width 2.67
 door office - bed width 2.67 into bed
 entry living south width 3 offset 6
 window living south width 6 offset 6
+window dining south width 4 offset 2
 window office south width 4 offset 2
 window bed north width 4 offset 2
 """
     result = compile_source(src)
     props = {d.room for d in result.infos if d.code == "ROOM_PROPORTION"}
     assert "bed" in props
-    assert "office" not in props
+    assert "office" in props
+    assert "dining" not in props
 
 
 def test_proportion_score_is_worst_dominated_not_diluted():

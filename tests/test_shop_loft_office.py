@@ -202,6 +202,16 @@ def test_door_swing_can_crowd_the_desk_out_of_a_marginal_office():
     assert "OFFICE_CLEARANCE" in _codes(_office(7, 5, door=True))
 
 
+def test_elongated_office_trips_the_tightened_proportion_cap():
+    # An office holds a desk, a chair-pull and a walk-around, so it gets the
+    # bedroom's 1.8:1 cap — the score already penalises past 1.6:1, and without
+    # the override an 8×17 corridor-with-a-desk lost points with no lint saying
+    # why. 8×12 (1.5:1) stays clean; 8×17 (2.1:1) flags.
+    assert "ROOM_PROPORTION" not in _codes(_office(8, 12))
+    issues = _issues(_office(8, 17), "ROOM_PROPORTION")
+    assert issues and "office" in issues[0].message.lower()
+
+
 # --- registry -----------------------------------------------------------------
 
 

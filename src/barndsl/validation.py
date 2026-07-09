@@ -146,9 +146,14 @@ MAX_ROOM_ASPECT = 3.0  # default: a habitable room longer than this (long:short)
 #: overriding :data:`MAX_ROOM_ASPECT`. A bedroom has to hold a bed *and* a
 #: walk-around, so a 2:1 "tunnel" bedroom (an 8×16, say) is already awkward well
 #: before the generic 3:1 bar — tighten it so the lint sees the tunnel bedroom the
-#: score is penalising. Other habitable rooms keep the 3:1 default.
+#: score is penalising. An office is the same story with a desk: it holds a desk,
+#: a chair-pull and a walk-around (often a guest chair), so a 2:1+ office is a
+#: corridor with a desk — and the score already penalises any habitable room past
+#: 1.6:1, so without this override an elongated office loses points silently with
+#: no lint explaining why. Other habitable rooms keep the 3:1 default.
 MAX_ROOM_ASPECT_BY_TYPE: dict[RoomType, float] = {
     RoomType.BEDROOM: 1.8,
+    RoomType.OFFICE: 1.8,
 }
 #: A mudroom's job needs floor, not length: a bench (~1.5 ft) plus a 3 ft
 #: walkway means anything under ~5 ft wide can't hold the drop zone it exists

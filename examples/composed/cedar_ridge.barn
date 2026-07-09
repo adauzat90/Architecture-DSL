@@ -22,7 +22,11 @@ use "parts/laundry_core.barn" as lc at 40,6
 room great: living at 0,13 size 22 x 17
 room hall: hallway at 22,0 size 4 x 30   # barndsl: accept HALL_DEADEND "spine reaches the north entry"
 room dining: dining at 26,0 size 14 x 18
-room office: office at 40,13 size 8 x 17
+# An 8 x 9 office (1.1:1 — a desk room, not a corridor with a desk) with the
+# leftover east-column run given to a utility room capping the service stack
+# (bath, laundry, utility) instead of stretching the office to 2.1:1.
+room office: office at 40,13 size 8 x 9
+room store: utility at 40,22 size 8 x 8
 
 # --- host circulation reaches into the stamped parts by their namespaced ids --
 door great - m.bed width 3 offset 2 into m.bed hinge near
@@ -33,6 +37,7 @@ door dining - k.kitchen cased width 8
 door dining - b1.bath width 2.5 into b1.bath hinge near
 door dining - lc.laundry width 2.5 offset 1 into lc.laundry hinge near
 door dining - office width 3
+door office - store width 2.5 offset 0.5
 
 # --- the building entrances (people doors) + their landings -------------------
 entry great west width 3 offset 6
@@ -44,7 +49,7 @@ porch stoop_n at 22,30 size 4 x 4 covered
 window great north width 8 offset 7 tempered
 window great west width 5 offset 11 tempered
 window dining south width 7 offset 4
-window office east width 5 offset 6
+window office east width 5 offset 2
 
 # --- life safety: a smoke alarm outside the sleeping area (IRC R314) -----------
 alarm smoke in great
