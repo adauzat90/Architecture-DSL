@@ -359,7 +359,7 @@ def locate(query: str, *, max_results: int = 80) -> dict[str, Any]:
         }
     command_line = _find_line(cli, f'add_parser("{key}"') or _find_line(cli, f"add_parser('{key}'")
     top_commands = {"compile", "build", "score", "inspect", "demo", "layout", "design", "revit", "revit-import", "fmt", "schedule", "new", "dxf", "ifc", "gltf", "view3d", "serve", "lsp", "elevation", "section", "watch", "compare", "revit-diff", "cost", "packet", "revit-log", "explain", "dev", "profiles"}
-    dev_commands = {"audit", "rule-probe", "diag-diff", "gallery-gate", "lsp-smoke", "doctor", "feature-check", "locate", "impact", "export-parity", "rule-scaffold", "feature-scaffold"}
+    dev_commands = {"audit", "rule-probe", "diag-diff", "gallery-gate", "lsp-smoke", "doctor", "feature-check", "locate", "diag-matrix", "fixtures", "impact", "export-parity", "rule-scaffold", "feature-scaffold"}
     if command_line and key in top_commands:
         kinds.append("cli_command")
         exact["cli_command"] = {"path": _rel(cli), "line": command_line, "run": f"barndsl {key} --help"}
@@ -389,6 +389,237 @@ def locate(query: str, *, max_results: int = 80) -> dict[str, Any]:
     if not kinds:
         kinds.append("text")
     return {"ok": bool(exact or any(matches.values())), "query": raw, "kind": kinds, "exact": exact, "matches": matches, "suggestions": suggestions}
+
+
+# --- diagnostic matrix / fixture catalog ------------------------------------
+
+
+def _literal_emitters_by_code() -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for path, codes in _literal_issue_codes().items():
+        for code in codes:
+            out.setdefault(code, []).append(path)
+    return {code: sorted(paths) for code, paths in sorted(out.items())}
+
+
+def diagnostic_matrix(paths: list[str] | None = None, *, max_hits: int = 6) -> dict[str, Any]:
+    """Return an actionable matrix for every registered diagnostic code.
+
+    The matrix is intentionally heuristic/static for speed: literal ``Issue``
+    emitters, test/doc/example mentions, and current example impact are enough to
+    tell a maintainer where to start before tightening a rule.
+    """
+    paths = paths or ["examples"]
+    diag_path = SRC / "barndsl" / "diagnostics.py"
+    emitters = _literal_emitters_by_code()
+    impact = diagnostic_diff(paths)
+    accepted_total: Counter = Counter()
+    impacted_files: dict[str, list[str]] = {}
+    for path, info in impact["files"]["after"].items():
+        for code, count in (info.get("codes") or {}).items():
+            impacted_files.setdefault(code, []).extend([path] * int(count))
+        accepted_total.update(info.get("accepted") or {})
+
+    rows: list[dict[str, Any]] = []
+    gap_counts: Counter = Counter()
+    doc_sources = [ROOT / "README.md", ROOT / ".agents"]
+    docs_dir = ROOT / "docs"
+    if docs_dir.exists():
+        doc_sources.extend(sorted(p for p in docs_dir.rglob("*.md") if p.name not in {"DIAGNOSTIC_MATRIX.md", "FIXTURE_CATALOG.md"}))
+    for code in sorted(REGISTRY):
+        info = REGISTRY[code]
+        test_hits = _line_matches([ROOT / "tests"], code, max_results=max_hits)
+        doc_hits = _line_matches(doc_sources, code, max_results=max_hits)
+        example_hits = _line_matches([ROOT / "examples"], code, max_results=max_hits)
+        gaps: list[str] = []
+        if not emitters.get(code):
+            gaps.append("no_literal_emitter")
+        if not test_hits:
+            gaps.append("no_test_mention")
+        if not doc_hits:
+            gaps.append("no_doc_mention")
+        if not example_hits and not impacted_files.get(code):
+            gaps.append("no_example_mention_or_impact")
+        for gap in gaps:
+            gap_counts[gap] += 1
+        rows.append({
+            "code": code,
+            "severity": info.severity.value,
+            "title": info.title,
+            "registry": {"path": _rel(diag_path), "line": _find_line(diag_path, f'_c("{code}"')},
+            "emitters": emitters.get(code, []),
+            "tests": test_hits,
+            "docs": doc_hits,
+            "examples": example_hits,
+            "example_impact": sorted(set(impacted_files.get(code, []))),
+            "accepted_example_count": int(accepted_total.get(code, 0)),
+            "first_repro_hint": test_hits[0] if test_hits else None,
+            "gaps": gaps,
+        })
+    return {
+        "ok": True,
+        "paths": paths,
+        "count": len(rows),
+        "gap_summary": dict(sorted(gap_counts.items())),
+        "example_summary": {k: impact[k] for k in ("after_files", "after_whole_plans", "after_fragments", "score")},
+        "rows": rows,
+    }
+
+
+def _md_path(path: str) -> str:
+    return path.replace("\\", "/")
+
+
+def diagnostic_matrix_markdown(matrix: dict[str, Any]) -> str:
+    lines = [
+        "# Diagnostic rule matrix",
+        "",
+        "Generated from `barndsl dev diag-matrix`. Use this as a navigation aid, not as a replacement for focused tests.",
+        "",
+        f"- Registered diagnostics: {matrix['count']}",
+        f"- Example paths: {', '.join(matrix['paths'])}",
+        f"- Gap summary: `{json.dumps(matrix['gap_summary'], sort_keys=True)}`",
+        "",
+        "| Code | Sev | Registry | Emitters | Tests | Docs | Examples / impact | Gaps |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in matrix["rows"]:
+        reg = row["registry"]
+        registry = f"{_md_path(reg['path'])}:{reg['line']}" if reg.get("line") else _md_path(reg["path"])
+        emitters = "<br>".join(_md_path(p) for p in row["emitters"][:4]) or "—"
+        tests = "<br>".join(f"{_md_path(h['path'])}:{h['line']}" for h in row["tests"][:3]) or "—"
+        docs = "<br>".join(f"{_md_path(h['path'])}:{h['line']}" for h in row["docs"][:2]) or "—"
+        examples = sorted({*(_md_path(h["path"]) for h in row["examples"][:2]), *(_md_path(p) for p in row["example_impact"][:3])})
+        ex = "<br>".join(examples) or "—"
+        if row["accepted_example_count"]:
+            ex += f"<br>accepted: {row['accepted_example_count']}"
+        gaps = ", ".join(row["gaps"]) or "—"
+        title = row["title"].replace("|", "\\|")
+        lines.append(f"| `{row['code']}`<br>{title} | {row['severity']} | {registry} | {emitters} | {tests} | {docs} | {ex} | {gaps} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _file_features(path: Path, text: str, info: dict[str, Any]) -> list[str]:
+    low = text.lower()
+    features: list[str] = []
+    if info.get("fragment"):
+        features.append("fragment")
+    else:
+        features.append("whole_plan")
+    if re.search(r"^\s*use\s+", text, re.MULTILINE):
+        features.append("composed")
+    if re.search(r"^\s*param\s+", text, re.MULTILINE):
+        features.append("parametric_part")
+    if "level 1" in low or re.search(r"^\s*stair\s+", text, re.MULTILINE):
+        features.append("multi_level")
+    if "shop" in low:
+        features.append("shop")
+    if "barndsl: accept" in low:
+        features.append("accepted_diagnostics")
+    if path.name == "lshape.barn":
+        features.append("export_parity_candidate")
+    return features
+
+
+def fixture_catalog(paths: list[str] | None = None) -> dict[str, Any]:
+    """Catalog high-value .barn fixtures/examples for tests and agent prompts."""
+    paths = paths or ["examples"]
+    expanded = [p for p in _expand_paths(paths) if p.suffix == ".barn"]
+    diff = diagnostic_diff(paths)
+    files: list[dict[str, Any]] = []
+    by_rel = diff["files"]["after"]
+    for p in expanded:
+        rel = _rel(p)
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        info = by_rel.get(rel, {})
+        files.append({
+            "path": rel,
+            "fragment": bool(info.get("fragment")),
+            "ok": bool(info.get("ok", False)),
+            "features": _file_features(p, text, info),
+            "codes": info.get("codes", {}),
+            "accepted": info.get("accepted", {}),
+            "score_total": (info.get("score") or {}).get("total"),
+            "rooms": (info.get("score") or {}).get("areas", {}).get("rooms") if info.get("score") else None,
+            "purpose": _fixture_purpose(rel),
+        })
+
+    def pick(role: str, rel: str, purpose: str) -> dict[str, Any] | None:
+        path = ROOT / rel
+        if not path.exists():
+            return None
+        return {"role": role, "path": rel, "purpose": purpose}
+
+    roles = [
+        {"role": "minimal_valid_inline", "kind": "inline", "purpose": "Smallest useful whole-plan smoke fixture for parser/diagnostic probes.", "source": 'plan "Minimal"\nenvelope 20 x 16\nceiling 9\nroom living: living at 0,0 size 20 x 16\nentry living south width 3\nwindow living south width 4 offset 6\n'},
+        pick("canonical_example", "examples/cedar_ridge.barn", "Full hand-authored sample with house + shop geometry."),
+        pick("gallery_export", "examples/gallery/lshape.barn", "Stable whole plan for render/export parity and scoring checks."),
+        pick("composed_smoke", "examples/composed/cedar_ridge.barn", "Composition/stamped-id smoke fixture with accepted deviations."),
+        pick("composed_nested_parametric", "examples/composed/cedar_ridge_v2.barn", "Nested use/parametric/multi-level composition fixture."),
+        pick("multi_level", "examples/gallery/two_story.barn", "Two-level stair/loft/alarm fixture."),
+        pick("fragment_part", "examples/composed/parts/master_suite.barn", "Headerless part fixture; compile as fragment."),
+        pick("parametric_part", "examples/composed/parts/flex_bath.barn", "Part with params for `use ... with` coverage."),
+        pick("shop_loft_part", "examples/composed/parts/shop_loft.barn", "Multi-level shop/loft fragment for composed export and validation."),
+    ]
+    roles = [r for r in roles if r]
+    return {
+        "ok": all(f["ok"] for f in files),
+        "paths": paths,
+        "roles": roles,
+        "files": sorted(files, key=lambda f: f["path"]),
+        "summary": {
+            "files": len(files),
+            "whole_plans": sum(1 for f in files if not f["fragment"]),
+            "fragments": sum(1 for f in files if f["fragment"]),
+            "features": dict(sorted(Counter(feat for f in files for feat in f["features"]).items())),
+        },
+    }
+
+
+def _fixture_purpose(rel: str) -> str:
+    name = rel.replace("\\", "/")
+    if name.endswith("examples/cedar_ridge.barn"):
+        return "canonical whole-plan example"
+    if name.endswith("examples/gallery/lshape.barn"):
+        return "export/render parity fixture"
+    if name.endswith("examples/gallery/two_story.barn"):
+        return "multi-level stair/loft fixture"
+    if "/composed/" in name and "/parts/" not in name:
+        return "composition host fixture"
+    if "/composed/parts/" in name:
+        return "headerless composition part fixture"
+    if "/gallery/" in name:
+        return "gallery quality fixture"
+    return "example plan fixture"
+
+
+def fixture_catalog_markdown(catalog: dict[str, Any]) -> str:
+    lines = [
+        "# Fixture catalog",
+        "",
+        "Generated from `barndsl dev fixtures`. Prefer these fixtures before inventing new large plans in tests.",
+        "",
+        "## Roles",
+        "",
+        "| Role | Path/source | Purpose |",
+        "| --- | --- | --- |",
+    ]
+    for role in catalog["roles"]:
+        loc = role.get("path") or "inline source"
+        lines.append(f"| `{role['role']}` | {loc} | {role['purpose']} |")
+    lines.extend(["", "## Files", "", "| Path | Kind | Features | Codes | Score | Purpose |", "| --- | --- | --- | --- | --- | --- |"])
+    for f in catalog["files"]:
+        kind = "fragment" if f["fragment"] else "whole"
+        feats = ", ".join(f["features"]) or "—"
+        codes = ", ".join(f"{k}:{v}" for k, v in sorted(f["codes"].items())) or "—"
+        score = "—" if f["score_total"] is None else str(f["score_total"])
+        lines.append(f"| {_md_path(f['path'])} | {kind} | {feats} | {codes} | {score} | {f['purpose']} |")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def feature_check(name: str, *, statement: bool = True) -> dict[str, Any]:

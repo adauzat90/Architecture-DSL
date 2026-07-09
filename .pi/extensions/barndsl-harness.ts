@@ -169,6 +169,35 @@ function formatLocate(r: { code: number | null; stdout: string; stderr: string; 
   ].filter(Boolean).join("\n");
 }
 
+function formatDiagMatrix(r: { code: number | null; stdout: string; stderr: string; command: string }): string {
+  const j = tryJson(r.stdout) as any;
+  if (!j || typeof j !== "object") return resultText("barndsl diagnostic matrix", r);
+  return [
+    `barndsl diagnostic matrix (exit ${r.code ?? "signal"})`,
+    `ok: ${j.ok}`,
+    `codes: ${j.count}`,
+    `gaps: ${JSON.stringify(j.gap_summary ?? {})}`,
+    `examples: ${j.example_summary?.after_files ?? "?"} files`,
+    `$ ${r.command}`,
+    r.stderr.trim() ? `stderr:\n${trim(r.stderr)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function formatFixtureCatalog(r: { code: number | null; stdout: string; stderr: string; command: string }): string {
+  const j = tryJson(r.stdout) as any;
+  if (!j || typeof j !== "object") return resultText("barndsl fixture catalog", r);
+  const roles = (j.roles ?? []).slice(0, 12).map((x: any) => x.role).join(", ");
+  return [
+    `barndsl fixture catalog (exit ${r.code ?? "signal"})`,
+    `ok: ${j.ok}`,
+    `files: ${j.summary?.files ?? "?"} (${j.summary?.whole_plans ?? "?"} plans, ${j.summary?.fragments ?? "?"} fragments)`,
+    `roles: ${roles}`,
+    `features: ${JSON.stringify(j.summary?.features ?? {})}`,
+    `$ ${r.command}`,
+    r.stderr.trim() ? `stderr:\n${trim(r.stderr)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 function walkCodes(value: unknown, out: Map<string, number>): void {
   if (Array.isArray(value)) {
     for (const v of value) walkCodes(v, out);
@@ -479,6 +508,37 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const r = await run(ctx.cwd, ["tools/pi_barndsl_locate.py"], signal, JSON.stringify(params));
       return { content: [{ type: "text", text: formatLocate(r) }], details: { ...r, json: tryJson(r.stdout) } };
+    },
+  });
+
+  pi.registerTool({
+    name: "barndsl_diagnostic_matrix",
+    label: "barndsl diagnostic matrix",
+    description: "Build a diagnostic registry/emitter/tests/docs/example coverage matrix.",
+    promptSnippet: "Inspect diagnostic rule coverage before changing validators or registry entries.",
+    parameters: Type.Object({
+      paths: Type.Optional(Type.Array(Type.String(), { description: "Example/fixture paths to scan; defaults to ['examples']" })),
+      maxHits: Type.Optional(Type.Number({ default: 6, description: "Maximum line hits per diagnostic/category" })),
+      out: Type.Optional(Type.String({ description: "Optional Markdown output path, e.g. docs/DIAGNOSTIC_MATRIX.md" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_diag_matrix.py"], signal, JSON.stringify(params));
+      return { content: [{ type: "text", text: formatDiagMatrix(r) }], details: { ...r, json: tryJson(r.stdout) } };
+    },
+  });
+
+  pi.registerTool({
+    name: "barndsl_fixture_catalog",
+    label: "barndsl fixture catalog",
+    description: "Catalog high-value .barn fixtures/examples for tests and agent prompts.",
+    promptSnippet: "Choose a curated .barn fixture before inventing a large plan for a test.",
+    parameters: Type.Object({
+      paths: Type.Optional(Type.Array(Type.String(), { description: "Example/fixture paths to catalog; defaults to ['examples']" })),
+      out: Type.Optional(Type.String({ description: "Optional Markdown output path, e.g. docs/FIXTURE_CATALOG.md" })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_fixture_catalog.py"], signal, JSON.stringify(params));
+      return { content: [{ type: "text", text: formatFixtureCatalog(r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
 

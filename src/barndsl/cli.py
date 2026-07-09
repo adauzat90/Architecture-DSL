@@ -88,6 +88,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from . import __version__
@@ -1185,6 +1186,32 @@ def _cmd_dev(args: argparse.Namespace) -> int:
         out = devtools.locate(args.query, max_results=args.max_results)
         print(devtools.dumps(out))
         return 0 if out["ok"] else 1
+    if cmd == "diag-matrix":
+        out = devtools.diagnostic_matrix(args.paths or ["examples"], max_hits=args.max_hits)
+        if args.markdown or args.out:
+            md = devtools.diagnostic_matrix_markdown(out)
+            if args.out:
+                out_path = Path(args.out)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(md, encoding="utf-8")
+            else:
+                print(md)
+        else:
+            print(devtools.dumps(out))
+        return 0
+    if cmd == "fixtures":
+        out = devtools.fixture_catalog(args.paths or ["examples"])
+        if args.markdown or args.out:
+            md = devtools.fixture_catalog_markdown(out)
+            if args.out:
+                out_path = Path(args.out)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(md, encoding="utf-8")
+            else:
+                print(md)
+        else:
+            print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
     if cmd == "impact":
         out = devtools.impact_tests(args.changed, run=args.run, quiet=not args.verbose)
         print(devtools.dumps(out))
@@ -1713,6 +1740,17 @@ def main(argv: list[str] | None = None) -> int:
     p_dev_locate.add_argument("query", help="diagnostic code, DSL statement, command, module, or search term")
     p_dev_locate.add_argument("--max-results", type=int, default=80, help="maximum source hits per category before truncation")
     p_dev_locate.set_defaults(func=_cmd_dev)
+    p_dev_matrix = dev_sub.add_parser("diag-matrix", help="diagnostic registry/emitter/tests/docs/example coverage matrix")
+    p_dev_matrix.add_argument("paths", nargs="*", help="example/fixture paths to scan for impact (default: examples)")
+    p_dev_matrix.add_argument("--max-hits", type=int, default=6, help="maximum line hits per diagnostic/category")
+    p_dev_matrix.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
+    p_dev_matrix.add_argument("--out", default=None, help="write Markdown matrix to this path")
+    p_dev_matrix.set_defaults(func=_cmd_dev)
+    p_dev_fixtures = dev_sub.add_parser("fixtures", help="catalog high-value .barn fixtures/examples for tests and agents")
+    p_dev_fixtures.add_argument("paths", nargs="*", help="example/fixture paths to catalog (default: examples)")
+    p_dev_fixtures.add_argument("--markdown", action="store_true", help="print Markdown instead of JSON")
+    p_dev_fixtures.add_argument("--out", default=None, help="write Markdown catalog to this path")
+    p_dev_fixtures.set_defaults(func=_cmd_dev)
     p_dev_impact = dev_sub.add_parser("impact", help="map changed files to likely pytest targets")
     p_dev_impact.add_argument("changed", nargs="*", help="changed files (default: git status)")
     p_dev_impact.add_argument("--run", action="store_true", help="run the selected pytest targets")

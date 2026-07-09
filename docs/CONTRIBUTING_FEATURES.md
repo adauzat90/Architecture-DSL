@@ -15,6 +15,8 @@ This checklist is optimized for both humans and coding agents.
    ```bash
    barndsl dev locate BEDROOM_EGRESS
    barndsl dev locate room
+   barndsl dev diag-matrix
+   barndsl dev fixtures
    ```
 
 3. For a new validation rule, scaffold guidance:
@@ -34,7 +36,7 @@ This checklist is optimized for both humans and coding agents.
 - Add or reuse a deterministic validator in `src/barndsl/validation.py` or the relevant domain module.
 - Emit `Issue(severity, "CODE", ...)` in stable order.
 - Register the code in `src/barndsl/diagnostics.py` with title, explanation and actionable hint.
-- Add tests with a minimal failing source and a minimal satisfied source.
+- Add tests with a minimal failing source and a minimal satisfied source; prefer fixtures from `docs/FIXTURE_CATALOG.md` before inventing a large plan.
 - Probe quickly while iterating:
 
   ```bash
@@ -45,6 +47,7 @@ This checklist is optimized for both humans and coding agents.
 
   ```bash
   barndsl dev audit
+  barndsl dev diag-matrix --out docs/DIAGNOSTIC_MATRIX.md
   barndsl dev gallery-gate examples
   barndsl dev impact --run
   ```

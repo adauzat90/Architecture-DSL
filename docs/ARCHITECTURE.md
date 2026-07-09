@@ -19,6 +19,8 @@ This is the short maintainer/agent map for extending `barndsl` safely.
 - **Direct edits** — `src/barndsl/edits.py` applies structured source edits while preserving comments/formatting where possible.
 - **Agent harness** — `src/barndsl/devtools.py`, `tools/pi_barndsl_*.py`, and `.pi/extensions/barndsl-harness.ts` expose deterministic helper tools.
 - **Navigation** — `barndsl dev locate QUERY` returns line-numbered source/test/docs/example breadcrumbs for a diagnostic code, DSL statement, CLI command, module or free-text feature.
+- **Rule/fixture maps** — `barndsl dev diag-matrix` and `barndsl dev fixtures` generate `docs/DIAGNOSTIC_MATRIX.md` and `docs/FIXTURE_CATALOG.md`.
+- **Decisions** — `docs/adr/` records architectural choices agents should preserve or supersede explicitly.
 
 ## Composition/stamped IDs
 

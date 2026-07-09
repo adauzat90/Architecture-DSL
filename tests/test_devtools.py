@@ -65,6 +65,25 @@ def test_locate_finds_statement_breadcrumbs():
     assert out["exact"]["statement"]["compiler_keywords"]["line"] is not None
 
 
+def test_diagnostic_matrix_indexes_registry_emitters_and_tests():
+    out = devtools.diagnostic_matrix(["examples"], max_hits=3)
+    row = next(r for r in out["rows"] if r["code"] == "BEDROOM_EGRESS")
+    assert out["ok"]
+    assert row["registry"]["line"] is not None
+    assert row["emitters"]
+    assert row["tests"]
+    assert "no_literal_emitter" not in row["gaps"]
+
+
+def test_fixture_catalog_has_composed_and_multilevel_roles():
+    out = devtools.fixture_catalog(["examples"])
+    roles = {r["role"] for r in out["roles"]}
+    assert out["ok"]
+    assert {"minimal_valid_inline", "composed_smoke", "multi_level", "fragment_part"} <= roles
+    assert out["summary"]["fragments"] >= 1
+    assert any("multi_level" in f["features"] for f in out["files"])
+
+
 def test_doctor_default_gate_passes_without_export():
     out = devtools.doctor(run_impact=False)
     assert out["ok"], out["next_steps"]
