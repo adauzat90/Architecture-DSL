@@ -37,12 +37,114 @@ class CodeInfo:
     def varies(self) -> bool:
         return self.code in _VARYING
 
+    @property
+    def category(self) -> str:
+        """Stable owner/domain bucket used by docs, matrices, and agents."""
+        return diagnostic_category(self.code)
+
+    @property
+    def owner(self) -> str:
+        """Human-facing subsystem owner for the diagnostic category."""
+        return diagnostic_owner(self.category)
+
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
 _VARYING = frozenset(
     {"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING", "AREA_VOID",
      "MUDROOM_SHAPE", "SHOP_DEPTH"}
 )
+
+
+CATEGORY_OWNERS: dict[str, str] = {
+    "pragma": "diagnostic suppression / audit trail",
+    "syntax": "compiler parser and recovery",
+    "composition": "part composition and stamped ids",
+    "program": "program/require/spec matching",
+    "geometry": "plan geometry and room placement",
+    "opening": "doors, windows, openings, and thresholds",
+    "access_egress": "accessibility, egress, light, and ventilation",
+    "circulation": "room access, halls, privacy, and adjacency flow",
+    "fixtures": "fixtures, appliances, clearances, and wet groups",
+    "electrical": "electrical and life-safety devices",
+    "structure": "frame, roof, stair, loft, porch, and load path",
+    "site": "site, drive, solar, grade, well, and septic",
+    "quality": "design-quality coaching and soft livability rules",
+    "finish": "finishes and material notes",
+    "export": "downstream export/build feedback",
+}
+
+_SYNTAX_CODES = frozenset({
+    "UNTERMINATED_STRING", "SYNTAX", "BAD_NUMBER", "BAD_LEVEL", "BAD_COUNT",
+    "EMPTY_ID", "BAD_TYPE", "BAD_WALL", "EXTRA_TOKENS", "BAD_PLACEMENT",
+    "PLACE_REF", "BAD_OPTION", "UNKNOWN_STMT", "EMPTY", "TRUNCATED",
+    "RECOVERY_LIMIT", "DIM_IMPLAUSIBLE", "DUP_ID", "CEILING",
+})
+_SITE_PREFIXES = ("SITE", "SETBACK", "DRIVE", "APPROACH", "SOLAR", "WELL", "SEPTIC")
+_FIXTURE_PREFIXES = ("FIXTURE", "RANGE", "KITCHEN", "LAUNDRY", "BATH_CLEARANCE", "DRYER", "SINK", "PLUMBING", "WATER_HEATER", "WET_GROUP", "COUNTER")
+_OPENING_PREFIXES = ("DOOR", "WINDOW", "OPENING", "OPEN_", "OVERHEAD", "ENTRY_INTERIOR")
+_STRUCTURE_PREFIXES = ("FRAME", "BAY", "ROOF", "POST", "LOAD", "STAIR", "LOFT", "PORCH", "WING")
+_ELECTRICAL_PREFIXES = ("ELECTRICAL", "OUTLET", "RECEPTACLE", "ROOM_NO_LIGHT", "ALARM")
+_COMPOSITION_PREFIXES = ("USE", "PARAM", "PART", "SUITE", "ZONE")
+_ACCESS_EGRESS_CODES = frozenset({
+    "BEDROOM_EGRESS", "EGRESS_SIZE", "EGRESS_DOOR", "NAT_LIGHT", "VENT_AREA",
+    "BATH_VENT", "ACCESS_ENTRY", "ACCESS_DOOR", "ACCESS_BATH", "ACCESS_SINGLE_FLOOR",
+    "WINDOW_FALL", "WINDOW_TEMPERED", "WINDOW_SILL",
+})
+_CIRCULATION_PREFIXES = ("HALL", "GARAGE", "PANTRY", "MUDROOM")
+_CIRCULATION_CODES = frozenset({
+    "NO_ENTRY", "NO_ACCESS", "NO_BACK_DOOR", "ENTRY_PRIVATE", "PRIVATE_PASSTHROUGH",
+    "CLOSET_ACCESS", "CLOSET_DOOR_SWING", "MASTER_ENSUITE", "BATH_DISTANCE",
+    "BED_PRIVACY", "BED_SOUND", "GARAGE_BEDROOM", "GARAGE_PASSTHROUGH",
+})
+_PROGRAM_CODES = frozenset({"NO_PROGRAM", "PROGRAM_MISMATCH", "REQUIRE_REF", "REQUIRE_UNMET", "NO_BATH"})
+_GEOMETRY_PREFIXES = ("AREA", "ROOM", "FOOTPRINT", "OUT_OF_BOUNDS", "OVERLAP", "ENVELOPE")
+_QUALITY_CODES = frozenset({
+    "DESIGN", "LOW_STORAGE", "NO_CLOSET", "CLOSET_DEPTH", "CLOSET_SHAPE", "CLOSET_WINDOW",
+    "BATH_OVERSIZE", "BEDROOM_AREA", "BEDROOM_DIM", "BED_CLEARANCE", "DINING_CLEARANCE",
+    "OFFICE_CLEARANCE", "SHOP_DEPTH", "SHOP_DOOR_HEIGHT", "ROOM_CLEAR", "ROOM_HABITABLE",
+    "ROOM_PROPORTION", "ROOM_SIZE", "ROOM_TIGHT", "KITCHEN_FLOW", "ENERGY_ENVELOPE",
+})
+
+
+def diagnostic_category(code: str) -> str:
+    """Return the stable domain bucket for a diagnostic code."""
+    c = code.strip().upper()
+    if c.startswith("ACCEPT_"):
+        return "pragma"
+    if c in _SYNTAX_CODES:
+        return "syntax"
+    if c.startswith(_COMPOSITION_PREFIXES):
+        return "composition"
+    if c in _PROGRAM_CODES:
+        return "program"
+    if c.startswith(_SITE_PREFIXES):
+        return "site"
+    if c.startswith(_ELECTRICAL_PREFIXES):
+        return "electrical"
+    if c in _ACCESS_EGRESS_CODES:
+        return "access_egress"
+    if c.startswith(_FIXTURE_PREFIXES):
+        return "fixtures"
+    if c.startswith(_OPENING_PREFIXES) or c in {"ENTRY_INTERIOR", "DOOR_THRESHOLD"}:
+        return "opening"
+    if c.startswith(_STRUCTURE_PREFIXES):
+        return "structure"
+    if c.startswith(_CIRCULATION_PREFIXES) or c in _CIRCULATION_CODES:
+        return "circulation"
+    if c.startswith(_GEOMETRY_PREFIXES):
+        return "geometry"
+    if c == "FLOOR_FINISH":
+        return "finish"
+    if c.startswith("REVIT_"):
+        return "export"
+    if c in _QUALITY_CODES:
+        return "quality"
+    return "quality"
+
+
+def diagnostic_owner(category: str) -> str:
+    """Return a human-facing owner label for a diagnostic category."""
+    return CATEGORY_OWNERS.get(category, "general validation")
 
 
 def _c(code: str, severity: Severity, title: str, explanation: str) -> tuple[str, CodeInfo]:
@@ -1084,4 +1186,4 @@ def explain(code: str) -> str:
         known = ", ".join(sorted(REGISTRY))
         return f"Unknown diagnostic code '{code}'.\nKnown codes: {known}"
     sev = info.severity.value + (" (context-dependent)" if info.varies else "")
-    return f"{info.code} [{sev}] — {info.title}\n\n{info.explanation}"
+    return f"{info.code} [{sev}] ({info.category}; owner: {info.owner}) — {info.title}\n\n{info.explanation}"

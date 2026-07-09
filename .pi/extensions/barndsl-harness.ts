@@ -177,6 +177,7 @@ function formatDiagMatrix(r: { code: number | null; stdout: string; stderr: stri
     `ok: ${j.ok}`,
     `codes: ${j.count}`,
     `gaps: ${JSON.stringify(j.gap_summary ?? {})}`,
+    `categories: ${JSON.stringify(j.category_summary ?? {})}`,
     `examples: ${j.example_summary?.after_files ?? "?"} files`,
     `$ ${r.command}`,
     r.stderr.trim() ? `stderr:\n${trim(r.stderr)}` : "",

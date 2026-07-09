@@ -4,11 +4,13 @@ This checklist is optimized for both humans and coding agents.
 
 ## Before changing code
 
-1. Run the default maintainability gate:
+1. Run the default maintainability gate and skim the model contracts when changing core behavior:
 
    ```bash
    barndsl dev doctor
    ```
+
+   See `docs/MODEL_INVARIANTS.md` for coordinate, identity, fragment, diagnostic and emit/format invariants.
 
 2. Before editing an unfamiliar rule/feature, locate its breadcrumbs:
 
@@ -35,7 +37,7 @@ This checklist is optimized for both humans and coding agents.
 
 - Add or reuse a deterministic validator in `src/barndsl/validation.py` or the relevant domain module.
 - Emit `Issue(severity, "CODE", ...)` in stable order.
-- Register the code in `src/barndsl/diagnostics.py` with title, explanation and actionable hint.
+- Register the code in `src/barndsl/diagnostics.py`; confirm its category/owner from `diagnostic_category()` is appropriate, and add title, explanation and actionable hint.
 - Add tests with a minimal failing source and a minimal satisfied source; prefer fixtures from `docs/FIXTURE_CATALOG.md` before inventing a large plan.
 - Probe quickly while iterating:
 

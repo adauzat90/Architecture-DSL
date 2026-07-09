@@ -344,6 +344,8 @@ def locate(query: str, *, max_results: int = 80) -> dict[str, Any]:
         exact["diagnostic"] = {
             "code": code,
             "severity": info.severity.value,
+            "category": info.category,
+            "owner": info.owner,
             "title": info.title,
             "registry": {"path": _rel(diagnostics), "line": _find_line(diagnostics, f'_c("{code}"')},
             "explain": f"barndsl explain {code}",
@@ -422,6 +424,7 @@ def diagnostic_matrix(paths: list[str] | None = None, *, max_hits: int = 6) -> d
 
     rows: list[dict[str, Any]] = []
     gap_counts: Counter = Counter()
+    category_counts: Counter = Counter()
     doc_sources = [ROOT / "README.md", ROOT / ".agents"]
     docs_dir = ROOT / "docs"
     if docs_dir.exists():
@@ -431,6 +434,7 @@ def diagnostic_matrix(paths: list[str] | None = None, *, max_hits: int = 6) -> d
         test_hits = _line_matches([ROOT / "tests"], code, max_results=max_hits)
         doc_hits = _line_matches(doc_sources, code, max_results=max_hits)
         example_hits = _line_matches([ROOT / "examples"], code, max_results=max_hits)
+        category_counts[info.category] += 1
         gaps: list[str] = []
         if not emitters.get(code):
             gaps.append("no_literal_emitter")
@@ -445,6 +449,8 @@ def diagnostic_matrix(paths: list[str] | None = None, *, max_hits: int = 6) -> d
         rows.append({
             "code": code,
             "severity": info.severity.value,
+            "category": info.category,
+            "owner": info.owner,
             "title": info.title,
             "registry": {"path": _rel(diag_path), "line": _find_line(diag_path, f'_c("{code}"')},
             "emitters": emitters.get(code, []),
@@ -461,6 +467,7 @@ def diagnostic_matrix(paths: list[str] | None = None, *, max_hits: int = 6) -> d
         "paths": paths,
         "count": len(rows),
         "gap_summary": dict(sorted(gap_counts.items())),
+        "category_summary": dict(sorted(category_counts.items())),
         "example_summary": {k: impact[k] for k in ("after_files", "after_whole_plans", "after_fragments", "score")},
         "rows": rows,
     }
@@ -479,9 +486,10 @@ def diagnostic_matrix_markdown(matrix: dict[str, Any]) -> str:
         f"- Registered diagnostics: {matrix['count']}",
         f"- Example paths: {', '.join(matrix['paths'])}",
         f"- Gap summary: `{json.dumps(matrix['gap_summary'], sort_keys=True)}`",
+        f"- Category summary: `{json.dumps(matrix.get('category_summary', {}), sort_keys=True)}`",
         "",
-        "| Code | Sev | Registry | Emitters | Tests | Docs | Examples / impact | Gaps |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Code | Sev | Category / owner | Registry | Emitters | Tests | Docs | Examples / impact | Gaps |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in matrix["rows"]:
         reg = row["registry"]
@@ -495,7 +503,8 @@ def diagnostic_matrix_markdown(matrix: dict[str, Any]) -> str:
             ex += f"<br>accepted: {row['accepted_example_count']}"
         gaps = ", ".join(row["gaps"]) or "—"
         title = row["title"].replace("|", "\\|")
-        lines.append(f"| `{row['code']}`<br>{title} | {row['severity']} | {registry} | {emitters} | {tests} | {docs} | {ex} | {gaps} |")
+        owner = row.get("owner", "")
+        lines.append(f"| `{row['code']}`<br>{title} | {row['severity']} | {row.get('category', 'quality')}<br>{owner} | {registry} | {emitters} | {tests} | {docs} | {ex} | {gaps} |")
     lines.append("")
     return "\n".join(lines)
 
@@ -826,8 +835,8 @@ def impact_targets(changed: list[str]) -> list[str]:
     if not files:
         return ["tests/test_compiler.py"]
     mapping = [
-        (("src/barndsl/validation.py", "src/barndsl/diagnostics.py", "src/barndsl/profiles.py"), ["tests/test_design_quality.py", "tests/test_compiler.py", "tests/test_profiles.py"]),
-        (("src/barndsl/compiler.py",), ["tests/test_compiler.py", "tests/test_recovery.py", "tests/test_compose.py", "tests/test_compose_v2.py"]),
+        (("src/barndsl/validation.py", "src/barndsl/diagnostics.py", "src/barndsl/profiles.py"), ["tests/test_design_quality.py", "tests/test_compiler.py", "tests/test_profiles.py", "tests/test_metamorphic.py"]),
+        (("src/barndsl/compiler.py",), ["tests/test_compiler.py", "tests/test_recovery.py", "tests/test_compose.py", "tests/test_compose_v2.py", "tests/test_metamorphic.py"]),
         (("src/barndsl/lsp.py",), ["tests/test_lsp.py"]),
         (("src/barndsl/playground.py",), ["tests/test_playground.py", "tests/test_playground_agent.py"]),
         (("src/barndsl/edits.py",), ["tests/test_edits.py", "tests/test_playground.py"]),

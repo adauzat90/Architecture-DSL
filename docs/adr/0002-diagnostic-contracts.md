@@ -11,11 +11,11 @@ Validation rules are part of the user-facing language. A diagnostic code appears
 
 Treat each diagnostic code as a contract:
 
-- The code must be registered in `src/barndsl/diagnostics.py` with severity, title, explanation, and actionable hint.
+- The code must be registered in `src/barndsl/diagnostics.py` with severity, category, owner, title, explanation, and actionable hint.
 - Emitters should use stable literal codes where practical so static harness tools can locate them.
 - Tests should include a firing case and a satisfied case for behavior changes.
 - Example/gallery impact should be reviewed before tightening or loosening a rule.
-- Use `barndsl dev diag-matrix` to inspect registry, emitter, test, docs, and example breadcrumbs before changing a rule.
+- Use `barndsl dev diag-matrix` to inspect registry, category/owner, emitter, test, docs, and example breadcrumbs before changing a rule.
 
 ## Consequences
 

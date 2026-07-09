@@ -7,7 +7,7 @@ This is the short maintainer/agent map for extending `barndsl` safely.
 1. **Source read** — `src/barndsl/compiler.py` reads `.barn` text, expands `use` composition, and tracks file/line context for diagnostics.
 2. **Parse/model build** — parser statements populate dataclasses from `src/barndsl/elements.py` and builder helpers.
 3. **Validation** — `src/barndsl/validation.py` and domain modules emit `Issue` objects with stable diagnostic codes.
-4. **Registry/explain** — every emitted code should be registered in `src/barndsl/diagnostics.py` so CLI, LSP and playground can teach the fix.
+4. **Registry/explain** — every emitted code should be registered in `src/barndsl/diagnostics.py` with severity, category/owner, and explanation so CLI, LSP and playground can teach the fix.
 5. **Score/introspection** — `src/barndsl/score.py` provides deterministic design scoring; `src/barndsl/introspect.py` exposes resolved geometry for tools/agents.
 6. **Outputs** — render/export modules lower the same compiled plan to SVG/PDF/PNG, glTF, IFC, Revit exchange JSON and packet HTML.
 
@@ -20,6 +20,7 @@ This is the short maintainer/agent map for extending `barndsl` safely.
 - **Agent harness** — `src/barndsl/devtools.py`, `tools/pi_barndsl_*.py`, and `.pi/extensions/barndsl-harness.ts` expose deterministic helper tools.
 - **Navigation** — `barndsl dev locate QUERY` returns line-numbered source/test/docs/example breadcrumbs for a diagnostic code, DSL statement, CLI command, module or free-text feature.
 - **Rule/fixture maps** — `barndsl dev diag-matrix` and `barndsl dev fixtures` generate `docs/DIAGNOSTIC_MATRIX.md` and `docs/FIXTURE_CATALOG.md`.
+- **Invariants** — `docs/MODEL_INVARIANTS.md` records coordinate, identity, fragment, diagnostic and emit/format contracts.
 - **Decisions** — `docs/adr/` records architectural choices agents should preserve or supersede explicitly.
 
 ## Composition/stamped IDs
@@ -39,7 +40,7 @@ to catch regressions.
 A diagnostic rule is maintainable when:
 
 - emitted codes are deterministic and stable;
-- each code has a `REGISTRY` entry with a useful explanation/hint;
+- each code has a `REGISTRY` entry with a useful category, owner, explanation and hint;
 - tests include one firing plan and one satisfied plan;
 - examples/gallery impact is understood;
 - accepted deviations remain explicit.

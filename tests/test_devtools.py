@@ -70,6 +70,8 @@ def test_diagnostic_matrix_indexes_registry_emitters_and_tests():
     row = next(r for r in out["rows"] if r["code"] == "BEDROOM_EGRESS")
     assert out["ok"]
     assert row["registry"]["line"] is not None
+    assert row["category"] == "access_egress"
+    assert row["owner"]
     assert row["emitters"]
     assert row["tests"]
     assert "no_literal_emitter" not in row["gaps"]
