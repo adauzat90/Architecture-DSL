@@ -576,6 +576,8 @@ barndsl revit-log plan.buildlog.json               # what the Revit build couldn
 barndsl demo --out cedar_ridge.svg                 # compile + render the example
 barndsl design "2 bed barndo with a 30x40 shop, ~1500 sq ft" --out plan.svg
 barndsl explain BEDROOM_EGRESS                     # what a diagnostic code means
+barndsl dev doctor                                 # maintainer/agent gate: audit + gallery + strict LSP + impact targets
+barndsl dev feature-check room                     # verify statement wiring across parser/docs/LSP/playground/tests
 ```
 
 **Outputs without Revit.** `barndsl schedule` emits room/door/window schedules

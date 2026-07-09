@@ -85,6 +85,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from typing import Any
@@ -1134,6 +1135,71 @@ def _cmd_revit_log(args: argparse.Namespace) -> int:
     return 1 if any(i.severity is not Severity.INFO for i in issues) else 0
 
 
+def _cmd_dev(args: argparse.Namespace) -> int:
+    """Developer/harness commands used by CI and agent tooling."""
+    from . import devtools
+
+    cmd = args.dev_command
+    if cmd == "audit":
+        out = devtools.repo_audit()
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "rule-probe":
+        if args.file:
+            source = open(args.file, encoding="utf-8").read()
+        elif args.source is not None:
+            source = args.source
+        else:
+            source = sys.stdin.read()
+        expect = json.loads(args.expect) if args.expect else None
+        out = devtools.rule_probe(source, expect, name=args.name, profile=args.profile)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "diag-diff":
+        out = devtools.diagnostic_diff(args.before, args.after, profile=args.profile)
+        print(devtools.dumps(out))
+        return 0
+    if cmd == "gallery-gate":
+        out = devtools.diagnostic_diff(args.paths or ["examples"], profile=args.profile)
+        print(devtools.dumps(out))
+        return 0
+    if cmd == "lsp-smoke":
+        out = devtools.lsp_smoke(args.file, strict_composed=args.strict_composed)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "doctor":
+        out = devtools.doctor(
+            paths=args.paths or None,
+            lsp_strict=not args.no_strict_lsp,
+            run_impact=args.run_impact,
+            export_plan=args.export_plan,
+            profile=args.profile,
+        )
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "feature-check":
+        out = devtools.feature_check(args.name, statement=not args.no_statement)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "impact":
+        out = devtools.impact_tests(args.changed, run=args.run, quiet=not args.verbose)
+        print(devtools.dumps(out))
+        return int(out.get("exit", 0) or 0)
+    if cmd == "export-parity":
+        out = devtools.export_parity(args.file, args.prefix)
+        print(devtools.dumps(out))
+        return 0 if out["ok"] else 1
+    if cmd == "rule-scaffold":
+        out = devtools.rule_scaffold(args.code, args.severity, args.test_file, write=args.write)
+        print(devtools.dumps(out))
+        return 0
+    if cmd == "feature-scaffold":
+        out = devtools.feature_scaffold(args.name, args.out, write=not args.no_write)
+        print(devtools.dumps(out))
+        return 0
+    raise SystemExit(f"unknown dev command {cmd}")
+
+
 def _cmd_explain(args: argparse.Namespace) -> int:
     from .diagnostics import REGISTRY, explain
 
@@ -1600,6 +1666,65 @@ def main(argv: list[str] | None = None) -> int:
         "code", nargs="?", default=None, help="a code like BEDROOM_EGRESS (omit to list all)"
     )
     p_explain.set_defaults(func=_cmd_explain)
+
+    p_dev = sub.add_parser(
+        "dev",
+        help="developer/harness helpers for rule and DSL feature work",
+    )
+    dev_sub = p_dev.add_subparsers(dest="dev_command", required=True)
+    p_dev_audit = dev_sub.add_parser("audit", help="audit diagnostic/statement wiring drift")
+    p_dev_audit.set_defaults(func=_cmd_dev)
+    p_dev_probe = dev_sub.add_parser("rule-probe", help="compile inline/source-file DSL and assert diagnostic codes")
+    p_dev_probe.add_argument("--source", default=None, help="inline .barn source (default stdin unless --file)")
+    p_dev_probe.add_argument("--file", default=None, help="read .barn source from a file")
+    p_dev_probe.add_argument("--expect", default=None, help='JSON expectations, e.g. {"warning":["NAT_LIGHT"],"absent":["BEDROOM_EGRESS"]}')
+    p_dev_probe.add_argument("--name", default=None, help="optional compile name")
+    _add_profile_flag(p_dev_probe)
+    p_dev_probe.set_defaults(func=_cmd_dev)
+    p_dev_diff = dev_sub.add_parser("diag-diff", help="diagnostic-code diff across two plan sets")
+    p_dev_diff.add_argument("before", nargs="+", help="baseline files, directories, or globs")
+    p_dev_diff.add_argument("--after", nargs="*", default=None, help="comparison files/directories/globs (default: before)")
+    _add_profile_flag(p_dev_diff)
+    p_dev_diff.set_defaults(func=_cmd_dev)
+    p_dev_gallery = dev_sub.add_parser("gallery-gate", help="compile examples/gallery and summarize diagnostics/scores")
+    p_dev_gallery.add_argument("paths", nargs="*", help="paths to scan (default: examples)")
+    _add_profile_flag(p_dev_gallery)
+    p_dev_gallery.set_defaults(func=_cmd_dev)
+    p_dev_lsp = dev_sub.add_parser("lsp-smoke", help="smoke-test pure LSP features")
+    p_dev_lsp.add_argument("file", nargs="?", default=None, help="optional composed .barn fixture")
+    p_dev_lsp.add_argument("--strict-composed", action="store_true", help="fail if composed/stamped-id LSP checks fail")
+    p_dev_lsp.set_defaults(func=_cmd_dev)
+    p_dev_doctor = dev_sub.add_parser("doctor", help="run the default audit/gallery/LSP/impact maintainability gate")
+    p_dev_doctor.add_argument("paths", nargs="*", help="gallery/example paths to scan (default: examples)")
+    p_dev_doctor.add_argument("--no-strict-lsp", action="store_true", help="do not fail on composed/stamped-id LSP smoke failures")
+    p_dev_doctor.add_argument("--run-impact", action="store_true", help="run impact-selected pytest targets, not just list them")
+    p_dev_doctor.add_argument("--export-plan", default=None, help="optional .barn plan for SVG/glTF/IFC/packet export parity")
+    _add_profile_flag(p_dev_doctor)
+    p_dev_doctor.set_defaults(func=_cmd_dev)
+    p_dev_feature_check = dev_sub.add_parser("feature-check", help="verify a DSL feature/statement is wired across key surfaces")
+    p_dev_feature_check.add_argument("name", help="feature or statement name")
+    p_dev_feature_check.add_argument("--no-statement", action="store_true", help="treat as model-only feature; skip statement keyword requirements")
+    p_dev_feature_check.set_defaults(func=_cmd_dev)
+    p_dev_impact = dev_sub.add_parser("impact", help="map changed files to likely pytest targets")
+    p_dev_impact.add_argument("changed", nargs="*", help="changed files (default: git status)")
+    p_dev_impact.add_argument("--run", action="store_true", help="run the selected pytest targets")
+    p_dev_impact.add_argument("-v", "--verbose", action="store_true", help="do not pass -q to pytest")
+    p_dev_impact.set_defaults(func=_cmd_dev)
+    p_dev_export = dev_sub.add_parser("export-parity", help="smoke-test SVG/glTF/IFC/packet exports for a plan")
+    p_dev_export.add_argument("file", help="path to a .barn plan")
+    p_dev_export.add_argument("--prefix", default=None, help="artifact prefix under .pi/artifacts")
+    p_dev_export.set_defaults(func=_cmd_dev)
+    p_dev_rule_scaf = dev_sub.add_parser("rule-scaffold", help="checklist/test skeleton for a new diagnostic rule")
+    p_dev_rule_scaf.add_argument("code", help="diagnostic code, e.g. ROOM_HABITABLE")
+    p_dev_rule_scaf.add_argument("--severity", choices=("error", "warning", "info"), default="info")
+    p_dev_rule_scaf.add_argument("--test-file", default=None)
+    p_dev_rule_scaf.add_argument("--write", action="store_true", help="write test skeleton if absent")
+    p_dev_rule_scaf.set_defaults(func=_cmd_dev)
+    p_dev_feat_scaf = dev_sub.add_parser("feature-scaffold", help="checklist artifact for a new DSL feature/statement")
+    p_dev_feat_scaf.add_argument("name")
+    p_dev_feat_scaf.add_argument("--out", default=None)
+    p_dev_feat_scaf.add_argument("--no-write", action="store_true")
+    p_dev_feat_scaf.set_defaults(func=_cmd_dev)
 
     p_profiles = sub.add_parser(
         "profiles",

@@ -90,7 +90,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .compare import compare_plans
-from .compiler import DSL_REFERENCE, compile_source
+from .compiler import DSL_REFERENCE, _KEYWORDS, compile_source
 from .compose import (  # scan_parts moved to compose (beside the `use` loader); re-exported here
     MAX_LISTED_PARTS,  # noqa: F401 — re-exported for backward compatibility
     MAX_PART_SNIFF_BYTES,  # noqa: F401 — re-exported for backward compatibility
@@ -124,16 +124,11 @@ MAX_BODY = 1_000_000
 
 _ELEVATION_SIDES = ("south", "north", "east", "west")
 
-#: Statement heads the compiler's ``_parse_statement`` dispatch recognises — kept
-#: in step with that if/elif chain in :mod:`barndsl.compiler`. These are the DSL's
-#: line-leading keywords; the editor's syntax highlighter colours them.
-_STATEMENT_KEYWORDS = (
-    "plan", "envelope", "wing", "ceiling", "floor", "accessible", "electrical",
-    "street", "overhang", "climate", "orientation", "finish", "site", "setback",
-    "roof", "note", "program", "require", "room", "wall", "suite", "zone", "door",
-    "open", "entry", "window", "porch", "stair", "frame", "fixture", "alarm",
-    "drive", "walk", "well", "septic", "service", "grade", "param",
-)
+#: Statement heads the compiler's ``_parse_statement`` dispatch recognises.  The
+#: playground derives this from :mod:`barndsl.compiler` so editor highlighting,
+#: autocomplete and quick-fix validation cannot drift from the parser when a new
+#: DSL statement is added.
+_STATEMENT_KEYWORDS = tuple(_KEYWORDS)
 
 #: Secondary keywords — placement anchors, opening modifiers and option words that
 #: appear mid-statement (from the grammar in :data:`~barndsl.compiler.DSL_REFERENCE`).

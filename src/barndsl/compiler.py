@@ -2669,6 +2669,10 @@ def read_source_file(path: str) -> tuple[str, str | None]:
     that are not valid UTF-8."""
     if path == "-":
         return _strip_bom(sys.stdin.read()), None
+    # On Windows, opening a directory can raise PermissionError instead of
+    # IsADirectoryError. Check first so CLI diagnostics stay stable and helpful.
+    if os.path.isdir(path):
+        raise SourceReadError(path, "is a directory") from None
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
