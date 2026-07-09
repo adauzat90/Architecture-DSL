@@ -432,7 +432,9 @@ def _swing_out(wall: RevitWall, o: RevitOpening, room_pt: dict) -> tuple[float, 
 
 
 _SWING_KINDS = frozenset({"swing", "exterior", "double", "french"})
-_SLIDE_KINDS = frozenset({"sliding", "pocket"})
+#: A closed bifold reads as a flat panel across the opening, same as a slider —
+#: modelling the fold would add nothing at this LOD.
+_SLIDE_KINDS = frozenset({"sliding", "pocket", "bifold"})
 
 
 def _add_opening_geometry(

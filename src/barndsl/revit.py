@@ -165,8 +165,8 @@ class RevitOpening:
 
     id: str
     category: str  # "door" | "window" | "cased_opening"
-    #: Doors: swing | pocket | sliding | double | french | cased | exterior |
-    #: overhead. Windows: the window kind (casement | slider | fixed |
+    #: Doors: swing | pocket | sliding | bifold | double | french | cased |
+    #: exterior | overhead. Windows: the window kind (casement | slider | fixed |
     #: double-hung; older documents wrote the generic "window", which imports
     #: as the casement default).
     kind: str

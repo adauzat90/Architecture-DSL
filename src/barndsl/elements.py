@@ -212,10 +212,16 @@ class Room:
 
 #: The interior-door kinds. ``swing`` is a hinged leaf (the default); ``cased``
 #: is an open walk-through (no leaf — the old ``open``); ``pocket``/``sliding``
-#: are sliding leaves (no swing arc); ``double`` is a pair of hinged half-width
+#: are sliding leaves (no swing arc); ``bifold`` is a pair of panels that fold
+#: flat against the jambs (the reach-in closet door — it opens nearly the whole
+#: width without sweeping an arc); ``double`` is a pair of hinged half-width
 #: leaves and ``french`` its glazed variant (both swing). All join the two rooms
 #: in the circulation graph; they differ in how they render and which checks apply.
-DOOR_KINDS = ("swing", "cased", "pocket", "sliding", "double", "french")
+DOOR_KINDS = ("swing", "cased", "pocket", "sliding", "bifold", "double", "french")
+
+#: Default total width (feet) of a bifold when none is given: the stock 48 in
+#: pair (two 24 in panels) — sized for a closet opening, not a passage.
+DEFAULT_BIFOLD_DOOR_WIDTH = 4.0
 
 #: Door kinds whose opening is a pair of half-width leaves. Egress and
 #: accessibility clear widths count **one** leaf (IRC R311.2 — the required

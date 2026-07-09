@@ -112,6 +112,9 @@ STD_EXTERIOR_DOOR_WIDTHS_IN = (30, 32, 36, 60, 72)
 #: (2×24 .. 2×36). A declared double is checked against these instead of the
 #: single-leaf sizes.
 STD_DOUBLE_DOOR_WIDTHS_IN = (48, 60, 64, 72)
+#: Stock bifold opening widths: 24-36 in singles, 48/60/72 in pairs, and 96 in
+#: (two 48 in units sharing one opening — the wide reach-in closet standard).
+STD_BIFOLD_DOOR_WIDTHS_IN = (24, 30, 32, 36, 48, 60, 72, 96)
 DOOR_SIZE_TOL_IN = 0.5  # how far off a standard size before we nudge
 # Overhead (sectional garage) door stock sizes, in **feet** — garage doors are
 # ordered in feet, unlike leaf doors: singles 8/9/10 wide, doubles 12/16; panels
@@ -185,6 +188,16 @@ BED_FURNISH_LONG = 7.0
 DINING_FURNISH_CLEAR = 8.0
 CLOSET_WALKIN_ASPECT = 4.0  # a closet skinnier than this (long:short) is "long skinny"
 MIN_WALKIN_AREA = 24.0  # a closet this big is worth shaping as a walk-in, not a strip
+#: A closet at least this deep behind its door is a walk-in — a person steps
+#: inside, so an ordinary person-door serves it. Shallower is a REACH-IN: you
+#: stand at the opening and reach, so the door must open (nearly) the closet's
+#: whole width — the centred-bifold idiom — or the rod past the jambs is dead.
+CLOSET_WALKIN_DEPTH = 4.0
+#: How far past a door jamb an arm usefully reaches into a reach-in closet.
+CLOSET_REACH = 2.0
+#: Clear depth a clothes rod needs — hanging clothes are 2 ft deep (24 in
+#: hangers). A shallower closet is shelf-only (linen/broom) storage.
+CLOSET_HANG_DEPTH = 2.0
 #: A swing door centred on a wall with at least this much clear wall on *both*
 #: flanks is floating mid-wall; backing it to a corner frees a usable wall run.
 DOOR_CORNER_MARGIN = 2.0
@@ -831,7 +844,8 @@ def _swing_region(
 def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
     """The swept region of an interior door's leaf, or None if nothing swings.
 
-    Pocket/sliding/cased doors have no leaf. A double/french pair sweeps two
+    Pocket/sliding/bifold/cased doors sweep no arc (a bifold folds flat against
+    its jambs). A double/french pair sweeps two
     half-width leaves; like the exterior check, approximate it with the hinge
     end's quarter-disc (half the total width) so a wide pair can't silently
     clash-exempt itself while the renderer draws two swinging leaves.
@@ -2467,11 +2481,13 @@ def _validate_doors(plan: Barndominium, add) -> None:
                                 **loc,
                             )
                         )
-        if door.leaf and door.width < MIN_INTERIOR_DOOR_WIDTH:
+        if door.leaf and door.kind != "bifold" and door.width < MIN_INTERIOR_DOOR_WIDTH:
             # An open cased passage (leaf=False) is wide by design — the narrow
             # check only applies to swinging doors. A double/french pair passes
             # its full width with both leaves open, so the total-width check
-            # stays honest for it too (egress is where one leaf counts).
+            # stays honest for it too (egress is where one leaf counts). A
+            # bifold fronts storage rather than passage — a stock 24 in bifold
+            # on a broom closet is fine — so it skips the passage minimum.
             add(
                 Issue(
                     Severity.WARNING,
@@ -2488,11 +2504,12 @@ def _validate_doors(plan: Barndominium, add) -> None:
             # A swing door that *is* wide enough should still be an orderable
             # size. A declared double/french pair checks against the stock pair
             # widths (two equal leaves) instead of the single-leaf sizes.
-            sizes: tuple[int, ...] = (
-                STD_DOUBLE_DOOR_WIDTHS_IN
-                if door.kind in DOUBLE_LEAF_KINDS
-                else STD_INTERIOR_DOOR_WIDTHS_IN
-            )
+            if door.kind in DOUBLE_LEAF_KINDS:
+                sizes: tuple[int, ...] = STD_DOUBLE_DOOR_WIDTHS_IN
+            elif door.kind == "bifold":
+                sizes = STD_BIFOLD_DOOR_WIDTHS_IN
+            else:
+                sizes = STD_INTERIOR_DOOR_WIDTHS_IN
             nearest = _nearest_std(door.width * 12, sizes)
             if abs(nearest - door.width * 12) > DOOR_SIZE_TOL_IN:
                 add(
@@ -3864,9 +3881,145 @@ def _dq_closet_shape(plan: Barndominium, graph, by_id, add) -> None:
                         f"({long / short:.1f}:1) — a long, skinny closet.",
                         room=room.id,
                         hint="With this much floor a walk-in is more usable — aim for a "
-                        "more square footprint (under ~3:1), at least 4 ft deep.",
+                        "more square footprint (under ~3:1), at least 4 ft deep. (A "
+                        "shallow reach-in is fine too, behind a near-full-width bifold.)",
                     )
                 )
+
+
+def _dq_closet_access(plan: Barndominium, graph, by_id, add) -> None:
+    # 8c2. Reach-in access: a closet shallower than CLOSET_WALKIN_DEPTH can't be
+    #      walked into — a person stands at the opening and reaches — so its door
+    #      must open (nearly) the closet's full width, centred on it: the bifold
+    #      idiom. A person-door parked at one end strands everything past arm's
+    #      reach of the jamb. Charge the worst blind stretch. Kind-agnostic: a
+    #      narrow bifold or cased gap at one end is just as blind as a swing door.
+    from .geometry import shared_edge
+
+    doors_into: dict[str, list] = {}
+    for d in plan.interior_doors:
+        for rid in (d.room_a, d.room_b):
+            if rid in by_id and by_id[rid].type is RoomType.CLOSET:
+                doors_into.setdefault(rid, []).append(d)
+    for cid, doors in doors_into.items():
+        if len(doors) != 1:
+            continue  # a walk-through closet reaches its rod from both openings
+        d = doors[0]
+        closet = by_id[cid]
+        other = by_id.get(d.room_a if d.room_b == cid else d.room_b)
+        if other is None:
+            continue
+        edge = shared_edge(closet, other)
+        if edge is None:
+            continue
+        # Depth = the closet's extent perpendicular to its door wall.
+        depth = closet.width if edge.orientation == "v" else closet.length
+        if depth + EPSILON >= CLOSET_WALKIN_DEPTH:
+            continue  # a walk-in: you step inside, so an ordinary door serves it
+        w = min(d.width, edge.length)
+        if d.offset is None:
+            start = edge.lo + (edge.length - w) / 2.0  # renderer centres it
+        else:
+            start = edge.lo + max(0.0, min(d.offset, edge.length - w))
+        lo = closet.y if edge.orientation == "v" else closet.x
+        hi = closet.y2 if edge.orientation == "v" else closet.x2
+        worst = max(start - lo, hi - (start + w))
+        if worst <= CLOSET_REACH + EPSILON:
+            continue
+        breadth = hi - lo
+        # The fix, computed: the widest STOCK bifold that fits the closet with a
+        # jamb's grace, centred on it (clamped to the shared run when a
+        # neighbour covers only part of the closet's wall).
+        max_w = min(breadth - 1.0, edge.length)
+        fix_w = max(
+            (s / 12.0 for s in STD_BIFOLD_DOOR_WIDTHS_IN if s / 12.0 <= max_w),
+            default=STD_BIFOLD_DOOR_WIDTHS_IN[0] / 12.0,
+        )
+        fix_off = max(0.0, (lo - edge.lo) + (breadth - fix_w) / 2.0)
+        if (breadth - fix_w) / 2.0 <= CLOSET_REACH + EPSILON:
+            fix = (
+                "Centre a near-full-width bifold on the closet so every foot "
+                f"of rod is reachable: `door {d.room_a} - {d.room_b} bifold "
+                f"width {_f(fix_w)} offset {_f(fix_off)}` (keep the blind run "
+                f"past each jamb under {_f(CLOSET_REACH)} ft)."
+            )
+        else:  # wider than even the 96 in double unit covers — split or reshape
+            fix = (
+                "This closet is wider than one stock bifold covers — give it "
+                "two openings (a pair of bifold `door` statements side by "
+                f"side), or reshape it into a walk-in ({_f(CLOSET_WALKIN_DEPTH)} "
+                "ft deep or more) behind an ordinary door."
+            )
+        add(
+            Issue(
+                Severity.WARNING,
+                "CLOSET_ACCESS",
+                f"Closet '{cid}' is a reach-in ({_f(depth)} ft deep — under "
+                f"{_f(CLOSET_WALKIN_DEPTH)} ft nobody can step inside) but its "
+                f"{_f(w)} ft door leaves {_f(worst)} ft of closet past a jamb, "
+                "beyond arm's reach.",
+                room=cid,
+                line=d.line,
+                col=d.col,
+                end_col=d.end_col,
+                hint=fix,
+            )
+        )
+
+
+def _dq_closet_depth(plan: Barndominium, graph, by_id, add) -> None:
+    # 8c3. Hanging depth: hanging clothes are 2 ft deep (24 in hangers), so a
+    #      bedroom's clothes closet needs that much clear in its short dimension.
+    #      Only a closet serving a bedroom (door-connected) is judged — a shallow
+    #      hall linen/broom closet is legitimate shelf-only storage.
+    for room in plan.rooms:
+        if room.type is not RoomType.CLOSET:
+            continue
+        if room.min_dimension + EPSILON >= CLOSET_HANG_DEPTH:
+            continue
+        beds = [
+            n
+            for n in graph.get(room.id, ())
+            if n in by_id and by_id[n].type is RoomType.BEDROOM
+        ]
+        if not beds:
+            continue
+        add(
+            Issue(
+                Severity.WARNING,
+                "CLOSET_DEPTH",
+                f"Closet '{room.id}' is only {_f(room.min_dimension)} ft deep — "
+                f"hanging clothes need {_f(CLOSET_HANG_DEPTH)} ft, so bedroom "
+                f"'{beds[0]}' can't hang anything in it.",
+                room=room.id,
+                hint="Deepen the closet to 2 ft or more (2 - 2.5 ft is the "
+                "reach-in standard); shallower is shelf-only linen/broom storage, "
+                "not a clothes closet.",
+            )
+        )
+
+
+def _dq_closet_window(plan: Barndominium, graph, by_id, add) -> None:
+    # 8c4. A window in a closet: sunlight fades clothes, the glass eats the wall
+    #      the rod wants, and it spends exterior wall a habitable room could
+    #      daylight with. Closets belong buried on interior walls. INFO — taste.
+    for w in plan.windows:
+        room = by_id.get(w.room)
+        if room is not None and room.type is RoomType.CLOSET:
+            add(
+                Issue(
+                    Severity.INFO,
+                    "CLOSET_WINDOW",
+                    f"Closet '{room.id}' has a window — sunlight fades clothes and "
+                    "the glass eats the wall the rod wants.",
+                    room=room.id,
+                    line=w.line,
+                    col=w.col,
+                    end_col=w.end_col,
+                    hint="Bury the closet on interior walls and give this stretch "
+                    "of exterior wall (and its daylight) to a habitable room.",
+                )
+            )
 
 
 def _dq_hall_tight(plan: Barndominium, graph, by_id, add, profile: Profile = DEFAULT) -> None:
@@ -4116,7 +4269,7 @@ def _dq_door_swing_direction(plan: Barndominium, graph, by_id, add) -> None:
         if edge is None:
             continue
         region = _interior_swing_region(plan, d, a, b, edge)
-        if region is None:  # pocket/sliding/cased — no leaf to place
+        if region is None:  # pocket/sliding/bifold/cased — no leaf to place
             continue
         target = _region_room(region, a, b, edge)
         if target is None:
@@ -4568,8 +4721,8 @@ def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
                     line=d.line,
                     col=d.col,
                     end_col=d.end_col,
-                    hint="Make it a bypass/sliding or bifold door so the leaf doesn't "
-                    f"fill the closet, e.g. `door {d.room_a} - {d.room_b} sliding "
+                    hint="Make it a bifold or bypass/sliding door so the leaf doesn't "
+                    f"fill the closet, e.g. `door {d.room_a} - {d.room_b} bifold "
                     f"width {_f(d.width)}`.",
                 )
             )
@@ -4664,6 +4817,9 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_master_ensuite,
     _dq_bed_sound,
     _dq_closet_shape,
+    _dq_closet_access,
+    _dq_closet_depth,
+    _dq_closet_window,
     _dq_hall_tight,
     _dq_no_back_door,
     _dq_bath_oversize,

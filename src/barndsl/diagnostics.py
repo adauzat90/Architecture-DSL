@@ -495,9 +495,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A swing door's width isn't a manufactured leaf size (interior "
            "24/28/30/32/36 in; exterior 30/32/36, doubles 60/72), a declared "
            "double/french pair isn't a stock pair width (48/60/64/72 in total), "
-           "or an overhead door isn't a stock sectional size (widths 8/9/10/12/16 "
-           "ft, heights 7/8 ft). Snap it to the nearest so it's orderable "
-           "off-the-shelf."),
+           "a bifold isn't a stock opening (24/30/32/36 in singles, 48/60/72 in "
+           "pairs, 96 in for two units side by side), or an overhead door isn't "
+           "a stock sectional size (widths 8/9/10/12/16 ft, heights 7/8 ft). "
+           "Snap it to the nearest so it's orderable off-the-shelf."),
         _c("OVERHEAD_ROOM", I, "Overhead door in a living space",
            "An overhead (sectional garage) door is on a room that isn't a garage "
            "or shop — unusual for a living space. Either the room should be a "
@@ -821,6 +822,25 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A closet has the floor area for a walk-in but is shaped as a narrow "
            "strip (>= 4:1). A more square footprint (under ~3:1, >= 4 ft deep) is "
            "a usable walk-in. Small reach-ins and wide/shallow closets are exempt."),
+        _c("CLOSET_ACCESS", W, "Reach-in closet with a blind rod",
+           "A closet under 4 ft deep is a REACH-IN — nobody can step inside, so "
+           "everything past arm's reach (~2 ft) of the door jambs is dead "
+           "storage. Its door should be a bifold centred on the closet and "
+           "nearly as wide as it, so every foot of rod is reachable. A person-"
+           "door parked at one end of a wide reach-in strands the rest of the "
+           "closet. Walk-ins (4 ft and deeper) take an ordinary door and are "
+           "exempt, as are walk-through closets with two openings."),
+        _c("CLOSET_DEPTH", W, "Bedroom closet too shallow to hang clothes",
+           "A closet serving a bedroom is under 2 ft in its short dimension — "
+           "hanging clothes are 2 ft deep (24 in hangers), so nothing hangs in "
+           "it and the bedroom effectively has no clothes closet. 2 - 2.5 ft is "
+           "the reach-in standard. A shallow closet off a hall is exempt (a "
+           "linen/broom cabinet is legitimate shelf-only storage)."),
+        _c("CLOSET_WINDOW", I, "Window in a closet",
+           "A closet has a window: sunlight fades clothes, the glass eats the "
+           "wall the rod wants, and the stretch of exterior wall (and its "
+           "daylight) would serve a habitable room better. Bury closets on "
+           "interior walls."),
         _c("BED_SOUND", I, "Bedrooms share a party wall",
            "Two bedrooms share a wall directly, so sound carries between them. "
            "Stack each bedroom's closet on the shared wall (back-to-back) to buffer "

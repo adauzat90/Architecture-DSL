@@ -587,6 +587,8 @@ class _DxfWriter:
                         self._door_leaf(ox + half, oy, edge.orientation, half, layer, sgn, True, mx, my)
             elif kind in ("pocket", "sliding"):
                 self._slide_leaf(ox, oy, edge.orientation, w, layer, mx, my)
+            elif kind == "bifold":
+                self._bifold_leaf(ox, oy, edge.orientation, w, layer, mx, my)
             # cased opening: the wall gap already reads as a passage — no leaf.
 
         for xd in self.plan.exterior_doors:
@@ -677,6 +679,25 @@ class _DxfWriter:
         else:
             s = d if (oy + d) <= my else -d
             self.line(ox, oy + s, ox + w, oy + s, layer)
+
+    def _bifold_leaf(
+        self, ox: float, oy: float, orientation: str, w: float, layer: str,
+        mx: float, my: float,
+    ) -> None:
+        """A bifold door: two half-open panel pairs as shallow Vs off the wall —
+        the plan zigzag. Mirrors :meth:`barndsl.render._Renderer._bifold_symbol`
+        (no swing arc; the panels fold flat against the jambs)."""
+        d = min(w / 4.0, 1.0)
+        if orientation == "v":
+            s = d if (ox + d) <= mx else -d
+            pts = [(ox, oy), (ox + s, oy + w / 4), (ox, oy + w / 2),
+                   (ox + s, oy + 3 * w / 4), (ox, oy + w)]
+        else:
+            s = d if (oy + d) <= my else -d
+            pts = [(ox, oy), (ox + w / 4, oy + s), (ox + w / 2, oy),
+                   (ox + 3 * w / 4, oy + s), (ox + w, oy)]
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            self.line(x1, y1, x2, y2, layer)
 
     def _overhead_leaf(
         self, ox: float, oy: float, orientation: str, w: float, wall: Direction,

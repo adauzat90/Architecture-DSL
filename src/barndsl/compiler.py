@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING
 from .constants import WALK_DEFAULT_WIDTH
 from .elements import (
     ALARM_KINDS,
+    DEFAULT_BIFOLD_DOOR_WIDTH,
     DEFAULT_DOUBLE_DOOR_WIDTH,
     DOOR_KINDS,
     DOUBLE_LEAF_KINDS,
@@ -245,11 +246,13 @@ Statements:
         # ids OR suite ids. An unknown member is a ZONE_REF error; a room in two
         # zones a ZONE_OVERLAP warning; a public room stranded in an otherwise
         # private zone (or vice versa) a ZONE_CROSS info.
-  door <id_a> - <id_b> [swing|cased|pocket|sliding|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
+  door <id_a> - <id_b> [swing|cased|pocket|sliding|bifold|double|french] [width <w>] [offset <o>] [into <room>] [hinge near|far]
         # interior door between two rooms. swing (default) hinges; cased = an open
-        # walk-through (no leaf); pocket/sliding slide; double/french = a pair of
-        # half-width leaves (default 5 ft total). offset = ft from the wall's
-        # S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
+        # walk-through (no leaf); pocket/sliding slide; bifold folds flat (the
+        # reach-in closet door, default 4 ft — centre it on the closet and size it
+        # near the closet's width so every foot of rod is reachable); double/french
+        # = a pair of half-width leaves (default 5 ft total). offset = ft from the
+        # wall's S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
         # The two-room forms `wall`, `door` and `open` accept `to` in place of the
         # `-` separator, so `door a to b` == `door a - b` (mind the spaces — the
         # dashless `a-b` reads as one token, and `a - b` still works too).
@@ -1533,6 +1536,8 @@ def _parse_statement(
                 width = 6.0  # cased opens wide
             elif kind in DOUBLE_LEAF_KINDS:
                 width = DEFAULT_DOUBLE_DOOR_WIDTH  # the stock 60 in pair
+            elif kind == "bifold":
+                width = DEFAULT_BIFOLD_DOOR_WIDTH  # the stock 48 in closet pair
             else:
                 width = 32 / 12
             offset, swing_into, hinge = None, None, None
@@ -1560,8 +1565,9 @@ def _parse_statement(
                         "BAD_OPTION",
                         f"Unknown door option '{opt}'.",
                         c.toks[c.i - 1].col,
-                        hint="Options: a kind (swing/cased/pocket/sliding/double/"
-                        "french), width <n>, offset <n>, into <room>, hinge near|far.",
+                        hint="Options: a kind (swing/cased/pocket/sliding/bifold/"
+                        "double/french), width <n>, offset <n>, into <room>, "
+                        "hinge near|far.",
                         end_col=c.toks[c.i - 1].end_col,
                     )
             c.expect_end()

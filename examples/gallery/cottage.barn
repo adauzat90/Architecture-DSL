@@ -19,7 +19,9 @@ open living - kitchen width 8
 door living - hall width 3 offset 0.5
 door hall - bed width 3 offset 0.5
 door hall - bath width 2.67 offset 5.83
-door bed - closet width 2.5 offset 0.5 into bed
+# The closet is a 3 ft reach-in — a bifold centred on it keeps the whole rod
+# within arm's reach (a person-door at one end would strand 8 ft of closet).
+door bed - closet bifold width 8 offset 1.5
 
 entry living south width 3 offset 13
 entry kitchen west width 3 offset 3

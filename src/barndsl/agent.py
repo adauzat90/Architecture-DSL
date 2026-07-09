@@ -267,6 +267,12 @@ LINT the compiler enforces (satisfy these too):
 - Habitable rooms need windows >= 8% of floor area (put them on exterior walls).
 - WET_GROUP: cluster bath/kitchen/laundry on a shared plumbing wall.
 - NO_CLOSET: every bedroom needs a closet reached by a door FROM it.
+- CLOSET_ACCESS / CLOSET_DEPTH (warnings): a closet under 4 ft deep is a
+  REACH-IN - nobody steps inside, so give it a `bifold` door CENTRED on the
+  closet and nearly as wide (blind rod past a jamb tops out at arm's reach,
+  ~2 ft): `door bed - closet bifold width 8 offset 1.5` on an 11 ft closet.
+  4 ft and deeper is a walk-in and takes a normal 2.5 ft door. A bedroom's
+  closet needs >= 2 ft of depth or clothes can't hang at all.
 - BED_SOUND: buffer two adjacent beds with closets/hall on the shared wall.
 - MASTER_ENSUITE / PRIVATE_PASSTHROUGH: the primary gets its own ensuite; never
   route the only path to a room through a bath or someone else's bedroom.
