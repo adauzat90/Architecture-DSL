@@ -202,6 +202,22 @@ def test_min_area_met_is_silent():
     assert "PROGRAM_MISMATCH" not in {d.code for d in validate(big).warnings}
 
 
+def test_program_area_overrun_is_an_info_not_a_mismatch():
+    big = barndominium("Big").envelope(width=50, length=40).ceiling(9)
+    big.add_room("living", T.LIVING, x=0, y=0, width=50, length=40)  # 2000 sq ft
+    big.program(0, min_area=1500)
+    result = validate(big)
+    assert "PROGRAM_MISMATCH" not in {d.code for d in result.warnings}
+    assert "PROGRAM_AREA_OVERRUN" in {d.code for d in result.infos}
+
+
+def test_program_area_small_overrun_is_silent():
+    plan = barndominium("Near").envelope(width=40, length=40).ceiling(9)
+    plan.add_room("living", T.LIVING, x=0, y=0, width=40, length=40)
+    plan.program(0, min_area=1500)
+    assert "PROGRAM_AREA_OVERRUN" not in {d.code for d in validate(plan).infos}
+
+
 def test_area_and_required_clauses_parse_and_round_trip():
     src = _plan("program 2 bed 1 bath 1 office area 1200")
     r = compile_source(src)

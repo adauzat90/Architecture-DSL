@@ -741,13 +741,15 @@ def _iteration_event(step: Any, rounds: int) -> dict:
 
 
 def _done_event(result: Any) -> dict:
-    """The ``done`` SSE payload: the best-scoring iteration and its render."""
+    """The ``done`` SSE payload: the best iteration, render, and loop outcome."""
     payload = compile_payload(result.source)
     return {
         "round": result.best_iteration,
         "iterations": result.iterations,
         "source": result.source,
         "score": result.score.to_dict(),
+        "termination_reason": getattr(result, "termination_reason", "unknown"),
+        "review_degraded": bool(getattr(result, "review_degraded", False)),
         "counts": payload.get("counts") or {"error": 0, "warning": 0, "info": 0},
         "payload": payload,
     }
@@ -4148,8 +4150,15 @@ function onEvent(kind, ev){
     const win = thread.querySelector('.iter-row[data-round="' + ev.round + '"]');
     if (win) win.classList.add('win');
     const t = ev.score ? fmt(ev.score.total) : '—';
-    addMsg('msg-agent', 'Landed the best plan (round ' + ev.round + ' of ' +
-      ev.iterations + ', score ' + t + '/100). Edit it, or send a follow-up to refine.');
+    const reason = ev.termination_reason || 'unknown';
+    let outcome = '';
+    if (reason === 'max_iterations') outcome = ' The iteration cap was reached.';
+    else if (reason === 'generation_failed') outcome = ' A later model call failed; this is the best completed plan.';
+    if (ev.review_degraded) outcome += ' Architectural review was unavailable, so this result is not review-approved.';
+    const degraded = ev.review_degraded || reason === 'generation_failed';
+    addMsg(degraded ? 'msg-agent err' : 'msg-agent',
+      'Landed the best plan (round ' + ev.round + ' of ' + ev.iterations +
+      ', score ' + t + '/100).' + outcome + ' Edit it, or send a follow-up to refine.');
   } else if (kind === 'error'){
     clearStatus();
     const msg = ev.kind === 'cancelled' ? 'Stopped.'
@@ -5415,9 +5424,11 @@ function nextRoomId(p, base){
 // A short, typed id stem for a room type, so "+ Room" defaults to bed2/bath2/…
 // rather than the literal "room". Falls back to the type name itself.
 const ROOM_STEM = { bedroom:'bed', bathroom:'bath', half_bath:'bath', hallway:'hall',
-  mudroom:'mud', laundry:'laundry', utility:'util', kitchen:'kitchen', living:'living',
-  dining:'dining', office:'office', closet:'closet', pantry:'pantry', garage:'garage',
-  shop:'shop', porch:'porch', loft:'loft' };
+  foyer:'foyer', mudroom:'mud', laundry:'laundry', utility:'util', mechanical:'mech',
+  kitchen:'kitchen', living:'living', great_room:'great', dining:'dining',
+  office:'office', flex:'flex', rec_room:'rec', closet:'closet', pantry:'pantry',
+  storage:'storage', safe_room:'safe', garage:'garage', shop:'shop', porch:'porch',
+  loft:'loft' };
 function typedRoomId(p, type){ return nextRoomId(p, ROOM_STEM[type] || type || 'room'); }
 // The Parts browser: the plan-less .barn parts beside the served file (scanned
 // server-side into p.parts_available). Each row Inserts a `use` at plan centre

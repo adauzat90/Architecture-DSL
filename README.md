@@ -94,7 +94,9 @@ or a building entrance, so the plan still needs a people-door `entry`.
 intent (a required adjacency, separation, exterior wall, or minimum room area);
 both are re-checked mechanically on every compile (`PROGRAM_MISMATCH` /
 `REQUIRE_UNMET` warnings), so the brief lives in the source and survives every
-revision.
+revision. A large overshoot of `program ... area` is also noted as
+`PROGRAM_AREA_OVERRUN` because brief square footage is often meant as a target,
+even though the area clause remains a minimum for compatibility.
 `wall <a> - <b> plumbing|bearing|rated` declares what the **shared wall**
 between two abutting rooms *is* (the pair must really share one — `WALL_NOADJ`
 otherwise): a `plumbing` wall is the 2x6 wet wall the fixtures back onto (it
@@ -135,8 +137,10 @@ above a ground room without overlapping it. A `stair` connects floors (the upper
 level becomes reachable from a ground `entry`), and `barndsl build` renders each
 level as its own labelled floor plan.
 
-`<type>`: living, kitchen, dining, bedroom, bathroom, hallway, closet, pantry,
-mudroom, office, loft, garage, shop, … · `<wall>`: north|south|east|west.
+`<type>`: living, great_room, kitchen, dining, bedroom, bathroom, half_bath,
+laundry, utility, mechanical, hallway, foyer, closet, pantry, storage, mudroom,
+office, flex, rec_room, loft, safe_room, garage, shop, porch, other · `<wall>`:
+north|south|east|west.
 Windows and entries must be on an **exterior** wall (one on the envelope edge)
 to count for daylight, bedroom egress, or building access.
 

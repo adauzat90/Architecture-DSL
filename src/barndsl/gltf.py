@@ -1095,8 +1095,9 @@ _NO_BASEBOARD_TYPES = frozenset({"garage", "shop", "porch"})
 #: to the roof (the vaulted barndominium look), as do bare-slab garage/shop and
 #: the porch. Names match :class:`~barndsl.elements.RoomType` values.
 _CEILING_ROOM_TYPES = frozenset(
-    {"bedroom", "bathroom", "half_bath", "closet", "pantry",
-     "office", "laundry", "utility", "mudroom", "hallway"}
+    {"bedroom", "bathroom", "half_bath", "closet", "pantry", "storage",
+     "office", "flex", "rec_room", "laundry", "utility", "mechanical",
+     "mudroom", "foyer", "hallway", "safe_room"}
 )
 
 

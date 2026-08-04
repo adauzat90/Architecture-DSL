@@ -39,8 +39,9 @@ Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
 south-of <room>`` (abut an already-defined room), or one of each to pin a corner.
 
 Coordinates are in feet; origin (0,0) is the south-west corner, x→east, y→north.
-``<type>`` is a RoomType value (living, kitchen, bedroom, bathroom, hallway,
-shop, …); ``<wall>`` is north|south|east|west.
+``<type>`` is a RoomType value (living, great_room, kitchen, bedroom,
+bathroom, foyer, storage, safe_room, shop, …); ``<wall>`` is
+north|south|east|west.
 
 Any LENGTH field (a size, position, offset, width, setback, ceiling…) accepts a
 feet-and-inches literal as well as decimal feet: ``12-6`` (= 12′6″ = 12.5 ft),
@@ -215,7 +216,7 @@ Statements:
                                   #   info, not an error.
   program <n> bed [<m> bath] [<k> <type> ...] [area <sqft>] [storage <sqft>]  # optional intent, checked vs the rooms
                                   #   bed/bath = exact counts; other types = at-least; area = min interior;
-                                  #   storage = min closet+pantry sq ft
+                                  #   storage = min closet+pantry+storage-room sq ft
   require adjacent <room_a> <room_b>    # the two rooms must share a wall
   require separate <room_a> <room_b>    # the two rooms must NOT share a wall
   require exterior <room> [<wall>]      # the room needs an exterior wall (optionally that side)

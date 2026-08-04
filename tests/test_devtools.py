@@ -1,5 +1,7 @@
 """Developer/harness helpers used by pi and `barndsl dev`."""
 
+from pathlib import Path
+
 from barndsl import devtools
 
 
@@ -8,6 +10,20 @@ def test_repo_audit_has_no_wiring_drift():
     assert out["ok"], out["problems"]
     assert out["statement_keywords"]["missing_in_playground"] == []
     assert out["diagnostics"]["missing_registry"] == []
+
+
+def test_pi_extension_confines_file_tools_to_the_workspace():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / ".pi" / "extensions" / "barndsl-harness.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function assertContained" in source
+    assert "function workspaceArg" in source
+    assert "function artifactArg" in source
+    assert "workspaceArg(ctx.cwd, params.path)" in source
+    assert "const out = artifactArg(ctx.cwd" in source
+    assert "resolve(ctx.cwd, cleanPath(params.path))" not in source
 
 
 def test_rule_probe_asserts_codes():

@@ -15,6 +15,7 @@ from barndsl.validation import (
     _DESIGN_QUALITY_CHECKS,
     _door_graph,
     _dq_kitchen_flow,
+    _dq_kitchen_passthrough,
     _validate_design_quality,
 )
 
@@ -28,7 +29,7 @@ def test_registry_is_well_formed():
     names = [c.__name__ for c in _DESIGN_QUALITY_CHECKS]
     assert len(names) == len(set(names)), "duplicate check in registry"
     assert all(n.startswith("_dq_") for n in names)
-    assert len(_DESIGN_QUALITY_CHECKS) == 34
+    assert len(_DESIGN_QUALITY_CHECKS) == 37
 
 
 def test_single_check_runs_in_isolation():
@@ -52,6 +53,58 @@ window kitchen east width 6 offset 6
 
     codes = {i.code for i in found}
     assert codes == {"KITCHEN_FLOW"}, codes
+
+
+def test_kitchen_passthrough_warns_when_kitchen_is_public_corridor():
+    src = """\
+plan "Kitchen corridor"
+envelope 36 x 20
+ceiling 9
+room great:   great_room at 0,0  size 12 x 20
+room kitchen: kitchen    at 12,0 size 12 x 20
+room dining:  dining     at 24,0 size 12 x 20
+open great - kitchen width 8
+open kitchen - dining width 8
+entry great south width 3 offset 4
+window great south width 6 offset 4
+window kitchen south width 4 offset 4
+window dining south width 6 offset 4
+"""
+    plan = compile_source(src).plan
+    graph, by_id = _ctx(plan)
+
+    found = []
+    _dq_kitchen_passthrough(plan, graph, by_id, found.append)
+
+    assert [i.code for i in found] == ["KITCHEN_PASSTHROUGH"]
+    assert "only route" in found[0].message
+
+
+def test_kitchen_passthrough_is_silent_when_public_rooms_have_bypass():
+    src = """\
+plan "Kitchen bypass"
+envelope 36 x 24
+ceiling 9
+room great:   great_room at 0,0  size 12 x 20
+room kitchen: kitchen    at 12,0 size 12 x 20
+room dining:  dining     at 24,0 size 12 x 20
+room hall:    hallway    at 0,20 size 36 x 4
+open great - kitchen width 8
+open kitchen - dining width 8
+open great - hall width 4
+open dining - hall width 4
+entry great south width 3 offset 4
+window great south width 6 offset 4
+window kitchen south width 4 offset 4
+window dining south width 6 offset 4
+"""
+    plan = compile_source(src).plan
+    graph, by_id = _ctx(plan)
+
+    found = []
+    _dq_kitchen_passthrough(plan, graph, by_id, found.append)
+
+    assert found == []
 
 
 def test_driver_equals_sum_of_checks():

@@ -104,6 +104,7 @@ MIN_ROOM_SHORT_SIDE: dict[RoomType, float] = {
 }
 MIN_EGRESS_DOOR_WIDTH = 32 / 12  # 32 in clear; matches inches(32) exactly
 MIN_INTERIOR_DOOR_WIDTH = 30 / 12  # 30 in
+MAX_SINGLE_SWING_DOOR_WIDTH = 3.0  # wider wants cased/open or double/french
 # Manufactured door leaf widths (inches). A door off these isn't orderable
 # off-the-shelf; the check nudges to the nearest. Doubles (60/72) included.
 STD_INTERIOR_DOOR_WIDTHS_IN = (24, 28, 30, 32, 36, 60, 72)
@@ -142,6 +143,7 @@ R304_HABITABLE_TYPES: frozenset[RoomType] = HABITABLE_TYPES - {
     RoomType.KITCHEN,
 }
 MAX_ROOM_ASPECT = 3.0  # default: a habitable room longer than this (long:short) is awkward
+MAX_GENERAL_ROOM_ASPECT = 4.0  # severe long-skinny warning for most non-circulation rooms
 #: Per-type elongation ceilings (long:short) above which ROOM_PROPORTION fires,
 #: overriding :data:`MAX_ROOM_ASPECT`. A bedroom has to hold a bed *and* a
 #: walk-around, so a 2:1 "tunnel" bedroom (an 8×16, say) is already awkward well
@@ -229,6 +231,20 @@ LOFT_MIN_CEILING = 7.0
 DESK_WIDTH = 4.0
 DESK_DEPTH = 2.0
 DESK_CHAIR_PULL = 3.0
+#: New semantic room-type comfort floors. These are design-review heuristics,
+#: not code minima; they keep the labels honest (safe_room, mechanical, etc.).
+MIN_SAFE_ROOM_AREA = 24.0
+MIN_SAFE_ROOM_DIM = 3.0
+MAX_SAFE_ROOM_ASPECT = 2.5
+MIN_MECH_AREA = 30.0
+MIN_MECH_DIM = 5.0
+MIN_FOYER_AREA = 25.0
+MIN_FOYER_DIM = 4.0
+MAX_FOYER_ASPECT = 2.5
+MIN_GREAT_ROOM_AREA = 200.0
+MIN_GREAT_ROOM_CEILING = 10.0
+MIN_REC_ROOM_AREA = 120.0
+MAX_STORAGE_ASPECT = 4.0
 #: A covered porch shallower than this (ft) can't hold a chair (a rocker/seat is
 #: ~2 ft deep) AND a walkway past it (~3 ft) — it's a stoop, not a sitting porch.
 MIN_PORCH_DEPTH = 6.0
@@ -569,11 +585,17 @@ def _profile_tag(profile: Profile, field: str, base_str: str) -> str:
 
 
 #: Public, shared living spaces — bedrooms ideally don't open straight onto these.
-PUBLIC_TYPES = {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
+PUBLIC_TYPES = {
+    RoomType.LIVING,
+    RoomType.GREAT_ROOM,
+    RoomType.KITCHEN,
+    RoomType.DINING,
+    RoomType.REC_ROOM,
+}
 BATH_TYPES = {RoomType.BATHROOM, RoomType.HALF_BATH}
 #: Dedicated-storage rooms, for the whole-house storage ratio (LOW_STORAGE) and
 #: the `program storage <sqft>` minimum.
-STORAGE_TYPES = {RoomType.CLOSET, RoomType.PANTRY}
+STORAGE_TYPES = {RoomType.CLOSET, RoomType.PANTRY, RoomType.STORAGE}
 #: Below this fraction of conditioned interior area in dedicated storage, a plan is
 #: storage-poor. Conservative — set below the worked gallery's floor so a curated,
 #: reasonably-storaged plan never trips it; it catches a home with almost no closets.
@@ -592,7 +614,13 @@ WET_TYPES = {
 #: (ZONE_CROSS). Public = the shared living core; private = sleeping/bathing.
 #: Every other type (hall, closet, office, laundry, mudroom, garage, …) is
 #: neutral — it appears in both wings, so it neither triggers nor blocks a band.
-ZONE_PUBLIC_TYPES = {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
+ZONE_PUBLIC_TYPES = {
+    RoomType.LIVING,
+    RoomType.GREAT_ROOM,
+    RoomType.KITCHEN,
+    RoomType.DINING,
+    RoomType.REC_ROOM,
+}
 ZONE_PRIVATE_TYPES = {RoomType.BEDROOM, RoomType.BATHROOM, RoomType.HALF_BATH}
 
 
@@ -1182,6 +1210,7 @@ def _run_full_plan_validators(plan: Barndominium, add, profile: Profile) -> None
     _validate_design_quality(plan, add, profile)
     _validate_accessibility(plan, add)
     _validate_program(plan, add)
+    _validate_program_area_overrun(plan, add)
     _validate_requirements(plan, add)
     _validate_walls(plan, add)
     _validate_suites_zones(plan, add)
@@ -2189,8 +2218,8 @@ def _validate_furniture(plan: Barndominium, add) -> None:
 
 
 def _validate_storage(plan: Barndominium, add) -> None:
-    """Flag a storage-poor plan — dedicated storage (closets + pantry) below a small
-    fraction of the conditioned area. Deterministic and unconditional, but the floor
+    """Flag a storage-poor plan — dedicated storage (closets, pantry, storage rooms)
+    below a small fraction of the conditioned area. Deterministic and unconditional, but the floor
     is conservative (below the worked gallery), so it only catches a home with almost
     no closets. INFO. For a specific target, declare `program ... storage <sqft>`.
     """
@@ -2203,11 +2232,11 @@ def _validate_storage(plan: Barndominium, add) -> None:
             Issue(
                 Severity.INFO,
                 "LOW_STORAGE",
-                f"Dedicated storage (closets + pantry) is {storage:.0f} sq ft — "
+                f"Dedicated storage (closets + pantry + storage rooms) is {storage:.0f} sq ft — "
                 f"{storage / interior * 100:.1f}% of the conditioned area, a "
                 "storage-poor plan.",
-                hint="Add closets or a pantry — a linen closet by the baths, a coat "
-                "closet at the entry, a walk-in pantry off the kitchen.",
+                hint="Add closets, a pantry or a storage room — a linen closet by "
+                "the baths, a coat closet at the entry, or bulk storage off a hall.",
             )
         )
 
@@ -2430,6 +2459,8 @@ def _validate_interior_door(plan: Barndominium, door, room_ids: set[str], add) -
         else:
             _validate_same_level_door(plan, door, a, b, loc, add)
     _validate_interior_door_leaf_size(door, loc, add)
+    if a and b:
+        _validate_wide_single_swing_door(door, a, b, loc, add)
     if not door.leaf and a and b:
         _validate_open_bath_door(door, a, b, loc, add)
 
@@ -2613,6 +2644,34 @@ def _add_narrow_door_issue(door, loc: dict, add) -> None:
         room=door.room_a,
         hint=f"Use width >= {MIN_INTERIOR_DOOR_WIDTH:g} "
         f"({MIN_INTERIOR_DOOR_WIDTH * 12:.0f} in).",
+        **loc,
+    ))
+
+
+def _validate_wide_single_swing_door(door, a: Room, b: Room, loc: dict, add) -> None:
+    if door.kind != "swing" or door.width <= MAX_SINGLE_SWING_DOOR_WIDTH + EPSILON:
+        return
+    public_pair = a.type in PUBLIC_TYPES and b.type in PUBLIC_TYPES
+    if public_pair:
+        hint = (
+            f"For open-plan flow, make it a cased opening instead: "
+            f"`open {door.room_a} - {door.room_b} width {_f(door.width)}`. "
+            "If you need doors, use a declared pair such as "
+            f"`door {door.room_a} - {door.room_b} double width {_f(door.width)}`."
+        )
+    else:
+        hint = (
+            f"A {_f(door.width)} ft single leaf is oversized. Use "
+            f"`door {door.room_a} - {door.room_b} double width {_f(door.width)}` "
+            "or `french`, or reduce the single swing door to a normal 2.5–3 ft leaf."
+        )
+    add(Issue(
+        Severity.WARNING,
+        "DOOR_WIDE_SWING",
+        f"Interior door between '{door.room_a}' and '{door.room_b}' is "
+        f"{_f(door.width)} ft wide but is a single swing leaf.",
+        room=door.room_a,
+        hint=hint,
         **loc,
     ))
 
@@ -3781,6 +3840,59 @@ def _dq_kitchen_flow(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
+def _dq_kitchen_passthrough(plan: Barndominium, graph, by_id, add) -> None:
+    """Warn when the kitchen is the only route between public rooms.
+
+    Open-plan kitchens should be adjacent to dining/living, but traffic should be
+    able to bypass the work triangle. If removing the kitchen splits its dining
+    neighbour from a living/great/rec neighbour, the kitchen is acting as a
+    corridor rather than a work room.
+    """
+    living_like = {RoomType.LIVING, RoomType.GREAT_ROOM, RoomType.REC_ROOM}
+    dining_like = {RoomType.DINING}
+    for room in plan.rooms:
+        if room.type is not RoomType.KITCHEN:
+            continue
+        public_neighbors = sorted(
+            n
+            for n in graph.get(room.id, ())
+            if n in by_id and by_id[n].type in living_like | dining_like
+        )
+        if len(public_neighbors) < 2:
+            continue
+        comps = _components_excluding(graph, {room.id})
+        comp_by_room = {rid: comp for comp in comps for rid in comp}
+        severed_pair: tuple[str, str] | None = None
+        for a in public_neighbors:
+            if by_id[a].type not in dining_like:
+                continue
+            for b in public_neighbors:
+                if by_id[b].type not in living_like:
+                    continue
+                if comp_by_room.get(a) is not comp_by_room.get(b):
+                    severed_pair = (b, a)
+                    break
+            if severed_pair is not None:
+                break
+        if severed_pair is None:
+            continue
+        living_id, dining_id = severed_pair
+        add(
+            Issue(
+                Severity.WARNING,
+                "KITCHEN_PASSTHROUGH",
+                f"Kitchen '{room.id}' is the only route between '{living_id}' and "
+                f"'{dining_id}', making the work zone a through-corridor.",
+                room=room.id,
+                hint=(
+                    "Let traffic bypass the work triangle: open the living/great "
+                    "room directly to dining, add a hall path around the kitchen, "
+                    "or move the kitchen to the side of the public core."
+                ),
+            )
+        )
+
+
 def _dq_bed_privacy(plan: Barndominium, graph, by_id, add) -> None:
     # 2. Bedroom privacy: a bedroom shouldn't open straight onto a public room.
     for room in plan.rooms:
@@ -4118,6 +4230,7 @@ def _dq_closet_shape(plan: Barndominium, graph, by_id, add) -> None:
 _REACH_IN_ACCESS: dict[RoomType, tuple[str, str, str]] = {
     RoomType.CLOSET: ("CLOSET_ACCESS", "closet", "rod"),
     RoomType.PANTRY: ("PANTRY_ACCESS", "pantry", "shelf"),
+    RoomType.STORAGE: ("STORAGE_ACCESS", "storage room", "stored goods"),
 }
 
 
@@ -4663,20 +4776,40 @@ def _dq_window_partition(plan: Barndominium, graph, by_id, add) -> None:
 
 def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
     # 8. Proportion: a habitable room shaped like a bowling alley is hard to
-    #    furnish. Hallways/closets are *meant* to be skinny — they're not habitable,
-    #    so the HABITABLE_TYPES gate already excludes them.
+    #    furnish. A more severe, general pass catches non-habitable rooms too
+    #    (laundry/utility/baths/etc.) when they are so skinny they read as leftover
+    #    corridor space. Linear types with their own rules are exempt.
     for room in plan.rooms:
+        short = room.min_dimension
+        long = max(room.width, room.length)
+        if short <= EPSILON:
+            continue
+        aspect = long / short
+        if _general_skinny_room_type(room.type) and aspect > MAX_GENERAL_ROOM_ASPECT:
+            add(
+                Issue(
+                    Severity.WARNING,
+                    "ROOM_SKINNY",
+                    f"{room.type.value.capitalize()} '{room.id}' is "
+                    f"{_f(room.width)} x {_f(room.length)} ({aspect:.1f}:1) — "
+                    "too long and skinny to function as a room.",
+                    room=room.id,
+                    hint=f"Keep rooms under about {MAX_GENERAL_ROOM_ASPECT:g}:1; "
+                    "widen the short side, split it into smaller rooms, or relabel "
+                    "it as hallway/storage if it is meant to be a linear strip.",
+                )
+            )
+            if room.type not in HABITABLE_TYPES:
+                continue
         if room.type in HABITABLE_TYPES:
-            short = room.min_dimension
-            long = max(room.width, room.length)
             limit = MAX_ROOM_ASPECT_BY_TYPE.get(room.type, MAX_ROOM_ASPECT)
-            if short > EPSILON and long / short > limit:
+            if aspect > limit:
                 add(
                     Issue(
                         Severity.INFO,
                         "ROOM_PROPORTION",
                         f"{room.type.value.capitalize()} '{room.id}' is "
-                        f"{_f(room.width)} x {_f(room.length)} ({long / short:.1f}:1); "
+                        f"{_f(room.width)} x {_f(room.length)} ({aspect:.1f}:1); "
                         "very elongated rooms are hard to furnish.",
                         room=room.id,
                         hint=f"Aim for a more rectangular footprint (under ~{limit:g}:1) "
@@ -4727,6 +4860,24 @@ def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
                 "strip what it is (a hallway).",
             )
         )
+
+
+def _general_skinny_room_type(room_type: RoomType) -> bool:
+    # These either are intentionally linear (hall/garage/porch), have stronger
+    # type-specific shape checks (safe_room, foyer, mudroom, shop, storage), or are
+    # reach-in/cabinet storage where skinny can be legitimate.
+    return room_type not in {
+        RoomType.HALLWAY,
+        RoomType.CLOSET,
+        RoomType.PANTRY,
+        RoomType.STORAGE,
+        RoomType.SAFE_ROOM,
+        RoomType.FOYER,
+        RoomType.MUDROOM,
+        RoomType.GARAGE,
+        RoomType.SHOP,
+        RoomType.PORCH,
+    }
 
 
 def _dq_shop_depth(plan: Barndominium, graph, by_id, add) -> None:
@@ -4900,6 +5051,307 @@ def _desk_fits_west_east(
     return False
 
 
+def _dq_new_room_semantics(plan: Barndominium, graph, by_id, add) -> None:
+    """Design-quality checks for the semantic room types beyond the original core.
+
+    These are intentionally heuristic: they make the labels mean something without
+    turning taste into hard syntax. Existing generic checks still handle egress,
+    daylight, reachability and room proportions.
+    """
+    for room in plan.rooms:
+        if room.type is RoomType.SAFE_ROOM:
+            _dq_safe_room(plan, graph, by_id, room, add)
+        elif room.type is RoomType.MECHANICAL:
+            _dq_mechanical_room(plan, graph, by_id, room, add)
+        elif room.type is RoomType.FOYER:
+            _dq_foyer(plan, graph, by_id, room, add)
+        elif _looks_like_foyer(room):
+            _dq_foyer_shape(room, add)
+        elif room.type is RoomType.STORAGE:
+            _dq_storage_room(plan, graph, by_id, room, add)
+        elif room.type is RoomType.GREAT_ROOM:
+            _dq_great_room(plan, graph, by_id, room, add)
+        elif room.type is RoomType.FLEX:
+            _dq_flex_room(plan, graph, by_id, room, add)
+        elif room.type is RoomType.REC_ROOM:
+            _dq_rec_room(plan, graph, by_id, room, add)
+
+
+def _dq_safe_room(plan: Barndominium, graph, by_id, room: Room, add) -> None:
+    for w in plan.windows_for(room.id):
+        add(Issue(
+            Severity.WARNING,
+            "SAFE_ROOM_WINDOW",
+            f"Safe room '{room.id}' has a window; ordinary glazing defeats the protected-room intent.",
+            room=room.id,
+            line=w.line,
+            col=w.col,
+            end_col=w.end_col,
+            hint="Move the safe room to an interior location with no window, or document a rated storm shutter/window assembly outside the DSL.",
+        ))
+    walls = exterior_walls(plan, room)
+    if walls:
+        add(Issue(
+            Severity.WARNING,
+            "SAFE_ROOM_EXTERIOR",
+            f"Safe room '{room.id}' sits on exterior wall(s): {', '.join(w.value for w in walls)}.",
+            room=room.id,
+            hint="Prefer an interior room surrounded by other spaces; if it must touch the shell, harden that exterior wall assembly.",
+        ))
+    short = room.min_dimension
+    long = max(room.width, room.length)
+    too_small = room.area + EPSILON < MIN_SAFE_ROOM_AREA or short + EPSILON < MIN_SAFE_ROOM_DIM
+    too_skinny = short > EPSILON and long / short > MAX_SAFE_ROOM_ASPECT
+    if too_small or too_skinny:
+        why = (
+            f"{long / short:.1f}:1 — too long and skinny for a shelter"
+            if too_skinny and not too_small
+            else f"{_f(room.area)} sq ft with a {_f(short)} ft short side"
+        )
+        add(Issue(
+            Severity.WARNING,
+            "SAFE_ROOM_SIZE",
+            f"Safe room '{room.id}' is {_f(room.width)} x {_f(room.length)} ({why}).",
+            room=room.id,
+            hint=f"Give it at least ~{MIN_SAFE_ROOM_AREA:g} sq ft, a {_f(MIN_SAFE_ROOM_DIM)} ft short side, and a compact shape under ~{MAX_SAFE_ROOM_ASPECT:g}:1.",
+        ))
+    if not _has_leaf_door(plan, room.id):
+        add(Issue(
+            Severity.WARNING,
+            "SAFE_ROOM_ACCESS",
+            f"Safe room '{room.id}' has no real door leaf; a cased/open passage cannot secure a shelter room.",
+            room=room.id,
+            hint=f"Use a swing/pocket/sliding door into the safe room, e.g. `door {room.id} - <hall> swing`.",
+        ))
+    if _is_pass_through_room(room.id, graph):
+        add(Issue(
+            Severity.WARNING,
+            "SAFE_ROOM_ACCESS",
+            f"Safe room '{room.id}' is part of the only route between other rooms.",
+            room=room.id,
+            hint="Do not use the safe room as circulation; put it off a hall/core with a single controlled doorway.",
+        ))
+
+
+def _dq_mechanical_room(plan: Barndominium, graph, by_id, room: Room, add) -> None:
+    if room.area + EPSILON < MIN_MECH_AREA or room.min_dimension + EPSILON < MIN_MECH_DIM:
+        add(Issue(
+            Severity.WARNING,
+            "MECH_CLEARANCE",
+            f"Mechanical room '{room.id}' is {_f(room.width)} x {_f(room.length)} ({_f(room.area)} sq ft).",
+            room=room.id,
+            hint=f"Give mechanical equipment service clearance — aim for at least {_f(MIN_MECH_DIM)} ft clear and ~{MIN_MECH_AREA:g} sq ft, or fold it into a larger utility room.",
+        ))
+    if not _has_leaf_door(plan, room.id):
+        add(Issue(
+            Severity.WARNING,
+            "MECH_ACCESS",
+            f"Mechanical room '{room.id}' has no real service door.",
+            room=room.id,
+            hint=f"Provide a door from a hall, utility, mudroom or garage: `door {room.id} - <service_space>`.",
+        ))
+    if _is_pass_through_room(room.id, graph):
+        add(Issue(
+            Severity.WARNING,
+            "MECH_ACCESS",
+            f"Mechanical room '{room.id}' is on the only circulation route between other rooms.",
+            room=room.id,
+            hint="Mechanical rooms should be service spaces, not hallways; route circulation around it.",
+        ))
+    for n in sorted(graph.get(room.id, ())):
+        if n in by_id and by_id[n].type is RoomType.BEDROOM:
+            add(Issue(
+                Severity.WARNING,
+                "MECH_BEDROOM",
+                f"Mechanical room '{room.id}' opens directly into bedroom '{n}'.",
+                room=room.id,
+                hint="Put mechanical access off a hall, utility, mudroom or garage instead of a sleeping room.",
+            ))
+
+
+def _dq_foyer(plan: Barndominium, graph, by_id, room: Room, add) -> None:
+    _dq_foyer_shape(room, add)
+    has_entry = any(d.room == room.id and not d.overhead for d in plan.exterior_doors)
+    if not has_entry:
+        add(Issue(
+            Severity.INFO,
+            "FOYER_FLOW",
+            f"Foyer '{room.id}' has no exterior entry door; it may be mislabeled circulation.",
+            room=room.id,
+            hint=f"Land the front entry in the foyer: `entry {room.id} <wall> width 3`.",
+        ))
+    if room.area + EPSILON < MIN_FOYER_AREA or room.min_dimension + EPSILON < MIN_FOYER_DIM:
+        add(Issue(
+            Severity.INFO,
+            "FOYER_FLOW",
+            f"Foyer '{room.id}' is {_f(room.width)} x {_f(room.length)} — tight for an arrival space.",
+            room=room.id,
+            hint=f"A foyer wants at least about {_f(MIN_FOYER_DIM)} ft of width and ~{MIN_FOYER_AREA:g} sq ft for people, door swing and coats.",
+        ))
+    neigh = [by_id[n] for n in graph.get(room.id, ()) if n in by_id]
+    if neigh and not any(r.type in PUBLIC_TYPES or r.type in {RoomType.HALLWAY, RoomType.MUDROOM} for r in neigh):
+        add(Issue(
+            Severity.WARNING,
+            "FOYER_FLOW",
+            f"Foyer '{room.id}' connects only to private/service rooms.",
+            room=room.id,
+            hint="Connect the foyer to the public core (great/living/kitchen/dining) or a hall, not only bedrooms/baths/service rooms.",
+        ))
+
+
+def _looks_like_foyer(room: Room) -> bool:
+    return room.id.lower() in {"foyer", "entry", "entryway", "entry_hall"}
+
+
+def _dq_foyer_shape(room: Room, add) -> None:
+    short = room.min_dimension
+    long = max(room.width, room.length)
+    if short <= EPSILON or long / short <= MAX_FOYER_ASPECT:
+        return
+    add(Issue(
+        Severity.INFO,
+        "FOYER_SHAPE",
+        f"Foyer '{room.id}' is {_f(room.width)} x {_f(room.length)} ({long / short:.1f}:1) — it reads as a hallway, not an arrival room.",
+        room=room.id,
+        hint=f"Make the entry compact (under ~{MAX_FOYER_ASPECT:g}:1), or type/name it as a hallway if it is meant to be a circulation spine.",
+    ))
+
+
+def _dq_storage_room(plan: Barndominium, graph, by_id, room: Room, add) -> None:
+    short = room.min_dimension
+    long = max(room.width, room.length)
+    if short > EPSILON and room.area >= MIN_WALKIN_AREA and long / short >= MAX_STORAGE_ASPECT:
+        add(Issue(
+            Severity.INFO,
+            "STORAGE_SHAPE",
+            f"Storage room '{room.id}' is {_f(room.width)} x {_f(room.length)} ({long / short:.1f}:1) — a long, skinny storage aisle.",
+            room=room.id,
+            hint="Make walk-in storage more compact (under ~3:1), or split it into closets/cabinets along circulation.",
+        ))
+    if not _has_any_door_or_opening(plan, room.id):
+        add(Issue(
+            Severity.WARNING,
+            "STORAGE_ACCESS",
+            f"Storage room '{room.id}' has no door or cased opening.",
+            room=room.id,
+            hint=f"Add a usable opening, e.g. `door {room.id} - <hall>` or relabel the dead pocket.",
+        ))
+    if _is_pass_through_room(room.id, graph):
+        add(Issue(
+            Severity.INFO,
+            "STORAGE_ACCESS",
+            f"Storage room '{room.id}' is being used as circulation between other rooms.",
+            room=room.id,
+            hint="Storage works best as a destination off a hall/core, not as the only route through the plan.",
+        ))
+
+
+def _dq_great_room(plan: Barndominium, graph, by_id, room: Room, add) -> None:
+    if room.area + EPSILON < MIN_GREAT_ROOM_AREA:
+        add(Issue(
+            Severity.INFO,
+            "GREAT_ROOM_SCALE",
+            f"Great room '{room.id}' is only {_f(room.area)} sq ft — closer to an ordinary living room.",
+            room=room.id,
+            hint=f"Use `living` for a modest room, or enlarge the great room to roughly {MIN_GREAT_ROOM_AREA:g}+ sq ft.",
+        ))
+    eff = room.ceiling_height if room.ceiling_height is not None else plan.ceiling_height
+    if not getattr(room, "vaulted", False) and eff + EPSILON < MIN_GREAT_ROOM_CEILING:
+        add(Issue(
+            Severity.INFO,
+            "GREAT_ROOM_SCALE",
+            f"Great room '{room.id}' has a {_f(eff)} ft flat ceiling; great rooms usually want taller or vaulted volume.",
+            room=room.id,
+            hint=f"Mark it `vaulted` or give it a ceiling around {MIN_GREAT_ROOM_CEILING:g}+ ft if the great-room volume is intended.",
+        ))
+    neigh_types = {by_id[n].type for n in graph.get(room.id, ()) if n in by_id}
+    if not neigh_types & {RoomType.KITCHEN, RoomType.DINING}:
+        add(Issue(
+            Severity.INFO,
+            "GREAT_ROOM_FLOW",
+            f"Great room '{room.id}' is not connected to kitchen or dining.",
+            room=room.id,
+            hint="Tie the great room to the public core with a wide cased opening to kitchen/dining.",
+        ))
+
+
+def _dq_flex_room(plan: Barndominium, graph, by_id, room: Room, add) -> None:
+    missing: list[str] = []
+    if not _has_escape_like_opening(plan, room):
+        missing.append("egress-capable exterior opening")
+    if not any(by_id[n].type is RoomType.CLOSET for n in graph.get(room.id, ()) if n in by_id):
+        missing.append("closet")
+    if missing:
+        add(Issue(
+            Severity.INFO,
+            "FLEX_FUTURE_BED",
+            f"Flex room '{room.id}' is not bedroom-ready: missing {', '.join(missing)}.",
+            room=room.id,
+            hint="If this may become a guest room, put it on an exterior wall with an escape-capable window/door and add a closet.",
+        ))
+
+
+def _dq_rec_room(plan: Barndominium, graph, by_id, room: Room, add) -> None:
+    if room.area + EPSILON < MIN_REC_ROOM_AREA:
+        add(Issue(
+            Severity.INFO,
+            "REC_ROOM_SCALE",
+            f"Rec room '{room.id}' is only {_f(room.area)} sq ft — tight for games or activity furniture.",
+            room=room.id,
+            hint=f"Use `flex`/`office` for a small multipurpose room, or grow the rec room toward {MIN_REC_ROOM_AREA:g}+ sq ft.",
+        ))
+    for other in plan.rooms:
+        if other.type is not RoomType.BEDROOM:
+            continue
+        edge = shared_edge(room, other)
+        if edge is not None and edge.length + EPSILON >= MIN_SOUND_BUFFER_WALL:
+            add(Issue(
+                Severity.INFO,
+                "REC_ROOM_NOISE",
+                f"Rec room '{room.id}' shares a {_f(edge.length)} ft wall with bedroom '{other.id}'.",
+                room=room.id,
+                hint="Buffer noisy rec rooms from bedrooms with a hall, closet, storage room or bath between them.",
+            ))
+
+
+def _has_leaf_door(plan: Barndominium, room_id: str) -> bool:
+    return any(d.leaf and room_id in (d.room_a, d.room_b) for d in plan.interior_doors) or any(
+        d.room == room_id and not d.overhead for d in plan.exterior_doors
+    )
+
+
+def _has_any_door_or_opening(plan: Barndominium, room_id: str) -> bool:
+    return any(room_id in (d.room_a, d.room_b) for d in plan.interior_doors) or any(
+        d.room == room_id for d in plan.exterior_doors
+    )
+
+
+def _is_pass_through_room(room_id: str, graph: dict[str, set[str]]) -> bool:
+    neighbors = sorted(graph.get(room_id, ()))
+    if len(neighbors) < 2:
+        return False
+    comps = _components_excluding(graph, {room_id})
+    if len(comps) < 2:
+        return False
+    touched = 0
+    for comp in comps:
+        if any(n in comp for n in neighbors):
+            touched += 1
+            if touched > 1:
+                return True
+    return False
+
+
+def _has_escape_like_opening(plan: Barndominium, room: Room) -> bool:
+    if any(d.room == room.id and d.egress and not d.overhead for d in plan.exterior_doors):
+        return True
+    walls = set(exterior_walls(plan, room))
+    return any(
+        w.room == room.id and w.wall in walls and getattr(w, "escape_capable", False)
+        for w in plan.windows
+    )
+
+
 def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
     # 9. Garage/shop → sleeping room. IRC R302.5.1: the opening shall not open
     #    into a room used for sleeping. This is code-grounded, so it's a WARNING.
@@ -4999,6 +5451,38 @@ def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
                     f"living space, e.g. `door {g.id} - <adjacent_room>`.",
                 )
             )
+
+
+def _dq_garage_vehicle_door(plan: Barndominium, graph, by_id, add) -> None:
+    # A garage/shop bay should have an exterior overhead/sectional door. Without
+    # one, the room may compile and even connect to the dwelling, but it cannot
+    # function as a vehicle/equipment bay — exactly the trapped-shop failure mode
+    # the visual review catches.
+    for g in plan.rooms:
+        if g.type not in GARAGE_TYPES:
+            continue
+        if any(d.room == g.id and d.overhead for d in plan.exterior_doors):
+            continue
+        walls = exterior_walls(plan, g)
+        label = g.type.value
+        if walls:
+            wall = max(walls, key=lambda w: _wall_length(g, w))
+            hint = (
+                f"Add an overhead door on the {wall.value} wall, e.g. "
+                f"`door {g.id} {wall.value} overhead width 10 height 8 offset 1`."
+            )
+        else:
+            hint = (
+                f"Move the {label} to the perimeter or give it an exterior wall, "
+                "then add an overhead vehicle door."
+            )
+        add(Issue(
+            Severity.WARNING,
+            "GARAGE_VEHICLE_DOOR",
+            f"{label.capitalize()} '{g.id}' has no exterior overhead/vehicle door; it is only reachable through the house.",
+            room=g.id,
+            hint=hint,
+        ))
 
 
 def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
@@ -5252,6 +5736,7 @@ def _add_hall_stub_issue(room: Room, stub: float, add) -> None:
 #: isolation; the driver below builds the shared derived state once.
 _DESIGN_QUALITY_CHECKS = (
     _dq_kitchen_flow,
+    _dq_kitchen_passthrough,
     _dq_bed_privacy,
     _dq_bath_distance,
     _dq_private_passthrough,
@@ -5278,9 +5763,11 @@ _DESIGN_QUALITY_CHECKS = (
     _dq_shop_depth,
     _dq_loft_ceiling,
     _dq_office_clearance,
+    _dq_new_room_semantics,
     _dq_garage_bedroom,
     _dq_garage_passthrough,
     _dq_garage_no_entry,
+    _dq_garage_vehicle_door,
     _dq_garage_separation,
     _dq_garage_door,
     _dq_closet_door_swing,
@@ -5367,6 +5854,36 @@ def _append_program_area_mismatch(spec, metrics: dict, mismatches: list[str]) ->
     interior = metrics["interior_sqft"]
     if math.isfinite(interior) and interior + EPSILON < spec.min_area:
         mismatches.append(f"{_f(spec.min_area)} sq ft declared but {interior:.0f} placed")
+
+
+def _validate_program_area_overrun(plan: Barndominium, add) -> None:
+    """Nudge when a declared program area reads like a target but geometry is much larger.
+
+    ``program ... area`` remains a minimum contract for backwards compatibility;
+    this INFO catches the common author/model mistake of declaring the requested
+    area in the program line, then drawing a substantially larger house.
+    """
+    spec = plan.program_spec
+    if spec is None or spec.min_area is None:
+        return
+    target = spec.min_area
+    interior = plan.interior_area
+    if not (math.isfinite(target) and math.isfinite(interior) and target > EPSILON):
+        return
+    over_by = interior - target
+    if over_by <= max(100.0, target * 0.10) + EPSILON:
+        return
+    add(Issue(
+        Severity.INFO,
+        "PROGRAM_AREA_OVERRUN",
+        f"The plan declares program area {_f(target)} sq ft but draws {interior:.0f} sq ft of conditioned interior.",
+        hint=(
+            "If the brief's area is a target, shrink the envelope/rooms toward it; "
+            "if it is only a minimum, raise or omit `area` so the program line "
+            "matches your intent."
+        ),
+        **_spec_loc(spec),
+    ))
 
 
 def _append_program_storage_mismatch(plan: Barndominium, spec, mismatches: list[str]) -> None:
@@ -6286,7 +6803,14 @@ def _validate_lighting_outlets(by_id: dict[str, Room], powered: set[str], lit: s
 #: The rooms where lack of winter sun (a north-only aspect) most hurts comfort.
 #: An office is excluded on purpose: even, glare-free north light is a legitimate
 #: choice for a studio/workspace, so "lit only from the north" isn't a defect there.
-_SUN_WANTED_TYPES = {RoomType.LIVING, RoomType.DINING, RoomType.BEDROOM, RoomType.KITCHEN}
+_SUN_WANTED_TYPES = {
+    RoomType.LIVING,
+    RoomType.GREAT_ROOM,
+    RoomType.DINING,
+    RoomType.BEDROOM,
+    RoomType.KITCHEN,
+    RoomType.REC_ROOM,
+}
 #: Preference order for the sunnier wall SOLAR_NORTH_ONLY recommends.
 _SECTOR_PREF = {"south": 0, "east": 1, "west": 2}
 

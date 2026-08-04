@@ -10,12 +10,14 @@ from barndsl import (
 )
 from barndsl import (
     barndominium,
+    compile_source,
     fixtures_fit,
     fixtures_for,
     plan_room_fixtures,
     to_revit_model,
     validate,
 )
+from barndsl.fixtures import resolve_room_fixtures
 from barndsl.validation import clear_box
 
 
@@ -48,6 +50,52 @@ def test_placed_fixtures_sit_inside_the_clear_box():
         assert x0 - 1e-6 <= f.x and f.x + f.width <= x0 + cw + 1e-6
         assert y0 - 1e-6 <= f.y and f.y + f.length <= y0 + cl + 1e-6
         assert f.wall in ("S", "N", "E", "W")
+
+
+def test_kitchen_seed_appliances_avoid_cased_openings():
+    src = """\
+plan "Opening kitchen"
+envelope 49 x 15
+room great: great_room at 0,0 size 21 x 15
+room kitchen: kitchen east-of great size 14 x 15
+room dining: dining east-of kitchen size 14 x 15
+open great - kitchen width 10 offset 0.5
+open kitchen - dining width 10 offset 1
+entry great south width 3 offset 2
+window great south width 6 offset 7
+window kitchen south width 5 offset 4
+window dining south width 5 offset 4
+"""
+    r = compile_source(src)
+    kitchen = r.plan.room("kitchen")
+    fixtures = resolve_room_fixtures(r.plan, kitchen)
+    # The original failure mode put the range on the west cased opening. The seed
+    # placer should now choose solid wall spans instead of backing appliances into
+    # either open-plan passage.
+    assert "FIXTURE_OPENING" not in {d.code for d in r.warnings}
+    for f in fixtures:
+        if f.kind not in {"range", "sink", "refrigerator"}:
+            continue
+        if f.wall == "W":
+            assert f.y >= 10.5 or f.y + f.length <= 0.5
+        if f.wall == "E":
+            assert f.y >= 11 or f.y + f.length <= 1
+
+
+def test_authored_wall_backed_fixture_in_opening_warns():
+    src = """\
+plan "Fixture opening"
+envelope 40 x 15
+room great: great_room at 0,0 size 20 x 15
+room kitchen: kitchen east-of great size 20 x 15
+open great - kitchen width 10 offset 0.5
+entry great south width 3 offset 2
+window great south width 6 offset 7
+window kitchen south width 5 offset 10
+fixture range in kitchen wall W offset 1
+"""
+    r = compile_source(src)
+    assert "FIXTURE_OPENING" in {d.code for d in r.warnings}
 
 
 # --- the alcove tub -------------------------------------------------------------

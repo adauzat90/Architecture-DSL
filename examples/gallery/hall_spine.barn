@@ -38,6 +38,7 @@ room mcloset: closet   at 63,15 size 6 x 18
 open living - kitchen width 10
 open kitchen - dining width 10
 open living - hall width 4
+open dining - hall width 4
 door hall - bed1 width 3 offset 0.5
 door hall - bed2 width 3 offset 0.5
 door hall - bath1 width 2.67 offset 3

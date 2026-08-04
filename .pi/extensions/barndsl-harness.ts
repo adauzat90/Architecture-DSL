@@ -5,12 +5,54 @@ import { Type } from "typebox";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
-import { basename, join, resolve, delimiter } from "node:path";
+import { basename, join, resolve, relative, isAbsolute, delimiter, sep } from "node:path";
 
 const MAX_TEXT = 24000;
 
 function cleanPath(input: string): string {
   return input.startsWith("@") ? input.slice(1) : input;
+}
+
+function assertContained(root: string, candidate: string, label = "path"): void {
+  const rel = relative(resolve(root), resolve(candidate));
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`${label} must stay inside the workspace`);
+  }
+}
+
+function workspaceArg(cwd: string, input: string, label = "path"): string {
+  const cleaned = cleanPath(input);
+  if (!cleaned.trim()) throw new Error(`${label} must not be empty`);
+  assertContained(cwd, resolve(cwd, cleaned), label);
+  return cleaned;
+}
+
+function workspaceAbs(cwd: string, input: string, label = "path"): string {
+  const cleaned = workspaceArg(cwd, input, label);
+  return resolve(cwd, cleaned);
+}
+
+function artifactArg(cwd: string, input: string, label = "output path"): string {
+  const cleaned = cleanPath(input);
+  const artifactRoot = resolve(cwd, ".pi", "artifacts");
+  const absolute = resolve(cwd, cleaned);
+  assertContained(artifactRoot, absolute, label);
+  return relative(resolve(cwd), absolute);
+}
+
+function simpleName(input: string, label: string): string {
+  const cleaned = cleanPath(input);
+  if (!cleaned || basename(cleaned) !== cleaned || cleaned === "." || cleaned === "..") {
+    throw new Error(`${label} must be a filename/prefix without directory components`);
+  }
+  return cleaned;
+}
+
+function pytestTarget(cwd: string, input: string): string {
+  if (input.startsWith("-")) throw new Error("pytest targets cannot inject command options");
+  const [path, ...selectors] = input.split("::");
+  workspaceArg(cwd, path, "pytest target");
+  return [path, ...selectors].join("::");
 }
 
 function pyEnv(cwd: string): NodeJS.ProcessEnv {
@@ -231,7 +273,7 @@ export default function (pi: ExtensionAPI) {
       profile: Type.Optional(Type.String()),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const args = ["-m", "barndsl.cli", "compile", cleanPath(params.path)];
+      const args = ["-m", "barndsl.cli", "compile", workspaceArg(ctx.cwd, params.path)];
       if (params.json ?? true) args.push("--json");
       if (params.showCoords) args.push("--show-coords");
       if (params.metrics) args.push("--metrics");
@@ -259,7 +301,7 @@ export default function (pi: ExtensionAPI) {
       adjacencyOnly: Type.Optional(Type.Boolean({ default: false })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const args = ["-m", "barndsl.cli", "inspect", cleanPath(params.path)];
+      const args = ["-m", "barndsl.cli", "inspect", workspaceArg(ctx.cwd, params.path)];
       if (params.json ?? true) args.push("--json");
       const r = await run(ctx.cwd, args, signal);
       let parsed = tryJson(r.stdout) as any;
@@ -310,9 +352,10 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       await mkdir(join(ctx.cwd, ".pi", "artifacts"), { recursive: true });
       const fmt = params.format ?? "svg";
-      const defaultOut = join(".pi", "artifacts", `${basename(cleanPath(params.path)).replace(/\.[^.]+$/, "")}.${fmt}`);
-      const out = params.out ? cleanPath(params.out) : defaultOut;
-      const args = ["-m", "barndsl.cli", "build", cleanPath(params.path), "--out", out, "--format", fmt];
+      const source = workspaceArg(ctx.cwd, params.path);
+      const defaultOut = join(".pi", "artifacts", `${basename(source).replace(/\.[^.]+$/, "")}.${fmt}`);
+      const out = artifactArg(ctx.cwd, params.out ?? defaultOut);
+      const args = ["-m", "barndsl.cli", "build", source, "--out", out, "--format", fmt];
       if (params.dims) args.push("--dims", params.dims);
       if (params.frame) args.push("--frame");
       if (params.profile) args.push("--profile", params.profile);
@@ -334,7 +377,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const targets = params.full ? [] : (params.targets && params.targets.length ? params.targets : ["tests/test_compiler.py"]);
-      const args = ["-m", "pytest", ...(params.quiet ?? true ? ["-q"] : []), ...targets.map(cleanPath)];
+      const args = ["-m", "pytest", ...(params.quiet ?? true ? ["-q"] : []), ...targets.map((target) => pytestTarget(ctx.cwd, target))];
       const r = await run(ctx.cwd, args, signal);
       return { content: [{ type: "text", text: resultText("pytest", r) }], details: { ...r, summary: summarizePytest(r.stdout, r.stderr) } };
     },
@@ -347,7 +390,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Analyze barndsl agent JSONL traces.",
     parameters: Type.Object({ path: Type.String() }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const abs = resolve(ctx.cwd, cleanPath(params.path));
+      const abs = workspaceAbs(ctx.cwd, params.path);
       const text = await readFile(abs, "utf8");
       const lines = text.split(/\r?\n/).filter((l) => l.trim());
       const codes = new Map<string, number>();
@@ -364,7 +407,7 @@ export default function (pi: ExtensionAPI) {
         for (const m of raw.matchAll(/"stop_reason"\s*:\s*"([^"]+)"/g)) stopReasons.set(m[1], (stopReasons.get(m[1]) ?? 0) + 1);
       }
       const summary = {
-        path: cleanPath(params.path),
+        path: workspaceArg(ctx.cwd, params.path),
         lines: lines.length,
         parsed,
         scores,
@@ -390,9 +433,10 @@ export default function (pi: ExtensionAPI) {
       edit: Type.Record(Type.String(), Type.Any(), { description: "A barndsl.edits.Edit-shaped object, e.g. {kind:'move_room', room:'kitchen', x:24, y:0}" }),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const abs = resolve(ctx.cwd, cleanPath(params.path));
+      const safePath = workspaceArg(ctx.cwd, params.path);
+      const abs = workspaceAbs(ctx.cwd, safePath);
       return withFileMutationQueue(abs, async () => {
-        const payload = JSON.stringify({ path: cleanPath(params.path), edit: params.edit });
+        const payload = JSON.stringify({ path: safePath, edit: params.edit });
         const r = await run(ctx.cwd, ["tools/pi_barndsl_edit.py"], signal, payload);
         const parsed = tryJson(r.stdout);
         return { content: [{ type: "text", text: resultText("barndsl edit", r) }], details: { ...r, json: parsed } };
@@ -443,7 +487,12 @@ export default function (pi: ExtensionAPI) {
       profile: Type.Optional(Type.String()),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_diag_diff.py"], signal, JSON.stringify(params));
+      const payload = {
+        ...params,
+        before: params.before.map((path) => workspaceArg(ctx.cwd, path, "baseline path")),
+        after: params.after?.map((path) => workspaceArg(ctx.cwd, path, "comparison path")),
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_diag_diff.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: formatDiagDiff("barndsl diagnostic diff", r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
@@ -455,7 +504,8 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Compile the gallery/examples as a lightweight integration gate.",
     parameters: Type.Object({ paths: Type.Optional(Type.Array(Type.String(), { description: "Defaults to ['examples']" })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const payload = { before: params.paths && params.paths.length ? params.paths : ["examples"] };
+      const requested = params.paths && params.paths.length ? params.paths : ["examples"];
+      const payload = { before: requested.map((path) => workspaceArg(ctx.cwd, path, "gallery path")) };
       const r = await run(ctx.cwd, ["tools/pi_barndsl_diag_diff.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: formatDiagDiff("barndsl gallery gate", r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
@@ -474,7 +524,12 @@ export default function (pi: ExtensionAPI) {
       profile: Type.Optional(Type.String()),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_doctor.py"], signal, JSON.stringify(params));
+      const payload = {
+        ...params,
+        paths: params.paths?.map((path) => workspaceArg(ctx.cwd, path, "doctor path")),
+        exportPlan: params.exportPlan ? workspaceArg(ctx.cwd, params.exportPlan, "export plan") : undefined,
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_doctor.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: formatDoctor(r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
@@ -523,7 +578,12 @@ export default function (pi: ExtensionAPI) {
       out: Type.Optional(Type.String({ description: "Optional Markdown output path, e.g. docs/DIAGNOSTIC_MATRIX.md" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_diag_matrix.py"], signal, JSON.stringify(params));
+      const payload = {
+        ...params,
+        paths: params.paths?.map((path) => workspaceArg(ctx.cwd, path, "matrix path")),
+        out: params.out ? workspaceArg(ctx.cwd, params.out, "matrix output") : undefined,
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_diag_matrix.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: formatDiagMatrix(r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
@@ -538,7 +598,12 @@ export default function (pi: ExtensionAPI) {
       out: Type.Optional(Type.String({ description: "Optional Markdown output path, e.g. docs/FIXTURE_CATALOG.md" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_fixture_catalog.py"], signal, JSON.stringify(params));
+      const payload = {
+        ...params,
+        paths: params.paths?.map((path) => workspaceArg(ctx.cwd, path, "fixture path")),
+        out: params.out ? workspaceArg(ctx.cwd, params.out, "catalog output") : undefined,
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_fixture_catalog.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: formatFixtureCatalog(r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
@@ -550,8 +615,8 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Check export/build parity after adding geometry-affecting DSL features.",
     parameters: Type.Object({ path: Type.String(), prefix: Type.Optional(Type.String({ description: "Output prefix under .pi/artifacts" })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const args = ["-m", "barndsl.cli", "dev", "export-parity", cleanPath(params.path)];
-      if (params.prefix) args.push("--prefix", params.prefix);
+      const args = ["-m", "barndsl.cli", "dev", "export-parity", workspaceArg(ctx.cwd, params.path)];
+      if (params.prefix) args.push("--prefix", simpleName(params.prefix, "artifact prefix"));
       const r = await run(ctx.cwd, args, signal);
       return { content: [{ type: "text", text: formatExportParity(r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
@@ -567,7 +632,11 @@ export default function (pi: ExtensionAPI) {
       strictComposed: Type.Optional(Type.Boolean({ default: false, description: "Fail the tool if composed/stamped-id checks fail" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_lsp_smoke.py"], signal, JSON.stringify(params));
+      const payload = {
+        ...params,
+        path: params.path ? workspaceArg(ctx.cwd, params.path, "LSP fixture") : undefined,
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_lsp_smoke.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: resultText("barndsl lsp smoke", r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
@@ -583,7 +652,11 @@ export default function (pi: ExtensionAPI) {
       quiet: Type.Optional(Type.Boolean({ default: true })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_impact_tests.py"], signal, JSON.stringify(params));
+      const payload = {
+        ...params,
+        changed: params.changed?.map((path) => workspaceArg(ctx.cwd, path, "changed file")),
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_impact_tests.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: resultText("barndsl impact tests", r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
@@ -600,7 +673,12 @@ export default function (pi: ExtensionAPI) {
       write: Type.Optional(Type.Boolean({ default: false, description: "Write the test skeleton if it does not exist" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_scaffold.py"], signal, JSON.stringify({ kind: "rule", ...params }));
+      const payload = {
+        kind: "rule",
+        ...params,
+        testFile: params.testFile ? workspaceArg(ctx.cwd, params.testFile, "test file") : undefined,
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_scaffold.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: resultText("barndsl rule scaffold", r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });
@@ -616,7 +694,12 @@ export default function (pi: ExtensionAPI) {
       write: Type.Optional(Type.Boolean({ default: true })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      const r = await run(ctx.cwd, ["tools/pi_barndsl_scaffold.py"], signal, JSON.stringify({ kind: "feature", ...params }));
+      const payload = {
+        kind: "feature",
+        ...params,
+        out: params.out ? workspaceArg(ctx.cwd, params.out, "checklist output") : undefined,
+      };
+      const r = await run(ctx.cwd, ["tools/pi_barndsl_scaffold.py"], signal, JSON.stringify(payload));
       return { content: [{ type: "text", text: resultText("barndsl feature scaffold", r) }], details: { ...r, json: tryJson(r.stdout) } };
     },
   });

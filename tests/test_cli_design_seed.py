@@ -45,6 +45,10 @@ class _FakeResult:
         self.source = self.result.source
         self.score = design_score(self.result)
         self.plan = None  # skip _print_metrics/save_svg
+        self.termination_reason = "completed"
+        self.review_degraded = any(
+            step.critique is not None and step.critique.skipped for step in steps
+        )
 
 
 class _FakeAgent:
@@ -141,13 +145,14 @@ def test_skipped_critique_prints_a_notice(monkeypatch, capsys):
         satisfied=False,
         assessment="(critique skipped: the critique call failed)",
         rationale="",
+        skipped=True,
     )
     step = DesignStep(
         1, CLEAN, compile_source(CLEAN, name=None), skipped,
         design_score(compile_source(CLEAN, name=None)),
     )
     _install_fake_agent(monkeypatch, steps=[step])
-    assert main(["design", "a cottage", "--out", "unused.svg"]) == 0
+    assert main(["design", "a cottage", "--out", "unused.svg"]) == 1
     out = capsys.readouterr().out
     assert "critique unavailable" in out
     assert "(critique skipped" in out

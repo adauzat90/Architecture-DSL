@@ -78,6 +78,7 @@ class RoomType(str, Enum):
     """The kinds of spaces a barndominium plan can contain."""
 
     LIVING = "living"
+    GREAT_ROOM = "great_room"
     KITCHEN = "kitchen"
     DINING = "dining"
     BEDROOM = "bedroom"
@@ -85,12 +86,18 @@ class RoomType(str, Enum):
     HALF_BATH = "half_bath"
     LAUNDRY = "laundry"
     UTILITY = "utility"
+    MECHANICAL = "mechanical"
     HALLWAY = "hallway"
+    FOYER = "foyer"
     CLOSET = "closet"
     PANTRY = "pantry"
+    STORAGE = "storage"
     MUDROOM = "mudroom"
     OFFICE = "office"
+    FLEX = "flex"
+    REC_ROOM = "rec_room"
     LOFT = "loft"
+    SAFE_ROOM = "safe_room"
     GARAGE = "garage"
     SHOP = "shop"
     PORCH = "porch"
@@ -101,10 +108,13 @@ class RoomType(str, Enum):
 HABITABLE_TYPES: frozenset[RoomType] = frozenset(
     {
         RoomType.LIVING,
+        RoomType.GREAT_ROOM,
         RoomType.KITCHEN,
         RoomType.DINING,
         RoomType.BEDROOM,
         RoomType.OFFICE,
+        RoomType.FLEX,
+        RoomType.REC_ROOM,
         RoomType.LOFT,
     }
 )
@@ -885,7 +895,7 @@ class ProgramSpec:
     baths: int | None = None
     required: dict[RoomType, int] = field(default_factory=dict)
     min_area: float | None = None
-    #: Minimum whole-house dedicated-storage area (closets + pantry), sq ft.
+    #: Minimum whole-house dedicated-storage area (closets + pantry + storage), sq ft.
     min_storage: float | None = None
     line: int | None = None
     col: int | None = None

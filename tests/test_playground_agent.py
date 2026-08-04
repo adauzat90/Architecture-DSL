@@ -219,6 +219,8 @@ def test_design_streams_status_iterations_and_done(monkeypatch):
     assert done["round"] == 1
     assert done["source"].strip() == CLEAN.strip()
     assert done["payload"]["ok"] is True
+    assert done["termination_reason"] == "unknown"  # backward-compatible fake result
+    assert done["review_degraded"] is False
 
 
 def test_design_streams_live_reasoning_and_draft_tokens(monkeypatch):

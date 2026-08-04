@@ -38,3 +38,20 @@ def test_build_html_is_self_contained_and_embeds_valid_json():
     assert [d["id"] for d in embedded] == [p.stem for p in sorted(GALLERY.glob("*.barn"))]
     # The export/feedback affordances are present.
     assert "Export feedback" in html and "barndsl-design-review" in html
+
+
+def test_build_html_uses_guided_review_deck_with_persistence():
+    html = build_html([design_data(str(GALLERY / "cottage.barn"))])
+
+    assert 'id="plan-viewport"' in html
+    assert 'id="question-panel"' in html
+    assert 'id="design-picker"' in html
+    assert 'id="progress-bar"' in html
+    assert "Does this layout feel buildable?" in html
+    assert "Is this diagnostic correct?" in html
+    assert "View DSL" in html
+    assert "localStorage.setItem" in html
+    assert "firstUnansweredStep" in html
+    assert "review-focus" in html
+    # Keep the existing downstream feedback contract while changing the UI.
+    assert "{tool:'barndsl-design-review', version:1, designs:state}" in html

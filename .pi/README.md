@@ -30,4 +30,9 @@ Also adds `/barndsl-status` as a quick extension/CLI smoke check.
 
 The same helpers are also available to non-pi tooling through `barndsl dev ...` subcommands (`audit`, `rule-probe`, `diag-diff`, `gallery-gate`, `lsp-smoke`, `doctor`, `locate`, `diag-matrix`, `fixtures`, `feature-check`, `impact`, `export-parity`, `rule-scaffold`, `feature-scaffold`).
 
+All extension file arguments are confined to the trusted workspace. Preview
+outputs are confined further to `.pi/artifacts/`; path traversal, absolute paths
+outside the workspace, pytest option injection, and export-prefix traversal are
+rejected before a child process starts.
+
 Reload pi with `/reload` after pulling these files. If Python resolution is unusual, set `BARNDSL_PYTHON` to the interpreter that has the repo's dev dependencies installed; otherwise the extension prefers `.venv`, then pyenv-win's active `python.exe`, then `python` on PATH.

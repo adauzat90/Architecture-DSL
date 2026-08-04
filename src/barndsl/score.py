@@ -59,7 +59,13 @@ from .elements import GARAGE_TYPES, HABITABLE_TYPES, Barndominium, RoomType
 from .validation import MIN_VOID_NOTE, Severity, _largest_void
 
 #: The public core a bedroom's daily route must reach without crossing a garage.
-_PUBLIC_TYPES = frozenset({RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING})
+_PUBLIC_TYPES = frozenset({
+    RoomType.LIVING,
+    RoomType.GREAT_ROOM,
+    RoomType.KITCHEN,
+    RoomType.DINING,
+    RoomType.REC_ROOM,
+})
 
 # --- weights (the contract; change these and the score changes meaning) ------
 

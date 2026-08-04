@@ -20,6 +20,7 @@ What the loop must guarantee (see `barndsl/agent.py`):
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from barndsl import compile_source
@@ -771,20 +772,20 @@ def test_seed_source_default_is_todays_fresh_generation():
 
 
 def test_cancel_stops_the_loop_between_rounds():
-    """`cancel` is polled at the top of each round; once true the loop stops and
-    hands back the best iteration recorded so far."""
+    """Once cancellation is set after a step, the next round never starts."""
     client = FakeClient(sources=[MEDIOCRE, CLEAN], critiques=[_unsatisfied(), _satisfied()])
-    calls = {"n": 0}
-
-    def cancel() -> bool:
-        calls["n"] += 1
-        return calls["n"] > 1  # allow round 1, then cancel before round 2
+    stopped = threading.Event()
 
     result = _agent(client).design(
-        "a home", max_iterations=3, target_score=None, cancel=cancel
+        "a home",
+        max_iterations=3,
+        target_score=None,
+        cancel=stopped.is_set,
+        on_step=lambda _step: stopped.set(),
     )
     assert [s.iteration for s in result.history] == [1]  # round 2 never ran
     assert result.best_iteration == 1
+    assert result.termination_reason == "cancelled"
 
 
 def test_cancel_before_the_first_round_returns_an_empty_result():
@@ -794,6 +795,7 @@ def test_cancel_before_the_first_round_returns_an_empty_result():
     )
     assert result.history == [] and result.iterations == 0
     assert result.best_iteration == 0  # nothing recorded, but no exception
+    assert result.termination_reason == "cancelled"
 
 
 def test_on_phase_narrates_writing_compiling_and_critiquing():
@@ -865,6 +867,58 @@ def test_pump_activity_swallows_a_broken_stream():
     assert calls == []  # no crash, nothing forwarded
 
 
+def test_cancel_closes_an_active_generation_stream():
+    class _ClosableDeltaStream(_FakeDeltaStream):
+        def __init__(self, text: str):
+            super().__init__(text)
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Client:
+        def __init__(self):
+            self.messages = self
+            self.stream_obj = _ClosableDeltaStream(f"```barn\n{CLEAN}```")
+
+        def stream(self, **_kwargs):
+            return self.stream_obj
+
+    stopped = threading.Event()
+    client = _Client()
+    result = BarndoAgent(client=client).design(
+        "a cottage",
+        max_iterations=1,
+        target_score=None,
+        cancel=stopped.is_set,
+        on_activity=lambda *_args: stopped.set(),
+    )
+
+    assert client.stream_obj.closed is True
+    assert result.termination_reason == "cancelled"
+    assert result.history == []
+
+
+def test_cancel_after_compile_does_not_start_the_critic():
+    stopped = threading.Event()
+    client = FakeClient(sources=[CLEAN], critiques=[_satisfied()])
+
+    def on_phase(phase: str, _round: int) -> None:
+        if phase == "compiling":
+            stopped.set()
+
+    result = _agent(client).design(
+        "a cottage",
+        max_iterations=1,
+        target_score=None,
+        cancel=stopped.is_set,
+        on_phase=on_phase,
+    )
+
+    assert result.termination_reason == "cancelled"
+    assert client.parse_prompts == []
+
+
 # -- availability probe -------------------------------------------------------
 
 
@@ -881,7 +935,7 @@ def test_agent_availability_true_when_anthropic_and_key_present(monkeypatch):
 # high max_tokens on a slow reasoning model). The model is told to emit a JSON
 # object, which we parse fence-tolerantly — so it works the same on native
 # Anthropic and on compat gateways (DeepSeek) that fence their JSON. A reply with
-# no parseable JSON degrades to a neutral verdict rather than crashing the loop.
+# no parseable JSON degrades to an unsatisfied verdict rather than crashing.
 
 
 class _FakeStreamClient:
@@ -928,15 +982,15 @@ def test_critique_parses_fenced_json_from_a_stream():
     crit = agent.critique(compile_source(MEDIOCRE))
     assert crit.satisfied is False
     assert crit.suggestions == ["Widen the bed2 window"]
-    assert "skipped" not in crit.assessment  # a real critique, not the neutral fallback
+    assert "skipped" not in crit.assessment  # a real critique, not the degraded fallback
 
 
-def test_critique_falls_back_to_neutral_when_there_is_no_json():
-    """Pure prose (no JSON object) degrades to a neutral verdict, not a crash."""
+def test_critique_fails_closed_when_there_is_no_json():
+    """Pure prose degrades without crashing, but never counts as approval."""
     result = compile_source(MEDIOCRE)
     agent = BarndoAgent(client=_FakeStreamClient("Looking at this plan, it reads as a home."))
     crit = agent.critique(result)
-    assert crit.satisfied is result.ok  # neutral: mirrors compile status
+    assert crit.satisfied is False
     assert "skipped" in crit.assessment
 
 
@@ -1568,7 +1622,7 @@ def test_critique_skipped_flag_true_on_the_degraded_paths():
     """Both degraded critique paths (no JSON / call failed) set skipped=True; a
     real parsed critique leaves it False, and the field is additive so a reply
     that omits it still validates."""
-    # No parseable JSON -> neutral fallback with skipped=True.
+    # No parseable JSON -> fail-closed fallback with skipped=True.
     agent = BarndoAgent(client=_FakeStreamClient("Just prose, no JSON here."))
     crit = agent.critique(compile_source(MEDIOCRE))
     assert crit.skipped is True
@@ -1604,7 +1658,18 @@ def test_critique_call_failure_sets_skipped():
     agent = BarndoAgent(client=_FailingCritiqueClient(CLEAN))
     crit = agent.critique(compile_source(CLEAN))
     assert crit.skipped is True
+    assert crit.satisfied is False
     assert "critique call failed" in crit.assessment
+
+
+def test_skipped_critique_cannot_complete_the_loop():
+    agent = BarndoAgent(client=_FailingCritiqueClient(CLEAN))
+    result = agent.design("a cottage", max_iterations=1, target_score=None)
+
+    assert result.termination_reason == "max_iterations"
+    assert result.review_degraded is True
+    assert result.history[0].critique is not None
+    assert result.history[0].critique.satisfied is False
 
 
 # -- the projected-score feedback line ----------------------------------------

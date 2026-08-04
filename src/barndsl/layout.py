@@ -305,10 +305,14 @@ def _connect_adjacencies(
             unsatisfied.append((a, b))
             continue
         if shared_edge(ra, rb) is not None:
-            both_public = (
-                by_id[a].type in {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
-                and by_id[b].type in {RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING}
-            )
+            public_core = {
+                RoomType.LIVING,
+                RoomType.GREAT_ROOM,
+                RoomType.KITCHEN,
+                RoomType.DINING,
+                RoomType.REC_ROOM,
+            }
+            both_public = by_id[a].type in public_core and by_id[b].type in public_core
             width = feet(6) if both_public else inches(32)
             plan.connect(a, b, width=width)
             satisfied.append((a, b))
@@ -398,7 +402,9 @@ def _pick_entry_room(plan: Barndominium, brief: LayoutBrief) -> str | None:
     if brief.entry_room and has_ext(brief.entry_room):
         return brief.entry_room
     priority = [
+        RoomType.FOYER,
         RoomType.MUDROOM,
+        RoomType.GREAT_ROOM,
         RoomType.LIVING,
         RoomType.KITCHEN,
         RoomType.DINING,

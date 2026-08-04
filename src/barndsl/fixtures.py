@@ -244,8 +244,16 @@ def _wall_rect(wall: str, x0: float, y0: float, cw: float, cl: float, cursor: fl
     return x0 + cw - d, y0 + cursor, d, width
 
 
-#: How far (ft) to nudge a fixture along its wall when a door swing blocks it.
+#: How far (ft) to nudge a fixture along its wall when a door/opening blocks it.
 _KEEPOUT_STEP = 0.5
+#: Depth of doorway/opening keepouts into a room. This keeps wall-backed
+#: appliances from landing in a cased opening/doorway and preserves traffic flow.
+_OPENING_KEEPOUT_DEPTH = 3.5
+#: Depth of window keepouts for seed/auto-slotted wall fixtures. A sink under a
+#: window can be legitimate, but the generic seed placer can't know that intent;
+#: keeping default appliances off glazing avoids worse range/fridge-at-window
+#: failures and authors can still override deliberately with `fixture ... at`.
+_WINDOW_KEEPOUT_DEPTH = 2.5
 
 
 def _rects_overlap(a, b, tol: float = 1e-6) -> bool:
@@ -447,9 +455,10 @@ def _place_perimeter(
     """Lay ``kinds`` along the clear-box perimeter (longer wall first), wrapping to
     the next wall when the current one runs out — the deterministic seed layout.
 
-    ``keepouts`` are ``(x, y, w, l)`` door-swing rectangles a fixture must stay
-    clear of; a blocked spot slides the fixture along the wall until it clears (or
-    wraps to the next wall), so the placer never parks a fixture in a door's arc.
+    ``keepouts`` are ``(x, y, w, l)`` door-swing / doorway rectangles a fixture
+    must stay clear of; a blocked spot slides the fixture along the wall until it
+    clears (or wraps to the next wall), so the placer never parks a fixture in a
+    door's arc or across a cased opening.
     ``gaps`` maps a kind to a landing gap (ft) left *before* it on the same wall —
     how the kitchen seed spreads its appliances (a wrap to a new wall drops the
     gap, so a fixture still starts at the corner)."""
@@ -541,7 +550,7 @@ def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = Tr
     the plan drawing and the 3D model consume is :func:`resolve_room_fixtures`.
 
     ``avoid_doors`` (the default) slides fixtures clear of every hinged door's
-    swing; pass ``False`` for the door-blind placement the swing-crowding check
+    swing and every doorway/cased opening; pass ``False`` for the door-blind placement the swing-crowding check
     (DOOR_HITS_FIXTURE) diffs against to tell when a door — not just a small room —
     drops a fixture.
     """
@@ -685,8 +694,9 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
     laid first (perimeter walk), then authored fixtures fill the first free slot
     that clears what's already down. Door swings count as occupied for both walks
     — a seed and an auto-slotted authored piece slide clear of every hinged
-    door's arc; only an explicit ``at x,y`` can park a fixture in one (and the
-    ``FIXTURE_DOOR`` check flags it). Every fixture gets a stable
+    door's arc and every doorway/cased opening; only an explicit ``at x,y`` can
+    park a fixture in one (and the ``FIXTURE_DOOR``/``FIXTURE_OPENING`` checks
+    flag it). Every fixture gets a stable
     ``<room>~<kind>~<i>`` id. Deterministic and side-effect-free.
     """
     explicit = [pf for pf in getattr(plan, "fixtures", []) if pf.room == room.id]
@@ -696,7 +706,11 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
 
     explicit_kinds = {pf.kind for pf in explicit}
     surviving = [k for k in fixtures_for(room.type) if k not in explicit_kinds]
-    keepouts = tuple(_door_swing_rects(plan, room))
+    keepouts = (
+        tuple(_door_swing_rects(plan, room))
+        + tuple(_opening_keepout_rects(plan, room))
+        + tuple(_window_keepout_rects(plan, room))
+    )
     placed = _place_seeds(
         x0, y0, cw, cl, surviving, keepouts, _seed_gaps(room.type)
     )
@@ -735,8 +749,9 @@ def validate_fixtures(plan: Barndominium, add) -> None:
     parked over a bedroom's escape window (``FIXTURE_EGRESS``).
 
     *Plan* checks judge seeds **and** authored pieces, because what they teach is
-    about the plan, not the placement: a range under an operable window
-    (``RANGE_WINDOW``) or with no landing beside it (``RANGE_LANDING``), a work
+    about the plan, not the placement: a fixture across a doorway/opening
+    (``FIXTURE_OPENING``), an authored range under an operable window
+    (``RANGE_WINDOW``) or with no landing beside it (``RANGE_LANDING``), an authored work
     triangle scattered too wide (``KITCHEN_TRIANGLE``), a dryer far from any
     exterior wall to vent through (``DRYER_VENT``), and a fixture on a stair
     footprint (``FIXTURE_STAIR``).
@@ -1022,8 +1037,28 @@ def _check_plan_rules(plan, room, fixtures, add, Issue, Severity) -> None:
         rect = (f.x, f.y, f.width, f.length)
         line = None if f.seed else f.source_line
 
-        # RANGE_WINDOW — a cooktop directly under an operable window.
-        if f.kind == "range":
+        # FIXTURE_OPENING — a wall-backed piece installed across a doorway/cased
+        # opening. Auto-seeds and wall-slotted fixtures avoid these bands; an
+        # explicit `at` placement or an impossible room still gets called out.
+        if f.kind in _WALL_BACKED and f.wall in ("S", "N", "E", "W"):
+            for label, keepout in _fixture_opening_keepouts(plan, room, f.wall):
+                if _rects_overlap(rect, keepout):
+                    add(
+                        Issue(
+                            Severity.WARNING,
+                            "FIXTURE_OPENING",
+                            f"Fixture '{f.kind}' in '{room.id}' sits across {label} on its {f.wall} wall.",
+                            room=room.id,
+                            line=line,
+                            hint="Keep appliances/casework out of doorways and cased openings: slide it along a solid wall with backing/services, or move the opening.",
+                        )
+                    )
+                    break
+
+        # RANGE_WINDOW — a cooktop directly under an operable window. Authored
+        # ranges are judged; default seeds are schematic unless the author pins
+        # them with a fixture line.
+        if f.kind == "range" and not f.seed:
             for w in windows:
                 if not getattr(w, "escape_capable", True) or w.wall not in ext:
                     continue  # a fixed sash doesn't open; interior walls give no code
@@ -1102,7 +1137,7 @@ def _check_plan_rules(plan, room, fixtures, add, Issue, Severity) -> None:
         ]
         if landings:  # only judge when there's other casework to compare against
             for f in fixtures:
-                if f.kind != "range":
+                if f.kind != "range" or f.seed:
                     continue
                 rect = (f.x, f.y, f.width, f.length)
                 if not any(_rect_gap(rect, land) <= 1.0 + 1e-6 for land in landings):
@@ -1147,7 +1182,7 @@ def _check_plan_rules(plan, room, fixtures, add, Issue, Severity) -> None:
         sink = next((f for f in fixtures if f.kind == "sink"), None)
         rng = next((f for f in fixtures if f.kind == "range"), None)
         fridge = next((f for f in fixtures if f.kind == "refrigerator"), None)
-        if sink and rng and fridge:
+        if sink and rng and fridge and not (sink.seed or rng.seed or fridge.seed):
             def _d(a, b):
                 (ax, ay), (bx, by) = a.center, b.center
                 return math.hypot(ax - bx, ay - by)
@@ -1221,6 +1256,58 @@ def _door_swing_rects(plan: Barndominium, room: Room) -> list:
             inward = edge.pos < room.center[1]
             by = edge.pos if inward else edge.pos - w
             out.append((start, by, w, w))
+    return out
+
+
+def _window_keepout_rects(plan: Barndominium, room: Room) -> list[tuple[float, float, float, float]]:
+    """Window bands the default wall-fixture placer should avoid.
+
+    This is a placement heuristic, not a diagnostic: explicit authored fixtures
+    may still choose a window wall and the existing plan checks decide whether it
+    is acceptable (e.g. ``RANGE_WINDOW`` for a cooktop under operable glass).
+    """
+    ext = set(exterior_walls(plan, room))
+    return [
+        _window_reach_rect(room, w, _WINDOW_KEEPOUT_DEPTH)
+        for w in plan.windows
+        if w.room == room.id and w.wall in ext
+    ]
+
+
+def _opening_keepout_rects(plan: Barndominium, room: Room) -> list[tuple[float, float, float, float]]:
+    """Doorway/cased-opening bands a wall-backed fixture must not occupy.
+
+    Door swings catch only hinged leaves. A cased opening has no leaf, but a
+    range, sink, fridge, washer, dryer or cabinet still cannot be installed in
+    that wall gap: it has no backing/services and blocks circulation. These
+    shallow bands make the auto-placer slide past openings and let explicit
+    placements be diagnosed by ``FIXTURE_OPENING``.
+    """
+    return [rect for _label, rect in _fixture_opening_keepouts(plan, room)]
+
+
+def _fixture_opening_keepouts(
+    plan: Barndominium, room: Room, wall_filter: str | None = None
+) -> list[tuple[str, tuple[float, float, float, float]]]:
+    out: list[tuple[str, tuple[float, float, float, float]]] = []
+    depth = _OPENING_KEEPOUT_DEPTH
+    walls = (wall_filter,) if wall_filter is not None else ("S", "N", "E", "W")
+    for wall in walls:
+        for label, lo, hi in _openings_on_wall(plan, room, wall):
+            span = max(0.0, hi - lo)
+            if span <= 0:
+                continue
+            if wall == "S":
+                rect = (lo, room.y, span, min(depth, room.length))
+            elif wall == "N":
+                d = min(depth, room.length)
+                rect = (lo, room.y2 - d, span, d)
+            elif wall == "W":
+                rect = (room.x, lo, min(depth, room.width), span)
+            else:  # E
+                d = min(depth, room.width)
+                rect = (room.x2 - d, lo, d, span)
+            out.append((label, rect))
     return out
 
 

@@ -27,11 +27,13 @@ Requires ``anthropic`` and ``ANTHROPIC_API_KEY``. Install ``pip install 'barndsl
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import logging
 import os
 import re
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -193,6 +195,64 @@ _API_RETRY_ATTEMPTS = 3
 _API_RETRY_BACKOFF = (2.0, 4.0)
 
 
+class _DesignCancelled(RuntimeError):
+    """Internal control-flow signal raised when a caller cancels active inference."""
+
+
+def _close_stream(stream: Any) -> None:
+    """Best-effort close for Anthropic and compatible streaming objects."""
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+@contextmanager
+def _cancel_scope(stream: Any, cancel: Callable[[], bool] | None):
+    """Close ``stream`` promptly when ``cancel`` becomes true.
+
+    The watcher matters when a provider is silent for a long reasoning stretch:
+    polling only between stream events would make the UI's Stop button wait for
+    the next token.  The post-yield check converts either a clean/partial return
+    or the provider exception caused by ``close()`` into one stable internal
+    cancellation signal.
+    """
+    if cancel is None:
+        yield
+        return
+
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(0.05):
+            try:
+                cancelled = cancel()
+            except Exception:
+                cancelled = False
+            if cancelled:
+                _close_stream(stream)
+                return
+
+    if cancel():
+        _close_stream(stream)
+        raise _DesignCancelled("design cancelled")
+    watcher = threading.Thread(target=watch, name="barndsl-agent-cancel", daemon=True)
+    watcher.start()
+    try:
+        yield
+        if cancel():
+            raise _DesignCancelled("design cancelled")
+    except Exception as exc:
+        if isinstance(exc, _DesignCancelled) or cancel():
+            raise _DesignCancelled("design cancelled") from exc
+        raise
+    finally:
+        stop.set()
+        watcher.join(timeout=0.2)
+
+
 def _retryable_api_errors() -> tuple[type[BaseException], ...]:
     """The anthropic exception types a transient failure should be retried on.
 
@@ -347,8 +407,15 @@ HOW TO PLACE ROOMS (craft that keeps plans compiling first try):
 - Habitable rooms (living/kitchen/dining/bed/office) go on the PERIMETER so
   they can take real windows; bury halls, baths, closets, storage inside.
 - A bath gets a `door` (privacy); use `open` for kitchen/living/dining flow.
+  Do not write a 6-10 ft single `door` between public rooms: that's a giant
+  swing leaf. Use `open living - kitchen width 8` for cased open-concept flow,
+  or `door living - office double width 5` / `french` when you truly want leaves.
 - Doors read best swung `into` the room they serve, hinged near a corner
   (`into <room> hinge near`), and backed to the wall's end with `offset`.
+  Do NOT center every door and window by habit: doors usually belong near the
+  circulation corner, and windows should be placed for furniture, views,
+  daylight, privacy, and facade rhythm. A centered window is fine when it serves
+  the room, but repeated perfect centering reads like a generated plan.
 """
 
 #: Furnishing craft: the `fixture` catalog and where furniture belongs. Wet
@@ -375,8 +442,11 @@ FURNISH THE KEY ROOMS (a plan reads as a home when furniture proves each room wo
   dining_table in the dining room, a desk in an office. A kitchen_island
   earns its place in a kitchen roomier than ~12 ft across.
 - Craft: prefer a bare `wall N|S|E|W` over `offset`/`at` - the auto-slot
-  clears door swings by itself; hand-pinned spots are where FIXTURE_DOOR and
-  FIXTURE_OVERLAP warnings come from. Free-standing pieces (tables, island)
+  clears door swings and cased openings by itself; hand-pinned spots are where
+  FIXTURE_DOOR, FIXTURE_OPENING and FIXTURE_OVERLAP warnings come from. Never
+  place appliances/casework in a doorway/opening between rooms: ranges, sinks,
+  refrigerators, washers and dryers need solid wall backing and utility hookups,
+  and openings must stay clear for traffic. Free-standing pieces (tables, island)
   centre themselves - leave ~2 ft of walkway around them. Never park tall
   casework (a wardrobe) over a bedroom's egress window, and stop a counter
   run short of doorways with `from`/`to`.
@@ -483,6 +553,7 @@ room mcloset: closet   at 63,15 size 6 x 18    # caps the corridor's east end
 open living - kitchen width 10                 # open core: one great room
 open kitchen - dining width 10
 open living - hall width 4                     # public core feeds the spine
+open dining - hall width 4                     # traffic can bypass the kitchen work triangle
 door hall - bed1 width 3 offset 0.5            # each bedroom hangs off the spine,
 door hall - bed2 width 3 offset 0.5            #   one room deep, private door
 door hall - bath1 width 2.67 offset 3
@@ -833,7 +904,11 @@ def _critique_from_text(text: str) -> CritiqueSpec | None:
         return None
 
 
-def _pump_activity(stream: Any, on_activity: Callable[[str, str], None]) -> None:
+def _pump_activity(
+    stream: Any,
+    on_activity: Callable[[str, str], None],
+    cancel: Callable[[], bool] | None = None,
+) -> None:
     """Forward a message stream's text/thinking deltas to ``on_activity``.
 
     Iterated *before* ``stream.get_final_message()`` (which still returns the
@@ -844,14 +919,18 @@ def _pump_activity(stream: Any, on_activity: Callable[[str, str], None]) -> None
     the DSL being written, or the critic's JSON).
 
     Tolerant by design: only the two known delta shapes are forwarded, and any
-    streaming hiccup is swallowed — the live feed is a nicety, never a reason to
-    fail a design round (``get_final_message`` below still produces the result,
-    or raises the same error it would have without streaming). A compat gateway
+    streaming hiccup except explicit cancellation is swallowed — the live feed
+    is a nicety, never a reason to fail a design round (``get_final_message``
+    below still produces the result, or raises the same error it would have
+    without streaming). A compat gateway
     (DeepSeek) that never emits ``thinking_delta`` events simply streams the
     ``text`` channel; the loop and the UI both degrade cleanly.
     """
     try:
         for event in stream:
+            if cancel is not None and cancel():
+                _close_stream(stream)
+                raise _DesignCancelled("design cancelled")
             if getattr(event, "type", None) != "content_block_delta":
                 continue
             delta = getattr(event, "delta", None)
@@ -864,6 +943,11 @@ def _pump_activity(stream: Any, on_activity: Callable[[str, str], None]) -> None
                 piece = getattr(delta, "thinking", "") or ""
                 if piece:
                     on_activity("thinking", piece)
+            if cancel is not None and cancel():
+                _close_stream(stream)
+                raise _DesignCancelled("design cancelled")
+    except _DesignCancelled:
+        raise
     except Exception:  # never let a streaming glitch abort the design loop
         pass
 
@@ -1004,14 +1088,14 @@ class CritiqueSpec(BaseModel):
         default_factory=list,
         description="Structural defects that make the plan unshippable regardless of score.",
     )
-    #: True only on the degraded fallbacks (the critique call failed, or returned
-    #: no parseable JSON) — a neutral verdict the model never emits itself.
+    #: True only on degraded fallbacks (the critique call failed, or returned no
+    #: parseable JSON). These fallbacks are deliberately unsatisfied/fail-closed.
     #: Additive with a default, so ``model_validate_json`` still accepts a real
     #: reply that omits it; lets a caller tell "the critic passed it" apart from
-    #: "the critic was skipped and we defaulted to the compile status".
+    #: "the critic was skipped and the loop remained unsatisfied".
     skipped: bool = Field(
         default=False,
-        description="Internal: set when the critique degraded to a neutral fallback.",
+        description="Internal: set when the critique degraded to a fail-closed fallback.",
     )
 
 
@@ -1086,6 +1170,9 @@ class DesignResult:
     source: str
     result: CompileResult
     history: list[DesignStep] = field(default_factory=list)
+    #: Why the loop returned: ``completed``, ``max_iterations``, ``cancelled``,
+    #: ``generation_failed``, or ``unknown`` for results built by older callers.
+    termination_reason: str = "unknown"
 
     @property
     def plan(self):
@@ -1110,6 +1197,11 @@ class DesignResult:
             if best.score is not None:
                 return best.score
         return design_score(self.result)
+
+    @property
+    def review_degraded(self) -> bool:
+        """Whether any attempted architectural review fell back or was skipped."""
+        return any(step.critique is not None and step.critique.skipped for step in self.history)
 
 
 class BarndoAgent:
@@ -1169,6 +1261,7 @@ class BarndoAgent:
         on_activity: Callable[[str, str], None] | None = None,
         restructure: bool = False,
         repair: int = 0,
+        cancel: Callable[[], bool] | None = None,
     ) -> str:
         """Generate DSL for one round (see :meth:`_write_source_ex`).
 
@@ -1179,6 +1272,7 @@ class BarndoAgent:
         source, _truncated = self._write_source_ex(
             brief, prior=prior, diagnostics=diagnostics, seed=seed,
             on_activity=on_activity, restructure=restructure, repair=repair,
+            cancel=cancel,
         )
         return source
 
@@ -1192,6 +1286,7 @@ class BarndoAgent:
         on_activity: Callable[[str, str], None] | None = None,
         restructure: bool = False,
         repair: int = 0,
+        cancel: Callable[[], bool] | None = None,
     ) -> tuple[str, bool]:
         """Generate DSL and report whether the reply was truncated.
 
@@ -1306,7 +1401,7 @@ class BarndoAgent:
         # partial DSL: worth one terser retry, but if the retry is also cut off
         # we still return what we have and let the loop warn the model.
         for attempt in (1, 2):
-            msg = self._stream_message(prompt, on_activity)
+            msg = self._stream_message(prompt, on_activity, cancel=cancel)
             text = "".join(b.text for b in msg.content if b.type == "text")
             stop_reason = getattr(msg, "stop_reason", None)
             truncated = stop_reason == "max_tokens"
@@ -1334,7 +1429,10 @@ class BarndoAgent:
         )
 
     def _stream_message(
-        self, prompt: str, on_activity: Callable[[str, str], None] | None
+        self,
+        prompt: str,
+        on_activity: Callable[[str, str], None] | None,
+        cancel: Callable[[], bool] | None = None,
     ) -> Any:
         """Run one generation stream call, retrying transient API failures.
 
@@ -1358,10 +1456,17 @@ class BarndoAgent:
                     messages=[{"role": "user", "content": prompt}],
                     thinking={"type": "adaptive"},
                 ) as stream:
-                    if on_activity is not None:
-                        _pump_activity(stream, on_activity)
-                    return stream.get_final_message()
-            except retryable as exc:
+                    with _cancel_scope(stream, cancel):
+                        if on_activity is not None:
+                            _pump_activity(stream, on_activity, cancel=cancel)
+                        return stream.get_final_message()
+            except _DesignCancelled:
+                raise
+            except Exception as exc:
+                if cancel is not None and cancel():
+                    raise _DesignCancelled("design cancelled") from exc
+                if not isinstance(exc, retryable):
+                    raise
                 # A 4xx status is a client error, not a transient blip — propagate.
                 status = getattr(exc, "status_code", None)
                 if status is not None and status < 500:
@@ -1383,6 +1488,7 @@ class BarndoAgent:
         result: CompileResult,
         score: ScoreReport | None = None,
         on_activity: Callable[[str, str], None] | None = None,
+        cancel: Callable[[], bool] | None = None,
     ) -> CritiqueSpec:
         if score is None:
             score = design_score(result)
@@ -1422,8 +1528,9 @@ class BarndoAgent:
         # (via ``_CRITIQUE_JSON``), which we parse fence-tolerantly, so this works
         # the same on native Anthropic and on compat gateways (DeepSeek) that
         # ignore Anthropic structured output. Any failure — no parseable JSON, or a
-        # network/API error — degrades to a neutral verdict (with a warning) so the
-        # compile-score-revise loop keeps running on any endpoint.
+        # network/API error — degrades to an explicitly unsatisfied verdict (with
+        # a warning), so the loop can keep revising but can never mistake a skipped
+        # architectural review for approval.
         try:
             with self.client.messages.stream(
                 model=self.model,
@@ -1432,9 +1539,12 @@ class BarndoAgent:
                 messages=[{"role": "user", "content": content}],
                 thinking={"type": "adaptive"},
             ) as stream:
-                if on_activity is not None:
-                    _pump_activity(stream, on_activity)
-                msg = stream.get_final_message()
+                with _cancel_scope(stream, cancel):
+                    if on_activity is not None:
+                        _pump_activity(stream, on_activity, cancel=cancel)
+                    msg = stream.get_final_message()
+        except _DesignCancelled:
+            raise
         except Exception as exc:
             logger.warning(
                 "Design critique call failed on model %r (%s: %s) — continuing "
@@ -1442,7 +1552,7 @@ class BarndoAgent:
                 self.model, type(exc).__name__, str(exc)[:200],
             )
             return CritiqueSpec(
-                satisfied=result.ok,
+                satisfied=False,
                 assessment="(critique skipped: the critique call failed)",
                 rationale="",
                 skipped=True,
@@ -1455,7 +1565,7 @@ class BarndoAgent:
                 "without the critic.", self.model,
             )
             return CritiqueSpec(
-                satisfied=result.ok,
+                satisfied=False,
                 assessment="(critique skipped: no parseable critique returned)",
                 rationale="",
                 skipped=True,
@@ -1477,6 +1587,7 @@ class BarndoAgent:
         cancel: Callable[[], bool] | None = None,
         on_phase: Callable[[str, int], None] | None = None,
         on_activity: Callable[[str, int, str, str], None] | None = None,
+        extra_feedback: Callable[[CompileResult, ScoreReport, CritiqueSpec | None], Iterable[Issue]] | None = None,
     ) -> DesignResult:
         """Run the write → compile → score → critique → revise loop.
 
@@ -1515,8 +1626,9 @@ class BarndoAgent:
         edit trades a point of score for the user's request. Default ``None``
         leaves the loop unchanged.
 
-        ``cancel`` (keyword-only) is polled once at the top of every round; when
-        it returns true the loop stops and hands back the best iteration so far.
+        ``cancel`` (keyword-only) is polled between phases and watched during
+        active generation/critique streams; when it returns true the stream is
+        closed promptly and the loop hands back the best completed iteration.
         ``on_phase`` (keyword-only) is called with ``(phase, round)`` — phase one
         of ``"writing" | "compiling" | "critiquing"`` — as each round advances,
         so a UI can narrate the loop between the coarser ``on_step`` results.
@@ -1525,8 +1637,15 @@ class BarndoAgent:
         critiquing LLM calls — ``phase`` is ``"writing"`` or ``"critiquing"`` and
         ``channel`` is ``"thinking"`` (the model's reasoning) or ``"text"`` (the
         DSL being written / the critic's reply). It lets a UI show the agent
-        think and write live instead of waiting for the round to land. All three
-        default ``None`` (no behaviour change, no calls).
+        think and write live instead of waiting for the round to land.
+
+        ``extra_feedback`` (keyword-only) lets a harness fold deterministic
+        acceptance gates into the same diagnostic stream the compiler and critic
+        use. The callback receives the round's compile result, score, and critique
+        and returns synthetic :class:`Issue` objects. They are appended after
+        scoring, so they guide the next revision without perturbing the score
+        contract for the current source. All callbacks default ``None`` (no
+        behaviour change, no calls).
         """
         # Resolve the environment-backed defaults (an explicit arg always wins;
         # target_score=None stays "gate disabled" — only _UNSET means "default").
@@ -1546,6 +1665,7 @@ class BarndoAgent:
         # 0-score plateau built from failed rounds must not latch it on.
         restructure_next = False
         repair_next = 0
+        termination_reason = "max_iterations"
 
         # A 2-arg (channel, delta) adapter that stamps each streamed token with
         # the phase and round the design-level ``on_activity`` contract carries.
@@ -1576,10 +1696,20 @@ class BarndoAgent:
                 if critique and seed_step.result.ok and seed_step.score is not None:
                     if on_phase is not None:
                         on_phase("critiquing", 0)
-                    seed_crit = self.critique(
-                        seed_step.result, seed_step.score,
-                        on_activity=activity_for("critiquing", 0),
-                    )
+                    try:
+                        seed_crit = self.critique(
+                            seed_step.result, seed_step.score,
+                            on_activity=activity_for("critiquing", 0),
+                            cancel=cancel,
+                        )
+                    except _DesignCancelled:
+                        history.append(seed_step)
+                        return DesignResult(
+                            seed_step.source,
+                            seed_step.result,
+                            history,
+                            termination_reason="cancelled",
+                        )
                     seed_step.critique = seed_crit
                     _fold_critique(seed_step.result, seed_crit)
                     _fold_blocking(seed_step.result, seed_crit)
@@ -1635,6 +1765,7 @@ class BarndoAgent:
 
         for i in range(1, max_iterations + 1):
             if cancel is not None and cancel():
+                termination_reason = "cancelled"
                 break
             # Snapshot how THIS round writes, so the step (recorded below) reflects
             # how its source was generated. Repair wins over restructure: when the
@@ -1656,7 +1787,11 @@ class BarndoAgent:
                     on_activity=activity_for("writing", i),
                     restructure=restructured,
                     repair=repair_next if repaired else 0,
+                    cancel=cancel,
                 )
+            except _DesignCancelled:
+                termination_reason = "cancelled"
+                break
             except Exception as exc:
                 if not history:
                     raise
@@ -1665,6 +1800,7 @@ class BarndoAgent:
                     "best of the %d completed iteration(s).",
                     i, type(exc).__name__, str(exc)[:200], len(history),
                 )
+                termination_reason = "generation_failed"
                 break
             if on_phase is not None:
                 on_phase("compiling", i)
@@ -1696,7 +1832,11 @@ class BarndoAgent:
                         brief, prior=source, diagnostics=retry_feedback,
                         on_activity=activity_for("writing", i),
                         repair=max(len(result.errors), 1),
+                        cancel=cancel,
                     )
+                except _DesignCancelled:
+                    termination_reason = "cancelled"
+                    break
                 except Exception as exc:
                     logger.warning(
                         "In-round repair failed on iteration %d (%s: %s) — "
@@ -1715,13 +1855,25 @@ class BarndoAgent:
                         salvaged = result.ok
             score = design_score(result)
             crit = None
+            if cancel is not None and cancel():
+                termination_reason = "cancelled"
+                break
             # Gate the critique on ``ok``, not just a plan: a partially-recovered
             # plan WITH errors scores 0 and can never satisfy the critic, so a
             # reasoning-model critique call on it is burnt tokens.
             if critique and result.ok:
                 if on_phase is not None:
                     on_phase("critiquing", i)
-                crit = self.critique(result, score, on_activity=activity_for("critiquing", i))
+                try:
+                    crit = self.critique(
+                        result,
+                        score,
+                        on_activity=activity_for("critiquing", i),
+                        cancel=cancel,
+                    )
+                except _DesignCancelled:
+                    termination_reason = "cancelled"
+                    break
             # Fold the architect's review into the diagnostic stream as INFO, so
             # design feedback travels the same channel as the compiler's errors.
             # (After scoring: the critique is model-driven, the score is not.)
@@ -1734,6 +1886,8 @@ class BarndoAgent:
             # so it rides the feedback text without perturbing the score contract:
             # the plan may be a half-written stub, so tell the model to be terser.
             _fold_truncation(result, truncated)
+            if extra_feedback is not None:
+                result.diagnostics.extend(extra_feedback(result, score, crit))
 
             # The gating total is the TRUE score, clamped to BLOCKING_CLAMP when the
             # critic flagged a blocking structural issue. It drives the target gate
@@ -1757,7 +1911,11 @@ class BarndoAgent:
             # blocking structural issue caps the effective score below any target.
             if target_score is not None and gating_total < target_score:
                 done = False
-            if done or i == max_iterations:
+            if done:
+                termination_reason = "completed"
+                break
+            if i == max_iterations:
+                termination_reason = "max_iterations"
                 break
             # When THIS round failed to compile (even after the in-round retry
             # above spent its one attempt), the NEXT round is a REPAIR round:
@@ -1799,9 +1957,19 @@ class BarndoAgent:
             # Cancelled before any round was recorded: still return a well-formed
             # result (the refinement seed, or an empty compile) rather than raise.
             src = seed_source or ""
-            return DesignResult(src, compile_source(src, name=None), history)
+            return DesignResult(
+                src,
+                compile_source(src, name=None),
+                history,
+                termination_reason=termination_reason,
+            )
         best = _best_step(history)
-        return DesignResult(best.source, best.result, history)
+        return DesignResult(
+            best.source,
+            best.result,
+            history,
+            termination_reason=termination_reason,
+        )
 
 
 def _fold_critique(result: CompileResult, crit: CritiqueSpec | None) -> None:

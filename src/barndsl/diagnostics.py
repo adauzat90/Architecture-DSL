@@ -96,7 +96,7 @@ _CIRCULATION_CODES = frozenset({
     "CLOSET_ACCESS", "CLOSET_DOOR_SWING", "MASTER_ENSUITE", "BATH_DISTANCE",
     "BED_PRIVACY", "BED_SOUND", "GARAGE_BEDROOM", "GARAGE_PASSTHROUGH",
 })
-_PROGRAM_CODES = frozenset({"NO_PROGRAM", "PROGRAM_MISMATCH", "REQUIRE_REF", "REQUIRE_UNMET", "NO_BATH"})
+_PROGRAM_CODES = frozenset({"NO_PROGRAM", "PROGRAM_MISMATCH", "PROGRAM_AREA_OVERRUN", "BRIEF_ACCEPTANCE", "REQUIRE_REF", "REQUIRE_UNMET", "NO_BATH"})
 _GEOMETRY_PREFIXES = ("AREA", "ROOM", "FOOTPRINT", "OUT_OF_BOUNDS", "OVERLAP", "ENVELOPE")
 _QUALITY_CODES = frozenset({
     "DESIGN", "LOW_STORAGE", "NO_CLOSET", "CLOSET_DEPTH", "CLOSET_SHAPE", "CLOSET_WINDOW",
@@ -476,6 +476,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "every swing, so only an explicit `at x,y` can land here. Keep the "
            "swing clear — slide the fixture off the door approach, or swing the "
            "door the other way (or make it a pocket/sliding door)."),
+        _c("FIXTURE_OPENING", W, "Fixture blocks a doorway/opening",
+           "A wall-backed fixture or appliance sits across a door, cased opening, "
+           "entry or overhead door. Appliances need wall backing and utility "
+           "hookups, and openings must stay clear for traffic."),
         _c("FIXTURE_TOILET_CLEARANCE", W, "Toilet clearance below IRC R307.1",
            "An author-placed toilet has less than 15 in from its centreline to the "
            "nearest side wall or fixture, or less than 21 in of clear floor in "
@@ -612,6 +616,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "residential and 10/12/14 ft commercial, the tall panels a shop bay "
            "wants for lift/RV clearance). Snap it to the nearest so it's "
            "orderable off-the-shelf."),
+        _c("DOOR_WIDE_SWING", W, "Oversized single swing door",
+           "A very wide interior opening was written as one swing leaf. Use an "
+           "open/cased passage for open-plan public rooms, or declare a double/"
+           "french pair so the opening is represented as two leaves."),
         _c("OVERHEAD_ROOM", I, "Overhead door in a living space",
            "An overhead (sectional garage) door is on a room that isn't a garage "
            "or shop — unusual for a living space. Either the room should be a "
@@ -885,6 +893,10 @@ REGISTRY: dict[str, CodeInfo] = dict(
         # --- design quality (advisory) --------------------------------------
         _c("KITCHEN_FLOW", I, "Kitchen not open to living/dining",
            "An idiomatic barndo opens the kitchen to a dining or living area."),
+        _c("KITCHEN_PASSTHROUGH", W, "Kitchen used as public circulation",
+           "The kitchen is the only route between dining and a living/great/rec "
+           "room, so everyday traffic crosses the work zone. Open those public "
+           "rooms directly to each other or route circulation around the kitchen."),
         _c("BED_PRIVACY", I, "Bedroom opens onto a public room",
            "A bedroom opening straight onto living/kitchen/dining lacks privacy; "
            "buffer it with a hallway."),
@@ -990,17 +1002,70 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "abuts it, or one abuts but with no door into it (e.g. a neighbour's "
            "closet)."),
         _c("LOW_STORAGE", I, "Storage-poor plan",
-           "Dedicated storage (closets + pantry) is below a small fraction of the "
+           "Dedicated storage (closets + pantry + storage rooms) is below a small fraction of the "
            "conditioned floor area — the whole-house storage the review flagged as "
            "invisible, now visible. Conservative floor (below the worked gallery), "
            "so it only catches a home with almost no closets. Declare a specific "
            "target with `program ... storage <sqft>`."),
+        _c("SAFE_ROOM_WINDOW", W, "Safe room has a window",
+           "A safe/storm room should not have ordinary exterior glazing: windborne "
+           "debris and pressure failure defeat the protected-room intent."),
+        _c("SAFE_ROOM_EXTERIOR", W, "Safe room on exterior wall",
+           "A protected room works best buried in the interior. Exterior walls take "
+           "the storm/debris load unless specifically hardened."),
+        _c("SAFE_ROOM_SIZE", W, "Safe room too small or skinny",
+           "A safe/storm room needs enough clear floor for occupants and a usable "
+           "door swing; a long 4-ft strip reads as a closet/corridor label, not a shelter."),
+        _c("SAFE_ROOM_ACCESS", W, "Safe room access problem",
+           "A safe/storm room should have a real door and should not be a "
+           "pass-through corridor to other rooms."),
+        _c("MECH_CLEARANCE", W, "Mechanical room too small",
+           "A mechanical room needs working clearance for equipment service — too "
+           "small and it becomes an inaccessible utility closet."),
+        _c("MECH_ACCESS", W, "Mechanical room access problem",
+           "Mechanical equipment needs a real service door and should not sit on the "
+           "only circulation route between other rooms."),
+        _c("MECH_BEDROOM", W, "Mechanical room opens to bedroom",
+           "Avoid a direct mechanical-room door into a sleeping room: noise, service "
+           "traffic and combustion/equipment risk belong off hall/utility space."),
+        _c("FOYER_FLOW", W, "Foyer entry flow problem",
+           "A foyer should be the public arrival point: it wants an exterior entry, "
+           "standing room, and a connection to the public core rather than only "
+           "private rooms."),
+        _c("FOYER_SHAPE", I, "Foyer shaped like a corridor",
+           "A foyer/entry should be a compact arrival space, not a long hallway "
+           "running the length of the house."),
+        _c("STORAGE_SHAPE", I, "Storage room awkwardly shaped",
+           "A storage room with walk-in area but a long skinny footprint wastes "
+           "floor as aisle; make it compact or relabel it as hallway/cabinetry."),
+        _c("STORAGE_ACCESS", W, "Storage room access problem",
+           "Storage should have a usable door/opening. A shallow reach-in needs a "
+           "wide, centred door so stored goods aren't stranded beyond arm's reach."),
+        _c("GREAT_ROOM_SCALE", I, "Great room lacks great-room scale",
+           "A great room should be larger and taller/opener than an ordinary living "
+           "room; otherwise the label overstates the space."),
+        _c("GREAT_ROOM_FLOW", I, "Great room not tied to public core",
+           "A great room should anchor the shared living core, connected/open to "
+           "kitchen or dining rather than isolated like a separate room."),
+        _c("FLEX_FUTURE_BED", I, "Flex room not bedroom-ready",
+           "A flex room often becomes a guest room or bedroom later; egress and a "
+           "closet make that conversion practical."),
+        _c("REC_ROOM_SCALE", I, "Rec room too small",
+           "A recreation/game room needs more floor area than a small office or den "
+           "to hold activity, furniture and circulation."),
+        _c("REC_ROOM_NOISE", I, "Rec room shares bedroom wall",
+           "A recreation room is a noisy public space; a direct party wall with a "
+           "bedroom needs a buffer such as hall, closet or storage."),
         _c("MASTER_ENSUITE", I, "No private ensuite",
            "On a floor with two or more full bathrooms, no bedroom has a private "
            "(ensuite) bath — every bath is shared. The primary bedroom should get "
            "its own."),
         _c("ROOM_PROPORTION", I, "Awkwardly elongated room",
            "A habitable room is more than ~3:1 long-to-short and hard to furnish."),
+        _c("ROOM_SKINNY", W, "Room extremely long and skinny",
+           "A non-circulation room is extremely elongated, so it reads as leftover "
+           "corridor space rather than a usable room. Split it, widen it, or relabel "
+           "it as circulation/storage if that is the intent."),
         _c("LAUNDRY_FIT", W, "Laundry can't hold its washer/dryer",
            "The laundry's clear interior can't fit a washer and dryer (2.25 ft "
            "deep) with a 3 ft working aisle to load them — about 5.5 ft of clear "
@@ -1037,6 +1102,9 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "the garage."),
         _c("GARAGE_NO_ENTRY", I, "Garage/shop has no people-door",
            "A garage or shop abuts the house but has no interior door into it."),
+        _c("GARAGE_VEHICLE_DOOR", W, "Garage/shop has no vehicle door",
+           "A garage/shop bay needs an exterior overhead/sectional door; otherwise "
+           "it is trapped behind the dwelling and cannot function as a vehicle or equipment bay."),
         _c("GARAGE_SEPARATION", I, "Garage/dwelling fire separation required",
            "A garage or shop shares a wall with conditioned space, or has habitable "
            "space above it. IRC R302.6 requires the common wall to be a fire "
@@ -1063,6 +1131,16 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "The rooms placed don't match the declared `program`: exact bed/bath "
            "counts, an at-least requirement for another room type (e.g. "
            "`1 laundry`), or a minimum conditioned `area`."),
+        _c("PROGRAM_AREA_OVERRUN", I, "Drawn area exceeds declared program area",
+           "The source declares a `program ... area` value but the resolved "
+           "conditioned interior is substantially larger. `program area` still "
+           "acts as a minimum for compatibility; this nudge catches the common "
+           "case where an author/model meant it as a target from the brief."),
+        _c("BRIEF_ACCEPTANCE", I, "Agent candidate misses harness acceptance",
+           "A deterministic agent harness folded an acceptance shortfall (missing "
+           "program rooms, area band, minimum score, or critic approval) into the "
+           "diagnostic stream so the next LLM revision sees it like compiler "
+           "feedback. It is not emitted by normal compilation."),
         _c("REQUIRE_UNMET", W, "Plan doesn't satisfy a `require` statement",
            "The compiled geometry doesn't satisfy a declared spatial requirement: "
            "`adjacent` needs a shared wall on the same level (purely geometric — "

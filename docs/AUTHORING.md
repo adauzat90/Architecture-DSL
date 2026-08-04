@@ -46,7 +46,9 @@ you can check the program against the brief; `--metrics` gives the full takeoff.
 To make that check **mechanical**, declare the intended counts with a `program`
 statement (e.g. `program 3 bed 2 bath`): the validator then warns
 (`PROGRAM_MISMATCH`) if the rooms you placed don't match — so a dropped bedroom
-can't slip through a clean compile.
+can't slip through a clean compile. `program ... area <sqft>` remains a minimum
+contract for compatibility, but a large overshoot emits `PROGRAM_AREA_OVERRUN` so
+an area from the brief is not silently treated as just decorative text.
 
 `require` extends the same pattern from counts to **spatial** intent — declare
 the brief's constraints in the source and every compile re-checks them:
@@ -166,9 +168,9 @@ alarm smoke|co|smoke_co in <room> [at <x>,<y>]   # optional; a smoke/CO alarm (r
 frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
 ```
 
-- `<type>`: `living, kitchen, dining, bedroom, bathroom, half_bath, laundry,
-  utility, hallway, closet, pantry, mudroom, office, loft, garage, shop, porch,
-  other`.
+- `<type>`: `living, great_room, kitchen, dining, bedroom, bathroom, half_bath,
+  laundry, utility, mechanical, hallway, foyer, closet, pantry, storage, mudroom,
+  office, flex, rec_room, loft, safe_room, garage, shop, porch, other`.
 - `<wall>`: `north | south | east | west`.
 - `<offset>` is feet from the wall's **start corner** (its south or west end) to
   the near edge of the opening. The opening must fit: `offset + width <= wall
@@ -565,8 +567,9 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - Numbers are finite; ids/names are non-empty.
 
 **Warnings (should address):**
-- 8% natural-light glazing for habitable rooms (`living, kitchen, dining,
-  bedroom, office, loft`) — windows must be on **exterior** walls to count.
+- 8% natural-light glazing for habitable rooms (`living, great_room, kitchen,
+  dining, bedroom, office, flex, rec_room, loft`) — windows must be on
+  **exterior** walls to count.
 - `VENT_AREA` — 4% **openable** window area (half the 8% light floor) for
   natural ventilation (IRC R303.1). A `fixed` window daylights but opens nothing,
   so it doesn't count here — make one operable or confirm mechanical ventilation.
@@ -633,6 +636,12 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `PROGRAM_MISMATCH` — the rooms placed don't match a declared `program` (e.g.
   `program 3 bed` but only two bedrooms exist). The plan is still valid/buildable
   — it's a contract check, not a code error — so it's a warning.
+- `PROGRAM_AREA_OVERRUN` — the drawn conditioned area is substantially larger
+  than `program ... area`. The area clause is still a minimum, but this catches
+  the common case where the brief's square footage was intended as a target.
+- `KITCHEN_PASSTHROUGH` — the kitchen is the only route between dining and a
+  living/great/rec room, so through-traffic crosses the work zone. Open the
+  public rooms directly to each other or route a hall around the kitchen.
 - `REQUIRE_UNMET` — the compiled geometry doesn't satisfy a declared `require`
   (a required adjacency/separation/exterior wall/minimum area). Same contract
   logic as `PROGRAM_MISMATCH`, so a warning; a `require` naming an unknown room
@@ -653,6 +662,8 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `GARAGE_DOOR` — a door between a `garage`/`shop` and the dwelling must be
   self-closing and 20-minute fire-rated (or solid-core / solid-wood ≥ 1-3/8 in
   thick — IRC R302.5.1). Anchored on the `door` statement itself.
+- `GARAGE_VEHICLE_DOOR` — a `garage`/`shop` bay has no exterior overhead door,
+  so it is trapped behind the dwelling and cannot function as a vehicle/equipment bay.
 - `CLOSET_DOOR_SWING` — a swing door serving a `closet` shallower than the door is
   wide, so the leaf can't fully open; make it a bypass/sliding or bifold door.
 - `WATER_HEATER_PLACEMENT` — a `water_heater` fixture in a garage/shop (ignition
@@ -665,9 +676,15 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   plumbing wall; 3+ that share no walls means longer, costlier runs.
 - `NO_CLOSET` — a bedroom with no closet reached *by a door* from it.
 - `ROOM_PROPORTION` — a habitable room more elongated than ~3:1 is hard to
-  furnish.
+  furnish. `ROOM_SKINNY` escalates extreme non-circulation strips (~4:1+) to a
+  warning because they read as leftover corridor space rather than usable rooms.
 - `ROOM_TIGHT` — a room below the floor its use needs: kitchen ~70, full bath ~48
   (≥ 6 ft short side), half bath ~30 (≥ 5 ft) sq ft.
+- New semantic room-type nudges: `SAFE_ROOM_WINDOW` / `SAFE_ROOM_EXTERIOR` /
+  `SAFE_ROOM_SIZE` / `SAFE_ROOM_ACCESS`; `MECH_CLEARANCE` / `MECH_ACCESS` /
+  `MECH_BEDROOM`; `FOYER_FLOW` / `FOYER_SHAPE`; `STORAGE_SHAPE` /
+  `STORAGE_ACCESS`; `GREAT_ROOM_SCALE` / `GREAT_ROOM_FLOW`; `FLEX_FUTURE_BED`;
+  and `REC_ROOM_SCALE` / `REC_ROOM_NOISE` keep the new labels honest.
 - `HALL_TIGHT` — a hallway at the 3 ft code minimum; 4 ft is comfortable.
 - `HALL_DEADEND` — a hall that serves ≤ 1 room, **or** runs well past its last
   **doorway** into a blank wall (a dead-end stub). Put the end room's door *at*
@@ -686,7 +703,9 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
 - `DOOR_CENTERED` — a swing door floating mid-wall; back it to a corner (`offset`)
   so one side keeps an unbroken wall to furnish.
 - `DOOR_SIZE` — a swing door off the stock leaf sizes; use `open` for a wide
-  cased passage instead of a 96 in "door".
+  cased passage instead of a 96 in "door". `DOOR_WIDE_SWING` catches a wide
+  single swing leaf; use `open` between public rooms or `double`/`french` for a
+  real pair of leaves.
 - `WINDOW_PARTITION` — a window butting an interior partition where it meets the
   exterior wall; pull it toward the centre or a building corner, and space windows
   evenly.
@@ -699,8 +718,9 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   people-door into it (you'd have to go outside to get in).
 - `AREA_UNUSED` — a lot of footprint is unallocated.
 - Placed-fixture nudges (authored `fixture` pieces only — the auto-placer fits its
-  own seeds): `FIXTURE_OOB` / `FIXTURE_OVERLAP` / `FIXTURE_DOOR` (past the room,
-  overlapping, in a door swing); `FIXTURE_FRONT` — the clear-floor strip in front
+  own seeds): `FIXTURE_OOB` / `FIXTURE_OVERLAP` / `FIXTURE_DOOR` /
+  `FIXTURE_OPENING` (past the room, overlapping, in a door swing, or across a
+  doorway/opening); `FIXTURE_FRONT` — the clear-floor strip in front
   of a fixture (or a walkway beside a free-standing piece) is blocked;
   `FIXTURE_BACKING` — a wall-backed piece (vanity, range, dresser…) floating off
   every wall; `FIXTURE_ROOM_TYPE` — a fixture in a surprising room type (a tub in a

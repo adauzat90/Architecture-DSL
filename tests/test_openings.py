@@ -64,6 +64,28 @@ entry living south width 3 offset 8
     assert r.plan.interior_doors[0].width == DEFAULT_OPENING_WIDTH
 
 
+def test_wide_single_swing_door_warns_but_open_and_double_do_not():
+    base = """\
+plan "Wide door"
+envelope 40 x 24
+ceiling 9
+room kitchen: kitchen at 0,0  size 18 x 24
+room living:  living  at 18,0 size 22 x 24
+{opening}
+entry living south width 3 offset 8
+"""
+    bad = compile_source(base.format(opening="door kitchen - living width 6"))
+    wide = [d for d in bad.warnings if d.code == "DOOR_WIDE_SWING"]
+    assert wide
+    assert "open kitchen - living" in (wide[0].hint or "")
+
+    cased = compile_source(base.format(opening="open kitchen - living width 6"))
+    assert "DOOR_WIDE_SWING" not in _codes(cased, "warning")
+
+    double = compile_source(base.format(opening="door kitchen - living double width 6"))
+    assert "DOOR_WIDE_SWING" not in _codes(double, "warning")
+
+
 def test_open_connects_rooms_for_reachability():
     # `living` is the only room with an entry; `kitchen` is reachable only via
     # the open passage. If `open` didn't join them, kitchen would be NO_ACCESS.

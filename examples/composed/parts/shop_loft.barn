@@ -8,7 +8,8 @@ param loft_depth = 16
 room shop: shop at 0,0 size 24 x 24
 room loft: loft at 0,0 size 24 x loft_depth level 1
 stair st at 19,0 size 4 x 15 from 0 to 1
-window shop south width 10 offset 4
+door shop south overhead width 9 height 10 offset 0
+window shop south width 10 offset 10
 window shop east width 10 offset 8
 window loft south width 9 offset 3
 window loft east width 9 offset 4

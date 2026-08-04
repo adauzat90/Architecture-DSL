@@ -55,6 +55,44 @@ def test_unknown_room_type_is_flagged_with_hint():
     assert "living" in (bad[0].hint or "")
 
 
+def test_added_room_types_are_accepted():
+    src = """
+plan "Types"
+envelope 90 x 20
+room foyer: foyer at 0,0 size 10 x 10
+room great: great_room at 10,0 size 10 x 10
+room mech: mechanical at 20,0 size 10 x 10
+room store: storage at 30,0 size 10 x 10
+room flex: flex at 40,0 size 10 x 10
+room rec: rec_room at 50,0 size 10 x 10
+room safe: safe_room at 60,0 size 10 x 10
+entry foyer south width 3 offset 2
+door foyer - great width 3
+door great - mech width 3
+door mech - store width 3
+door store - flex width 3
+door flex - rec width 3
+door rec - safe width 3
+window great south width 4 offset 3
+window flex south width 4 offset 3
+window rec south width 4 offset 3
+"""
+    result = compile_source(src)
+    assert result.ok, result.report()
+    assert [
+        result.plan.room(rid).type.value
+        for rid in ("foyer", "great", "mech", "store", "flex", "rec", "safe")
+    ] == [
+        "foyer",
+        "great_room",
+        "mechanical",
+        "storage",
+        "flex",
+        "rec_room",
+        "safe_room",
+    ]
+
+
 def test_unknown_statement_is_flagged():
     # `wall` became a real statement, so use a keyword that stays unknown.
     result = compile_source("envelope 20 x 20\nfence a north\n")

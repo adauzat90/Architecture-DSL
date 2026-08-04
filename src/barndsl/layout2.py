@@ -53,7 +53,13 @@ from .layout import (
 )
 
 #: Rooms forming the open core; they tile the first band and share vertical walls.
-_PUBLIC = (RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING)
+_PUBLIC = (
+    RoomType.LIVING,
+    RoomType.GREAT_ROOM,
+    RoomType.KITCHEN,
+    RoomType.DINING,
+    RoomType.REC_ROOM,
+)
 #: Circulation; may be interior (no daylight needed) and sits between the bands.
 _CIRCULATION = (RoomType.HALLWAY,)
 #: Large non-habitable spaces that get their own band, so their bulk doesn't set
@@ -116,7 +122,15 @@ class RoomSpec2:
 def _default_min_dim(t: RoomType) -> float:
     if t is RoomType.HALLWAY:
         return feet(3)
-    if t in (RoomType.BEDROOM, RoomType.LIVING, RoomType.KITCHEN, RoomType.DINING):
+    if t in (
+        RoomType.BEDROOM,
+        RoomType.LIVING,
+        RoomType.GREAT_ROOM,
+        RoomType.KITCHEN,
+        RoomType.DINING,
+        RoomType.FLEX,
+        RoomType.REC_ROOM,
+    ):
         return feet(8)
     return feet(5)
 
@@ -1361,7 +1375,14 @@ def _pick_connected_entry(plan: Barndominium) -> str | None:
         if len(comp) > len(best_comp):
             best_comp = comp
 
-    pref = {RoomType.LIVING: 0, RoomType.KITCHEN: 1, RoomType.DINING: 2, RoomType.MUDROOM: 3}
+    pref = {
+        RoomType.FOYER: 0,
+        RoomType.MUDROOM: 1,
+        RoomType.GREAT_ROOM: 2,
+        RoomType.LIVING: 3,
+        RoomType.KITCHEN: 4,
+        RoomType.DINING: 5,
+    }
     candidates = [
         r
         for r in plan.rooms

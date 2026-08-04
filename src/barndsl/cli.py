@@ -511,7 +511,10 @@ def _cmd_design(args: argparse.Namespace) -> int:
 
     _print_design_seed_note(seed, result)
     _print_design_result(result, args.out)
-    return 0 if result.result.ok else 1
+    termination = getattr(result, "termination_reason", "unknown")
+    degraded = bool(getattr(result, "review_degraded", False))
+    complete = termination in {"completed", "unknown"} and not degraded
+    return 0 if result.result.ok and complete else 1
 
 
 def _load_agent_api():
@@ -594,6 +597,10 @@ def _print_design_result(result, out: str) -> None:
         f"iteration {result.best_iteration}, score {result.score.total:g}/100) ---"
     )
     print(result.source.rstrip())
+    reason = getattr(result, "termination_reason", "unknown")
+    degraded = bool(getattr(result, "review_degraded", False))
+    if reason != "unknown" or degraded:
+        print(f"\nLoop outcome: {reason}" + (" (architectural review degraded)" if degraded else ""))
     print("\n--- compiler report ---")
     print(result.result.report())
     if result.plan is not None:
