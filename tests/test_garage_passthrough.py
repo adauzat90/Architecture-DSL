@@ -489,7 +489,7 @@ window bed north width 4 offset 2
 
 def test_proportion_thresholds_track_the_room_type():
     # Bedroom AND office get the tight 1.8:1 cap (each holds one big furniture
-    # piece plus a walk-around, and the score already dings past 1.6:1); dining
+    # piece plus a walk-around, and the score already dings past 1.7:1); dining
     # keeps the generic 3:1 default, so the same 2.0:1 shape stays silent as a
     # dining room while flagging as an office or a bedroom.
     src = """\

@@ -151,8 +151,9 @@ MAX_GENERAL_ROOM_ASPECT = 4.0  # severe long-skinny warning for most non-circula
 #: score is penalising. An office is the same story with a desk: it holds a desk,
 #: a chair-pull and a walk-around (often a guest chair), so a 2:1+ office is a
 #: corridor with a desk — and the score already penalises any habitable room past
-#: 1.6:1, so without this override an elongated office loses points silently with
-#: no lint explaining why. Other habitable rooms keep the 3:1 default.
+#: GOOD_ASPECT (1.7:1), so without this override an elongated office loses points
+#: silently with no lint explaining why. Keeping these at 1.8 leaves only a 0.1
+#: band of silent deduction. Other habitable rooms keep the 3:1 default.
 MAX_ROOM_ASPECT_BY_TYPE: dict[RoomType, float] = {
     RoomType.BEDROOM: 1.8,
     RoomType.OFFICE: 1.8,

@@ -293,7 +293,9 @@ HOW AN ARCHITECT THINKS (do this before writing rooms):
    closets, pantry, utility inside. Give the great room two exposures (windows
    on two walls). Put the primary suite at the OPPOSITE end from the kids'
    rooms; don't back its head wall onto the garage or the living-room TV wall.
-   Aim rooms near 1.2:1-1.6:1 - never a tunnel (a 2:1+ room won't furnish).
+   Aim rooms near 1.2:1-1.7:1 - never a tunnel (a 2:1+ room won't furnish).
+   The classical ratios all sit in that band (4:3, 3:2, 5:3); landing on one
+   is free, and the score starts charging past 1.7:1.
 4. OPEN the core, door the private. `open` living-kitchen-dining into one
    great room (vault it under the ridge with `vaulted` for the barndo look);
    give every bath and bedroom a real `door` for privacy. The kitchen is a

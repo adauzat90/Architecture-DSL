@@ -165,3 +165,28 @@ TURNDOWN_DEPTH = 12.0 / 12.0
 #: Plan size and depth of a square pad footing under a post.
 FOOTING_SIZE = 2.0
 FOOTING_DEPTH = 12.0 / 12.0
+
+# --- room proportion (design quality, not code) -------------------------------
+# Unlike everything above, this is a taste threshold, not an IRC minimum. It
+# lives here for the same anti-drift reason: it was defined twice, once in
+# ``score.py`` (what a plan is judged by) and once in ``layout2.py`` (what the
+# solver optimises toward). Two copies meant the solver could hill-climb toward
+# a bar the scorer did not use.
+
+#: Elongation (long:short) at which a habitable room starts to cost points.
+#: Set just above the classical set of preferred room ratios so that every one
+#: of them sits inside the free band: 1:1, 4:3 (1.333), √2 (1.414), 3:2 (1.500),
+#: the golden section (1.618) and 5:3 (1.667). The previous 1.6 clipped the top
+#: two — a true golden rectangle was penalised by its own namesake bar, and
+#: Palladio's 5:3 lost points outright. Past this the room is elongated on any
+#: reading, not merely off-system. Raising it does not create a blind spot: the
+#: lint's per-type ceilings (``MAX_ROOM_ASPECT_BY_TYPE``, 1.8 for bedrooms and
+#: offices) now sit 0.1 above the scoring bar rather than 0.2, so the band where
+#: a room loses points with no diagnostic explaining why is *narrower* than before.
+GOOD_ASPECT = 1.7
+
+#: The preferred ratios themselves, for rules that reward landing *on* a system
+#: rather than merely avoiding elongation. Unused by the current score; kept
+#: here so a future ``ROOM_RATIO_OFF_SYSTEM`` check and the scorer agree on the
+#: set. Snap tolerance of ~0.04 is realistic — on a 12 ft room that is ±0.5 ft.
+PREFERRED_ROOM_RATIOS = (1.0, 4 / 3, 2**0.5, 1.5, 1.618, 5 / 3, 2.0)

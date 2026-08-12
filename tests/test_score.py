@@ -15,6 +15,7 @@ import pytest
 
 from barndsl import compile_file, compile_source, design_score
 from barndsl.cli import main
+from barndsl.constants import GOOD_ASPECT
 
 GALLERY = Path(__file__).resolve().parent.parent / "examples" / "gallery"
 PLANS = sorted(GALLERY.glob("*.barn"))
@@ -151,7 +152,9 @@ def test_proportion_detail_names_the_elongated_room_with_its_ratio():
     report = design_score(compile_source(FIXED))
     assert report.components["proportion"] > 0
     assert "bed is 2.0:1" in report.details["proportion"]
-    assert "1.6:1" in report.details["proportion"]  # the target it overshoots
+    # The target it overshoots, read from the constant so a recalibration of the
+    # bar can't leave this assertion silently pinning the old value.
+    assert f"{GOOD_ASPECT:g}:1" in report.details["proportion"]
 
 
 def test_proportion_detail_orders_worst_first_and_caps_the_list():

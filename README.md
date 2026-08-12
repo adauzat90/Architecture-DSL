@@ -755,7 +755,7 @@ design score** — the "how good is it?" number to go with the compiler's "what'
 wrong?". A plan with errors scores 0 (unbuildable); warnings and info nudges
 deduct fixed points (8 and 2 each, capped); four continuous terms then refine —
 unassigned footprint, hallway share of interior area, habitable-room elongation
-past 1.6:1, and glazing shortfall below the 8% daylight floor. Same plan in,
+past 1.7:1, and glazing shortfall below the 8% daylight floor. Same plan in,
 same score out (no randomness, no LLM), and `--json` breaks the total into its
 per-component deductions, so an agent can hill-climb it: compare candidates,
 keep the best, catch a regression. The full formula is the module docstring in

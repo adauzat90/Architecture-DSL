@@ -76,13 +76,32 @@ the agent's optimization gradient:
 
 Confirmed well-calibrated (do not change): `COMFORT_BAY = 12.0`,
 `MIN_SHOP_DEPTH`/`SHOP_COMFORT_DEPTH` (12/20 ft), `DAYLIGHT_RATIO` and
-`NATURAL_VENT_RATIO` (IRC R303.1). Worth revisiting: `GOOD_ASPECT = 1.6`
-slightly penalizes Palladio's 5:3 (raise free band to ~1.70, bonus near
-preferred ratios); `MIN_GREAT_ROOM_AREA = 200` is low for a combined
-kitchen/dining/living volume (~350 sq ft functional floor);
-`LOW_STORAGE_RATIO = 0.025` is a closet ratio, not bulk storage;
-`MIN_MECH_AREA = 30` is a floor — ~60 sq ft is the realistic target when the
-shop is conditioned.
+`NATURAL_VENT_RATIO` (IRC R303.1).
+
+Of the constants the researchers flagged, **only one was actually
+mis-calibrated.** The rest are correct *floors* whose gap is a missing comfort
+tier — the fix is a new info rule, not a different number:
+
+| Constant | Verdict | Action |
+| --- | --- | --- |
+| `GOOD_ASPECT` | genuinely mis-set at 1.6 | **recalibrated to 1.7** (done) |
+| `MIN_GREAT_ROOM_AREA = 200` | correct warning floor | add a ~350 sq ft comfort info |
+| `LOW_STORAGE_RATIO = 0.025` | correct, deliberately conservative closet ratio | add a separate `BULK_STORAGE` info |
+| `MIN_MECH_AREA = 30` | correct floor | add `MECH_AREA_RATIO` info (~60 sq ft when the shop is conditioned) |
+
+**`GOOD_ASPECT` 1.6 → 1.7 (implemented).** At 1.6 the bar sat *below* the
+golden section it was chosen to approximate (1.618), so a true golden rectangle
+was penalized by its own namesake, and Palladio's 5:3 (1.667) lost points
+outright. 1.7 puts the whole classical set — 1:1, 4:3, √2, 3:2, φ, 5:3 —
+inside the free band. Measured impact on the gallery corpus: three of six plans
+move, all upward, mean +0.20 and max +0.40 points.
+
+The change also uncovered a latent bug the researchers did not see: the
+threshold was declared **twice**, in `score.py` and again as `_GOOD_ASPECT` in
+`layout2.py`, so the solver could have been hill-climbing toward a bar the
+scorer no longer used. It now lives once in `constants.py` and both import it.
+Anything else that recalibrates a shared threshold should check for the same
+pattern first.
 
 ### Named high-yield rules
 

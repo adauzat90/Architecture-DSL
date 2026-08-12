@@ -41,6 +41,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .constants import GOOD_ASPECT
 from .elements import HABITABLE_TYPES, Barndominium, RoomType, feet, inches
 from .geometry import shared_edge
 from .layout import (
@@ -259,13 +260,12 @@ def _prepare(brief: LayoutBrief2):
     return specs, adj
 
 
-#: Habitable rooms more elongated than this (long side / short side) read as
-#: awkward; the scorer penalises the excess so squarer layouts win.
-_GOOD_ASPECT = 1.6
-
-
 def _proportion_penalty(plan: Barndominium) -> float:
-    """How badly habitable rooms are elongated past :data:`_GOOD_ASPECT`.
+    """How badly habitable rooms are elongated past
+    :data:`~barndsl.constants.GOOD_ASPECT`.
+
+    The bar is shared with :mod:`barndsl.score` rather than restated here, so the
+    solver optimises toward exactly the ratio the plan is later judged against.
 
     Sums the aspect excess over every habitable room (bedrooms weighted double —
     a long, thin bedroom is the most noticeable). Zero when every such room is
@@ -279,7 +279,7 @@ def _proportion_penalty(plan: Barndominium) -> float:
         if side <= 0:
             pen += 10.0
             continue
-        excess = max(0.0, max(r.width, r.length) / side - _GOOD_ASPECT)
+        excess = max(0.0, max(r.width, r.length) / side - GOOD_ASPECT)
         pen += (2.0 if r.type is RoomType.BEDROOM else 1.0) * excess
     return pen
 

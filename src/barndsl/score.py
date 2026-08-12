@@ -21,9 +21,11 @@ where each component is a penalty (points deducted):
                  concentrated room-sized void also costs up to 6 even above 85%.
     circulation  up to 6 — hallway share of interior area; free up to 15%,
                  full penalty at 35% (a plan that is mostly corridor).
-    proportion   up to 8 — habitable-room elongation past 1.6:1, bedrooms counted
+    proportion   up to 8 — habitable-room elongation past 1.7:1, bedrooms counted
                  double and worst-dominated (0.6·worst + 0.4·mean) so a lone tunnel
-                 room can't be averaged away by squarer neighbours.
+                 room can't be averaged away by squarer neighbours. The bar clears
+                 the classical preferred ratios (4:3, √2, 3:2, φ, 5:3) so a room on
+                 a proportioning system is never penalised for being on it.
     daylight     up to 8 — mean habitable-room glazing shortfall below the
                  IRC R303 8%-of-floor minimum (full penalty at zero glazing).
     topology     up to 15 — fraction of bedrooms whose only interior route to the
@@ -55,6 +57,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .constants import GOOD_ASPECT
 from .elements import GARAGE_TYPES, HABITABLE_TYPES, Barndominium, RoomType
 from .validation import MIN_VOID_NOTE, Severity, _largest_void
 
@@ -82,8 +85,10 @@ CIRCULATION_WEIGHT = 6.0  #: max penalty for hallway-heavy plans
 CIRCULATION_FREE = 0.15  #: hallway share of interior area with no penalty
 CIRCULATION_WORST = 0.35  #: share at/above which the full penalty applies
 PROPORTION_WEIGHT = 8.0  #: max penalty for elongated habitable rooms
-GOOD_ASPECT = 1.6  #: elongation past this ratio starts to cost (ROOM_PROPORTION's bar)
-WORST_ASPECT_EXCESS = 1.5  #: excess (i.e. 3.1:1) at which the full penalty applies
+# GOOD_ASPECT (the bar elongation starts to cost past) is imported from
+# .constants — the solver in layout2 optimises toward the same value, and it
+# used to be declared separately in both places.
+WORST_ASPECT_EXCESS = 1.5  #: excess (i.e. 3.2:1) at which the full penalty applies
 BEDROOM_EXCESS_WEIGHT = 2.0  #: bedrooms count double in proportion (like layout2)
 DAYLIGHT_WEIGHT = 8.0  #: max penalty for under-glazed habitable rooms
 DAYLIGHT_RATIO = 0.08  #: IRC R303 glazing floor: 8% of habitable floor area
