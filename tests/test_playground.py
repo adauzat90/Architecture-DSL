@@ -1010,6 +1010,44 @@ def test_app_shows_elevations_as_a_canvas_view_with_a_face_picker():
     assert "http://" not in html and "https://" not in html
 
 
+def test_app_ships_the_visual_system_pass():
+    # One type scale and one button recipe in two sizes, two radii, severity as
+    # shape as well as colour, visible keyboard focus, and reduced motion honoured.
+    html = render_app(CLEAN)
+    for token in ("--r:7px; --r-lg:10px;", "--fs:12.5px;", "min-height:30px; padding:0 11px; border-radius:var(--r)",
+                  ".count.warning::before", ".count.error::before", ".gutter .gln.has-warning .dot",
+                  ":focus-visible { outline:2px solid var(--accent2)", "prefers-reduced-motion: reduce"):
+        assert token in html, token
+    # informational text is muted, never faint
+    assert ".agent-sub, .edit-note, .agent-note, .od-or, .examples, .diag-row .loc" in html
+    assert "http://" not in html and "https://" not in html
+
+
+def test_app_audit_fixes_hold():
+    # The audit after the re-layout: hidden always wins over the button recipe,
+    # a new plan starts unselected, the selection survives leaving edit mode,
+    # badges and the score chip are keyboard reachable, the score popover anchors
+    # to its chip, badges/popover/ring never print, the compass picks a face,
+    # a failed compile says the drawing is the last good one, errors wear a
+    # diamond on the badge, and the drawer may grow over the canvas.
+    html = render_app(CLEAN)
+    for token in ("[hidden] { display:none !important; }",
+                  "selectRoom(null, 'load'); closeDiagPop();",
+                  "selectRoom(selectedRoomId, 'edit')",
+                  "g.setAttribute('role', 'button'); g.setAttribute('tabindex', '0');",
+                  "scoreChip.setAttribute('role', 'button');",
+                  "scorePop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 280)) + 'px';",
+                  ".diag-badge, .diag-pop, .sel-ring, .ac-pop, .find-bar, .menu-list, .views-head, .views-foot",
+                  ".views-compass .edge[data-side]",
+                  "showing the last good plan",
+                  "sev === 'error' ? '◆ ' : sev === 'warning' ? '▲ ' : ''",
+                  "rightEl.clientWidth * 0.72",
+                  "This is an example plan.",
+                  "@media (max-width:720px)"):
+        assert token in html, token
+    assert "http://" not in html and "https://" not in html
+
+
 def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
     html = render_app(CLEAN)
     assert 'id="theme-btn"' in html

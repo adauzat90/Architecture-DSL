@@ -1533,8 +1533,8 @@ function mountScene(canvas, labels, togglesEl) {
   walkBtn.title = 'First-person walkthrough (Enter). Esc to exit.';
   walkBtn.style.cssText = 'position:absolute;bottom:12px;right:14px;z-index:6;'
     + 'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;'
-    + 'padding:7px 15px;border-radius:20px;border:1px solid rgba(0,0,0,.14);'
-    + 'background:rgba(255,255,255,.88);color:#1d2530;cursor:pointer;'
+    + 'padding:7px 15px;border-radius:20px;border:1px solid var(--line, rgba(0,0,0,.14));'
+    + 'background:var(--panel, rgba(255,255,255,.88));color:var(--ink, #1d2530);cursor:pointer;'
     + 'box-shadow:0 2px 10px rgba(20,30,50,.18);-webkit-backdrop-filter:blur(6px);'
     + 'backdrop-filter:blur(6px);display:none;';
   walkBtn.addEventListener('click', () => { walking ? exitWalk() : enterWalk(); });
@@ -1598,21 +1598,21 @@ function mountScene(canvas, labels, togglesEl) {
   // reachable so you can set a cut before stepping inside.
   const CTRL_PILL = 'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",'
     + 'Helvetica,Arial,sans-serif;padding:6px 13px;border-radius:20px;'
-    + 'border:1px solid rgba(0,0,0,.14);background:rgba(255,255,255,.88);'
-    + 'color:#1d2530;cursor:pointer;box-shadow:0 2px 10px rgba(20,30,50,.18);'
+    + 'border:1px solid var(--line, rgba(0,0,0,.14));background:var(--panel, rgba(255,255,255,.88));'
+    + 'color:var(--ink, #1d2530);cursor:pointer;box-shadow:0 2px 10px rgba(20,30,50,.18);'
     + '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);';
   const POPOVER = 'margin-top:6px;padding:10px 12px;border-radius:10px;'
-    + 'background:rgba(255,255,255,.92);border:1px solid rgba(0,0,0,.10);'
+    + 'background:var(--panel, rgba(255,255,255,.92));border:1px solid var(--line, rgba(0,0,0,.10));'
     + 'box-shadow:0 4px 18px rgba(20,30,50,.14);-webkit-backdrop-filter:blur(6px);'
     + 'backdrop-filter:blur(6px);font:12px -apple-system,BlinkMacSystemFont,'
-    + '"Segoe UI",Helvetica,Arial,sans-serif;color:#1d2530;display:none;min-width:172px;';
+    + '"Segoe UI",Helvetica,Arial,sans-serif;color:var(--ink, #1d2530);display:none;min-width:172px;';
   const POP_HD = 'font-size:11px;text-transform:uppercase;letter-spacing:.6px;'
-    + 'color:#8791a1;margin-bottom:6px;';
+    + 'color:var(--faint, #8791a1);margin-bottom:6px;';
   // A 3-way / cycle mini-button inside a popover row.
   const SEG_BTN = 'font:600 11px -apple-system,BlinkMacSystemFont,"Segoe UI",'
     + 'Helvetica,Arial,sans-serif;padding:4px 9px;border-radius:14px;'
-    + 'border:1px solid rgba(0,0,0,.14);background:rgba(255,255,255,.6);'
-    + 'color:#566072;cursor:pointer;margin-right:5px;';
+    + 'border:1px solid var(--line, rgba(0,0,0,.14));background:var(--panel, rgba(255,255,255,.6));'
+    + 'color:var(--muted, #566072);cursor:pointer;margin-right:5px;';
 
   // A container stacked in the top-right, below the mini-map. Each control is a
   // wrapper holding its pill + its (hidden) popover so the popover tracks the pill.
@@ -1636,7 +1636,7 @@ function mountScene(canvas, labels, togglesEl) {
   sunTime.style.cssText = 'flex:1;accent-color:#d1873f;';
   const sunTimeLbl = document.createElement('span');
   sunTimeLbl.style.cssText = 'min-width:38px;text-align:right;font-variant-numeric:'
-    + 'tabular-nums;color:#566072;';
+    + 'tabular-nums;color:var(--muted, #566072);';
   sunTimeLbl.textContent = clockLabel(sunHours);
   sunTime.addEventListener('input', () => {
     sunHours = parseFloat(sunTime.value);
@@ -1704,7 +1704,7 @@ function mountScene(canvas, labels, togglesEl) {
   secSlide.style.cssText = 'flex:1;accent-color:#d1873f;';
   const secLbl = document.createElement('span');
   secLbl.style.cssText = 'min-width:44px;text-align:right;font-variant-numeric:'
-    + 'tabular-nums;color:#566072;';
+    + 'tabular-nums;color:var(--muted, #566072);';
   secSlide.addEventListener('input', () => {
     const v = parseFloat(secSlide.value);
     setSection(v);   // clears level isolation; NO_CLIP at the top of the range
@@ -1771,8 +1771,8 @@ function mountScene(canvas, labels, togglesEl) {
   // hidden until walk mode is entered so orbit view is uncluttered.
   const PILL = 'position:absolute;bottom:12px;z-index:6;'
     + 'font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;'
-    + 'padding:7px 13px;border-radius:20px;border:1px solid rgba(0,0,0,.14);'
-    + 'background:rgba(255,255,255,.88);color:#1d2530;cursor:pointer;'
+    + 'padding:7px 13px;border-radius:20px;border:1px solid var(--line, rgba(0,0,0,.14));'
+    + 'background:var(--panel, rgba(255,255,255,.88));color:var(--ink, #1d2530);cursor:pointer;'
     + 'box-shadow:0 2px 10px rgba(20,30,50,.18);-webkit-backdrop-filter:blur(6px);'
     + 'backdrop-filter:blur(6px);display:none;';
   const eyeBtn = document.createElement('button');
@@ -2551,8 +2551,8 @@ function mountScene(canvas, labels, togglesEl) {
     measuring = (on == null) ? !measuring : !!on;
     measurePts.length = 0;
     measBtn.textContent = measuring ? 'Measuring' : 'Measure';
-    measBtn.style.background = measuring ? 'rgba(209,135,63,.9)' : 'rgba(255,255,255,.88)';
-    measBtn.style.color = measuring ? '#fff' : '#1d2530';
+    measBtn.style.background = measuring ? 'rgba(209,135,63,.9)' : 'var(--panel, rgba(255,255,255,.88))';
+    measBtn.style.color = measuring ? '#fff' : 'var(--ink, #1d2530)';
     canvas.style.cursor = measuring ? 'crosshair' : '';
     drawOverlay();
     return measuring;
@@ -2821,13 +2821,13 @@ function mountScene(canvas, labels, togglesEl) {
   viewsHd.style.cssText = POP_HD; viewsHd.textContent = 'Saved views';
   const viewsList = document.createElement('div');   // one row per saved view
   const viewsMsg = document.createElement('div');     // transient status line
-  viewsMsg.style.cssText = 'font-size:11px;color:#8791a1;min-height:14px;margin:4px 0;';
+  viewsMsg.style.cssText = 'font-size:11px;color:var(--faint, #8791a1);min-height:14px;margin:4px 0;';
   // A readonly fallback field for when the clipboard is unavailable.
   const linkField = document.createElement('input');
   linkField.type = 'text'; linkField.readOnly = true;
   linkField.style.cssText = 'display:none;width:100%;margin:2px 0 6px;padding:4px 6px;'
-    + 'font:11px monospace;border:1px solid rgba(0,0,0,.14);border-radius:6px;'
-    + 'background:rgba(255,255,255,.7);color:#1d2530;';
+    + 'font:11px monospace;border:1px solid var(--line, rgba(0,0,0,.14));border-radius:6px;'
+    + 'background:rgba(255,255,255,.7);color:var(--ink, #1d2530);';
   const viewsBtnRow = document.createElement('div');
   viewsBtnRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;';
   const saveBtn = document.createElement('button');
@@ -2866,7 +2866,7 @@ function mountScene(canvas, labels, togglesEl) {
     viewsList.textContent = '';
     if (!views.length) {
       const e = document.createElement('div');
-      e.style.cssText = 'font-size:11px;color:#8791a1;padding:2px 0 4px;';
+      e.style.cssText = 'font-size:11px;color:var(--faint, #8791a1);padding:2px 0 4px;';
       e.textContent = 'No saved views yet.';
       viewsList.appendChild(e);
     }
@@ -2878,8 +2878,8 @@ function mountScene(canvas, labels, togglesEl) {
       nameBtn.title = 'Restore this view';
       nameBtn.style.cssText = 'flex:1;text-align:left;font:600 12px -apple-system,'
         + 'BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;padding:3px 6px;'
-        + 'border-radius:6px;border:1px solid rgba(0,0,0,.10);cursor:pointer;'
-        + 'background:rgba(255,255,255,.6);color:#1d2530;overflow:hidden;'
+        + 'border-radius:6px;border:1px solid var(--line, rgba(0,0,0,.10));cursor:pointer;'
+        + 'background:var(--panel, rgba(255,255,255,.6));color:var(--ink, #1d2530);overflow:hidden;'
         + 'text-overflow:ellipsis;white-space:nowrap;'
         + (v.mode === 'w' ? '' : '');
       nameBtn.addEventListener('click', e => { e.preventDefault(); restoreView(v); });
@@ -2906,7 +2906,7 @@ function mountScene(canvas, labels, togglesEl) {
     b.style.cssText = 'flex:0 0 auto;font:600 11px -apple-system,BlinkMacSystemFont,'
       + '"Segoe UI",Helvetica,Arial,sans-serif;padding:3px 7px;border-radius:6px;'
       + 'border:1px solid rgba(0,0,0,.12);cursor:pointer;'
-      + 'background:rgba(255,255,255,.6);color:#566072;';
+      + 'background:var(--panel, rgba(255,255,255,.6));color:var(--muted, #566072);';
     return b;
   }
   // Inline-rename: swap the row's name button for a text input; Enter/blur commits.
@@ -2916,7 +2916,7 @@ function mountScene(canvas, labels, togglesEl) {
     inp.style.cssText = 'flex:1;font:600 12px -apple-system,BlinkMacSystemFont,'
       + '"Segoe UI",Helvetica,Arial,sans-serif;padding:3px 6px;border-radius:6px;'
       + 'border:1px solid rgba(209,135,63,.7);background:rgba(255,255,255,.9);'
-      + 'color:#1d2530;min-width:0;';
+      + 'color:var(--ink, #1d2530);min-width:0;';
     const commit = () => { const t = inp.value.trim(); if (t) v.name = t; renderViews(); };
     inp.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); commit(); }

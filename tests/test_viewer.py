@@ -713,6 +713,16 @@ def test_renderer_exposes_linked_selection_hooks():
     assert "setHighlight, onSelect };" in RENDERER_JS
 
 
+def test_renderer_hud_reads_the_host_theme_tokens_with_fallbacks():
+    # The pills and popovers take the host's --panel/--ink/--line tokens when the
+    # playground provides them (so they follow its dark mode) and fall back to the
+    # standalone viewer's light look otherwise.
+    assert "var(--panel, rgba(255,255,255,.88))" in RENDERER_JS
+    assert "var(--ink, #1d2530)" in RENDERER_JS
+    assert "var(--line, rgba(0,0,0,.14))" in RENDERER_JS
+    assert "var(--muted, #566072)" in RENDERER_JS
+
+
 def test_renderer_has_the_transparent_glass_pass_hooks():
     # Glass draws LAST in a separate blended pass with depth-write off, so a client
     # standing inside can see out through the windows.

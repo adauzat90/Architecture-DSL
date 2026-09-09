@@ -1429,6 +1429,8 @@ _APP_HTML = r"""<!doctype html>
     --bg:#eef1f4; --panel:#ffffff; --ink:#1d2530; --muted:#566072; --faint:#8791a1;
     --line:rgba(20,30,50,.12); --editor:#fbfbfa; --gutter:#f0f1f2; }
   * { box-sizing: border-box; }
+  /* the hidden attribute always wins, whatever display a widget rule sets */
+  [hidden] { display:none !important; }
   html, body { margin:0; height:100%; overflow:hidden;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
     background:var(--bg); color:var(--ink); }
@@ -1646,6 +1648,7 @@ _APP_HTML = r"""<!doctype html>
     font-size:12px; color:var(--muted); }
   .canvas-bar .count { cursor:pointer; }
   .canvas-bar .ok { color:var(--okc); font-weight:600; }
+  .canvas-bar .stale-note { color:var(--warn); font-weight:600; }
   .canvas-bar .cb-src { margin-left:auto; font-size:11.5px; padding:3px 9px; }
   /* draggable split handles between the three panes (agent | editor | viewport).
      A slim 6px hit target with a centred hairline that warms on hover; the row is
@@ -1762,7 +1765,8 @@ _APP_HTML = r"""<!doctype html>
   .views-head .spacer { flex:1; }
   .views-compass { width:74px; height:54px; display:block; flex:none; }
   .views-compass .b { fill:var(--bg); stroke:var(--faint); stroke-width:1; }
-  .views-compass .edge { stroke:var(--line); stroke-width:5; stroke-linecap:round; }
+  .views-compass .edge { stroke:var(--line); stroke-width:5; stroke-linecap:round; cursor:pointer; }
+  .views-compass .edge:hover { stroke:var(--muted); }
   .views-compass .edge.on { stroke:var(--accent2); }
   .views-compass text { font:600 8.5px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
     fill:var(--muted); }
@@ -1791,10 +1795,11 @@ _APP_HTML = r"""<!doctype html>
 
   /* --- Tier 5: edit mode --- */
   #pane-plan.active { display:flex; flex-direction:column; }
-  .edit-bar { display:flex; align-items:center; gap:12px; padding:6px 12px; flex:none;
+  .edit-bar { display:flex; align-items:center; gap:10px; row-gap:6px; flex-wrap:wrap;
+    padding:6px 12px; flex:none;
     background:var(--panel); border-bottom:1px solid var(--line); font-size:12.5px; }
   .edit-toggle { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none;
-    font-weight:600; color:var(--muted); }
+    font-weight:600; color:var(--muted); white-space:nowrap; }
   .edit-toggle input { accent-color:var(--accent); }
   .edit-bar button { font:inherit; font-size:12px; padding:4px 11px; border-radius:7px;
     border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer; }
@@ -1916,7 +1921,6 @@ _APP_HTML = r"""<!doctype html>
   .gln.flash { animation:lineflash 1s ease-out; }
 
   /* --- Report tab --- */
-  .tabs #print-btn { align-self:center; margin:0 6px 4px 0; }
   .report-wrap { position:absolute; inset:0; overflow:auto; padding:16px 18px; }
   .rsec { margin:0 0 22px; max-width:920px; }
   .rsec h3 { font-size:11px; text-transform:uppercase; letter-spacing:.6px;
@@ -2205,6 +2209,81 @@ _APP_HTML = r"""<!doctype html>
   /* measure endpoints — small dots on fine pointers, fat grab circles on coarse */
   .ov-measure-end { fill:var(--accent); stroke:var(--panel); stroke-width:.14em; }
 
+  /* ===== the visual pass: one type scale, one button recipe in two sizes, two
+     radii, severity as shape as well as colour, and muted (never faint) for
+     anything that carries information. Deliberately late in the sheet — it
+     overrides the per-widget rules above by order, so each widget keeps its own
+     layout and only the shared look is set here. ===== */
+  :root { --r:7px; --r-lg:10px; --fs-xs:11px; --fs-sm:12px; --fs:12.5px; --fs-md:13px;
+    --fs-lg:15px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  /* the button: one recipe, two sizes (30px toolbar, 26px inline) */
+  .tbtn, .composer-row button, .edit-bar button, .design-panel button, .find-bar button,
+  .three-head button, .diag-pop .dp-acts button, .align-tools button, #agent-collapse,
+  #notice button.na, .canvas-bar .cb-src {
+    font-family:inherit; font-size:var(--fs); font-weight:600; line-height:1.2;
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    min-height:30px; padding:0 11px; border-radius:var(--r); border:1px solid var(--line);
+    background:var(--panel); color:var(--ink); cursor:pointer; white-space:nowrap; }
+  .edit-bar button, .design-panel button, .find-bar button, .three-head button,
+  .diag-pop .dp-acts button, .align-tools button, .canvas-bar .cb-src {
+    min-height:26px; padding:0 9px; font-size:var(--fs-sm); }
+  .find-bar .find-nav, .find-bar .find-x { padding:0 7px; }
+  #agent-collapse { min-height:24px; width:24px; padding:0; color:var(--muted); }
+  .tbtn:hover:not(:disabled), .edit-bar button:hover:not(:disabled), .design-panel button:hover,
+  .find-bar button:hover, .three-head button:hover, .diag-pop .dp-acts button:hover,
+  .align-tools button:hover:not(:disabled), .canvas-bar .cb-src:hover, .composer-row button:hover:not(:disabled) {
+    border-color:var(--accent); color:var(--accent); }
+  .tbtn:disabled, .edit-bar button:disabled, .align-tools button:disabled { opacity:.45; cursor:default; }
+  .tbtn.on, #panel-btn.on, #measure-btn.on, #elec-btn.on, #dims-btn.on {
+    border-color:var(--accent); color:var(--accent); background:rgba(209,135,63,.10); }
+  /* primary actions keep their fills, but share the recipe's shape */
+  #send-btn, #od-btn, .diag-pop .dp-acts button.primary { border-color:transparent; color:#fff; }
+  .diag-pop .dp-acts .dp-nav button { min-height:22px; padding:0 6px; }   /* the ‹ n/m › pager stays small */
+  #send-btn:hover:not(:disabled), #od-btn:hover:not(:disabled), .diag-pop .dp-acts button.primary:hover {
+    color:#fff; border-color:transparent; filter:brightness(1.06); }
+  .diag-pop .dp-acts button.quiet { border-color:transparent; color:var(--muted); background:transparent; }
+  .diag-pop .dp-acts button.quiet:hover { border-color:var(--line); color:var(--ink); }
+  /* pills: counts, level chips, the score chip — one height, full radius */
+  .count, .lvl-chip, .chip { font-size:var(--fs-sm); line-height:18px; padding:2px 9px;
+    border-radius:20px; display:inline-flex; align-items:center; gap:5px; }
+  /* severity as shape as well as colour: diamond = error, triangle = warning, dot = info */
+  .count::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%;
+    background:currentColor; flex:none; }
+  .count.warning::before { border-radius:0; width:8px; height:7px;
+    clip-path:polygon(50% 0, 100% 100%, 0 100%); }
+  .count.error::before { border-radius:1px; width:6px; height:6px; transform:rotate(45deg); }
+  .count.zero::before { opacity:.45; }
+  .gutter .gln.has-warning .dot { border-radius:0; width:8px; height:7px; margin-top:-3.5px;
+    clip-path:polygon(50% 0, 100% 100%, 0 100%); }
+  .gutter .gln.has-error .dot { border-radius:1px; width:6px; height:6px; margin-top:-3px;
+    transform:rotate(45deg); }
+  /* tabs: same radius and scale as the buttons; the active one carries the accent */
+  .tab { font-size:var(--fs); font-weight:600; padding:7px 12px; border-radius:var(--r) var(--r) 0 0; }
+  .tab:hover { color:var(--ink); }
+  .rail-tabs button { font-size:var(--fs); padding:7px 12px; }
+  .views-sides button { font-size:var(--fs-sm); min-height:26px; padding:0 10px; border-radius:5px; }
+  /* type: the plan name is content, not chrome; informational text is muted, never faint */
+  #plan-title { color:var(--ink); font-size:var(--fs-md); }
+  .agent-sub, .edit-note, .agent-note, .od-or, .examples, .diag-row .loc, .diag-row .hint,
+  .diag-empty, .menu-item .fmt, .menu-item small, #three-panel .hd, .views-foot,
+  .src-note, .canvas-bar, .sp-details, .dp-note { color:var(--muted); }
+  .diag-row .code, .diag-row .loc, .zoom-ctl .zpct, .views-head .sub, .views-foot .k,
+  .sp-row .val, #dim-chip { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  /* panels and popovers share the larger radius; menus and pills the smaller */
+  #three-panel, .diag-pop, .score-pop, .menu-list, .cmp-modal, .views-body .ev { border-radius:var(--r-lg); }
+  /* keyboard focus is visible everywhere, and only for keyboard focus */
+  :focus-visible { outline:2px solid var(--accent2); outline-offset:2px; }
+  .svgbox:focus-visible, #editor:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--accent2); }
+  @media (prefers-reduced-motion: reduce){
+    *, *::before, *::after { transition:none !important; animation:none !important; } }
+  /* a phone-width window: the rail starts collapsed (boot), the drawer takes the
+     whole width, and the header/edit bar wrap rather than crush the canvas */
+  @media (max-width:720px){
+    .left { width:100% !important; min-width:0; max-width:100%; }
+    .agent:not(.collapsed) { width:min(308px, 82vw); }
+    .plan-facts, #metrics { display:none; }
+  }
+
   @media (pointer: coarse){
     /* toolbar / tab / pill buttons: comfortable spacing + tall enough to tap */
     .tbtn, .tab, .edit-bar button, .align-tools button, .lvl-chip,
@@ -2232,7 +2311,8 @@ _APP_HTML = r"""<!doctype html>
   @media print {
     header, #notice, .agent, .left, .split-h, .tabs, .edit-bar, #three-panel,
     .design-panel, #snap-btn, .drop-hint, .zoom-ctl, #dim-chip, .score-pop, .help-backdrop,
-    .help-panel, .lightbox, .three-col, .three-split, .canvas-bar, .rail-tabs
+    .help-panel, .lightbox, .three-col, .three-split, .canvas-bar, .rail-tabs,
+    .diag-badge, .diag-pop, .sel-ring, .ac-pop, .find-bar, .menu-list, .views-head, .views-foot
     { display:none !important; }
     .canvas-row { display:block !important; }
     .plan-body .svgbox { overflow:visible !important; }
@@ -2250,7 +2330,11 @@ _APP_HTML = r"""<!doctype html>
       cursor:auto !important; }
     .svgbox svg { transform:none !important; max-width:100% !important; }
     .report-wrap { position:static !important; overflow:visible !important; }
-    .views-grid { grid-template-columns:1fr 1fr !important; }
+    /* the Elevations view prints every drawing it holds, one after another */
+    #pane-views.active, .views-body { display:block !important; overflow:visible !important;
+      height:auto !important; }
+    .views-body .ev { display:block !important; break-inside:avoid; margin-bottom:12px; }
+    .views-body .ev figcaption { display:block !important; }
   }
 </style>
 </head>
@@ -2438,7 +2522,7 @@ _APP_HTML = r"""<!doctype html>
       <button class="three-tab" id="three-tab" title="Show the 3D model (2)">3D ▸</button>
       <div class="three-head">
         <span class="t">3D</span><span class="spacer"></span>
-        <button id="three-wide" title="Give the 3D model half the canvas">Split</button>
+        <button id="three-wide" title="Give the 3D model half the canvas">Half width</button>
         <button id="three-hide" title="Hide the 3D model (2)">Hide</button>
       </div>
       <div class="three-body">
@@ -2561,6 +2645,7 @@ let sceneLoaded = false;  // scene3d currently uploaded to ctrl
 let currentTab = 'plan';  // the canvas view: plan | views | report (3D is a dock, not a tab)
 let threeShown = false, threeMode = 'hidden';   // the docked 3D column: hidden | open | split
 let sourceOpen = false;   // the source drawer (editor + diagnostics) slid over the canvas
+let lastHadError = false; // did the previous compile have errors (the drawer auto-opens on the transition)
 
 function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function fmt(n){ return (Math.round(n*10)/10).toString(); }
@@ -2837,6 +2922,7 @@ function applyResult(p){
     lastGood = p; scene3d = p.scene; sceneLoaded = false;
     viewport.classList.remove('stale');
     setPlanSvg(planVariant(p));
+    markSourceLine();   // the gutter was drawn from the previous payload's line numbers
     if (currentTab === 'plan') planZoom.refit(); else planNeedsFit = true;
     renderViews(p);
     renderReport(p);
@@ -2907,9 +2993,21 @@ function renderScorePop(){
 }
 function toggleScorePop(show){
   const open = show == null ? scorePop.hidden : show;
-  if (open && lastScore){ renderScorePop(); scorePop.hidden = false; }
-  else scorePop.hidden = true;
+  if (open && lastScore){
+    renderScorePop();
+    // anchor to the chip wherever the (wrapping) header put it
+    const r = scoreChip.getBoundingClientRect();
+    scorePop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 280)) + 'px';
+    scorePop.style.top = (r.bottom + 6) + 'px';
+    scorePop.hidden = false; scoreChip.setAttribute('aria-expanded', 'true');
+  } else { scorePop.hidden = true; scoreChip.setAttribute('aria-expanded', 'false'); }
 }
+// the chip is a button in all but name: keyboard reachable, toggles on Enter/Space
+scoreChip.setAttribute('role', 'button'); scoreChip.setAttribute('tabindex', '0');
+scoreChip.setAttribute('aria-haspopup', 'true'); scoreChip.setAttribute('aria-expanded', 'false');
+scoreChip.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggleScorePop(); }
+});
 scoreChip.addEventListener('click', e => { e.stopPropagation(); toggleScorePop(); });
 document.addEventListener('click', e => {
   if (!scorePop.hidden && !e.target.closest('#score-pop') && !e.target.closest('#score-chip'))
@@ -3337,9 +3435,12 @@ function renderDiagnostics(p){
   let head = '<div class="diag-head">' + countChip('error', c.error) +
     countChip('warning', c.warning) + countChip('info', c.info) +
     (p.ok ? '<span class="ok">✓ compiles clean</span>' : '') + '</div>';
-  renderCanvasBar(c, !!p.ok);
-  // Errors need the editor: surface the drawer (without remembering that as a choice).
-  if (c.error && !sourceOpen) toggleSource(true, false);
+  // The canvas keeps the last good drawing (dimmed) while this compile fails — say so.
+  renderCanvasBar(c, !!p.ok, !(p.svg && !p.recovered) && !!lastGood);
+  // Errors need the editor: surface the drawer once, when errors first appear
+  // (not on every recompile while they persist — a closed drawer stays closed).
+  if (c.error && !lastHadError && !sourceOpen) toggleSource(true, false);
+  lastHadError = !!c.error;
   if (!ds.length){ diagEl.innerHTML = head + '<div class="diag-empty">No diagnostics.</div>'; return; }
   let shown = sortedDiagnostics(ds);
   if (diagFilter) shown = shown.filter(d => d.severity === diagFilter);
@@ -3683,11 +3784,11 @@ function setThree(mode, persist){
   else if (mode === 'open'){
     // a saved drag width, else the CSS default — either way clamped so the plan
     // keeps its minimum on a narrow window
-    let w = ''; try { w = localStorage.getItem(LS_THREE_W) || ''; } catch (e){}
-    threeCol.style.width = clampThree(w ? parseFloat(w) : 380) + 'px';
+    let w = NaN; try { w = parseFloat(localStorage.getItem(LS_THREE_W)); } catch (e){}
+    threeCol.style.width = clampThree(Number.isFinite(w) ? w : 380) + 'px';
   }
   threeTabBtn.classList.toggle('active', threeShown);
-  document.getElementById('three-wide').textContent = mode === 'split' ? 'Dock' : 'Split';
+  document.getElementById('three-wide').textContent = mode === 'split' ? 'Narrow' : 'Half width';
   if (threeShown) showThree();
   else if (ctrl && ctrl.exitWalk) ctrl.exitWalk();
   updateSnapState();
@@ -3707,9 +3808,10 @@ threeSplit.addEventListener('pointerdown', ev => {
   const prevCursor = document.body.style.cursor, prevSel = document.body.style.userSelect;
   document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
   try { threeSplit.setPointerCapture(ev.pointerId); } catch (_){}
+  let moved = false;
   function move(e){
     const r = rightEl.getBoundingClientRect();
-    threeCol.style.width = clampThree(r.right - e.clientX - 3) + 'px';
+    threeCol.style.width = clampThree(r.right - e.clientX - 3) + 'px'; moved = true;
     afterSplitResize();
   }
   function up(e){
@@ -3718,8 +3820,10 @@ threeSplit.addEventListener('pointerdown', ev => {
     threeSplit.classList.remove('dragging');
     document.body.style.cursor = prevCursor; document.body.style.userSelect = prevSel;
     try { threeSplit.releasePointerCapture(e.pointerId); } catch (_){}
-    if (threeMode === 'split'){ threeMode = 'open'; document.getElementById('three-wide').textContent = 'Split'; }
-    try { localStorage.setItem(LS_THREE_W, parseInt(threeCol.style.width, 10));
+    if (!moved) return;   // a plain click on the handle changes nothing
+    if (threeMode === 'split'){ threeMode = 'open'; document.getElementById('three-wide').textContent = 'Half width'; }
+    const w = parseInt(threeCol.style.width, 10);
+    try { if (Number.isFinite(w)) localStorage.setItem(LS_THREE_W, w);
           localStorage.setItem(LS_THREE, 'open'); } catch (e){}
     threeChosen = true; afterSplitResize();
   }
@@ -3761,6 +3865,7 @@ function toggleSource(open, persist){
 sourceBtn.addEventListener('click', () => toggleSource());
 document.getElementById('canvas-bar').addEventListener('click', e => {
   const b = e.target.closest('.cb-src, .count'); if (!b) return;
+  if (b.classList.contains('zero')) return;   // nothing to show for a zero count
   if (b.classList.contains('count')){
     toggleSource(true);
     const f = b.getAttribute('data-filter');
@@ -3769,13 +3874,14 @@ document.getElementById('canvas-bar').addEventListener('click', e => {
     diagEl.scrollIntoView({ block:'nearest' });
   } else toggleSource();
 });
-function renderCanvasBar(c, ok){
+function renderCanvasBar(c, ok, stale){
   const bar = document.getElementById('canvas-bar'); if (!bar) return;
   const pill = (kind, n) => '<span class="count ' + kind + (n ? '' : ' zero') + '" data-filter="' + kind +
     '" title="' + (n ? 'Show the ' + kind + 's in the source drawer' : '') + '">' + n + ' ' + kind +
     (n === 1 ? '' : 's') + '</span>';
   bar.innerHTML = pill('error', c.error) + pill('warning', c.warning) + pill('info', c.info) +
     (ok ? '<span class="ok">✓ compiles clean</span>' : '') +
+    (stale ? '<span class="stale-note" title="The plan did not compile; the drawing is the last one that did">showing the last good plan</span>' : '') +
     '<button class="tbtn cb-src" title="Show or hide the source editor and diagnostics (s)">' +
     (sourceOpen ? 'Hide source' : 'Show source') + '</button>';
 }
@@ -3822,7 +3928,7 @@ function renderViews(p){
   const sideBtn = (s, label) => '<button data-side="' + s + '">' + label + '</button>';
   let html = '<div class="views-head"><div><h2 id="views-title"></h2><div class="sub" id="views-sub"></div></div>' +
     '<span class="spacer"></span>' +
-    '<svg class="views-compass" id="views-compass" viewBox="0 0 74 54" aria-hidden="true">' +
+    '<svg class="views-compass" id="views-compass" viewBox="0 0 74 54" role="img" aria-label="Which face you are looking at; click an edge to pick one">' +
       '<rect class="b" x="17" y="14" width="40" height="26"/>' +
       '<line class="edge" data-side="north" x1="21" y1="14" x2="53" y2="14"/>' +
       '<line class="edge" data-side="south" x1="21" y1="40" x2="53" y2="40"/>' +
@@ -3892,7 +3998,8 @@ function openLightbox(view){
 }
 function closeLightbox(){ lb.hidden = true; lbSvg.innerHTML = ''; }
 viewsPane.addEventListener('click', e => {
-  const side = e.target.closest('.views-sides button[data-side]');
+  // the picker buttons and the compass edges both pick a face
+  const side = e.target.closest('.views-sides button[data-side], .views-compass .edge[data-side]');
   if (side){ applyViewSide(side.getAttribute('data-side')); return; }
   const fig = e.target.closest('figure[data-view]'); if (!fig) return;
   openLightbox(fig.getAttribute('data-view'));
@@ -4259,8 +4366,8 @@ function selectRoom(id, from){
   renderSelRing(); markSourceLine();
   if (ctrl && ctrl.setHighlight) ctrl.setHighlight(id);
   renderPanel();
-  if (id && (from === 'plan' || from === 'three' || from === 'badge')){
-    if (!dpOpen) togglePanel(true);
+  if (id && (from === 'plan' || from === 'three' || from === 'badge' || from === 'overlay')){
+    if (!dpOpen) togglePanel(true, false);
     const ln = roomLineOf(id);
     if (sourceOpen && ln && from !== 'three'){ jumpToLine(ln); flashLine(ln); }
   }
@@ -4300,11 +4407,17 @@ function renderBadges(){
     const ds = byRoom[id], sev = worstSeverity(ds);
     const x = parseFloat(rect.getAttribute('x')), y = parseFloat(rect.getAttribute('y'));
     const w = parseFloat(rect.getAttribute('width'));
-    const label = (sev === 'info' ? '' : '▲ ') + ds.length;
+    // severity as shape: diamond = error, triangle = warning, a bare count = suggestion
+    const label = (sev === 'error' ? '◆ ' : sev === 'warning' ? '▲ ' : '') + ds.length;
     const bw = 12 + label.length * 7, bh = 18;
     const g = document.createElementNS(NS, 'g');
     g.setAttribute('class', 'diag-badge sev-' + sev);
     g.setAttribute('data-room', id);
+    // keyboard reachable: Tab to a badge, Enter or Space opens its popover
+    g.setAttribute('role', 'button'); g.setAttribute('tabindex', '0');
+    g.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); e.stopPropagation(); openDiagPop(id, 0); }
+    });
     const nWarn = ds.filter(d => d.severity !== 'info').length;
     const t = document.createElementNS(NS, 'title');
     t.textContent = roomLabel(id) + ': ' + (nWarn ? nWarn + ' warning' + (nWarn === 1 ? '' : 's') +
@@ -4350,10 +4463,12 @@ function positionDiagPop(){
   if (top + ph > pb.height - 8) top = Math.max(8, b.top - pb.top - ph - 6);
   diagPop.style.left = left + 'px'; diagPop.style.top = top + 'px';
 }
-function openDiagPop(room, idx){
+function openDiagPop(room, idx, quiet){
   const ds = roomDiags(room);
   if (!ds.length){ closeDiagPop(); return; }
-  if (room !== selectedRoomId) selectRoom(room, 'badge');   // a badge click selects its room
+  // a badge click selects its room; a refresh after a recompile must not (it
+  // would pull the caret back to the room's line while the user types elsewhere)
+  if (!quiet && room !== selectedRoomId) selectRoom(room, 'badge');
   diagPopRoom = room; diagPopIdx = ((idx % ds.length) + ds.length) % ds.length;
   diagPop.innerHTML = diagPopHTML(ds[diagPopIdx], diagPopIdx, ds.length);
   diagPop.hidden = false;
@@ -4365,7 +4480,7 @@ function closeDiagPop(){ diagPop.hidden = true; diagPopRoom = null; }
 function refreshDiagPop(){
   if (diagPop.hidden || !diagPopRoom) return;
   if (diagPop.querySelector('.dp-form')) return;   // don't yank a reason mid-typing
-  openDiagPop(diagPopRoom, diagPopIdx);
+  openDiagPop(diagPopRoom, diagPopIdx, true);
 }
 // Ignore = the compiler's accept pragma, trailing the statement's line. If that
 // line already carries one (one code per pragma), the standalone form goes on
@@ -4410,7 +4525,7 @@ diagPop.addEventListener('click', e => {
   const act = b.getAttribute('data-act');
   if (act === 'prev') openDiagPop(diagPopRoom, diagPopIdx - 1);
   else if (act === 'next') openDiagPop(diagPopRoom, diagPopIdx + 1);
-  else if (act === 'source'){ jumpToLine(d.line); flashLine(d.line); }
+  else if (act === 'source'){ closeDiagPop(); jumpToLine(d.line); flashLine(d.line); }   // the drawer slides over where the popover sits
   else if (act === 'fix'){ const snip = quickFixSnippet(d.hint); if (snip) applyQuickFix(snip, d.line); }
   else if (act === 'ignore') showIgnoreForm(d);
   else if (act === 'ignore-ok'){ const inp = diagPop.querySelector('.dp-form input'); ignoreDiag(d, inp ? inp.value.trim() : ''); }
@@ -4508,7 +4623,9 @@ function clampAgent(px){
   return Math.max(AGENT_MIN, Math.min(px, Math.max(AGENT_MIN, room)));
 }
 function clampEditor(px){
-  const room = mainEl.clientWidth - agentWidthNow() - VIEWPORT_MIN - HANDLES;
+  // the drawer overlays the canvas: it may grow to the CSS max (72% of the canvas)
+  // as long as a sliver of drawing stays visible
+  const room = Math.min(mainEl.clientWidth - agentWidthNow() - 120, rightEl.clientWidth * 0.72);
   return Math.max(EDITOR_MIN, Math.min(px, Math.max(EDITOR_MIN, room)));
 }
 function persistSplits(){
@@ -4989,7 +5106,8 @@ function initEdit(){
     resetEditTf();
     renderLevelSwitcher();
     if (editMode) buildOverlay();
-    else { selectedRoomId = null; clearMultiSel(false); editNote(''); planZoom.refit(); }
+    // leaving edit mode keeps the selection — it is the same selection on every surface
+    else { clearMultiSel(false); editNote(''); planZoom.refit(); selectRoom(selectedRoomId, 'edit'); }
   });
   measureBtn.addEventListener('click', () => setMeasure(!measureMode));
   elecBtn.addEventListener('click', () => {
@@ -5046,8 +5164,8 @@ function fixtureByKey(k){ return editFixtures.find(f => f.id === k); }
 function noteByIndex(i){ return editNotes.find(n => n.index === i); }
 function setEditLevel(lvl){
   if (editLevels.indexOf(lvl) < 0 || lvl === editLevel) return;
-  editLevel = lvl; selectedRoomId = null;
-  clearMultiSel(false);            // selection is per-floor
+  editLevel = lvl; selectRoom(null, 'level');   // selection is per-floor, on every surface
+  clearMultiSel(false);
   applyLevelFilter(); renderLevelSwitcher();
   if (editMode) buildOverlay();
 }
@@ -5804,14 +5922,17 @@ function showRail(name){
   document.getElementById('rail-design').classList.toggle('on', name === 'design');
   document.getElementById('rail-inspect').classList.toggle('on', name === 'inspect');
 }
-function togglePanel(open){
+// `persist` is false when the panel opens as a side effect of a selection: that
+// is not a preference to remember. The plan's width no longer depends on the
+// panel, so nothing re-fits here.
+function togglePanel(open, persist){
   dpOpen = open == null ? !dpOpen : !!open;
   dpEl.hidden = !dpOpen;
   panelBtn.classList.toggle('on', dpOpen);
   showRail(dpOpen ? 'inspect' : 'design');
   if (dpOpen && agentPane.classList.contains('collapsed')) collapseBtn.click();
-  try { localStorage.setItem(LS_PANEL, dpOpen ? '1' : ''); } catch (e){}
-  renderPanel(); planZoom.refit();
+  if (persist !== false) try { localStorage.setItem(LS_PANEL, dpOpen ? '1' : ''); } catch (e){}
+  renderPanel();
 }
 panelBtn.addEventListener('click', () => togglePanel());
 railTabs.addEventListener('click', e => {
@@ -6262,7 +6383,7 @@ function dpDelete(){
   const p = lastGood; if (!p || !dpSel) return;
   const sel = dpSel; dpSel = null;
   if (sel.t === 'room'){
-    selectedRoomId = null;
+    selectRoom(null, 'delete');
     applyEdits([{ kind:'delete_room', room:sel.k }], 'delete room');
   } else if (sel.t === 'op'){
     const o = (p.openings || []).find(x => x.key === sel.k);
@@ -6583,20 +6704,23 @@ document.addEventListener('keydown', e => {
   const tag = (document.activeElement || {}).tagName;
   if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
   // `[` / `]` step the active floor while editing.
-  if (editMode && editLevels.length > 1 && (e.key === '[' || e.key === ']')){
+  // Edit-mode keys act only while the plan is the view on screen: the Elevations
+  // view owns the arrows, and nothing should move on a drawing you cannot see.
+  const onPlan = editMode && currentTab === 'plan';
+  if (onPlan && editLevels.length > 1 && (e.key === '[' || e.key === ']')){
     e.preventDefault();
     const i = editLevels.indexOf(editLevel), j = e.key === ']' ? i + 1 : i - 1;
     if (j >= 0 && j < editLevels.length) setEditLevel(editLevels[j]);
     return;
   }
   // `m` toggles the measure tape (edit mode only — that's where the overlay lives).
-  if (editMode && (e.key === 'm' || e.key === 'M')){
+  if (onPlan && (e.key === 'm' || e.key === 'M')){
     e.preventDefault(); setMeasure(!measureMode); return;
   }
   // Arrows nudge the selection; Shift steps a whole 3 ft build module. With a
   // 2+ room multi-selection the whole set moves as one batched edit; otherwise
   // the single selected room, unchanged.
-  if (editMode && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' ||
+  if (onPlan && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' ||
       e.key === 'ArrowUp' || e.key === 'ArrowDown')){
     const members = multiSel.size >= 2 ? selectedRooms()
       : (roomById(selectedRoomId) ? [roomById(selectedRoomId)] : []);
@@ -6617,7 +6741,7 @@ document.addEventListener('keydown', e => {
     return;
   }
   // Delete removes whatever the inspector holds — one undo brings it all back.
-  if (e.key === 'Delete' && dpSel){
+  if (e.key === 'Delete' && dpSel && currentTab === 'plan'){   // never delete from a view that can't show it
     e.preventDefault(); dpDelete();
   }
 });
@@ -6672,6 +6796,7 @@ function readSaved(){ try { return localStorage.getItem(LS_SOURCE); } catch (e){
 // Loading a document is itself undoable — Ctrl+Z after it returns to what you had.
 function setSource(src, label){
   checkpoint = src;
+  selectRoom(null, 'load'); closeDiagPop();   // a new plan starts unselected
   applyEdit(src, 0, 0, label || 'load');
   renderGutter(); compile();
 }
@@ -6842,6 +6967,10 @@ editor.addEventListener('input', () => { if (autosaveOff){ autosaveOff = false; 
   } else {
     savedSource = INITIAL_SOURCE; checkpoint = INITIAL_SOURCE;
     editor.value = INITIAL_SOURCE; renderGutter(); compile();
+    // A first run lands on a bundled example: say so, and point at the two ways in.
+    if (!INITIAL_FROM_FILE)
+      showNotice('This is an example plan. Describe your own in the Design tab, pick another example, or press New.',
+        [{ label:'New plan', fn:newPlan }, { label:'Got it', ghost:true }]);
   }
   histInit(editor.value);   // seed the undo timeline with the booted source (the floor state)
   // Shell state: the source drawer and the 3D dock, remembered per browser.
@@ -6850,6 +6979,8 @@ editor.addEventListener('input', () => { if (autosaveOff){ autosaveOff = false; 
   toggleSource(so === '1', false);
   if (td === 'hidden' || td === 'open' || td === 'split'){ threeChosen = true; setThree(td, false); }
   else setThree(threeAutoDefault(), false);
+  // a phone-width window starts with the rail collapsed so the canvas has room
+  if (window.innerWidth < 720 && !agentPane.classList.contains('collapsed')) collapseBtn.click();
 })();
 </script>
 </body>

@@ -118,8 +118,18 @@ Ignore — which writes the compiler's own `accept` pragma onto the line) and
 them, including the caret landing on a room's statement). **Elevations are a
 canvas view** too: one face at drawing size with a compass and a face picker,
 `All four` as a contact sheet, the section and site plan alongside, ← → to walk
-around the building. Still to come: the visual pass (one type scale, one button
-recipe), and a face highlight in the 3D dock to match the elevation shown.
+around the building. **The visual pass** closes the sequence: one type scale, one
+button recipe in two sizes, two radii, severity drawn as shape (diamond, triangle,
+dot) as well as colour, muted rather than faint for anything informational,
+visible keyboard focus, reduced motion honoured, and the 3D dock's pills reading
+the app's theme tokens (with the standalone viewer's light look as the fallback).
+Still open after the post-relayout audit: a face highlight in the 3D dock to
+match the elevation shown; a floor switcher outside edit mode for two-storey
+plans; state labels for the toggles that change what is drawn (tooltips do not
+exist on touch); the notice bar floating over the canvas instead of reflowing
+it; the edit overlay's fixture and note colours as theme tokens for dark mode;
+and one closer for every overlay (score popover, export menu, issue popover,
+help) so two can never sit open at once.
 
 What we deliberately do **not** build: Revit's documentation engine (wall-layer
 joins, detailing, sheet sets). That is where "Revit killers" die. The wedge is
