@@ -195,3 +195,19 @@ def test_shed_roof_slopes():
     # A shed rises across the full short span (40 ft) → a taller rise than a gable.
     assert g["rise"] == pytest.approx(40.0 * 0.25)
     _wellformed(elevation_svg(plan, "east"))
+
+
+def test_mirrored_faces_draw_rects_inside_the_canvas():
+    """North and West read from outside, so screen x is flipped. A rect's left edge
+    must be the smaller *projected* x — taking the smaller world coordinate put the
+    whole wall mass (and every opening) off the right edge of the canvas."""
+    import re
+
+    plan = compile_source(_PLAN).plan
+    for side in ("north", "west", "south", "east"):
+        svg = elevation_svg(plan, side)
+        width = float(re.search(r'<svg[^>]*\bwidth="([\d.]+)"', svg).group(1))
+        rects = re.findall(r'<rect x="([-\d.]+)" y="[-\d.]+" width="([\d.]+)"', svg)
+        assert rects, side
+        for x, w in rects:
+            assert 0 <= float(x) and float(x) + float(w) <= width + 0.5, (side, x, w)

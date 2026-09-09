@@ -1800,7 +1800,7 @@ _APP_HTML = r"""<!doctype html>
   /* --- Tier 5: edit mode --- */
   #pane-plan.active { display:flex; flex-direction:column; }
   .edit-bar { display:flex; align-items:center; gap:10px; row-gap:6px; flex-wrap:wrap;
-    padding:6px 12px; flex:none;
+    padding:6px 12px; flex:none; position:relative; z-index:2;   /* above the zoomed plan */
     background:var(--panel); border-bottom:1px solid var(--line); font-size:12.5px; }
   .edit-toggle { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none;
     font-weight:600; color:var(--muted); white-space:nowrap; }
@@ -2935,7 +2935,8 @@ function applyResult(p){
     viewport.classList.remove('stale');
     setPlanSvg(planVariant(p));
     markSourceLine();   // the gutter was drawn from the previous payload's line numbers
-    if (currentTab === 'plan') planZoom.refit(); else planNeedsFit = true;
+    // keep the user's zoom across a recompile (relayout fits only when still at Fit)
+    if (currentTab === 'plan') planZoom.relayout(); else planNeedsFit = true;
     renderViews(p);
     renderReport(p);
     if (threeShown) showThree();
@@ -3871,7 +3872,7 @@ threeSplit.addEventListener('dblclick', () => {
 if (window.ResizeObserver){
   new ResizeObserver(() => { if (threeShown && ctrl){ ctrl.resize(); ctrl.draw(); } }).observe(threeCol);
   new ResizeObserver(() => { if (currentTab !== 'plan') return;
-    if (viewLevel != null) frameLevel(viewLevel); else planZoom.refit(); }).observe(viewport);
+    if (viewLevel != null) frameLevel(viewLevel); else planZoom.relayout(); }).observe(viewport);
 }
 window.addEventListener('resize', () => { if (!threeChosen){ const want = threeAutoDefault();
   if (want !== threeMode) setThree(want, false); } });
@@ -4228,6 +4229,10 @@ function makeZoom(box, opts){
   const MIN = 0.05, MAX = 12, PAD = 12;
   let scale = 1, tx = 0, ty = 0, fitScale = 1;
   let dragging = false, sx = 0, sy = 0, moved = false;
+  // userZoomed: the view has been zoomed/panned away from Fit, so a pane resize
+  // must keep it (relayout) rather than snap back to Fit. lastW/lastH remember the
+  // box size the current tx/ty were laid out for.
+  let userZoomed = false, lastW = 0, lastH = 0;
   function svg(){ return box.querySelector('svg'); }
   function intrinsic(el){
     let w = parseFloat(el.getAttribute('width')), h = parseFloat(el.getAttribute('height'));
@@ -4245,15 +4250,26 @@ function makeZoom(box, opts){
     const it = intrinsic(el);
     fitScale = Math.min((bw - 2 * PAD) / it.w, (bh - 2 * PAD) / it.h);
     if (!(fitScale > 0) || !isFinite(fitScale)) fitScale = 1;
-    scale = fitScale;
+    scale = fitScale; userZoomed = false; lastW = bw; lastH = bh;
     tx = (bw - it.w * scale) / 2; ty = (bh - it.h * scale) / 2; apply();
+  }
+  // The box changed size (rail/dock/drawer/window). At Fit, fit again; otherwise keep
+  // the user's scale, keep the drawing point that was at the box centre at the new
+  // centre, and refresh fitScale so the % readout stays relative to Fit.
+  function relayoutNow(){ const el = svg(); if (!el) return;
+    const bw = box.clientWidth, bh = box.clientHeight; if (!bw || !bh) return;
+    if (!userZoomed || !lastW || !lastH) return fit();
+    const it = intrinsic(el);
+    const fs = Math.min((bw - 2 * PAD) / it.w, (bh - 2 * PAD) / it.h);
+    if (fs > 0 && isFinite(fs)) fitScale = fs;
+    tx += (bw - lastW) / 2; ty += (bh - lastH) / 2; lastW = bw; lastH = bh; apply();
   }
   function zoomAt(factor, cx, cy){ const el = svg(); if (!el) return;
     const r = box.getBoundingClientRect();
     if (cx == null){ cx = r.width / 2; cy = r.height / 2; } else { cx -= r.left; cy -= r.top; }
     const ns = Math.min(MAX, Math.max(MIN, scale * factor));
     tx = cx - (cx - tx) * (ns / scale); ty = cy - (cy - ty) * (ns / scale);
-    scale = ns; apply();
+    scale = ns; userZoomed = true; apply();
   }
   box.addEventListener('wheel', e => { e.preventDefault();
     zoomAt(Math.exp(-e.deltaY * 0.0012), e.clientX, e.clientY); }, { passive:false });
@@ -4290,7 +4306,7 @@ function makeZoom(box, opts){
       pinchD = d; moved = true; return;
     }
     if (!dragging) return;
-    tx = e.clientX - sx; ty = e.clientY - sy; moved = true; apply(); });
+    tx = e.clientX - sx; ty = e.clientY - sy; moved = true; userZoomed = true; apply(); });
   function endPtr(e){
     ptrs.delete(e.pointerId);
     try { box.releasePointerCapture(e.pointerId); } catch(_){}
@@ -4323,9 +4339,14 @@ function makeZoom(box, opts){
     fitRect(x, y, w, h){ const bw = box.clientWidth, bh = box.clientHeight;
       if (!bw || !bh || !(w > 0) || !(h > 0)) return;
       scale = Math.min(MAX, Math.max(MIN, Math.min((bw - 2 * PAD) / w, (bh - 2 * PAD) / h)));
+      userZoomed = true; lastW = bw; lastH = bh;
       tx = (bw - w * scale) / 2 - x * scale; ty = (bh - h * scale) / 2 - y * scale; apply(); },
     // fit lazily on the first render (once the pane has a measurable size)
     refit(){ requestAnimationFrame(fit); },
+    // the box resized: keep the user's zoom (or fit, when still at Fit)
+    // Applied at once (the new/replaced SVG must not paint untransformed) and again on
+    // the next frame in case the box is still settling.
+    relayout(){ relayoutNow(); requestAnimationFrame(relayoutNow); },
   };
 }
 
@@ -4653,7 +4674,7 @@ const splitEditor = document.getElementById('split-editor');
 const AGENT_MIN = 200, EDITOR_MIN = 320, VIEWPORT_MIN = 360, HANDLES = 12;
 function afterSplitResize(){
   if (threeShown && ctrl){ ctrl.resize(); ctrl.draw(); }
-  if (currentTab === 'plan') planZoom.refit();
+  if (currentTab === 'plan') planZoom.relayout();   // keep the user's zoom across a rail/dock change
   else planNeedsFit = true;
 }
 function agentWidthNow(){
@@ -6868,6 +6889,7 @@ function readSaved(){ try { return localStorage.getItem(LS_SOURCE); } catch (e){
 function setSource(src, label){
   checkpoint = src;
   selectRoom(null, 'load'); closeDiagPop();   // a new plan starts unselected
+  planZoom.fit();   // ...and framed whole: the next compile fits instead of keeping the old zoom
   applyEdit(src, 0, 0, label || 'load');
   renderGutter(); compile();
 }

@@ -1671,6 +1671,7 @@ function mountScene(canvas, labels, togglesEl) {
   sunBtn.addEventListener('click', e => {
     e.preventDefault(); sunOpen = !sunOpen;
     sunPop.style.display = sunOpen ? '' : 'none';
+    sunWrap.style.zIndex = sunOpen ? '8' : '6';   // above the pills stacked below
   });
   // Highlight the active season chip so the 3-way reads as selected.
   function syncSeasonBtns() {
@@ -1728,6 +1729,7 @@ function mountScene(canvas, labels, togglesEl) {
   secBtn.addEventListener('click', e => {
     e.preventDefault(); secOpen = !secOpen;
     secPop.style.display = secOpen ? '' : 'none';
+    secWrap.style.zIndex = secOpen ? '8' : '6';
   });
   // Push the current section state into the slider + label + the section pill text.
   function syncSectionUI() {
@@ -2754,7 +2756,7 @@ function mountScene(canvas, labels, togglesEl) {
     if (stops.length < 2 && views.length >= 2) return false;
     tour = { stops, i: -1, phase: 'advance', t0: 0, from: null };
     tourBtn.textContent = 'Stop tour';
-    if (viewsPop) { viewsPop.style.display = 'none'; viewsOpen = false; }
+    if (viewsPop) { viewsPop.style.display = 'none'; viewsOpen = false; viewsWrap.style.zIndex = '6'; }
     tourRAF = requestAnimationFrame(tourStep);
     return true;
   }
@@ -2858,6 +2860,7 @@ function mountScene(canvas, labels, togglesEl) {
   viewsBtn.addEventListener('click', e => {
     e.preventDefault(); viewsOpen = !viewsOpen;
     viewsPop.style.display = viewsOpen ? '' : 'none';
+    viewsWrap.style.zIndex = viewsOpen ? '8' : '6';
     if (viewsOpen) renderViews();
   });
   let viewsMsgTimer = null;

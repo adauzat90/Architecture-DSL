@@ -139,7 +139,8 @@ class _Canvas:
         )
 
     def rect_wz(self, h0, z0, h1, z1, fill, stroke=WALL, sw=1.0, dash=None):
-        x, y = self.sx(min(h0, h1)), self.sy(max(z0, z1))
+        # Screen x is mirrored on flipped faces, so take the min AFTER projecting.
+        x, y = min(self.sx(h0), self.sx(h1)), self.sy(max(z0, z1))
         w = abs(self.sx(h1) - self.sx(h0))
         ht = abs(self.sy(z1) - self.sy(z0))
         d = f' stroke-dasharray="{dash}"' if dash else ""
