@@ -703,6 +703,16 @@ def test_renderer_has_the_shadow_map_hooks():
     assert "stencil: true" not in RENDERER_JS    # context no longer asks for stencil
 
 
+def test_renderer_exposes_linked_selection_hooks():
+    # The host names a room by its DSL id and its floor draws in the selection
+    # blue; a click on a room floor reports the id back. Other surfaces only identify.
+    assert "function setHighlight(id)" in RENDERER_JS
+    assert "function onSelect(fn)" in RENDERER_JS
+    assert "nd.name === 'room:' + highlightId" in RENDERER_JS
+    assert "(hit.name || '').startsWith('room:')) onSelectCb(hit.name.slice(5))" in RENDERER_JS
+    assert "setHighlight, onSelect };" in RENDERER_JS
+
+
 def test_renderer_has_the_transparent_glass_pass_hooks():
     # Glass draws LAST in a separate blended pass with depth-write off, so a client
     # standing inside can see out through the windows.

@@ -941,6 +941,14 @@ function mountScene(canvas, labels, togglesEl) {
   let walkRAF = null, walkLast = 0;
   let usePointerLock = false, walkDrag = false, wpx = 0, wpy = 0;
   let savedCam = null;             // orbit camera snapshot to restore on exit
+  // Linked selection: the host names a room (its DSL id) and its floor draws in
+  // the selection blue; a click on a room floor reports the id back to the host.
+  let highlightId = null, onSelectCb = null;
+  const HIGHLIGHT_MIX = [0.30, 0.52, 0.82];
+  function highlightColor(c) {
+    return new Float32Array([c[0] * 0.4 + HIGHLIGHT_MIX[0] * 0.6,
+      c[1] * 0.4 + HIGHLIGHT_MIX[1] * 0.6, c[2] * 0.4 + HIGHLIGHT_MIX[2] * 0.6]);
+  }
   let furniture = true;            // collide against fixtures (toggle; default ON)
   const WALK_R = 0.75;             // player collision radius (ft)
   const WALK_FILL = 0.35;          // eye-attached fill strength in walk mode
@@ -1461,7 +1469,8 @@ function mountScene(canvas, labels, togglesEl) {
   function drawOne(nd) {
     gl.uniformMatrix4fv(uModel, false, new Float32Array(
       (walking && nd.door) ? doorModelMatrix(nd) : IDENTITY));
-    gl.uniform3fv(uColor, nd.color);
+    gl.uniform3fv(uColor, (highlightId && nd.name === 'room:' + highlightId)
+      ? highlightColor(nd.color) : nd.color);
     gl.uniform1f(uRough, nd.rough);
     gl.uniform1f(uMetal, nd.metal);
     gl.uniform1f(uPatScale, nd.patScale);
@@ -2948,6 +2957,9 @@ function mountScene(canvas, labels, togglesEl) {
     if (tour || walking) return;      // suppress identify mid-tour and while walking
     const hit = pick(px, py);
     if (hit) showIdentify(identityOf(hit));
+    // A room floor is a selection, reported to the host (the playground links it
+    // to the plan, the source line and the inspector). Other surfaces just identify.
+    if (hit && onSelectCb && (hit.name || '').startsWith('room:')) onSelectCb(hit.name.slice(5));
   }, true);
 
   // Esc clears/disarms measure and stops a tour (in addition to walk's own Esc,
@@ -2999,11 +3011,17 @@ function mountScene(canvas, labels, togglesEl) {
     if (!hashApplied) { hashApplied = true; applyHashOnce(); }
   };
 
+  // Linked selection API: highlight a room's floor by its DSL id (null clears),
+  // and register the callback a room-floor click reports the id to.
+  function setHighlight(id) { highlightId = id || null; if (hasScene) draw(); }
+  function onSelect(fn) { onSelectCb = typeof fn === 'function' ? fn : null; }
+
   return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport,
     walkStick, cycleEye, toggleFurniture, toggleMinimap,
     setSun, setSection, setLevel, sunState, setGround,
     saveView, restoreView, playTour, stopTour, setMeasure, pick,
-    parseHash, encodeHash, currentCamera, autoTourStops };
+    parseHash, encodeHash, currentCamera, autoTourStops,
+    setHighlight, onSelect };
 }
 """
 

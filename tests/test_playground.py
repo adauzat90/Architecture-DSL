@@ -968,6 +968,29 @@ def test_app_puts_diagnostic_badges_on_the_plan():
     assert "http://" not in html and "https://" not in html
 
 
+def test_app_links_selection_across_plan_3d_source_and_inspector():
+    # One selected room, shown on every surface: a ring on the plan, the floor
+    # highlighted in the 3D dock, the statement marked in the gutter, the Inspect
+    # row. Any surface can start it; only the drawing/model pull the rail and the
+    # editor along.
+    html = render_app(CLEAN)
+    for token in ("function selectRoom(", "function renderSelRing(", "function markSourceLine(",
+                  "function roomLineOf(", "function caretSelect(", "'sel-ring'",
+                  "ctrl.onSelect(id => selectRoom(id, 'three'))", "ctrl.setHighlight(selectedRoomId)",
+                  "selectRoom(k, 'panel')", "selectRoom(id, 'overlay')", "selectRoom(room, 'badge')",
+                  "editor.addEventListener('click', caretSelect)"):
+        assert token in html, token
+    # the plan click goes through the hub (and a second click on the same room clears)
+    assert "selectRoom(id === selectedRoomId ? null : id, 'plan')" in html
+    # only a click on the drawing, the model or a badge pulls the rail to Inspect
+    assert "from === 'plan' || from === 'three' || from === 'badge'" in html
+    # Escape clears the selection once every overlay is closed (not while editing)
+    assert "if (selectedRoomId && !editMode && !typing){ selectRoom(null, 'key'); return; }" in html
+    # the gutter keeps the selected room's line marked across re-renders
+    assert "(i === selLn ? ' sel' : '')" in html
+    assert "http://" not in html and "https://" not in html
+
+
 def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
     html = render_app(CLEAN)
     assert 'id="theme-btn"' in html

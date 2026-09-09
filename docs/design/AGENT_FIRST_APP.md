@@ -110,11 +110,14 @@ canvas first, keeping every module behind it unchanged:
 * A **status bar** under the canvas carries the compile counts, so the source can
   stay closed until it is needed.
 
-Next steps in the same direction, in order: diagnostics as badges on the rooms
-they describe (tooltip with the hint and the quick fix, Ignore writing the
-`accept` pragma); one selection shared by plan, 3D, source line and inspector;
-elevations and section as canvas views with a face picker rather than a grid of
-thumbnails; then the visual pass (one type scale, one button recipe).
+Two follow-ons have landed on the same shell: **diagnostics on the drawing**
+(a badge per room with open issues, a popover with the hint, the quick fix and
+Ignore — which writes the compiler's own `accept` pragma onto the line) and
+**linked selection** (one selected room ringed on the plan, highlighted in the
+3D dock, marked in the gutter and picked in the inspector, started from any of
+them, including the caret landing on a room's statement). Still to come, in
+order: elevations and section as canvas views with a face picker rather than a
+grid of thumbnails; then the visual pass (one type scale, one button recipe).
 
 What we deliberately do **not** build: Revit's documentation engine (wall-layer
 joins, detailing, sheet sets). That is where "Revit killers" die. The wedge is

@@ -1991,6 +1991,11 @@ _APP_HTML = r"""<!doctype html>
      and zooms with the drawing; a triangle glyph marks a warning/error, a plain
      count a suggestion. Accepted diagnostics don't count — they are the audit
      trail, not open work. */
+  /* the selected room, ringed on the (non-edit) plan in the same blue the edit
+     overlay and the 3D highlight use — one selection, every surface */
+  .sel-ring { fill:rgba(47,111,176,.10); stroke:var(--accent2); stroke-width:2.4;
+    pointer-events:none; }
+  .gutter .gln.sel { background:rgba(47,111,176,.16); color:var(--ink); }
   .diag-badge { cursor:pointer; }
   .diag-badge rect { fill:var(--info); stroke:#fff; stroke-width:1.5; }
   .diag-badge.sev-warning rect { fill:var(--warn); }
@@ -2562,8 +2567,9 @@ function renderGutter(){
     const prev = marks[d.line], r = rank[d.severity] || 0;
     if (!prev || r > prev.r) marks[d.line] = { sev:d.severity, r }; }
   let html = '';
+  const selLn = roomLineOf(selectedRoomId);   // the selected room's statement stays marked
   for (let i = 1; i <= n; i++){ const m = marks[i];
-    html += '<div class="gln' + (m ? ' has-' + m.sev : '') + '">' +
+    html += '<div class="gln' + (m ? ' has-' + m.sev : '') + (i === selLn ? ' sel' : '') + '">' +
       (m ? '<span class="dot"></span>' : '') + i + '</div>'; }
   gutter.innerHTML = html;
   gutter.scrollTop = editor.scrollTop;
@@ -3212,6 +3218,7 @@ document.addEventListener('keydown', e => {
     if (!compareModal.hidden){ closeCompare(); return; }
     if (!helpPanel.hidden){ closeHelp(); return; }
     if (!scorePop.hidden){ toggleScorePop(false); return; }
+    if (selectedRoomId && !editMode && !typing){ selectRoom(null, 'key'); return; }
   }
 });
 
@@ -3600,9 +3607,12 @@ let planNeedsFit = false;
 function showThree(){
   if (!threeInit){ threeInit = true;
     ctrl = mountScene(document.getElementById('three-canvas'), LAYER_LABELS,
-      document.getElementById('three-toggles')); }
+      document.getElementById('three-toggles'));
+    // a room floor clicked in 3D selects it everywhere
+    if (ctrl && ctrl.onSelect) ctrl.onSelect(id => selectRoom(id, 'three')); }
   if (ctrl && scene3d){
-    if (!sceneLoaded){ ctrl.setScene(scene3d); sceneLoaded = true; }
+    if (!sceneLoaded){ ctrl.setScene(scene3d); sceneLoaded = true;
+      if (ctrl.setHighlight) ctrl.setHighlight(selectedRoomId); }
     else { ctrl.resize(); ctrl.draw(); }
   }
   updateSnapState();
@@ -4096,11 +4106,9 @@ function planClickToSource(e){
   const badge = e.target && e.target.closest ? e.target.closest('.diag-badge') : null;
   if (badge){ openDiagPop(badge.getAttribute('data-room'), 0); return; }
   const rect = e.target && e.target.closest ? e.target.closest('[data-room]') : null;
-  if (!rect) return;
+  if (!rect){ if (selectedRoomId) selectRoom(null, 'plan'); return; }   // empty paper: deselect
   const id = rect.getAttribute('data-room');
-  const room = (lastGood && lastGood.rooms || []).find(r => r.id === id);
-  const ln = room && room.line;
-  if (ln){ jumpToLine(ln); flashLine(ln); }
+  selectRoom(id === selectedRoomId ? null : id, 'plan');
 }
 
 // --- diagnostics on the drawing --------------------------------------------
@@ -4114,7 +4122,63 @@ function planClickToSource(e){
 // diagnostics (no line) cannot be accepted and get no Ignore button.
 const diagPop = document.getElementById('diag-pop');   // planBody is declared with the edit layer below
 let diagPopRoom = null, diagPopIdx = 0;
-function setPlanSvg(html){ planSvg.innerHTML = html; renderBadges(); }
+function setPlanSvg(html){ planSvg.innerHTML = html; renderBadges(); renderSelRing(); }
+
+// --- linked selection --------------------------------------------------------
+// One selected room, shown everywhere at once: a ring on the plan (the edit
+// overlay's own ring in edit mode), the floor highlighted in the 3D dock, the
+// statement's line marked in the gutter, and the Inspect page's row. Any surface
+// can start it — a room on the plan or in 3D, a badge, a panel row, the caret
+// landing on a room line — and the others follow. Only a click on the drawing or
+// the model pulls the rail to Inspect and (when the drawer is open) the editor
+// to the line; the panel and the caret never push focus around.
+function roomLineOf(id){
+  if (!id) return null;
+  const r = ((lastGood && lastGood.rooms) || []).find(x => x.id === id);
+  return r && r.line ? r.line : null;
+}
+function renderSelRing(){
+  const svg = planSvg.querySelector('svg'); if (!svg) return;
+  svg.querySelectorAll('.sel-ring').forEach(x => x.remove());
+  if (!selectedRoomId) return;
+  const rect = svg.querySelector('rect[data-room="' + String(selectedRoomId).replace(/"/g, '') + '"]');
+  if (!rect) return;
+  const ring = document.createElementNS(svg.namespaceURI, 'rect');
+  ['x', 'y', 'width', 'height'].forEach(a => ring.setAttribute(a, rect.getAttribute(a)));
+  ring.setAttribute('class', 'sel-ring');
+  // under the badges (appended last) but over everything else
+  const firstBadge = svg.querySelector('.diag-badge');
+  if (firstBadge) svg.insertBefore(ring, firstBadge); else svg.appendChild(ring);
+}
+function markSourceLine(){
+  const ln = roomLineOf(selectedRoomId);
+  gutter.querySelectorAll('.gln.sel').forEach(x => x.classList.remove('sel'));
+  if (ln && gutter.children[ln - 1]) gutter.children[ln - 1].classList.add('sel');
+}
+function selectRoom(id, from){
+  id = id || null;
+  selectedRoomId = id;
+  dpSel = id ? { t:'room', k:id } : null; dpForm = null;
+  if (editMode) buildOverlay();
+  renderSelRing(); markSourceLine();
+  if (ctrl && ctrl.setHighlight) ctrl.setHighlight(id);
+  renderPanel();
+  if (id && (from === 'plan' || from === 'three' || from === 'badge')){
+    if (!dpOpen) togglePanel(true);
+    const ln = roomLineOf(id);
+    if (sourceOpen && ln && from !== 'three'){ jumpToLine(ln); flashLine(ln); }
+  }
+}
+// The caret landing on a room's statement selects that room (never the other
+// way round: typing elsewhere leaves the selection alone).
+function caretSelect(){
+  if (!lastGood || !lastGood.rooms) return;
+  const ln = editor.value.slice(0, editor.selectionStart).split('\n').length;
+  const r = lastGood.rooms.find(x => x.line === ln);
+  if (r && r.id !== selectedRoomId) selectRoom(r.id, 'editor');
+}
+editor.addEventListener('keyup', e => { if (!e.ctrlKey && !e.metaKey) caretSelect(); });
+editor.addEventListener('click', caretSelect);
 function roomDiags(id){ return diagnostics.filter(d => d.room === id && !d.accepted); }
 function roomLabel(id){
   return String(id).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -4193,6 +4257,7 @@ function positionDiagPop(){
 function openDiagPop(room, idx){
   const ds = roomDiags(room);
   if (!ds.length){ closeDiagPop(); return; }
+  if (room !== selectedRoomId) selectRoom(room, 'badge');   // a badge click selects its room
   diagPopRoom = room; diagPopIdx = ((idx % ds.length) + ds.length) % ds.length;
   diagPop.innerHTML = diagPopHTML(ds[diagPopIdx], diagPopIdx, ds.length);
   diagPop.hidden = false;
@@ -5379,7 +5444,7 @@ function onDown(e){
     drag.cur = drag.bbox;                 // addGhost draws the bounding rect
   } else if (roomEl){
     const id = roomId, r = roomById(id); if (!r) return;
-    if (id !== selectedRoomId){ selectedRoomId = id; buildOverlay(); }
+    if (id !== selectedRoomId) selectRoom(id, 'overlay');
     drag = { kind:'move', id, P, cur:{ x:r.x, y:r.y, w:r.w, l:r.l },
       calc:{ x:r.x, y:r.y, w:r.w, l:r.l }, moved:false };
   } else if (e.pointerType && e.pointerType !== 'mouse'){
@@ -5628,10 +5693,10 @@ function dpSelect(t, k){
   // Notes are keyed by numeric index; a panel row passes it as a string, the
   // overlay as a number — normalise so every comparison downstream is number↔number.
   if (t === 'note' && k != null) k = parseInt(k, 10);
+  if (t === 'room'){ selectRoom(k, 'panel'); return; }   // the shared selection hub
   dpSel = k == null ? null : { t: t, k: k };
   dpForm = null;
-  if (t === 'room'){ selectedRoomId = k; if (editMode) buildOverlay(); }
-  else if (t === 'note' && editMode) buildOverlay();
+  if (t === 'note' && editMode) buildOverlay();
   renderPanel();
 }
 // The panel is the rail's Inspect page: opening it switches the rail to Inspect
