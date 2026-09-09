@@ -1325,6 +1325,10 @@ function mountScene(canvas, labels, togglesEl) {
       gl.drawElements(gl.TRIANGLES, nd.count, gl.UNSIGNED_INT, 0);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // The shadow pass set the viewport to the map's square; hand the canvas back
+    // to the main pass, or everything renders scaled into the shadow map's frame
+    // (the building lands in the top-right corner, most of the canvas empty).
+    gl.viewport(0, 0, canvas.width, canvas.height);
   }
 
   function draw() {

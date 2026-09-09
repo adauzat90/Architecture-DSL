@@ -910,6 +910,39 @@ def test_app_contains_resizable_split_handles_and_persistence_keys():
     assert ".split-h" in html
 
 
+def test_app_ships_the_canvas_first_shell():
+    # The re-layout: the canvas is the page. The agent rail carries a Design page
+    # and an Inspect page (the design panel moved out of the viewport), the 3D
+    # model is a dock beside the plan rather than a tab, and the editor +
+    # diagnostics slide over the canvas as a drawer that never pushes the drawing.
+    html = render_app(CLEAN)
+    for token in ('id="rail-tabs"', 'data-rail="design"', 'data-rail="inspect"',
+                  'id="rail-design"', 'id="rail-inspect"', "function showRail(",
+                  'id="three-col"', 'id="three-split"', 'id="three-tab-btn"',
+                  'id="three-hide"', 'id="three-wide"', "function setThree(",
+                  "function toggleThree(", "function threeAutoDefault(",
+                  'id="source-drawer"', 'id="source-btn"', "function toggleSource(",
+                  'id="canvas-bar"', "function renderCanvasBar("):
+        assert token in html, token
+    # the design panel lives in the rail's Inspect page, not in the plan row
+    assert html.index('id="rail-inspect"') < html.index('id="design-panel"') < html.index('id="split-agent"')
+    # the 3D pane sits in the dock column, outside the tabbed viewport
+    assert html.index('id="viewport"') < html.index('id="three-col"') < html.index('id="pane-three"')
+    # the editor column is the drawer, with its resize handle on its own left edge
+    assert html.index('id="source-drawer"') < html.index('id="split-editor"') < html.index('id="editor"')
+    # shell state persists under namespaced keys, and the shell keys are documented
+    for key in ("barndsl.playground.threeDock", "barndsl.playground.threeWidth",
+                "barndsl.playground.sourceOpen"):
+        assert key in html, key
+    assert "Show / hide the source editor" in html
+    # the dock, drawer chrome and rail tabs never print
+    assert ".three-col, .three-split, .canvas-bar, .rail-tabs" in html
+    # the 2 key still reaches the 3D model — as a dock toggle
+    assert "if (tab === 'three'){ toggleThree(); return; }" in html
+    # still offline
+    assert "http://" not in html and "https://" not in html
+
+
 def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
     html = render_app(CLEAN)
     assert 'id="theme-btn"' in html

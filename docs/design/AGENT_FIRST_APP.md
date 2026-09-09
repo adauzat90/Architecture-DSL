@@ -81,6 +81,41 @@ human can talk, edit text directly, or (later) manipulate geometry with the
 edit round-tripped into DSL — `exchange_to_plan` already proves the inverse
 direction works.
 
+**Shell re-layout (2026-09, canvas first).** The three equal panes above were the
+right shape while the language was being built and the wrong shape for someone
+designing a house: the code editor held the widest column, diagnostics were a
+console, and the drawing was a tab in the third column. The shell now puts the
+canvas first, keeping every module behind it unchanged:
+
+```
+┌────────────┬──────────────────────────────────┬────────────┐
+│ rail       │  canvas                          │  3D dock   │
+│ Design /   │  plan ⇄ elevations ⇄ report      │  (open /   │
+│ Inspect    │  edit bar · zoom · status bar    │  split /   │
+│            │            ┌─────────────────────┤  hidden)   │
+│            │            │ source drawer       │            │
+│            │            │ (editor + diags)    │            │
+└────────────┴────────────┴─────────────────────┴────────────┘
+```
+
+* The left rail has two pages: **Design** (agent chat + offline form) and
+  **Inspect** (the design panel — outline and properties — moved out of the
+  viewport so the plan keeps its width).
+* The **3D model is a dock**, not a tab: a fixed-width column beside the plan
+  (drag to resize, Split for half the canvas) or a 36px tab when hidden, so plan
+  and model are visible together. `2` toggles it; the state persists.
+* The **editor + diagnostics are a drawer** that slides over the canvas from the
+  right (`s`, the header Source button, or the status bar). It never pushes the
+  drawing. Compile errors and any jump-to-line open it uninvited.
+* A **status bar** under the canvas carries the compile counts, so the source can
+  stay closed until it is needed.
+
+Next steps in the same direction, in order: diagnostics as badges on the rooms
+they describe (tooltip with the hint and the quick fix, Ignore writing the
+`accept` pragma); one selection shared by plan, 3D, source line and inspector;
+elevations and section as canvas views with a face picker rather than a grid of
+thumbnails; then the visual pass (one type scale, one button recipe).
+
 What we deliberately do **not** build: Revit's documentation engine (wall-layer
 joins, detailing, sheet sets). That is where "Revit killers" die. The wedge is
 design-iteration speed on a constrained domain (barndominiums), with open

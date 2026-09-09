@@ -1490,6 +1490,18 @@ _APP_HTML = r"""<!doctype html>
   .agent-head { display:flex; align-items:center; gap:8px; padding:9px 12px;
     border-bottom:1px solid var(--line); }
   .agent.collapsed .agent-head { padding:9px 7px; justify-content:center; }
+  /* the rail's two pages: Design (chat + offline form) and Inspect (the design
+     panel — outline + properties). One page shows at a time; the collapsed rail
+     shows neither. */
+  .rail-tabs { display:flex; gap:2px; padding:4px 8px 0; flex:none;
+    border-bottom:1px solid var(--line); }
+  .rail-tabs button { font:inherit; font-size:12.5px; font-weight:600; padding:7px 12px;
+    border:0; background:transparent; color:var(--muted); cursor:pointer;
+    border-radius:8px 8px 0 0; border-bottom:2px solid transparent; }
+  .rail-tabs button.on { color:var(--ink); border-bottom-color:var(--accent); }
+  .rail-page { display:none; flex:1; min-height:0; flex-direction:column; }
+  .rail-page.on { display:flex; }
+  .agent.collapsed .rail-tabs, .agent.collapsed .rail-page { display:none; }
   .agent-title { font-weight:700; font-size:13px; }
   .agent-title span { color:var(--accent2); }
   .agent-sub { font-size:11px; color:var(--faint); margin-left:auto; }
@@ -1583,9 +1595,58 @@ _APP_HTML = r"""<!doctype html>
   #od-btn:disabled { opacity:.5; cursor:default; }
   .od-or { font-size:11px; font-weight:600; color:var(--faint); text-transform:uppercase;
     letter-spacing:.04em; margin-top:2px; }
-  .left { width:36%; min-width:280px; display:flex; flex-direction:column;
-    border-right:1px solid var(--line); }
-  .right { flex:1; display:flex; flex-direction:column; min-width:0; }
+  /* The source drawer: editor + diagnostics, slid over the canvas from the right.
+     It never pushes the drawing — the canvas keeps its width and the drawer sits
+     on top, so the plan stays readable while the text is open beside it. */
+  .left { position:absolute; top:0; right:0; bottom:0; z-index:15;
+    width:36%; min-width:320px; max-width:72%; display:flex; flex-direction:column;
+    background:var(--panel); border-left:1px solid var(--line);
+    box-shadow:-10px 0 30px rgba(20,30,50,.18);
+    transform:translateX(102%); transition:transform .18s ease; }
+  .left.open { transform:none; }
+  .left #split-editor { position:absolute; left:-3px; top:0; bottom:0; }
+  .right { flex:1; display:flex; flex-direction:column; min-width:0; position:relative; }
+  .canvas-row { flex:1; display:flex; min-height:0; min-width:0; }
+  /* the docked 3D column beside the plan: a fixed-width column (drag the handle to
+     resize, Split for half the canvas) or a 36px "3D ▸" tab when hidden. The
+     renderer's canvas fills the column; toggling never re-mounts WebGL. */
+  .three-col { flex:none; width:380px; position:relative; display:flex; flex-direction:column;
+    min-width:0; border-left:1px solid var(--line); background:var(--bg); }
+  .three-head { display:flex; align-items:center; gap:6px; padding:5px 8px 5px 12px;
+    font-size:12px; background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
+  .three-head .t { font-weight:700; }
+  .three-head button { font:inherit; font-size:11.5px; padding:3px 8px; border-radius:6px;
+    border:1px solid var(--line); background:transparent; color:var(--muted); cursor:pointer; }
+  .three-head button:hover { border-color:var(--accent); color:var(--accent); }
+  .three-body { flex:1; position:relative; min-height:0; }
+  .three-col #pane-three { display:block; position:absolute; inset:0; }
+  .three-tab { display:none; flex:1; writing-mode:vertical-rl; transform:rotate(180deg);
+    align-items:center; justify-content:center; font:inherit; font-size:12.5px; font-weight:700;
+    color:var(--muted); background:var(--panel); border:0; cursor:pointer; padding:12px 0; }
+  .three-tab:hover { color:var(--accent); }
+  .right.three-collapsed .three-col { width:36px !important; }
+  .right.three-collapsed .three-head, .right.three-collapsed .three-body,
+  .right.three-collapsed .three-split { display:none; }
+  .right.three-collapsed .three-tab { display:flex; }
+  .three-split { flex:none; width:6px; cursor:col-resize; position:relative; z-index:6;
+    touch-action:none; }
+  .three-split::before { content:""; position:absolute; top:0; bottom:0; left:2px; right:2px;
+    border-radius:2px; background:transparent; transition:background .12s; }
+  .three-split:hover::before { background:var(--line); }
+  .three-split.dragging::before { background:var(--accent); }
+  .tabs .tab[data-tab="three"] { border:1px solid var(--line); border-radius:7px;
+    padding:4px 11px; align-self:center; margin-bottom:5px; }
+  .tabs .tab[data-tab="three"].active { border-color:var(--accent); color:var(--accent);
+    font-weight:600; }
+  .tbtn.on { border-color:var(--accent); color:var(--accent); }
+  /* the canvas bar: compile status at a glance, and the way into the source
+     drawer when it is closed (counts are the same pills the diagnostics use) */
+  .canvas-bar { flex:none; display:flex; align-items:center; gap:8px; padding:4px 12px;
+    min-height:32px; background:var(--panel); border-top:1px solid var(--line);
+    font-size:12px; color:var(--muted); }
+  .canvas-bar .count { cursor:pointer; }
+  .canvas-bar .ok { color:var(--okc); font-weight:600; }
+  .canvas-bar .cb-src { margin-left:auto; font-size:11.5px; padding:3px 9px; }
   /* draggable split handles between the three panes (agent | editor | viewport).
      A slim 6px hit target with a centred hairline that warms on hover; the row is
      flex, so a handle just sits between two panes and dragging rewrites the width
@@ -1719,9 +1780,8 @@ _APP_HTML = r"""<!doctype html>
     paint-order:stroke; stroke:var(--panel); stroke-width:.22em; }
 
   /* --- design panel: outline + inspector, the no-code face of the DSL --- */
-  .design-panel { flex:none; width:252px; overflow-y:auto; overflow-x:hidden;
-    background:var(--panel); border-right:1px solid var(--line);
-    font-size:12.5px; padding:10px 12px 20px; }
+  .design-panel { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden;
+    background:var(--panel); font-size:12.5px; padding:10px 12px 20px; }
   .design-panel[hidden] { display:none; }
   .design-panel h5 { margin:14px 0 6px; font-size:10.5px; text-transform:uppercase;
     letter-spacing:.6px; color:var(--faint); }
@@ -2085,7 +2145,9 @@ _APP_HTML = r"""<!doctype html>
   @media print {
     header, #notice, .agent, .left, .split-h, .tabs, .edit-bar, #three-panel,
     .design-panel, #snap-btn, .drop-hint, .zoom-ctl, #dim-chip, .score-pop, .help-backdrop,
-    .help-panel, .lightbox { display:none !important; }
+    .help-panel, .lightbox, .three-col, .three-split, .canvas-bar, .rail-tabs
+    { display:none !important; }
+    .canvas-row { display:block !important; }
     .plan-body .svgbox { overflow:visible !important; }
     .plan-body .svgbox svg { position:static !important; transform:none !important; }
     html, body { overflow:visible !important; height:auto !important; background:#fff !important; }
@@ -2124,6 +2186,23 @@ _APP_HTML = r"""<!doctype html>
   <label class="examples">example
     <select id="example-select"><option value="">loading…</option></select>
   </label>
+  <button class="tbtn" id="print-btn"
+    title="Open a print-ready packet — title block, plan, elevations, report">Print</button>
+  <div class="menu">
+    <button class="tbtn" id="export-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
+    <div class="menu-list" id="export-menu" hidden>
+      <button class="menu-item" data-fmt="barn">Source <span class="fmt">.barn</span></button>
+      <button class="menu-item" data-fmt="svg">2D plan <span class="fmt">.svg</span></button>
+      <button class="menu-item" data-fmt="dxf">CAD drawing <span class="fmt">.dxf</span></button>
+      <button class="menu-item" data-fmt="glb">3D model <span class="fmt">.glb</span></button>
+      <button class="menu-item" data-fmt="ifc">BIM model <span class="fmt">.ifc</span></button>
+      <button class="menu-item" data-fmt="viewer">3D viewer <span class="fmt">.html</span>
+        <small>self-contained — share with a client</small></button>
+      <button class="menu-item" data-fmt="packet">Permit packet <span class="fmt">.html</span>
+        <small>print-ready — cover, plan, schedules, cost</small></button>
+    </div>
+  </div>
+  <button class="tbtn" id="source-btn" title="Show or hide the source editor and diagnostics (s)">Source</button>
   <button class="tbtn" id="theme-btn" aria-label="Cycle color theme"
     title="Theme: auto">◐</button>
   <button class="tbtn" id="help-btn" aria-haspopup="dialog"
@@ -2171,6 +2250,11 @@ _APP_HTML = r"""<!doctype html>
       <div class="agent-title">agent <span>chat</span></div>
       <div class="agent-sub" id="agent-sub"></div>
     </div>
+    <div class="rail-tabs" id="rail-tabs">
+      <button class="on" data-rail="design" title="Brief the agent, or lay out a plan offline">Design</button>
+      <button data-rail="inspect" title="Outline &amp; properties of the compiled plan — no code required">Inspect</button>
+    </div>
+    <div class="rail-page on" id="rail-design">
     <div class="thread" id="thread"></div>
     <div class="composer">
       <details class="offline-design" id="offline-design" open>
@@ -2203,9 +2287,85 @@ _APP_HTML = r"""<!doctype html>
       </div>
       <div class="agent-note" id="agent-note"></div>
     </div>
+    </div>
+    <div class="rail-page" id="rail-inspect">
+      <aside class="design-panel" id="design-panel" hidden aria-label="Design panel"></aside>
+    </div>
   </section>
   <div class="split-h" id="split-agent" title="Drag to resize · double-click to reset"></div>
-  <section class="left">
+  <section class="right" id="right">
+    <div class="tabs">
+      <button class="tab active" data-tab="plan">2D plan</button>
+      <button class="tab" data-tab="views">Elevations</button>
+      <button class="tab" data-tab="report">Report</button>
+      <div class="spacer"></div>
+      <button class="tab" data-tab="three" id="three-tab-btn"
+        title="Show or hide the 3D model beside the plan (2)">3D</button>
+    </div>
+    <div class="canvas-row">
+    <div class="viewport" id="viewport">
+      <div class="pane active" id="pane-plan">
+        <div class="edit-bar">
+          <button id="panel-btn" title="Inspect — outline &amp; properties in the left rail, no code required">☰ Inspect</button>
+          <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
+          <button id="undo-btn" disabled title="Nothing to undo">↶ Undo</button>
+          <button id="redo-btn" disabled title="Nothing to redo">↷ Redo</button>
+          <button id="measure-btn" disabled
+            title="Measure — drag between two points on the plan (M, edit mode)">⟷ Measure</button>
+          <button id="elec-btn"
+            title="Electrical layer — show outlets, switches &amp; ceiling lights">⚡ Electrical</button>
+          <button id="dims-btn"
+            title="Dimension convention — nominal room lines vs face-of-stud">⟺ Dims: nominal</button>
+          <span class="level-switch" id="level-switch" hidden></span>
+          <span class="multi-count" id="multi-count"></span>
+          <span class="align-tools" id="align-tools" hidden>
+            <button data-btn="align-left" title="Align left edges (min x)">⇤ Left</button>
+            <button data-btn="align-right" title="Align right edges (max x)">Right ⇥</button>
+            <button data-btn="align-top" title="Align top edges (max y)">⤒ Top</button>
+            <button data-btn="align-bottom" title="Align bottom edges (min y)">⤓ Bottom</button>
+            <button data-btn="dist-h" title="Distribute horizontally — equalize gaps">⇹ Dist H</button>
+            <button data-btn="dist-v" title="Distribute vertically — equalize gaps">⤨ Dist V</button>
+          </span>
+          <span class="edit-note" id="edit-note"></span>
+        </div>
+        <div class="plan-row">
+        <div class="plan-body">
+          <div class="svgbox" id="plan-svg" tabindex="0" style="outline:none"></div>
+          <div class="edit-layer" id="edit-layer" hidden></div>
+          <div id="dim-chip"></div>
+          <div class="zoom-ctl" id="plan-zoom">
+            <button data-z="out" title="Zoom out (−)" aria-label="Zoom out">−</button>
+            <span class="zpct" id="plan-zpct">100%</span>
+            <button data-z="in" title="Zoom in (+)" aria-label="Zoom in">+</button>
+            <button class="zfit" data-z="fit" title="Fit to pane (0)">Fit</button>
+          </div>
+        </div>
+        </div>
+      </div>
+      <div class="pane" id="pane-views"></div>
+      <div class="pane" id="pane-report"><div class="report-wrap" id="report-wrap"></div></div>
+    </div>
+    <div class="three-split" id="three-split" title="Drag to resize · double-click to reset"></div>
+    <div class="three-col" id="three-col">
+      <button class="three-tab" id="three-tab" title="Show the 3D model (2)">3D ▸</button>
+      <div class="three-head">
+        <span class="t">3D</span><span class="spacer"></span>
+        <button id="three-wide" title="Give the 3D model half the canvas">Split</button>
+        <button id="three-hide" title="Hide the 3D model (2)">Hide</button>
+      </div>
+      <div class="three-body">
+      <div class="pane" id="pane-three">
+        <canvas id="three-canvas"></canvas>
+        <div id="three-panel"><div class="hd">Layers</div><div id="three-toggles"></div></div>
+        <button class="tbtn" id="snap-btn" hidden
+          title="Download this 3D view as a PNG">⤓ PNG</button>
+      </div>
+      </div>
+    </div>
+    </div>
+    <div class="canvas-bar" id="canvas-bar"></div>
+  <aside class="left" id="source-drawer" aria-label="Source editor and diagnostics">
+  <div class="split-h" id="split-editor" title="Drag to resize · double-click to reset"></div>
     <div class="editor-wrap" id="editor-wrap">
       <div class="gutter" id="gutter"></div>
       <div class="editor-stack">
@@ -2230,81 +2390,7 @@ _APP_HTML = r"""<!doctype html>
       <div class="drop-hint">Drop a .barn file to open</div>
     </div>
     <div class="diagnostics" id="diagnostics"></div>
-  </section>
-  <div class="split-h" id="split-editor" title="Drag to resize · double-click to reset"></div>
-  <section class="right">
-    <div class="tabs">
-      <button class="tab active" data-tab="plan">2D plan</button>
-      <button class="tab" data-tab="three">3D</button>
-      <button class="tab" data-tab="views">Elevations</button>
-      <button class="tab" data-tab="report">Report</button>
-      <div class="spacer"></div>
-      <button class="tbtn" id="print-btn"
-        title="Open a print-ready packet — title block, plan, elevations, report">Print</button>
-      <div class="menu">
-        <button class="tbtn" id="export-btn" aria-haspopup="true" aria-expanded="false">Export ▾</button>
-        <div class="menu-list" id="export-menu" hidden>
-          <button class="menu-item" data-fmt="barn">Source <span class="fmt">.barn</span></button>
-          <button class="menu-item" data-fmt="svg">2D plan <span class="fmt">.svg</span></button>
-          <button class="menu-item" data-fmt="dxf">CAD drawing <span class="fmt">.dxf</span></button>
-          <button class="menu-item" data-fmt="glb">3D model <span class="fmt">.glb</span></button>
-          <button class="menu-item" data-fmt="ifc">BIM model <span class="fmt">.ifc</span></button>
-          <button class="menu-item" data-fmt="viewer">3D viewer <span class="fmt">.html</span>
-            <small>self-contained — share with a client</small></button>
-          <button class="menu-item" data-fmt="packet">Permit packet <span class="fmt">.html</span>
-            <small>print-ready — cover, plan, schedules, cost</small></button>
-        </div>
-      </div>
-    </div>
-    <div class="viewport" id="viewport">
-      <div class="pane active" id="pane-plan">
-        <div class="edit-bar">
-          <button id="panel-btn" title="Design panel — outline &amp; properties, no code required">☰ Design</button>
-          <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
-          <button id="undo-btn" disabled title="Nothing to undo">↶ Undo</button>
-          <button id="redo-btn" disabled title="Nothing to redo">↷ Redo</button>
-          <button id="measure-btn" disabled
-            title="Measure — drag between two points on the plan (M, edit mode)">⟷ Measure</button>
-          <button id="elec-btn"
-            title="Electrical layer — show outlets, switches &amp; ceiling lights">⚡ Electrical</button>
-          <button id="dims-btn"
-            title="Dimension convention — nominal room lines vs face-of-stud">⟺ Dims: nominal</button>
-          <span class="level-switch" id="level-switch" hidden></span>
-          <span class="multi-count" id="multi-count"></span>
-          <span class="align-tools" id="align-tools" hidden>
-            <button data-btn="align-left" title="Align left edges (min x)">⇤ Left</button>
-            <button data-btn="align-right" title="Align right edges (max x)">Right ⇥</button>
-            <button data-btn="align-top" title="Align top edges (max y)">⤒ Top</button>
-            <button data-btn="align-bottom" title="Align bottom edges (min y)">⤓ Bottom</button>
-            <button data-btn="dist-h" title="Distribute horizontally — equalize gaps">⇹ Dist H</button>
-            <button data-btn="dist-v" title="Distribute vertically — equalize gaps">⤨ Dist V</button>
-          </span>
-          <span class="edit-note" id="edit-note"></span>
-        </div>
-        <div class="plan-row">
-        <aside class="design-panel" id="design-panel" hidden aria-label="Design panel"></aside>
-        <div class="plan-body">
-          <div class="svgbox" id="plan-svg" tabindex="0" style="outline:none"></div>
-          <div class="edit-layer" id="edit-layer" hidden></div>
-          <div id="dim-chip"></div>
-          <div class="zoom-ctl" id="plan-zoom">
-            <button data-z="out" title="Zoom out (−)" aria-label="Zoom out">−</button>
-            <span class="zpct" id="plan-zpct">100%</span>
-            <button data-z="in" title="Zoom in (+)" aria-label="Zoom in">+</button>
-            <button class="zfit" data-z="fit" title="Fit to pane (0)">Fit</button>
-          </div>
-        </div>
-        </div>
-      </div>
-      <div class="pane" id="pane-three">
-        <canvas id="three-canvas"></canvas>
-        <div id="three-panel"><div class="hd">Layers</div><div id="three-toggles"></div></div>
-        <button class="tbtn" id="snap-btn" hidden
-          title="Download this 3D view as a PNG">⤓ PNG</button>
-      </div>
-      <div class="pane" id="pane-views"></div>
-      <div class="pane" id="pane-report"><div class="report-wrap" id="report-wrap"></div></div>
-    </div>
+  </aside>
   </section>
 </main>
 <div id="lightbox" class="lightbox" hidden>
@@ -2384,7 +2470,9 @@ let scene3d = null;      // last good 3D scene json
 let ctrl = null;         // 3D renderer controller
 let threeInit = false;   // mountScene attempted (canvas may be replaced)
 let sceneLoaded = false;  // scene3d currently uploaded to ctrl
-let currentTab = 'plan';
+let currentTab = 'plan';  // the canvas view: plan | views | report (3D is a dock, not a tab)
+let threeShown = false, threeMode = 'hidden';   // the docked 3D column: hidden | open | split
+let sourceOpen = false;   // the source drawer (editor + diagnostics) slid over the canvas
 
 function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function fmt(n){ return (Math.round(n*10)/10).toString(); }
@@ -2663,7 +2751,7 @@ function applyResult(p){
     if (currentTab === 'plan') planZoom.refit(); else planNeedsFit = true;
     renderViews(p);
     renderReport(p);
-    if (currentTab === 'three') showThree();
+    if (threeShown) showThree();
   } else if (lastGood){
     viewport.classList.add('stale');  // keep the last good render, dimmed
   } else {
@@ -2759,7 +2847,8 @@ const SHORTCUTS = [
   ['Measure on the plan (edit mode)', 'm'],
   ['Nudge the selected room 1 ft / 3 ft', '←↑↓→  ·  Shift'],
   ['Rotate the selected fixture', 'r'], ['Delete the selection', 'Del'],
-  ['Switch viewport tab', '1  2  3  4'], ['Cycle theme', 't'],
+  ['Switch viewport tab · 2 shows/hides 3D', '1  2  3  4'],
+  ['Show / hide the source editor', 's'], ['Cycle theme', 't'],
   ['Open this help', '?'],
 ];
 let helpRefLines = null;   // cached parsed reference lines (fetched once)
@@ -3050,7 +3139,7 @@ function applyTheme(mode){
   themeBtn.title = 'Theme: ' + themeMode + ' (t)';
   try { localStorage.setItem(LS_THEME, themeMode); } catch (e){}
   // A 3D redraw picks up palette-driven clear/background changes immediately.
-  if (currentTab === 'three' && ctrl) ctrl.draw();
+  if (threeShown && ctrl) ctrl.draw();
 }
 function cycleTheme(){ applyTheme(THEME_CYCLE[(THEME_CYCLE.indexOf(themeMode) + 1) % THEME_CYCLE.length]); }
 themeBtn.addEventListener('click', cycleTheme);
@@ -3067,6 +3156,7 @@ document.addEventListener('keydown', e => {
     const TAB_KEY = { '1':'plan', '2':'three', '3':'views', '4':'report' };
     if (TAB_KEY[e.key]){ e.preventDefault(); selectTab(TAB_KEY[e.key]); return; }
     if (e.key === 't'){ e.preventDefault(); cycleTheme(); return; }
+    if (e.key === 's'){ e.preventDefault(); toggleSource(); return; }
   }
   if (e.key === 'Escape'){
     if (lb && !lb.hidden){ closeLightbox(); return; }
@@ -3150,6 +3240,9 @@ function renderDiagnostics(p){
   let head = '<div class="diag-head">' + countChip('error', c.error) +
     countChip('warning', c.warning) + countChip('info', c.info) +
     (p.ok ? '<span class="ok">✓ compiles clean</span>' : '') + '</div>';
+  renderCanvasBar(c, !!p.ok);
+  // Errors need the editor: surface the drawer (without remembering that as a choice).
+  if (c.error && !sourceOpen) toggleSource(true, false);
   if (!ds.length){ diagEl.innerHTML = head + '<div class="diag-empty">No diagnostics.</div>'; return; }
   let shown = sortedDiagnostics(ds);
   if (diagFilter) shown = shown.filter(d => d.severity === diagFilter);
@@ -3198,6 +3291,7 @@ diagEl.addEventListener('click', e => {
   if (ln) jumpToLine(ln);
 });
 function jumpToLine(ln){
+  if (!sourceOpen) toggleSource(true, false);   // the line is in the drawer
   const lines = editor.value.split('\n');
   let pos = 0;
   for (let i = 0; i < ln - 1 && i < lines.length; i++) pos += lines[i].length + 1;
@@ -3437,19 +3531,21 @@ editor.addEventListener('blur', () => { if (acOpen) hideAc(); });
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => selectTab(btn.getAttribute('data-tab')));
 });
+// The canvas has three views (plan, elevations, report) and a 3D DOCK: the model
+// lives in its own column beside the view, so plan and 3D are visible together.
+// selectTab('three') therefore toggles the dock rather than swapping the pane —
+// the `2` key and the 3D pill in the tab strip both go through here.
 function selectTab(tab){
+  if (tab === 'three'){ toggleThree(); return; }
   currentTab = tab;
-  document.querySelectorAll('.tab').forEach(b =>
-    b.classList.toggle('active', b.getAttribute('data-tab') === tab));
-  document.querySelectorAll('.pane').forEach(p =>
+  document.querySelectorAll('.tab').forEach(b => {
+    const t = b.getAttribute('data-tab');
+    if (t !== 'three') b.classList.toggle('active', t === tab);
+  });
+  document.querySelectorAll('.viewport .pane').forEach(p =>
     p.classList.toggle('active', p.id === 'pane-' + tab));
-  if (tab === 'three') showThree();
-  // Leaving the 3D tab must drop out of walk mode cleanly (release pointer lock,
-  // unhook its key/mouse listeners) — the renderer restores the orbit camera.
-  else if (ctrl && ctrl.exitWalk) ctrl.exitWalk();
   // A pane has no measurable size while hidden, so Fit is deferred until it shows.
   if (tab === 'plan'){ planNeedsFit = false; planZoom.refit(); }
-  updateSnapState();               // the snapshot pill only lives on the 3D tab
 }
 let planNeedsFit = false;
 function showThree(){
@@ -3463,13 +3559,134 @@ function showThree(){
   updateSnapState();
 }
 
+// --- the 3D dock: hidden | open | split ---------------------------------------
+// `open` is a fixed-width column (dragged widths persist), `split` gives the model
+// half the canvas, `hidden` leaves a 36px "3D ▸" tab. Without a saved choice the
+// default follows the canvas width: docked on a wide window, hidden on a narrow
+// or touch one. Hiding drops out of walk mode cleanly (pointer lock released).
+const rightEl = document.getElementById('right');
+const threeCol = document.getElementById('three-col');
+const threeSplit = document.getElementById('three-split');
+const threeTabBtn = document.getElementById('three-tab-btn');
+const LS_THREE = 'barndsl.playground.threeDock';     // hidden | open | split
+const LS_THREE_W = 'barndsl.playground.threeWidth';  // dragged dock width (px)
+const THREE_MIN = 220;
+let threeChosen = false;   // the user picked a state this session (or one was saved)
+function threeAutoDefault(){
+  const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  return (!coarse && rightEl.clientWidth >= 1040) ? 'open' : 'hidden';
+}
+function setThree(mode, persist){
+  threeMode = mode; threeShown = mode !== 'hidden';
+  rightEl.classList.toggle('three-collapsed', !threeShown);
+  if (mode === 'split') threeCol.style.width = Math.round(rightEl.clientWidth * 0.5) + 'px';
+  else if (mode === 'open'){
+    // a saved drag width, else the CSS default — either way clamped so the plan
+    // keeps its minimum on a narrow window
+    let w = ''; try { w = localStorage.getItem(LS_THREE_W) || ''; } catch (e){}
+    threeCol.style.width = clampThree(w ? parseFloat(w) : 380) + 'px';
+  }
+  threeTabBtn.classList.toggle('active', threeShown);
+  document.getElementById('three-wide').textContent = mode === 'split' ? 'Dock' : 'Split';
+  if (threeShown) showThree();
+  else if (ctrl && ctrl.exitWalk) ctrl.exitWalk();
+  updateSnapState();
+  if (persist){ threeChosen = true; try { localStorage.setItem(LS_THREE, mode); } catch (e){} }
+  afterSplitResize();
+}
+function toggleThree(){ setThree(threeShown ? 'hidden' : 'open', true); }
+function clampThree(px){
+  return Math.max(THREE_MIN, Math.min(px, Math.max(THREE_MIN, rightEl.clientWidth - VIEWPORT_MIN - 6)));
+}
+document.getElementById('three-tab').addEventListener('click', () => setThree('open', true));
+document.getElementById('three-hide').addEventListener('click', () => setThree('hidden', true));
+document.getElementById('three-wide').addEventListener('click', () =>
+  setThree(threeMode === 'split' ? 'open' : 'split', true));
+threeSplit.addEventListener('pointerdown', ev => {
+  threeSplit.classList.add('dragging');
+  const prevCursor = document.body.style.cursor, prevSel = document.body.style.userSelect;
+  document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+  try { threeSplit.setPointerCapture(ev.pointerId); } catch (_){}
+  function move(e){
+    const r = rightEl.getBoundingClientRect();
+    threeCol.style.width = clampThree(r.right - e.clientX - 3) + 'px';
+    afterSplitResize();
+  }
+  function up(e){
+    threeSplit.removeEventListener('pointermove', move);
+    threeSplit.removeEventListener('pointerup', up);
+    threeSplit.classList.remove('dragging');
+    document.body.style.cursor = prevCursor; document.body.style.userSelect = prevSel;
+    try { threeSplit.releasePointerCapture(e.pointerId); } catch (_){}
+    if (threeMode === 'split'){ threeMode = 'open'; document.getElementById('three-wide').textContent = 'Split'; }
+    try { localStorage.setItem(LS_THREE_W, parseInt(threeCol.style.width, 10));
+          localStorage.setItem(LS_THREE, 'open'); } catch (e){}
+    threeChosen = true; afterSplitResize();
+  }
+  threeSplit.addEventListener('pointermove', move);
+  threeSplit.addEventListener('pointerup', up);
+  ev.preventDefault();
+});
+threeSplit.addEventListener('dblclick', () => {
+  threeCol.style.width = '';
+  try { localStorage.removeItem(LS_THREE_W); } catch (e){}
+  afterSplitResize();
+});
+// The column resizes with the window and with every dock/drawer change: keep the
+// WebGL canvas the size of its box, and re-fit the plan when the view changes size.
+if (window.ResizeObserver){
+  new ResizeObserver(() => { if (threeShown && ctrl){ ctrl.resize(); ctrl.draw(); } }).observe(threeCol);
+  new ResizeObserver(() => { if (currentTab === 'plan') planZoom.refit(); }).observe(viewport);
+}
+window.addEventListener('resize', () => { if (!threeChosen){ const want = threeAutoDefault();
+  if (want !== threeMode) setThree(want, false); } });
+
+// --- the source drawer: editor + diagnostics over the canvas -------------------
+// Closed by default on a fresh install (canvas first); remembered afterwards.
+// Compile errors open it uninvited — they need the editor to fix — and so does
+// any jump-to-line (a diagnostic row, a room click), which is the link between
+// the drawing and its text.
+const sourceDrawer = document.getElementById('source-drawer');
+const sourceBtn = document.getElementById('source-btn');
+const LS_SOURCE_OPEN = 'barndsl.playground.sourceOpen';
+function toggleSource(open, persist){
+  sourceOpen = open == null ? !sourceOpen : !!open;
+  sourceDrawer.classList.toggle('open', sourceOpen);
+  sourceBtn.classList.toggle('on', sourceOpen);
+  sourceBtn.setAttribute('aria-expanded', sourceOpen ? 'true' : 'false');
+  const cb = document.querySelector('.canvas-bar .cb-src');
+  if (cb) cb.textContent = sourceOpen ? 'Hide source' : 'Show source';
+  if (persist !== false) try { localStorage.setItem(LS_SOURCE_OPEN, sourceOpen ? '1' : '0'); } catch (e){}
+}
+sourceBtn.addEventListener('click', () => toggleSource());
+document.getElementById('canvas-bar').addEventListener('click', e => {
+  const b = e.target.closest('.cb-src, .count'); if (!b) return;
+  if (b.classList.contains('count')){
+    toggleSource(true);
+    const f = b.getAttribute('data-filter');
+    if (f && f !== diagFilter && lastDiagPayload.counts && lastDiagPayload.counts[f]){
+      diagFilter = f; renderDiagnostics(lastDiagPayload); }
+    diagEl.scrollIntoView({ block:'nearest' });
+  } else toggleSource();
+});
+function renderCanvasBar(c, ok){
+  const bar = document.getElementById('canvas-bar'); if (!bar) return;
+  const pill = (kind, n) => '<span class="count ' + kind + (n ? '' : ' zero') + '" data-filter="' + kind +
+    '" title="' + (n ? 'Show the ' + kind + 's in the source drawer' : '') + '">' + n + ' ' + kind +
+    (n === 1 ? '' : 's') + '</span>';
+  bar.innerHTML = pill('error', c.error) + pill('warning', c.warning) + pill('info', c.info) +
+    (ok ? '<span class="ok">✓ compiles clean</span>' : '') +
+    '<button class="tbtn cb-src" title="Show or hide the source editor and diagnostics (s)">' +
+    (sourceOpen ? 'Hide source' : 'Show source') + '</button>';
+}
+
 // --- 3D snapshot (download the current WebGL view as a PNG) ------------------
 // The canvas has no preserveDrawingBuffer, so its pixels are only valid until the
 // browser composites: draw and read the buffer in the SAME synchronous task, with
 // no await in between. toDataURL is synchronous, so it captures what draw() just
 // rendered (orbit or walk — it's the same canvas). Reuses downloadBlob.
 const snapBtn = document.getElementById('snap-btn');
-function updateSnapState(){ snapBtn.hidden = !(currentTab === 'three' && ctrl && scene3d); }
+function updateSnapState(){ snapBtn.hidden = !(threeShown && ctrl && scene3d); }
 function dataUrlToBlob(url){
   const comma = url.indexOf(','), bin = atob(url.slice(comma + 1));
   const arr = new Uint8Array(bin.length);
@@ -3903,8 +4120,8 @@ const splitAgent = document.getElementById('split-agent');
 const splitEditor = document.getElementById('split-editor');
 const AGENT_MIN = 200, EDITOR_MIN = 320, VIEWPORT_MIN = 360, HANDLES = 12;
 function afterSplitResize(){
-  if (currentTab === 'three' && ctrl){ ctrl.resize(); ctrl.draw(); }
-  else if (currentTab === 'plan') planZoom.refit();
+  if (threeShown && ctrl){ ctrl.resize(); ctrl.draw(); }
+  if (currentTab === 'plan') planZoom.refit();
   else planNeedsFit = true;
 }
 function agentWidthNow(){
@@ -3934,7 +4151,8 @@ function startSplit(which, ev){
   function move(e){
     const left = mainEl.getBoundingClientRect().left;
     if (which === 'agent') agentPane.style.width = clampAgent(e.clientX - left) + 'px';
-    else leftCol.style.width = clampEditor(e.clientX - left - agentWidthNow() - 6) + 'px';
+    // the source drawer is anchored to the right edge: its handle sits on its left
+    else leftCol.style.width = clampEditor(mainEl.getBoundingClientRect().right - e.clientX - 3) + 'px';
     afterSplitResize();
   }
   function up(e){
@@ -5200,14 +5418,29 @@ function dpSelect(t, k){
   else if (t === 'note' && editMode) buildOverlay();
   renderPanel();
 }
+// The panel is the rail's Inspect page: opening it switches the rail to Inspect
+// (expanding a collapsed rail), closing it returns to Design. The plan keeps its
+// width either way — the panel no longer sits inside the viewport.
+const railTabs = document.getElementById('rail-tabs');
+function showRail(name){
+  railTabs.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.getAttribute('data-rail') === name));
+  document.getElementById('rail-design').classList.toggle('on', name === 'design');
+  document.getElementById('rail-inspect').classList.toggle('on', name === 'inspect');
+}
 function togglePanel(open){
-  dpOpen = open == null ? dpEl.hidden : open;
+  dpOpen = open == null ? !dpOpen : !!open;
   dpEl.hidden = !dpOpen;
   panelBtn.classList.toggle('on', dpOpen);
+  showRail(dpOpen ? 'inspect' : 'design');
+  if (dpOpen && agentPane.classList.contains('collapsed')) collapseBtn.click();
   try { localStorage.setItem(LS_PANEL, dpOpen ? '1' : ''); } catch (e){}
-  renderPanel(); planZoom.refit();          // the plan pane just changed width
+  renderPanel(); planZoom.refit();
 }
 panelBtn.addEventListener('click', () => togglePanel());
+railTabs.addEventListener('click', e => {
+  const b = e.target.closest('button[data-rail]'); if (!b) return;
+  togglePanel(b.getAttribute('data-rail') === 'inspect');
+});
 
 function optList(items, cur){
   let h = '';
@@ -6234,6 +6467,12 @@ editor.addEventListener('input', () => { if (autosaveOff){ autosaveOff = false; 
     editor.value = INITIAL_SOURCE; renderGutter(); compile();
   }
   histInit(editor.value);   // seed the undo timeline with the booted source (the floor state)
+  // Shell state: the source drawer and the 3D dock, remembered per browser.
+  let so = null, td = null;
+  try { so = localStorage.getItem(LS_SOURCE_OPEN); td = localStorage.getItem(LS_THREE); } catch (e){}
+  toggleSource(so === '1', false);
+  if (td === 'hidden' || td === 'open' || td === 'split'){ threeChosen = true; setThree(td, false); }
+  else setThree(threeAutoDefault(), false);
 })();
 </script>
 </body>
