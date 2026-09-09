@@ -991,6 +991,25 @@ def test_app_links_selection_across_plan_3d_source_and_inspector():
     assert "http://" not in html and "https://" not in html
 
 
+def test_app_shows_elevations_as_a_canvas_view_with_a_face_picker():
+    # One face at drawing size with a compass and a face picker, All four for a
+    # contact sheet, Section and Site alongside; arrow keys walk around; a click
+    # still opens the zoomable lightbox.
+    html = render_app(CLEAN)
+    for token in ("function applyViewSide(", "function stepViewSide(", 'id="views-compass"',
+                  'class="views-sides"', "sideBtn('four', 'All four')", "sideBtn('section', 'Section')",
+                  "barndsl.playground.viewSide", "Walk around the elevations",
+                  "stepViewSide(e.key === 'ArrowRight' ? 1 : -1)",
+                  "openLightbox(fig.getAttribute('data-view'))"):
+        assert token in html, token
+    # the arrows only steer the Elevations view (the plan's arrows nudge rooms)
+    assert "currentTab === 'views' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')" in html
+    # the compass and the picker share the side names the payload uses
+    for side in ("south", "east", "north", "west"):
+        assert 'data-side="%s"' % side in html, side
+    assert "http://" not in html and "https://" not in html
+
+
 def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
     html = render_app(CLEAN)
     assert 'id="theme-btn"' in html

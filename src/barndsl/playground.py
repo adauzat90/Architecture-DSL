@@ -1751,6 +1751,43 @@ _APP_HTML = r"""<!doctype html>
   .views-grid figcaption { font-size:11.5px; color:var(--faint); padding:7px 10px;
     border-bottom:1px solid var(--line); text-transform:uppercase; letter-spacing:.4px; }
   .views-grid .svgbox { height:220px; cursor:default; }
+  /* --- elevations as a canvas view: one face at drawing size, a face picker,
+     a compass that says which way you are looking, All four for a contact sheet,
+     Section and Site alongside. ← → walk around the building. --- */
+  #pane-views.active { display:flex; flex-direction:column; overflow:hidden; }
+  .views-head { flex:none; display:flex; align-items:center; gap:14px; padding:10px 16px 8px;
+    background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .views-head h2 { margin:0; font-size:15px; font-weight:700; letter-spacing:-.01em; }
+  .views-head .sub { font:12px ui-monospace,Menlo,Consolas,monospace; color:var(--muted); }
+  .views-head .spacer { flex:1; }
+  .views-compass { width:74px; height:54px; display:block; flex:none; }
+  .views-compass .b { fill:var(--bg); stroke:var(--faint); stroke-width:1; }
+  .views-compass .edge { stroke:var(--line); stroke-width:5; stroke-linecap:round; }
+  .views-compass .edge.on { stroke:var(--accent2); }
+  .views-compass text { font:600 8.5px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    fill:var(--muted); }
+  .views-sides { display:inline-flex; gap:2px; padding:3px; background:var(--bg);
+    border-radius:8px; flex-wrap:wrap; }
+  .views-sides button { font:inherit; font-size:12px; font-weight:600; padding:4px 10px;
+    border:0; border-radius:5px; background:transparent; color:var(--muted); cursor:pointer;
+    white-space:nowrap; }
+  .views-sides button:hover { color:var(--ink); }
+  .views-sides button.on { background:var(--ink); color:var(--bg); }
+  .views-sides .sep { width:1px; background:var(--line); margin:4px 4px; }
+  .views-body { flex:1; overflow:auto; min-height:0; padding:16px; }
+  .views-body .ev { display:none; margin:0; background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; overflow:hidden; cursor:zoom-in; }
+  .views-body .ev.on { display:block; }
+  .views-body .ev figcaption { display:none; font-size:11.5px; color:var(--faint); padding:7px 10px;
+    border-bottom:1px solid var(--line); text-transform:uppercase; letter-spacing:.4px; }
+  .views-body.four { display:grid; grid-template-columns:1fr 1fr; gap:14px; align-content:start; }
+  .views-body.four .ev.four { display:block; }
+  .views-body.four .ev figcaption { display:block; }
+  .views-body .ev .svgbox { height:auto; padding:0; overflow:visible; display:block; cursor:zoom-in; }
+  .views-body .ev svg { width:100%; height:auto; display:block; }
+  .views-foot { flex:none; display:flex; gap:16px; padding:6px 16px; font-size:11.5px;
+    color:var(--faint); background:var(--panel); border-top:1px solid var(--line); }
+  .views-foot .k { font:11px ui-monospace,Menlo,Consolas,monospace; color:var(--muted); }
 
   /* --- Tier 5: edit mode --- */
   #pane-plan.active { display:flex; flex-direction:column; }
@@ -2903,6 +2940,7 @@ const SHORTCUTS = [
   ['Rotate the selected fixture', 'r'], ['Delete the selection', 'Del'],
   ['Switch viewport tab · 2 shows/hides 3D', '1  2  3  4'],
   ['Show / hide the source editor', 's'], ['Cycle theme', 't'],
+  ['Walk around the elevations', '←  →'],
   ['Open this help', '?'],
 ];
 let helpRefLines = null;   // cached parsed reference lines (fetched once)
@@ -3211,6 +3249,9 @@ document.addEventListener('keydown', e => {
     if (TAB_KEY[e.key]){ e.preventDefault(); selectTab(TAB_KEY[e.key]); return; }
     if (e.key === 't'){ e.preventDefault(); cycleTheme(); return; }
     if (e.key === 's'){ e.preventDefault(); toggleSource(); return; }
+    // on the Elevations view, ← → walk around the building (the plan's arrows nudge rooms)
+    if (currentTab === 'views' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && (lb && lb.hidden)){
+      e.preventDefault(); stepViewSide(e.key === 'ArrowRight' ? 1 : -1); return; }
   }
   if (e.key === 'Escape'){
     if (!diagPop.hidden){ closeDiagPop(); return; }
@@ -3762,18 +3803,71 @@ function snapshot3d(){
   downloadBlob(dataUrlToBlob(url), planSlug() + '-3d.png');
 }
 snapBtn.addEventListener('click', snapshot3d);
+// Elevations are a canvas view, not a grid of thumbnails: one face at drawing
+// size with a face picker and a compass, `All four` for a contact sheet, and the
+// section and site plan alongside. ← → walk around the building; a click on the
+// drawing opens the zoomable lightbox as before.
+const SIDE_ORDER = ['south', 'east', 'north', 'west'];
+const SIDE_INFO = {
+  south:['South elevation', 'looking north'], east:['East elevation', 'looking west'],
+  north:['North elevation', 'looking south'], west:['West elevation', 'looking east'],
+  four:['Elevations', 'all four faces'], section:['Section', 'cut through the plan'],
+  site:['Site plan', 'lot, setbacks and the building'] };
+const LS_VIEW_SIDE = 'barndsl.playground.viewSide';
+let viewSide = 'south';
+try { viewSide = localStorage.getItem(LS_VIEW_SIDE) || 'south'; } catch (e){}
 function renderViews(p){
   if (!p.elevations){ viewsPane.innerHTML = '<div class="diag-empty">No views.</div>'; return; }
-  const order = [['south','South'],['north','North'],['east','East'],['west','West']];
-  let html = '<div class="views-grid">';
-  for (const pair of order){ const svg = p.elevations[pair[0]];
-    if (svg) html += '<figure data-view="' + pair[0] + '" title="Click to zoom"><figcaption>' +
-      pair[1] + ' elevation</figcaption><div class="svgbox">' + svg + '</div></figure>'; }
-  if (p.section) html += '<figure data-view="section" title="Click to zoom">' +
+  const env = (p.settings && p.settings.envelope) || [0, 0];
+  const sideBtn = (s, label) => '<button data-side="' + s + '">' + label + '</button>';
+  let html = '<div class="views-head"><div><h2 id="views-title"></h2><div class="sub" id="views-sub"></div></div>' +
+    '<span class="spacer"></span>' +
+    '<svg class="views-compass" id="views-compass" viewBox="0 0 74 54" aria-hidden="true">' +
+      '<rect class="b" x="17" y="14" width="40" height="26"/>' +
+      '<line class="edge" data-side="north" x1="21" y1="14" x2="53" y2="14"/>' +
+      '<line class="edge" data-side="south" x1="21" y1="40" x2="53" y2="40"/>' +
+      '<line class="edge" data-side="west" x1="17" y1="18" x2="17" y2="36"/>' +
+      '<line class="edge" data-side="east" x1="57" y1="18" x2="57" y2="36"/>' +
+      '<text x="37" y="8" text-anchor="middle">N</text><text x="37" y="51" text-anchor="middle">S</text>' +
+      '<text x="8" y="30" text-anchor="middle">W</text><text x="67" y="30" text-anchor="middle">E</text></svg>' +
+    '<div class="views-sides" role="group" aria-label="Which drawing to show">' +
+      sideBtn('south', 'South') + sideBtn('east', 'East') + sideBtn('north', 'North') + sideBtn('west', 'West') +
+      sideBtn('four', 'All four') +
+      (p.section || p.site_svg ? '<span class="sep"></span>' : '') +
+      (p.section ? sideBtn('section', 'Section') : '') + (p.site_svg ? sideBtn('site', 'Site') : '') +
+    '</div></div><div class="views-body" id="views-body">';
+  for (const s of SIDE_ORDER){ const svg = p.elevations[s]; if (!svg) continue;
+    html += '<figure class="ev four" data-view="' + s + '" data-side="' + s + '" title="Click to zoom"><figcaption>' +
+      SIDE_INFO[s][0] + '</figcaption><div class="svgbox">' + svg + '</div></figure>'; }
+  if (p.section) html += '<figure class="ev" data-view="section" data-side="section" title="Click to zoom">' +
     '<figcaption>Section</figcaption><div class="svgbox">' + p.section + '</div></figure>';
-  if (p.site_svg) html += '<figure data-view="site" title="Click to zoom">' +
+  if (p.site_svg) html += '<figure class="ev" data-view="site" data-side="site" title="Click to zoom">' +
     '<figcaption>Site plan</figcaption><div class="svgbox">' + p.site_svg + '</div></figure>';
-  viewsPane.innerHTML = html + '</div>';
+  html += '</div><div class="views-foot"><span><span class="k">←  →</span> walk around the building</span>' +
+    '<span>click a drawing to zoom</span>' +
+    (env[0] && env[1] ? '<span class="k">' + env[0] + '′ × ' + env[1] + '′</span>' : '') + '</div>';
+  viewsPane.innerHTML = html;
+  applyViewSide(viewSide);
+}
+function applyViewSide(s){
+  const body = document.getElementById('views-body'); if (!body) return;
+  if (!(s in SIDE_INFO) || (s !== 'four' && !body.querySelector('.ev[data-side="' + s + '"]'))) s = 'south';
+  viewSide = s;
+  try { localStorage.setItem(LS_VIEW_SIDE, s); } catch (e){}
+  const info = SIDE_INFO[s];
+  document.getElementById('views-title').textContent = info[0];
+  document.getElementById('views-sub').textContent = info[1];
+  body.classList.toggle('four', s === 'four');
+  body.querySelectorAll('.ev').forEach(f => f.classList.toggle('on', f.getAttribute('data-side') === s));
+  viewsPane.querySelectorAll('.views-sides button').forEach(b =>
+    b.classList.toggle('on', b.getAttribute('data-side') === s));
+  viewsPane.querySelectorAll('.views-compass .edge').forEach(e =>
+    e.classList.toggle('on', e.getAttribute('data-side') === s));
+  body.scrollTop = 0;
+}
+function stepViewSide(dir){
+  const i = SIDE_ORDER.indexOf(viewSide);
+  applyViewSide(SIDE_ORDER[((i < 0 ? 0 : i) + dir + 4) % 4]);
 }
 
 // --- elevation lightbox (a zoomable single-view overlay) --------------------
@@ -3798,6 +3892,8 @@ function openLightbox(view){
 }
 function closeLightbox(){ lb.hidden = true; lbSvg.innerHTML = ''; }
 viewsPane.addEventListener('click', e => {
+  const side = e.target.closest('.views-sides button[data-side]');
+  if (side){ applyViewSide(side.getAttribute('data-side')); return; }
   const fig = e.target.closest('figure[data-view]'); if (!fig) return;
   openLightbox(fig.getAttribute('data-view'));
 });

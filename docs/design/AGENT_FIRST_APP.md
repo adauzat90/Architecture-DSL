@@ -115,9 +115,11 @@ Two follow-ons have landed on the same shell: **diagnostics on the drawing**
 Ignore — which writes the compiler's own `accept` pragma onto the line) and
 **linked selection** (one selected room ringed on the plan, highlighted in the
 3D dock, marked in the gutter and picked in the inspector, started from any of
-them, including the caret landing on a room's statement). Still to come, in
-order: elevations and section as canvas views with a face picker rather than a
-grid of thumbnails; then the visual pass (one type scale, one button recipe).
+them, including the caret landing on a room's statement). **Elevations are a
+canvas view** too: one face at drawing size with a compass and a face picker,
+`All four` as a contact sheet, the section and site plan alongside, ← → to walk
+around the building. Still to come: the visual pass (one type scale, one button
+recipe), and a face highlight in the 3D dock to match the elevation shown.
 
 What we deliberately do **not** build: Revit's documentation engine (wall-layer
 joins, detailing, sheet sets). That is where "Revit killers" die. The wedge is
