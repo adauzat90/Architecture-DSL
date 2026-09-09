@@ -1440,10 +1440,11 @@ _APP_HTML = r"""<!doctype html>
     background:var(--bg); color:var(--ink); }
   body { display:flex; flex-direction:column; }
   header { display:flex; align-items:center; gap:14px; padding:9px 16px; flex:none;
-    background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  .brand { font-weight:700; font-size:15px; letter-spacing:.2px; }
+    background:var(--panel); border-bottom:1px solid var(--line); min-width:0; }
+  .brand { font-weight:700; font-size:15px; letter-spacing:.2px; white-space:nowrap; flex:none; }
   .brand span { color:var(--accent); font-weight:600; }
-  #plan-title { font-size:14px; font-weight:600; color:var(--muted); }
+  #plan-title { font-size:14px; font-weight:600; color:var(--muted);
+    min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .chip { font-size:12px; font-weight:600; padding:3px 9px; border-radius:20px;
     border:1px solid var(--line); cursor:default; white-space:nowrap; }
   .chip.good { color:var(--okc); } .chip.mid { color:var(--warn); }
@@ -1454,6 +1455,23 @@ _APP_HTML = r"""<!doctype html>
   select { font:inherit; font-size:12.5px; padding:4px 8px; border-radius:7px;
     border:1px solid var(--line); background:var(--panel); color:var(--ink); }
   .toolbar { display:flex; gap:6px; align-items:center; }
+  /* The file group (New/Open/Save/Format/Compare) folds under a File ▾ button on
+     narrower windows; the rest of the header trims (example label, metrics,
+     title) rather than wrapping to a second row. Wrapping only returns on phones. */
+  #file-btn { display:none; }
+  @media (max-width:1180px){
+    #file-btn { display:inline-block; }
+    .file-menu .toolbar { display:none; position:absolute; left:0; top:calc(100% + 4px);
+      z-index:20; flex-direction:column; align-items:stretch; gap:2px; min-width:150px;
+      background:var(--panel); border:1px solid var(--line); border-radius:9px;
+      box-shadow:0 6px 22px rgba(20,30,50,.18); padding:5px; }
+    .file-menu.open .toolbar { display:flex; }
+    .file-menu .toolbar .tbtn { text-align:left; border-color:transparent; }
+    .examples .lbl { display:none; }
+  }
+  @media (max-width:1000px){ #metrics { display:none; } }
+  @media (max-width:900px){ #plan-title { display:none; } }
+  @media (max-width:720px){ header { flex-wrap:wrap; } }
   .tbtn { font:inherit; font-size:12.5px; font-weight:600; padding:5px 11px; border-radius:7px;
     border:1px solid var(--line); background:var(--panel); color:var(--ink); cursor:pointer;
     white-space:nowrap; }
@@ -1799,6 +1817,16 @@ _APP_HTML = r"""<!doctype html>
 
   /* --- Tier 5: edit mode --- */
   #pane-plan.active { display:flex; flex-direction:column; }
+  /* The pane is a size container so the bar can go icon-only when the rail, the
+     3D dock or the drawer squeeze it, instead of wrapping to two rows. */
+  #pane-plan { container-type:inline-size; }
+  .edit-bar .lbl-s { display:none; }   /* the short form of a label, narrow panes only */
+  @container (max-width:720px){
+    .edit-bar { gap:6px; }
+    .edit-bar .lbl { display:none; }
+    .edit-bar .lbl-s { display:inline; }
+    .edit-bar button { padding:4px 8px; }
+  }
   .edit-bar { display:flex; align-items:center; gap:10px; row-gap:6px; flex-wrap:wrap;
     padding:6px 12px; flex:none; position:relative; z-index:2;   /* above the zoomed plan */
     background:var(--panel); border-bottom:1px solid var(--line); font-size:12.5px; }
@@ -1810,6 +1838,7 @@ _APP_HTML = r"""<!doctype html>
   .edit-bar button:disabled { opacity:.45; cursor:default; }
   .edit-note { font-size:11.5px; color:var(--faint); margin-left:auto; text-align:right; }
   .edit-note.err { color:var(--err); }
+  .edit-note:empty { display:none; }   /* an empty note must not claim a wrap line */
   /* multi-select: count indicator + align/distribute toolbar (2+ rooms) */
   .multi-count { font-size:11.5px; font-weight:600; color:var(--accent2); white-space:nowrap; }
   .multi-count:empty { display:none; }
@@ -2357,6 +2386,8 @@ _APP_HTML = r"""<!doctype html>
   <div id="score-chip" class="chip" title="">score</div>
   <div id="metrics"></div>
   <div class="spacer"></div>
+  <div class="menu file-menu" id="file-menu">
+  <button class="tbtn" id="file-btn" aria-haspopup="true" aria-expanded="false">File ▾</button>
   <div class="toolbar">
     <button class="tbtn" id="new-btn" title="Start a new plan from the scaffold">New</button>
     <button class="tbtn" id="open-btn" title="Open a .barn file (Ctrl/Cmd+O)">Open</button>
@@ -2366,7 +2397,8 @@ _APP_HTML = r"""<!doctype html>
     <input type="file" id="file-input" accept=".barn,.txt" hidden>
     <input type="file" id="compare-file-input" accept=".barn,.txt" hidden>
   </div>
-  <label class="examples">example
+  </div>
+  <label class="examples"><span class="lbl">example</span>
     <select id="example-select"><option value="">loading…</option></select>
   </label>
   <button class="tbtn" id="print-btn"
@@ -2489,16 +2521,16 @@ _APP_HTML = r"""<!doctype html>
     <div class="viewport" id="viewport">
       <div class="pane active" id="pane-plan">
         <div class="edit-bar">
-          <button id="panel-btn" title="Inspect — outline &amp; properties in the left rail, no code required">☰ Inspect</button>
-          <label class="edit-toggle"><input type="checkbox" id="edit-mode"> Edit layout</label>
-          <button id="undo-btn" disabled title="Nothing to undo">↶ Undo</button>
-          <button id="redo-btn" disabled title="Nothing to redo">↷ Redo</button>
+          <button id="panel-btn" title="Inspect — outline &amp; properties in the left rail, no code required">☰ <span class="lbl">Inspect</span></button>
+          <label class="edit-toggle"><input type="checkbox" id="edit-mode"> <span class="lbl">Edit layout</span><span class="lbl-s">Edit</span></label>
+          <button id="undo-btn" disabled title="Nothing to undo">↶ <span class="lbl">Undo</span></button>
+          <button id="redo-btn" disabled title="Nothing to redo">↷ <span class="lbl">Redo</span></button>
           <button id="measure-btn" disabled
-            title="Measure — drag between two points on the plan (M, edit mode)">⟷ Measure</button>
+            title="Measure — drag between two points on the plan (M, edit mode)">⟷ <span class="lbl">Measure</span></button>
           <button id="elec-btn"
-            title="Electrical layer — show outlets, switches &amp; ceiling lights">⚡ Electrical</button>
+            title="Electrical layer — show outlets, switches &amp; ceiling lights">⚡ <span class="lbl">Electrical</span></button>
           <button id="dims-btn"
-            title="Dimension convention — nominal room lines vs face-of-stud">⟺ Dims: nominal</button>
+            title="Dimension convention — nominal room lines vs face-of-stud">⟺ <span class="lbl">Dims: nominal</span></button>
           <span class="level-switch" id="level-switch" hidden></span>
           <span class="multi-count" id="multi-count"></span>
           <span class="align-tools" id="align-tools" hidden>
@@ -3010,6 +3042,7 @@ function renderScorePop(){
 function closeOverlays(except){
   if (except !== 'score' && !scorePop.hidden) toggleScorePop(false);
   if (except !== 'export' && !exportMenu.hidden) toggleExportMenu(false);
+  if (except !== 'file' && fileMenu.classList.contains('open')) toggleFileMenu(false);
   if (except !== 'diag' && !diagPop.hidden) closeDiagPop();
   if (except !== 'help' && !helpPanel.hidden) closeHelp();
   if (except !== 'ac' && acOpen) hideAc();
@@ -5175,7 +5208,8 @@ function initEdit(){
   elecBtn.addEventListener('click', () => {
     elecMode = !elecMode;
     elecBtn.classList.toggle('on', elecMode);
-    elecBtn.textContent = elecMode ? '⚡ Electrical: on' : '⚡ Electrical';   // state in the label, not only in colour
+    elecBtn.innerHTML = elecMode ? '⚡ <span class="lbl">Electrical: on</span>'
+                                : '⚡ <span class="lbl">Electrical</span>';   // state in the label, not only in colour
     // Swap the plan SVG in place — the electrical variant rides in the payload,
     // so no re-compile and nothing leaves the page (offline).
     if (lastGood) setPlanSvg(planVariant(lastGood));
@@ -5186,7 +5220,8 @@ function initEdit(){
     // one server-rendered knob, no client-side dimension math.
     dimsMode = (dimsMode === 'faces') ? 'nominal' : 'faces';
     dimsBtn.classList.toggle('on', dimsMode === 'faces');
-    dimsBtn.textContent = (dimsMode === 'faces') ? '⟺ Dims: faces' : '⟺ Dims: nominal';
+    dimsBtn.innerHTML = (dimsMode === 'faces') ? '⟺ <span class="lbl">Dims: faces</span>'
+                                              : '⟺ <span class="lbl">Dims: nominal</span>';
     if (lastGood) setPlanSvg(planVariant(lastGood));
   });
   undoBtn.addEventListener('click', doUndo);
@@ -6914,6 +6949,22 @@ function toggleExportMenu(show){
   });
 }
 exportBtn.addEventListener('click', e => { e.stopPropagation(); toggleExportMenu(); });
+// File ▾: the folded file group on narrow windows (CSS shows the button; the same
+// New/Open/Save/Format/Compare buttons live inside, so their handlers are unchanged).
+const fileMenu = document.getElementById('file-menu');
+const fileBtn = document.getElementById('file-btn');
+function toggleFileMenu(show){
+  const open = show == null ? !fileMenu.classList.contains('open') : show;
+  if (open) closeOverlays('file');
+  fileMenu.classList.toggle('open', open);
+  fileBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+fileBtn.addEventListener('click', e => { e.stopPropagation(); toggleFileMenu(); });
+fileMenu.querySelector('.toolbar').addEventListener('click', e => {
+  if (e.target.closest('.tbtn')) toggleFileMenu(false); });   // pick → fold
+document.addEventListener('click', e => {
+  if (fileMenu.classList.contains('open') && !e.target.closest('#file-menu')) toggleFileMenu(false);
+});
 document.addEventListener('click', e => {
   if (!exportMenu.hidden && !e.target.closest('.menu')) toggleExportMenu(false);
 });

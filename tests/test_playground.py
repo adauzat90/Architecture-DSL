@@ -1057,7 +1057,7 @@ def test_app_closes_the_post_audit_open_items():
     for token in ("function frameLevel(", "fitRect(x, y, w, h)", 'data-level="all"',
                   "const multi = editLevels.length > 1;",
                   "function syncFaceHighlight(", "ctrl.setFaceHighlight(",
-                  "'⚡ Electrical: on'",
+                  "'⚡ <span class=\"lbl\">Electrical: on</span>'",
                   '<div id="notice" hidden role="status" aria-live="polite">',
                   "#notice { position:fixed;",
                   "--ov-note:#7A6A55", "--ov-note:#d4b98d", "stroke:var(--ov-fx)",
@@ -1371,7 +1371,8 @@ def test_payload_omits_site_svg_when_no_lot():
 def test_electrical_and_site_ui_markup_present():
     html = render_app(CLEAN)
     # The ⚡ plan-toolbar toggle and its swap logic.
-    assert 'id="elec-btn"' in html and "⚡ Electrical" in html
+    # The label sits in a .lbl span so the bar can go icon-only in a narrow pane.
+    assert 'id="elec-btn"' in html and '⚡ <span class="lbl">Electrical</span>' in html
     assert "elecMode" in html and "electrical_svg" in html
     # The ＋ Electrical room-inspector affordance and its handlers.
     assert 'data-btn="addelec"' in html and "＋ Electrical" in html

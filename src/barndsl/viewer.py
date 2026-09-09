@@ -1619,6 +1619,16 @@ function mountScene(canvas, labels, togglesEl) {
     + 'border:1px solid var(--line, rgba(0,0,0,.14));background:var(--panel, rgba(255,255,255,.6));'
     + 'color:var(--muted, #566072);cursor:pointer;margin-right:5px;';
 
+  // Where a pill's popover goes: beside the pill column (left of it, top-aligned)
+  // when the dock is wide enough, else below the pill as before. Called on open,
+  // so a resized dock picks the right side next time.
+  function placePop(pop) {
+    const beside = host.clientWidth >= 440;
+    pop.style.position = beside ? 'absolute' : '';
+    pop.style.right = beside ? 'calc(100% + 8px)' : '';
+    pop.style.top = beside ? '0' : '';
+    pop.style.marginTop = beside ? '0' : '';
+  }
   // A container stacked in the top-right, below the mini-map. Each control is a
   // wrapper holding its pill + its (hidden) popover so the popover tracks the pill.
   const sunWrap = document.createElement('div');
@@ -1670,6 +1680,7 @@ function mountScene(canvas, labels, togglesEl) {
   let sunOpen = false;
   sunBtn.addEventListener('click', e => {
     e.preventDefault(); sunOpen = !sunOpen;
+    if (sunOpen) placePop(sunPop);
     sunPop.style.display = sunOpen ? '' : 'none';
     sunWrap.style.zIndex = sunOpen ? '8' : '6';   // above the pills stacked below
   });
@@ -1728,6 +1739,7 @@ function mountScene(canvas, labels, togglesEl) {
   let secOpen = false;
   secBtn.addEventListener('click', e => {
     e.preventDefault(); secOpen = !secOpen;
+    if (secOpen) placePop(secPop);
     secPop.style.display = secOpen ? '' : 'none';
     secWrap.style.zIndex = secOpen ? '8' : '6';
   });
@@ -2859,6 +2871,7 @@ function mountScene(canvas, labels, togglesEl) {
   let viewsOpen = false;
   viewsBtn.addEventListener('click', e => {
     e.preventDefault(); viewsOpen = !viewsOpen;
+    if (viewsOpen) placePop(viewsPop);
     viewsPop.style.display = viewsOpen ? '' : 'none';
     viewsWrap.style.zIndex = viewsOpen ? '8' : '6';
     if (viewsOpen) renderViews();
