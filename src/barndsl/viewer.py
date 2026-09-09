@@ -383,6 +383,10 @@ def scene_json(scene: Scene) -> dict:
         # glTF/IFC exporters never see it.
         if n.material is GLASS_MATERIAL:
             entry["isGlass"] = True
+        # An exterior wall run names its compass face so the renderer can light
+        # up the face an elevation shows (viewer-JSON only).
+        if getattr(n, "face", None):
+            entry["face"] = n.face
         nodes.append(entry)
     layers = [ly for ly in Scene.LAYERS if any(nd["layer"] == ly for nd in nodes)]
     return {"nodes": nodes, "layers": layers, "walk": _walk_block(scene),
@@ -944,6 +948,7 @@ function mountScene(canvas, labels, togglesEl) {
   // Linked selection: the host names a room (its DSL id) and its floor draws in
   // the selection blue; a click on a room floor reports the id back to the host.
   let highlightId = null, onSelectCb = null;
+  let faceHighlight = null;        // 'south'|'east'|'north'|'west': the face an elevation shows
   const HIGHLIGHT_MIX = [0.30, 0.52, 0.82];
   function highlightColor(c) {
     return new Float32Array([c[0] * 0.4 + HIGHLIGHT_MIX[0] * 0.6,
@@ -1131,7 +1136,7 @@ function mountScene(canvas, labels, togglesEl) {
       // `isGlass` (shipped by scene_json for glazing) routes the node into the LAST,
       // blended, depth-write-off draw pass so windows read see-through, and keeps it
       // out of the shadow-caster set so a window casts LIGHT, not a dark patch.
-      return { layer: n.layer, color: n.color, name: n.name || '', mat: n.mat || '',
+      return { layer: n.layer, color: n.color, name: n.name || '', mat: n.mat || '', face: n.face || null,
         rough: n.roughness == null ? 0.8 : n.roughness,
         metal: n.metallic == null ? 0.0 : n.metallic,
         patScale: n.patternScale || 1.0, tex: patternTexture(pattern),
@@ -1469,8 +1474,8 @@ function mountScene(canvas, labels, togglesEl) {
   function drawOne(nd) {
     gl.uniformMatrix4fv(uModel, false, new Float32Array(
       (walking && nd.door) ? doorModelMatrix(nd) : IDENTITY));
-    gl.uniform3fv(uColor, (highlightId && nd.name === 'room:' + highlightId)
-      ? highlightColor(nd.color) : nd.color);
+    gl.uniform3fv(uColor, ((highlightId && nd.name === 'room:' + highlightId) ||
+      (faceHighlight && nd.face === faceHighlight)) ? highlightColor(nd.color) : nd.color);
     gl.uniform1f(uRough, nd.rough);
     gl.uniform1f(uMetal, nd.metal);
     gl.uniform1f(uPatScale, nd.patScale);
@@ -3014,6 +3019,7 @@ function mountScene(canvas, labels, togglesEl) {
   // Linked selection API: highlight a room's floor by its DSL id (null clears),
   // and register the callback a room-floor click reports the id to.
   function setHighlight(id) { highlightId = id || null; if (hasScene) draw(); }
+  function setFaceHighlight(side) { faceHighlight = side || null; if (hasScene) draw(); }
   function onSelect(fn) { onSelectCb = typeof fn === 'function' ? fn : null; }
 
   return { setScene, resize, draw, enterWalk, exitWalk, walkState, walkTeleport,
@@ -3021,7 +3027,7 @@ function mountScene(canvas, labels, togglesEl) {
     setSun, setSection, setLevel, sunState, setGround,
     saveView, restoreView, playTour, stopTour, setMeasure, pick,
     parseHash, encodeHash, currentCamera, autoTourStops,
-    setHighlight, onSelect };
+    setHighlight, setFaceHighlight, onSelect };
 }
 """
 

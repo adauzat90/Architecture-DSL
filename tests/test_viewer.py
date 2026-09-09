@@ -710,7 +710,7 @@ def test_renderer_exposes_linked_selection_hooks():
     assert "function onSelect(fn)" in RENDERER_JS
     assert "nd.name === 'room:' + highlightId" in RENDERER_JS
     assert "(hit.name || '').startsWith('room:')) onSelectCb(hit.name.slice(5))" in RENDERER_JS
-    assert "setHighlight, onSelect };" in RENDERER_JS
+    assert "setHighlight, setFaceHighlight, onSelect };" in RENDERER_JS
 
 
 def test_renderer_hud_reads_the_host_theme_tokens_with_fallbacks():
@@ -721,6 +721,20 @@ def test_renderer_hud_reads_the_host_theme_tokens_with_fallbacks():
     assert "var(--ink, #1d2530)" in RENDERER_JS
     assert "var(--line, rgba(0,0,0,.14))" in RENDERER_JS
     assert "var(--muted, #566072)" in RENDERER_JS
+
+
+def test_scene_json_exterior_walls_name_their_compass_face():
+    # Every outer exterior wall run says which face it belongs to, so the
+    # renderer can light up the face an elevation shows; partitions carry none.
+    nodes = scene_json(build_scene(_plan()))["nodes"]
+    walls = [n for n in nodes if n["name"].startswith("wall:")]
+    faces = {n.get("face") for n in walls if n.get("face")}
+    assert {"south", "north", "east", "west"} <= faces
+    for n in walls:
+        assert n.get("face") in (None, "south", "north", "east", "west")
+    assert "function setFaceHighlight(side)" in RENDERER_JS
+    assert "faceHighlight && nd.face === faceHighlight" in RENDERER_JS
+    assert "setHighlight, setFaceHighlight, onSelect };" in RENDERER_JS
 
 
 def test_renderer_has_the_transparent_glass_pass_hooks():

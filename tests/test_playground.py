@@ -1048,6 +1048,25 @@ def test_app_audit_fixes_hold():
     assert "http://" not in html and "https://" not in html
 
 
+def test_app_closes_the_post_audit_open_items():
+    # The floor switcher works in view mode (framing a floor), the 3D dock lights
+    # the face the Elevations view shows, drawing toggles carry their state in the
+    # label, the notice floats over the canvas, the edit overlay's colours are
+    # theme tokens, and one closer keeps two overlays from sitting open together.
+    html = render_app(CLEAN)
+    for token in ("function frameLevel(", "fitRect(x, y, w, h)", 'data-level="all"',
+                  "const multi = editLevels.length > 1;",
+                  "function syncFaceHighlight(", "ctrl.setFaceHighlight(",
+                  "'⚡ Electrical: on'",
+                  '<div id="notice" hidden role="status" aria-live="polite">',
+                  "#notice { position:fixed;",
+                  "--ov-note:#7A6A55", "--ov-note:#d4b98d", "stroke:var(--ov-fx)",
+                  "function closeOverlays(", "closeOverlays('score')", "closeOverlays('export')",
+                  "closeOverlays('diag')", "closeOverlays('help')"):
+        assert token in html, token
+    assert "http://" not in html and "https://" not in html
+
+
 def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
     html = render_app(CLEAN)
     assert 'id="theme-btn"' in html

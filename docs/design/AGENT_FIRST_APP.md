@@ -123,13 +123,15 @@ button recipe in two sizes, two radii, severity drawn as shape (diamond, triangl
 dot) as well as colour, muted rather than faint for anything informational,
 visible keyboard focus, reduced motion honoured, and the 3D dock's pills reading
 the app's theme tokens (with the standalone viewer's light look as the fallback).
-Still open after the post-relayout audit: a face highlight in the 3D dock to
-match the elevation shown; a floor switcher outside edit mode for two-storey
-plans; state labels for the toggles that change what is drawn (tooltips do not
-exist on touch); the notice bar floating over the canvas instead of reflowing
-it; the edit overlay's fixture and note colours as theme tokens for dark mode;
-and one closer for every overlay (score popover, export menu, issue popover,
-help) so two can never sit open at once.
+The post-relayout audit's follow-ups have landed too: exterior wall runs carry
+their compass face in the scene JSON and the 3D dock lights the face the
+Elevations view shows; a two-storey plan's floor switcher works in view mode
+(framing one floor, `All` fitting the sheet) as well as in edit mode; the
+Electrical toggle carries its state in its label (tooltips do not exist on
+touch); the notice floats over the canvas instead of reflowing it; the edit
+overlay's fixture, note and stair colours are theme tokens; and one closer
+keeps the score popover, export menu, issue popover, help and autocomplete
+from ever sitting open together.
 
 What we deliberately do **not** build: Revit's documentation engine (wall-layer
 joins, detailing, sheet sets). That is where "Revit killers" die. The wedge is

@@ -1413,10 +1413,12 @@ _APP_HTML = r"""<!doctype html>
     --bg:#eef1f4; --panel:#ffffff; --ink:#1d2530; --muted:#566072; --faint:#8791a1;
     --line:rgba(20,30,50,.12); --accent:#d1873f; --accent2:#2F6FB0;
     --err:#c8452f; --warn:#c98a1e; --info:#2f6fb0; --okc:#2e8b57;
-    --editor:#fbfbfa; --gutter:#f0f1f2; }
+    --editor:#fbfbfa; --gutter:#f0f1f2;
+    --ov-fx:#5a5a5a; --ov-note:#7A6A55; --ov-stair:#9a8c66; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#171b21; --panel:#1e232b; --ink:#e6ebf2; --muted:#9aa4b4;
-      --faint:#7a8494; --line:rgba(255,255,255,.10); --editor:#12151a; --gutter:#1a1f26; }
+      --faint:#7a8494; --line:rgba(255,255,255,.10); --editor:#12151a; --gutter:#1a1f26;
+    --ov-fx:#c3c7cf; --ov-note:#d4b98d; --ov-stair:#cbb98d; }
   }
   /* Explicit theme hooks for the header toggle. Auto (no data-theme) leaves the
      media query above in charge; light/dark pin the palette outright — and set
@@ -1424,10 +1426,12 @@ _APP_HTML = r"""<!doctype html>
      attribute specificity. Dark mirrors the media block; light mirrors base :root. */
   :root[data-theme="dark"] { color-scheme:dark;
     --bg:#171b21; --panel:#1e232b; --ink:#e6ebf2; --muted:#9aa4b4;
-    --faint:#7a8494; --line:rgba(255,255,255,.10); --editor:#12151a; --gutter:#1a1f26; }
+    --faint:#7a8494; --line:rgba(255,255,255,.10); --editor:#12151a; --gutter:#1a1f26;
+    --ov-fx:#c3c7cf; --ov-note:#d4b98d; --ov-stair:#cbb98d; }
   :root[data-theme="light"] { color-scheme:light;
     --bg:#eef1f4; --panel:#ffffff; --ink:#1d2530; --muted:#566072; --faint:#8791a1;
-    --line:rgba(20,30,50,.12); --editor:#fbfbfa; --gutter:#f0f1f2; }
+    --line:rgba(20,30,50,.12); --editor:#fbfbfa; --gutter:#f0f1f2;
+    --ov-fx:#5a5a5a; --ov-note:#7A6A55; --ov-stair:#9a8c66; }
   * { box-sizing: border-box; }
   /* the hidden attribute always wins, whatever display a widget rule sets */
   [hidden] { display:none !important; }
@@ -1888,7 +1892,7 @@ _APP_HTML = r"""<!doctype html>
      (same trick the nudge chevrons use). */
   .ov-handle-hit { fill:transparent; }
   /* fixtures/furniture — draggable; a seed is dashed until a drag authors it */
-  .ov-fixture { cursor:move; fill:rgba(90,90,90,.08); stroke:#5a5a5a; stroke-width:1; }
+  .ov-fixture { cursor:move; fill:rgba(127,127,127,.10); stroke:var(--ov-fx); stroke-width:1; }
   .ov-fixture.seed { fill:rgba(90,90,90,.04); stroke:#9a9a9a; stroke-dasharray:2 2; }
   .ov-fixture:hover { stroke:var(--accent); }
   .ov-fix-t { fill:var(--muted); }
@@ -1897,14 +1901,14 @@ _APP_HTML = r"""<!doctype html>
     pointer-events:none; }
   .ov-under-t { fill:var(--faint); opacity:.6; pointer-events:none; }
   /* stair footprint — shown on both the run's and the landing's level */
-  .ov-stair { fill:rgba(150,130,90,.16); stroke:#9a8c66; stroke-dasharray:2 2;
+  .ov-stair { fill:rgba(150,130,90,.16); stroke:var(--ov-stair); stroke-dasharray:2 2;
     pointer-events:none; }
   .ov-stair-t { fill:#8a7f63; pointer-events:none; }
   /* positioned notes — leader callout; the dot is the drag handle */
-  .ov-note { cursor:move; fill:#7A6A55; stroke:#fff; stroke-width:.5; }
+  .ov-note { cursor:move; fill:var(--ov-note); stroke:var(--panel); stroke-width:.5; }
   .ov-note:hover, .ov-note.sel { fill:var(--accent); }
-  .ov-note-lead { stroke:#7A6A55; stroke-width:1; pointer-events:none; }
-  .ov-note-t { fill:#7A6A55; font-style:italic; pointer-events:none; }
+  .ov-note-lead { stroke:var(--ov-note); stroke-width:1; pointer-events:none; }
+  .ov-note-t { fill:var(--ov-note); font-style:italic; pointer-events:none; }
   .ov-note-t.sel { fill:var(--accent); }
   /* segmented floor switcher (multi-level plans, edit mode only) */
   .level-switch { display:flex; align-items:center; gap:4px; }
@@ -2276,6 +2280,14 @@ _APP_HTML = r"""<!doctype html>
   .svgbox:focus-visible, #editor:focus-visible { outline:none; box-shadow:inset 0 0 0 2px var(--accent2); }
   @media (prefers-reduced-motion: reduce){
     *, *::before, *::after { transition:none !important; animation:none !important; } }
+  /* the notice floats over the canvas under the header instead of pushing the
+     whole app down (which re-fitted the plan every time one appeared) */
+  #notice { position:fixed; left:50%; transform:translateX(-50%); z-index:35;
+    width:max-content; max-width:min(760px, 92vw); border:1px solid var(--line);
+    border-radius:var(--r-lg); box-shadow:0 8px 28px rgba(20,30,50,.22);
+    background:var(--panel); }
+  #notice::before { content:""; position:absolute; inset:0; border-radius:inherit;
+    background:rgba(209,135,63,.10); pointer-events:none; }
   /* a phone-width window: the rail starts collapsed (boot), the drawer takes the
      whole width, and the header/edit bar wrap rather than crush the canvas */
   @media (max-width:720px){
@@ -2409,7 +2421,7 @@ _APP_HTML = r"""<!doctype html>
   </div>
   <div class="cmp-body" id="compare-body"></div>
 </div>
-<div id="notice" hidden>
+<div id="notice" hidden role="status" aria-live="polite">
   <span class="notice-msg" id="notice-msg"></span>
   <span id="notice-actions"></span>
   <button class="nx" id="notice-dismiss" title="Dismiss" aria-label="Dismiss">×</button>
@@ -2991,8 +3003,19 @@ function renderScorePop(){
   scorePop.innerHTML = '<h4>Design score ' + fmt(s.total) + ' <span>/ 100</span></h4>' + rows +
     (details ? '<div class="sp-details">' + details + '</div>' : '');
 }
+// One closer for every transient overlay, so opening one never leaves another
+// sitting beside it: the score popover, the export menu, the issue popover on
+// the plan, the help slide-over and the editor's autocomplete.
+function closeOverlays(except){
+  if (except !== 'score' && !scorePop.hidden) toggleScorePop(false);
+  if (except !== 'export' && !exportMenu.hidden) toggleExportMenu(false);
+  if (except !== 'diag' && !diagPop.hidden) closeDiagPop();
+  if (except !== 'help' && !helpPanel.hidden) closeHelp();
+  if (except !== 'ac' && acOpen) hideAc();
+}
 function toggleScorePop(show){
   const open = show == null ? scorePop.hidden : show;
+  if (open) closeOverlays('score');
   if (open && lastScore){
     renderScorePop();
     // anchor to the chip wherever the (wrapping) header put it
@@ -3150,6 +3173,7 @@ function renderReference(q){
   helpRefBody.innerHTML = shown ? out : '<div class="rempty">No matches for “' + esc(q) + '”.</div>';
 }
 function openHelp(){
+  closeOverlays('help');
   renderShortcuts();
   helpBackdrop.hidden = false; helpPanel.hidden = false;
   loadReference();
@@ -3744,6 +3768,11 @@ function selectTab(tab){
     p.classList.toggle('active', p.id === 'pane-' + tab));
   // A pane has no measurable size while hidden, so Fit is deferred until it shows.
   if (tab === 'plan'){ planNeedsFit = false; planZoom.refit(); }
+  syncFaceHighlight();   // the 3D dock lights the face the Elevations view shows
+}
+function syncFaceHighlight(){
+  if (ctrl && ctrl.setFaceHighlight)
+    ctrl.setFaceHighlight(currentTab === 'views' && SIDE_ORDER.indexOf(viewSide) >= 0 ? viewSide : null);
 }
 let planNeedsFit = false;
 function showThree(){
@@ -3754,7 +3783,8 @@ function showThree(){
     if (ctrl && ctrl.onSelect) ctrl.onSelect(id => selectRoom(id, 'three')); }
   if (ctrl && scene3d){
     if (!sceneLoaded){ ctrl.setScene(scene3d); sceneLoaded = true;
-      if (ctrl.setHighlight) ctrl.setHighlight(selectedRoomId); }
+      if (ctrl.setHighlight) ctrl.setHighlight(selectedRoomId);
+      syncFaceHighlight(); }
     else { ctrl.resize(); ctrl.draw(); }
   }
   updateSnapState();
@@ -3840,7 +3870,8 @@ threeSplit.addEventListener('dblclick', () => {
 // WebGL canvas the size of its box, and re-fit the plan when the view changes size.
 if (window.ResizeObserver){
   new ResizeObserver(() => { if (threeShown && ctrl){ ctrl.resize(); ctrl.draw(); } }).observe(threeCol);
-  new ResizeObserver(() => { if (currentTab === 'plan') planZoom.refit(); }).observe(viewport);
+  new ResizeObserver(() => { if (currentTab !== 'plan') return;
+    if (viewLevel != null) frameLevel(viewLevel); else planZoom.refit(); }).observe(viewport);
 }
 window.addEventListener('resize', () => { if (!threeChosen){ const want = threeAutoDefault();
   if (want !== threeMode) setThree(want, false); } });
@@ -3970,6 +4001,7 @@ function applyViewSide(s){
   viewsPane.querySelectorAll('.views-compass .edge').forEach(e =>
     e.classList.toggle('on', e.getAttribute('data-side') === s));
   body.scrollTop = 0;
+  syncFaceHighlight();
 }
 function stepViewSide(dir){
   const i = SIDE_ORDER.indexOf(viewSide);
@@ -4287,6 +4319,11 @@ function makeZoom(box, opts){
   return {
     fit,
     zoomIn(){ zoomAt(1.25); }, zoomOut(){ zoomAt(0.8); },
+    // frame a rectangle of the drawing (SVG units) — used to frame one floor
+    fitRect(x, y, w, h){ const bw = box.clientWidth, bh = box.clientHeight;
+      if (!bw || !bh || !(w > 0) || !(h > 0)) return;
+      scale = Math.min(MAX, Math.max(MIN, Math.min((bw - 2 * PAD) / w, (bh - 2 * PAD) / h)));
+      tx = (bw - w * scale) / 2 - x * scale; ty = (bh - h * scale) / 2 - y * scale; apply(); },
     // fit lazily on the first render (once the pane has a measurable size)
     refit(){ requestAnimationFrame(fit); },
   };
@@ -4325,7 +4362,10 @@ function planClickToSource(e){
 // diagnostics (no line) cannot be accepted and get no Ignore button.
 const diagPop = document.getElementById('diag-pop');   // planBody is declared with the edit layer below
 let diagPopRoom = null, diagPopIdx = 0;
-function setPlanSvg(html){ planSvg.innerHTML = html; renderBadges(); renderSelRing(); }
+function setPlanSvg(html){
+  planSvg.innerHTML = html; renderBadges(); renderSelRing();
+  viewLevel = null;   // a fresh drawing starts framed whole (the switcher shows All)
+}
 
 // --- linked selection --------------------------------------------------------
 // One selected room, shown everywhere at once: a ring on the plan (the edit
@@ -4466,6 +4506,7 @@ function positionDiagPop(){
 function openDiagPop(room, idx, quiet){
   const ds = roomDiags(room);
   if (!ds.length){ closeDiagPop(); return; }
+  if (!quiet) closeOverlays('diag');
   // a badge click selects its room; a refresh after a recompile must not (it
   // would pull the caret back to the room's line while the user types elsewhere)
   if (!quiet && room !== selectedRoomId) selectRoom(room, 'badge');
@@ -5113,6 +5154,7 @@ function initEdit(){
   elecBtn.addEventListener('click', () => {
     elecMode = !elecMode;
     elecBtn.classList.toggle('on', elecMode);
+    elecBtn.textContent = elecMode ? '⚡ Electrical: on' : '⚡ Electrical';   // state in the label, not only in colour
     // Swap the plan SVG in place — the electrical variant rides in the payload,
     // so no re-compile and nothing leaves the page (offline).
     if (lastGood) setPlanSvg(planVariant(lastGood));
@@ -5130,7 +5172,10 @@ function initEdit(){
   redoBtn.addEventListener('click', doRedo);
   levelSwitch.addEventListener('click', e => {
     const b = e.target.closest('[data-level]'); if (!b) return;
-    setEditLevel(parseInt(b.getAttribute('data-level'), 10));
+    const v = b.getAttribute('data-level');
+    // editing: switch the floor being edited; viewing: frame that floor's drawing
+    if (editMode) setEditLevel(parseInt(v, 10));
+    else frameLevel(v === 'all' ? null : parseInt(v, 10));
   });
   alignTools.addEventListener('click', e => {
     const b = e.target.closest('[data-btn]'); if (!b) return;
@@ -5144,15 +5189,38 @@ function initEdit(){
 
 // -- the floor switcher (only on plans with >1 level, only in edit mode) --
 function levelLabel(lvl){ return lvl === 0 ? 'Ground' : ('Level ' + lvl); }
+// A two-storey plan shows its floor switcher in every mode: while editing it
+// picks the floor being edited (the overlay is per-floor); while viewing it
+// frames that floor's part of the drawing, with `All` fitting the whole sheet.
+let viewLevel = null;   // the floor framed in view mode (null = the whole drawing)
 function renderLevelSwitcher(){
-  const multi = editMode && editLevels.length > 1;
+  const multi = editLevels.length > 1;
   levelSwitch.hidden = !multi;
   if (!multi){ levelSwitch.innerHTML = ''; return; }
+  const cur = editMode ? editLevel : viewLevel;
   let h = '<span class="lvl-label">Floor</span>';
+  if (!editMode) h += '<button class="lvl-chip' + (cur == null ? ' on' : '') +
+    '" data-level="all" title="Fit the whole drawing">All</button>';
   for (const lvl of editLevels)
-    h += '<button class="lvl-chip' + (lvl === editLevel ? ' on' : '') +
-      '" data-level="' + lvl + '">' + esc(levelLabel(lvl)) + '</button>';
+    h += '<button class="lvl-chip' + (lvl === cur ? ' on' : '') + '" data-level="' + lvl +
+      '" title="' + (editMode ? 'Edit this floor' : 'Frame this floor') + '">' + esc(levelLabel(lvl)) + '</button>';
   levelSwitch.innerHTML = h;
+}
+function frameLevel(lvl){
+  viewLevel = lvl; renderLevelSwitcher();
+  if (lvl == null){ planZoom.fit(); return; }
+  const svg = planSvg.querySelector('svg'); if (!svg || !lastGood) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const r of (lastGood.rooms || [])){
+    if ((r.level || 0) !== lvl) continue;
+    const el = svg.querySelector('rect[data-room="' + String(r.id).replace(/"/g, '') + '"]'); if (!el) continue;
+    const x = +el.getAttribute('x'), y = +el.getAttribute('y'), w = +el.getAttribute('width'), h = +el.getAttribute('height');
+    x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + h);
+  }
+  if (!isFinite(x0)){ planZoom.fit(); return; }
+  const pad = 36;   // room for the dimension strings and labels around the floor
+  // after layout settles: the switcher's own re-render can change the pane's size
+  requestAnimationFrame(() => planZoom.fitRect(x0 - pad, y0 - pad, (x1 - x0) + 2 * pad, (y1 - y0) + 2 * pad));
 }
 function applyLevelFilter(){
   editRooms = allRooms.filter(r => r.level === editLevel);
@@ -5392,7 +5460,7 @@ function addGhost(d){
     placeGhostLine(d.o, d.offset);
   } else if (d.kind === 'note'){
     ghostEl = document.createElementNS(NS, 'circle');
-    ghostEl.setAttribute('fill', 'rgba(122,106,85,.4)'); ghostEl.setAttribute('stroke', '#7A6A55');
+    ghostEl.setAttribute('fill', 'rgba(122,106,85,.4)'); ghostEl.setAttribute('stroke', 'var(--ov-note)');
     ghostEl.setAttribute('stroke-width', '1.5');
     placeGhostNote(d.cur.x, d.cur.y);
   } else {
@@ -6767,6 +6835,9 @@ let autosaveOff = false;            // suppressed while offering a newer session
 
 // -- dismissible, non-modal notice bar --
 function showNotice(msg, actions){
+  // float just under the header (which may have wrapped) — never reflow the canvas
+  const hb = document.querySelector('header').getBoundingClientRect();
+  noticeEl.style.top = Math.round(hb.bottom + 8) + 'px';
   noticeMsg.textContent = msg;
   noticeActions.innerHTML = '';
   for (const a of (actions || [])){
@@ -6809,6 +6880,7 @@ function updateExportState(ok){
 }
 function toggleExportMenu(show){
   const open = show == null ? exportMenu.hidden : show;
+  if (open) closeOverlays('export');
   exportMenu.hidden = !open;
   exportBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) exportMenu.querySelectorAll('.menu-item').forEach(it => {

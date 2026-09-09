@@ -148,6 +148,10 @@ class MeshNode:
         self.layer = layer
         self.material = material
         self.tint = tint
+        #: For an exterior wall run: the compass face it belongs to
+        #: (``south``/``east``/``north``/``west``), so a viewer can light up the
+        #: face an elevation shows. ``None`` for everything else.
+        self.face: str | None = None
         self.positions: list[tuple[float, float, float]] = []
         self.normals: list[tuple[float, float, float]] = []
         self.indices: list[int] = []
@@ -602,6 +606,42 @@ def _add_overhead(scene: Scene, wall: RevitWall, o: RevitOpening,
                              _across_dir(wall))
 
 
+def _wall_bounds(model: RevitModel) -> tuple[float, float, float, float]:
+    """``(min_x, max_x, min_y, max_y)`` over every wall centreline (the footprint)."""
+    xs = [p[0] for w in model.walls for p in (w.start, w.end)]
+    ys = [p[1] for w in model.walls for p in (w.start, w.end)]
+    if not xs:
+        return (0.0, 0.0, 0.0, 0.0)
+    return (min(xs), max(xs), min(ys), max(ys))
+
+
+def _wall_face(w: RevitWall, bounds: tuple[float, float, float, float]) -> str | None:
+    """The compass face an exterior wall run belongs to, or ``None``.
+
+    A run along the footprint's south edge faces south, and so on. Re-entrant
+    exterior walls of an L/T/U footprint (exterior, but not on the outer bounds)
+    get no face — the elevation renderer draws them behind the outer face anyway.
+    """
+    if not w.exterior:
+        return None
+    min_x, max_x, min_y, max_y = bounds
+    tol = max(0.5, w.thickness)
+    (x0, y0), (x1, y1) = w.start, w.end
+    if abs(y0 - y1) <= tol:  # a run along x
+        y = (y0 + y1) / 2.0
+        if abs(y - min_y) <= tol:
+            return "south"
+        if abs(y - max_y) <= tol:
+            return "north"
+    elif abs(x0 - x1) <= tol:  # a run along y
+        x = (x0 + x1) / 2.0
+        if abs(x - min_x) <= tol:
+            return "west"
+        if abs(x - max_x) <= tol:
+            return "east"
+    return None
+
+
 def _gable_infill(node: MeshNode, wall: RevitWall, base: float) -> None:
     """Add the triangular gable-end infill above the plate up to the ridge apex."""
     if wall.profile != "gable" or wall.apex is None:
@@ -812,11 +852,13 @@ def _add_walls(scene: Scene) -> None:
     # face of an exterior wall, only whole partition runs (Phase 6 requirement A).
     siding_mat = wall_material(scene.plan)
     partition_mat = PALETTE["drywall"]
+    bounds = _wall_bounds(model)
     for w in model.walls:
         base = elev.get(w.level, 0.0)
         ops = hosted.get(w.id, [])
         wall_mat = siding_mat if w.exterior else partition_mat
         node = scene.node(f"wall:{w.id}", "walls", wall_mat)
+        node.face = _wall_face(w, bounds)
         intervals = wall_top_intervals(w, model)
         for box in wall_solids(w, ops, base, intervals):
             node.add_box(box)
