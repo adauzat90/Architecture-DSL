@@ -1986,6 +1986,51 @@ _APP_HTML = r"""<!doctype html>
     white-space:nowrap; }
   #dim-chip .delta { color:#f0c088; font-weight:700; margin-left:6px; }
 
+  /* --- diagnostics on the drawing: a badge per room, a popover per issue --- */
+  /* The badge is drawn INTO the plan SVG (top-right of the room's rect) so it pans
+     and zooms with the drawing; a triangle glyph marks a warning/error, a plain
+     count a suggestion. Accepted diagnostics don't count — they are the audit
+     trail, not open work. */
+  .diag-badge { cursor:pointer; }
+  .diag-badge rect { fill:var(--info); stroke:#fff; stroke-width:1.5; }
+  .diag-badge.sev-warning rect { fill:var(--warn); }
+  .diag-badge.sev-error rect { fill:var(--err); }
+  .diag-badge text { fill:#fff; font:700 11px ui-monospace,Menlo,Consolas,monospace;
+    pointer-events:none; }
+  .diag-badge:hover rect { filter:brightness(1.08); }
+  .diag-pop { position:absolute; z-index:14; width:min(360px, calc(100% - 24px));
+    background:var(--panel); border:1px solid var(--line); border-radius:9px;
+    box-shadow:0 12px 32px rgba(20,30,50,.24); padding:11px 13px; font-size:12.5px; }
+  .diag-pop[hidden] { display:none; }
+  .diag-pop .dp-sev { display:inline-flex; align-items:center; gap:6px; font-size:10.5px;
+    font-weight:700; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); }
+  .diag-pop .dp-sev.sev-warning { color:var(--warn); }
+  .diag-pop .dp-sev.sev-error { color:var(--err); }
+  .diag-pop .dp-sev.sev-info { color:var(--info); }
+  .diag-pop .dp-sev .code { font:11px ui-monospace,Menlo,Consolas,monospace; text-transform:none;
+    letter-spacing:0; color:var(--muted); }
+  .diag-pop h4 { margin:5px 0 4px; font-size:13px; }
+  .diag-pop p { margin:0; }
+  .diag-pop .hint { color:var(--muted); margin-top:5px; }
+  .diag-pop .dp-acts { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:9px; }
+  .diag-pop .dp-acts button { font:inherit; font-size:12px; font-weight:600; padding:4px 10px;
+    border-radius:7px; border:1px solid var(--line); background:var(--panel); color:var(--ink);
+    cursor:pointer; }
+  .diag-pop .dp-acts button:hover { border-color:var(--accent); color:var(--accent); }
+  .diag-pop .dp-acts button.primary { background:var(--accent); color:#fff; border-color:transparent; }
+  .diag-pop .dp-acts button.primary:hover { color:#fff; filter:brightness(1.06); }
+  .diag-pop .dp-acts button.quiet { border-color:transparent; color:var(--muted); }
+  .diag-pop .dp-nav { margin-left:auto; display:inline-flex; align-items:center; gap:2px;
+    font:11.5px ui-monospace,Menlo,Consolas,monospace; color:var(--faint); }
+  .diag-pop .dp-nav button { padding:2px 6px; border-color:transparent; }
+  .diag-pop .dp-why { font-size:11.5px; color:var(--faint); margin-top:8px; }
+  .diag-pop .dp-form { display:grid; grid-template-columns:1fr auto auto; gap:6px;
+    align-items:center; width:100%; }
+  .diag-pop .dp-form .lbl { grid-column:1 / -1; font-size:11.5px; color:var(--muted); }
+  .diag-pop .dp-form input { min-width:0; font:inherit; font-size:12px; padding:5px 8px;
+    border-radius:6px; border:1px solid var(--line); background:var(--editor); color:var(--ink); }
+  .diag-pop .dp-form input:focus { border-color:var(--accent); outline:none; }
+
   /* --- score popover (per-category breakdown) --- */
   #score-chip { cursor:pointer; }
   .score-pop { position:absolute; z-index:40; top:44px; left:16px; width:270px;
@@ -2333,6 +2378,7 @@ _APP_HTML = r"""<!doctype html>
           <div class="svgbox" id="plan-svg" tabindex="0" style="outline:none"></div>
           <div class="edit-layer" id="edit-layer" hidden></div>
           <div id="dim-chip"></div>
+          <div id="diag-pop" class="diag-pop" hidden role="dialog" aria-label="Issue on this room"></div>
           <div class="zoom-ctl" id="plan-zoom">
             <button data-z="out" title="Zoom out (−)" aria-label="Zoom out">−</button>
             <span class="zpct" id="plan-zpct">100%</span>
@@ -2747,16 +2793,18 @@ function applyResult(p){
   if (good){
     lastGood = p; scene3d = p.scene; sceneLoaded = false;
     viewport.classList.remove('stale');
-    planSvg.innerHTML = planVariant(p);
+    setPlanSvg(planVariant(p));
     if (currentTab === 'plan') planZoom.refit(); else planNeedsFit = true;
     renderViews(p);
     renderReport(p);
     if (threeShown) showThree();
   } else if (lastGood){
     viewport.classList.add('stale');  // keep the last good render, dimmed
+    renderBadges();                    // ...but the badges reflect THIS compile
   } else {
     planSvg.innerHTML = '';
   }
+  refreshDiagPop();
   refreshEditData(good ? p : null);
   autosave();                          // persist whatever is now in the editor
   updateExportState(!!p.ok);           // export needs a clean compile (ok, not just rendered)
@@ -3159,6 +3207,7 @@ document.addEventListener('keydown', e => {
     if (e.key === 's'){ e.preventDefault(); toggleSource(); return; }
   }
   if (e.key === 'Escape'){
+    if (!diagPop.hidden){ closeDiagPop(); return; }
     if (lb && !lb.hidden){ closeLightbox(); return; }
     if (!compareModal.hidden){ closeCompare(); return; }
     if (!helpPanel.hidden){ closeHelp(); return; }
@@ -4031,7 +4080,8 @@ function makeZoom(box, opts){
 }
 
 const planZoom = makeZoom(planSvg, {
-  onChange: pct => { document.getElementById('plan-zpct').textContent = pct + '%'; },
+  onChange: pct => { document.getElementById('plan-zpct').textContent = pct + '%';
+    if (!diagPop.hidden) positionDiagPop(); },   // the badge moved under the popover
   onClick: planClickToSource,
 });
 document.getElementById('plan-zoom').addEventListener('click', e => {
@@ -4043,6 +4093,8 @@ document.getElementById('plan-zoom').addEventListener('click', e => {
 // Click a room on the (non-edit) plan → jump the editor to its source line + flash.
 function planClickToSource(e){
   if (editMode) return;
+  const badge = e.target && e.target.closest ? e.target.closest('.diag-badge') : null;
+  if (badge){ openDiagPop(badge.getAttribute('data-room'), 0); return; }
   const rect = e.target && e.target.closest ? e.target.closest('[data-room]') : null;
   if (!rect) return;
   const id = rect.getAttribute('data-room');
@@ -4050,6 +4102,169 @@ function planClickToSource(e){
   const ln = room && room.line;
   if (ln){ jumpToLine(ln); flashLine(ln); }
 }
+
+// --- diagnostics on the drawing --------------------------------------------
+// Every room with open diagnostics wears a badge at its top-right corner, drawn
+// into the plan SVG itself so it pans and zooms with the drawing. Clicking it
+// opens a popover for that room's issues — message, hint, and the actions the
+// diagnostics list already has (Apply a quick fix, jump to the Source) plus
+// Ignore, which writes the compiler's own `# barndsl: accept CODE "reason"`
+// pragma onto the statement's line. Accepted diagnostics are not open work, so
+// they neither count on the badge nor show in the popover; errors and plan-wide
+// diagnostics (no line) cannot be accepted and get no Ignore button.
+const diagPop = document.getElementById('diag-pop');   // planBody is declared with the edit layer below
+let diagPopRoom = null, diagPopIdx = 0;
+function setPlanSvg(html){ planSvg.innerHTML = html; renderBadges(); }
+function roomDiags(id){ return diagnostics.filter(d => d.room === id && !d.accepted); }
+function roomLabel(id){
+  return String(id).replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+const SEV_ORDER = { error:0, warning:1, info:2 };
+function worstSeverity(ds){
+  let w = 'info';
+  for (const d of ds) if ((SEV_ORDER[d.severity] ?? 3) < SEV_ORDER[w]) w = d.severity;
+  return w;
+}
+function renderBadges(){
+  const svg = planSvg.querySelector('svg'); if (!svg) return;
+  const NS = svg.namespaceURI;   // the SVG namespace, read off the drawing (no URL literal here)
+  svg.querySelectorAll('.diag-badge').forEach(g => g.remove());
+  const byRoom = {};
+  for (const d of diagnostics){
+    if (!d.room || d.accepted) continue;
+    (byRoom[d.room] = byRoom[d.room] || []).push(d);
+  }
+  for (const id in byRoom){
+    const rect = svg.querySelector('rect[data-room="' + id.replace(/"/g, '') + '"]');
+    if (!rect) continue;
+    const ds = byRoom[id], sev = worstSeverity(ds);
+    const x = parseFloat(rect.getAttribute('x')), y = parseFloat(rect.getAttribute('y'));
+    const w = parseFloat(rect.getAttribute('width'));
+    const label = (sev === 'info' ? '' : '▲ ') + ds.length;
+    const bw = 12 + label.length * 7, bh = 18;
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'diag-badge sev-' + sev);
+    g.setAttribute('data-room', id);
+    const nWarn = ds.filter(d => d.severity !== 'info').length;
+    const t = document.createElementNS(NS, 'title');
+    t.textContent = roomLabel(id) + ': ' + (nWarn ? nWarn + ' warning' + (nWarn === 1 ? '' : 's') +
+      (ds.length > nWarn ? ', ' : '') : '') +
+      (ds.length > nWarn ? (ds.length - nWarn) + ' suggestion' + (ds.length - nWarn === 1 ? '' : 's') : '');
+    g.appendChild(t);
+    const r = document.createElementNS(NS, 'rect');
+    r.setAttribute('x', x + w - bw - 4); r.setAttribute('y', y + 4);
+    r.setAttribute('width', bw); r.setAttribute('height', bh); r.setAttribute('rx', bh / 2);
+    g.appendChild(r);
+    const tx = document.createElementNS(NS, 'text');
+    tx.setAttribute('x', x + w - 4 - bw / 2); tx.setAttribute('y', y + 4 + bh / 2 + 4);
+    tx.setAttribute('text-anchor', 'middle'); tx.textContent = label;
+    g.appendChild(tx);
+    svg.appendChild(g);
+  }
+}
+function diagPopHTML(d, i, n){
+  const snip = quickFixSnippet(d.hint);
+  const canIgnore = d.line && d.severity !== 'error';
+  const acts =
+    (snip ? '<button class="primary" data-act="fix" title="' + escAttr(qfixTitle(snip)) + '">Apply fix</button>' : '') +
+    (canIgnore ? '<button data-act="ignore" title="Accept this as-is: writes an accept pragma next to the statement so it stays ignored on every recompile">Ignore</button>' : '') +
+    (d.line ? '<button class="quiet" data-act="source">Source</button>' : '') +
+    (n > 1 ? '<span class="dp-nav"><button data-act="prev" aria-label="Previous issue">‹</button>' +
+      (i + 1) + ' / ' + n + '<button data-act="next" aria-label="Next issue">›</button></span>' : '');
+  const why = !d.line ? '<div class="dp-why">Plan-wide: nothing on the drawing to attach an accept pragma to.</div>'
+    : d.severity === 'error' ? '<div class="dp-why">Errors cannot be ignored — they have to be fixed.</div>' : '';
+  return '<span class="dp-sev sev-' + esc(d.severity) + '">' + esc(d.severity) +
+    ' <span class="code">' + esc(d.code) + '</span></span>' +
+    '<h4>' + esc(roomLabel(d.room)) + (d.line ? ' · line ' + d.line : '') + '</h4>' +
+    '<p>' + esc(d.message) + '</p>' +
+    (d.hint ? '<p class="hint">' + esc(d.hint) + '</p>' : '') +
+    '<div class="dp-acts">' + acts + '</div>' + why;
+}
+function positionDiagPop(){
+  const g = planSvg.querySelector('.diag-badge[data-room="' + String(diagPopRoom).replace(/"/g, '') + '"]');
+  if (!g) return;
+  const pb = planBody.getBoundingClientRect(), b = g.getBoundingClientRect();
+  const pw = diagPop.offsetWidth, ph = diagPop.offsetHeight;
+  let left = b.right - pb.left - pw, top = b.bottom - pb.top + 6;
+  left = Math.max(8, Math.min(left, pb.width - pw - 8));
+  if (top + ph > pb.height - 8) top = Math.max(8, b.top - pb.top - ph - 6);
+  diagPop.style.left = left + 'px'; diagPop.style.top = top + 'px';
+}
+function openDiagPop(room, idx){
+  const ds = roomDiags(room);
+  if (!ds.length){ closeDiagPop(); return; }
+  diagPopRoom = room; diagPopIdx = ((idx % ds.length) + ds.length) % ds.length;
+  diagPop.innerHTML = diagPopHTML(ds[diagPopIdx], diagPopIdx, ds.length);
+  diagPop.hidden = false;
+  positionDiagPop();
+}
+function closeDiagPop(){ diagPop.hidden = true; diagPopRoom = null; }
+// After a recompile the room's list may have changed: keep the popover on the
+// same room (clamped to what is left), or close it when nothing remains.
+function refreshDiagPop(){
+  if (diagPop.hidden || !diagPopRoom) return;
+  if (diagPop.querySelector('.dp-form')) return;   // don't yank a reason mid-typing
+  openDiagPop(diagPopRoom, diagPopIdx);
+}
+// Ignore = the compiler's accept pragma, trailing the statement's line. If that
+// line already carries one (one code per pragma), the standalone form goes on
+// its own line just above — it targets the following statement.
+function ignoreDiag(d, reason){
+  if (!d.line) return;
+  const lines = editor.value.split('\n'), i = d.line - 1;
+  if (i < 0 || i >= lines.length) return;
+  const prag = '# barndsl: accept ' + d.code +
+    (reason ? ' "' + reason.replace(/[\\"]/g, m => '\\' + m) + '"' : '');
+  let at = d.line;
+  if (/#\s*barndsl:\s*accept\b/.test(lines[i])){ lines.splice(i, 0, prag); at = i + 1; }
+  else lines[i] = lines[i].replace(/\s+$/, '') + '   ' + prag;
+  autosaveOff = false;
+  applyEdit(lines.join('\n'), null, null, 'ignore ' + d.code);
+  renderGutter(); compile(); flashLine(at);
+  showNotice('Ignored ' + d.code + ' on ' + roomLabel(d.room) + ' — written to line ' + at +
+    ' as an accept pragma; it stays ignored on every recompile.',
+    [{ label:'Undo', fn: doUndo }]);
+  // Drop the reason form now; the recompile's refresh moves the popover on to the
+  // room's next open issue (or closes it when none is left).
+  if (diagPopRoom) openDiagPop(diagPopRoom, diagPopIdx);
+}
+function showIgnoreForm(d){
+  const acts = diagPop.querySelector('.dp-acts'); if (!acts) return;
+  acts.innerHTML = '<div class="dp-form"><span class="lbl">Why? Optional — it is written next to the line for whoever reviews the plan.</span>' +
+    '<input type="text" maxlength="120" placeholder="e.g. handrail shown on the construction documents" aria-label="Reason for ignoring">' +
+    '<button class="primary" data-act="ignore-ok">Ignore</button><button class="quiet" data-act="ignore-cancel">Cancel</button></div>';
+  const inp = acts.querySelector('input');
+  setTimeout(() => inp.focus(), 0);
+  inp.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Enter'){ e.preventDefault(); ignoreDiag(d, inp.value.trim()); }
+    else if (e.key === 'Escape'){ e.preventDefault(); openDiagPop(diagPopRoom, diagPopIdx); }
+  });
+  positionDiagPop();
+}
+diagPop.addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  e.stopPropagation();
+  const ds = roomDiags(diagPopRoom), d = ds[diagPopIdx]; if (!d) { closeDiagPop(); return; }
+  const act = b.getAttribute('data-act');
+  if (act === 'prev') openDiagPop(diagPopRoom, diagPopIdx - 1);
+  else if (act === 'next') openDiagPop(diagPopRoom, diagPopIdx + 1);
+  else if (act === 'source'){ jumpToLine(d.line); flashLine(d.line); }
+  else if (act === 'fix'){ const snip = quickFixSnippet(d.hint); if (snip) applyQuickFix(snip, d.line); }
+  else if (act === 'ignore') showIgnoreForm(d);
+  else if (act === 'ignore-ok'){ const inp = diagPop.querySelector('.dp-form input'); ignoreDiag(d, inp ? inp.value.trim() : ''); }
+  else if (act === 'ignore-cancel') openDiagPop(diagPopRoom, diagPopIdx);
+});
+// A press anywhere on the drawing that isn't a badge (a pan, a room click)
+// closes the popover; so does a click outside the plan.
+planSvg.addEventListener('pointerdown', e => {
+  if (!e.target.closest || !e.target.closest('.diag-badge')) closeDiagPop();
+});
+document.addEventListener('click', e => {
+  if (diagPop.hidden) return;
+  if (e.target.closest('#diag-pop') || e.target.closest('.diag-badge')) return;
+  if (!e.target.closest('#plan-svg')) closeDiagPop();
+});
 
 // Keyboard zoom when the plan viewport has focus (+/-/0). The plan pane is made
 // focusable so these don't fight the editor's own key handling.
@@ -4609,6 +4824,7 @@ function initEdit(){
     document.getElementById('plan-zoom').style.display = editMode ? 'none' : '';
     measureBtn.disabled = !editMode;
     if (!editMode) setMeasure(false);
+    closeDiagPop();            // the badges live on the plan SVG, which edit mode hides
     resetEditTf();
     renderLevelSwitcher();
     if (editMode) buildOverlay();
@@ -4620,7 +4836,7 @@ function initEdit(){
     elecBtn.classList.toggle('on', elecMode);
     // Swap the plan SVG in place — the electrical variant rides in the payload,
     // so no re-compile and nothing leaves the page (offline).
-    if (lastGood) planSvg.innerHTML = planVariant(lastGood);
+    if (lastGood) setPlanSvg(planVariant(lastGood));
   });
   dimsBtn.addEventListener('click', () => {
     // Toggle the dimension convention. The face-of-stud variant is baked into
@@ -4629,7 +4845,7 @@ function initEdit(){
     dimsMode = (dimsMode === 'faces') ? 'nominal' : 'faces';
     dimsBtn.classList.toggle('on', dimsMode === 'faces');
     dimsBtn.textContent = (dimsMode === 'faces') ? '⟺ Dims: faces' : '⟺ Dims: nominal';
-    if (lastGood) planSvg.innerHTML = planVariant(lastGood);
+    if (lastGood) setPlanSvg(planVariant(lastGood));
   });
   undoBtn.addEventListener('click', doUndo);
   redoBtn.addEventListener('click', doRedo);

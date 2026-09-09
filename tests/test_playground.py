@@ -943,6 +943,31 @@ def test_app_ships_the_canvas_first_shell():
     assert "http://" not in html and "https://" not in html
 
 
+def test_app_puts_diagnostic_badges_on_the_plan():
+    # Every room with open diagnostics wears a badge drawn into the plan SVG; the
+    # badge opens a popover with the message, the hint, Apply (quick fix), Source
+    # and Ignore — which writes the compiler's own accept pragma onto the line.
+    html = render_app(CLEAN)
+    for token in ('id="diag-pop"', "function renderBadges(", "function setPlanSvg(",
+                  "function openDiagPop(", "function closeDiagPop(", "function refreshDiagPop(",
+                  "function ignoreDiag(", "function showIgnoreForm(", "function positionDiagPop(",
+                  "'diag-badge sev-'", "closest('.diag-badge')"):
+        assert token in html, token
+    # accepted diagnostics are the audit trail, not open work: no badge, no popover
+    assert "d.room === id && !d.accepted" in html
+    # Ignore writes the real pragma (trailing, or standalone above a line that has one)
+    assert "'# barndsl: accept ' + d.code" in html
+    assert "lines.splice(i, 0, prag)" in html
+    # errors and plan-wide diagnostics cannot be accepted, so they get no Ignore
+    assert "d.line && d.severity !== 'error'" in html
+    # the popover is on the Escape stack and closes when edit mode hides the plan
+    assert "if (!diagPop.hidden){ closeDiagPop(); return; }" in html
+    # every plan-SVG swap re-draws the badges (compile, electrical, dims)
+    assert html.count("setPlanSvg(planVariant(") == 3
+    # still offline
+    assert "http://" not in html and "https://" not in html
+
+
 def test_app_theme_toggle_pins_both_palettes_and_color_scheme():
     html = render_app(CLEAN)
     assert 'id="theme-btn"' in html
