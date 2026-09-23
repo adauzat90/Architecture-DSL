@@ -566,6 +566,44 @@ def _units_word_hint(toks: list[Token], unit_idx: int) -> str | None:
     )
 
 
+def scan_string(line: str, start: int) -> tuple[str, int, bool]:
+    """Read the ``"..."`` literal whose opening quote is ``line[start]``.
+
+    Returns ``(text, end, terminated)``: the unescaped text, the index just past
+    the closing quote (the line's length when it never closes), and whether it
+    closed. ``\\"`` and ``\\\\`` are the only escapes; any other backslash is
+    kept as written. The lexer, :func:`comment_start` and the formatter all read
+    strings with this, so they agree on where every string ends."""
+    i, n = start + 1, len(line)
+    buf: list[str] = []
+    while i < n and line[i] != '"':
+        if line[i] == "\\" and i + 1 < n and line[i + 1] in '"\\':
+            buf.append(line[i + 1])
+            i += 2
+            continue
+        buf.append(line[i])
+        i += 1
+    terminated = i < n
+    return "".join(buf), i + 1 if terminated else i, terminated
+
+
+def comment_start(line: str) -> int | None:
+    """Index of the ``#`` that starts ``line``'s comment, or ``None``.
+
+    A ``#`` inside a ``"..."`` string doesn't count, so ``note "a # b" # c``
+    comments from the second ``#`` — exactly where :func:`tokenize_line` stops."""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == "#":
+            return i
+        if ch == '"':
+            _, i, _ = scan_string(line, i)
+            continue
+        i += 1
+    return None
+
+
 def tokenize_line(line: str, lineno: int) -> list[Token]:
     tokens: list[Token] = []
     i, n = 0, len(line)
@@ -578,23 +616,12 @@ def tokenize_line(line: str, lineno: int) -> list[Token]:
             continue
         if ch == '"':
             start = i
-            i += 1
-            buf = ""
-            while i < n and line[i] != '"':
-                if line[i] == "\\" and i + 1 < n and line[i + 1] in '"\\':
-                    buf += line[i + 1]
-                    i += 2
-                    continue
-                buf += line[i]
-                i += 1
-            terminated = i < n
-            if terminated:
-                i += 1  # consume closing quote
+            text, i, terminated = scan_string(line, start)
             # Span covers the quotes (and any escapes): from the opening quote
             # through whatever we consumed, so the caret underlines "...".
             tokens.append(
                 Token(
-                    buf, lineno, start + 1, end=i + 1, quoted=True,
+                    text, lineno, start + 1, end=i + 1, quoted=True,
                     unterminated=not terminated,
                 )
             )
@@ -2524,7 +2551,8 @@ def _parse_source_lines(
 
 def _record_empty_line_syntax(raw: str, lineno: int, diagnostics: list[Issue]) -> bool:
     """Flag punctuation-only lines; return True when a diagnostic was added."""
-    stripped = raw.split("#", 1)[0]
+    cut = comment_start(raw)
+    stripped = raw if cut is None else raw[:cut]
     residue = [ch for ch in stripped if not ch.isspace() and ch not in _DROP]
     if not residue:
         return False

@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from .compiler import (
     PLACEMENT_ANCHORS,
     CompileResult,
+    comment_start,
     compile_source,
     parse_ft_in,
     tokenize_line,
@@ -2529,8 +2530,6 @@ def _inline_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
 def _with_comment(raw: str, stmt: str) -> str:
     """Replace ``raw``'s statement with ``stmt``, preserving any trailing comment
     and leading indentation."""
-    from .pragma import comment_start
-
     indent = raw[:len(raw) - len(raw.lstrip())]
     cut = comment_start(raw)
     comment = "" if cut is None else " " + raw[cut:].strip()

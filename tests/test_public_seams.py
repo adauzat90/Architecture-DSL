@@ -10,10 +10,16 @@ from __future__ import annotations
 import pytest
 
 from barndsl import compile_source, compose
-from barndsl.compiler import PLACEMENT_ANCHORS, compile_file, did_you_mean, parse_ft_in, tokenize_line
+from barndsl.compiler import (
+    PLACEMENT_ANCHORS,
+    comment_start,
+    compile_file,
+    did_you_mean,
+    parse_ft_in,
+    tokenize_line,
+)
 from barndsl.fixtures import quarter_turns
 from barndsl.geometry import point_rect_distance
-from barndsl.pragma import comment_start
 from barndsl.schedule import schedule_tables
 
 

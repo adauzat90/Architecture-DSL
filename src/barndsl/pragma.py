@@ -34,6 +34,7 @@ import difflib
 import re
 from dataclasses import dataclass
 
+from .compiler import comment_start
 from .diagnostics import REGISTRY
 from .validation import Issue, Severity
 
@@ -69,28 +70,6 @@ class AcceptPragma:
     #: The line the pragma comment itself sits on (where ACCEPT_* diagnostics
     #: about the pragma are anchored).
     pragma_line: int
-
-
-def comment_start(line: str) -> int | None:
-    """Index of the first ``#`` that begins a comment (not one inside a string),
-    or ``None``. Mirrors the lexer's quote handling so a ``#`` in a quoted value
-    (``note "a # b"``) isn't mistaken for a comment."""
-    i, n = 0, len(line)
-    while i < n:
-        ch = line[i]
-        if ch == "#":
-            return i
-        if ch == '"':
-            i += 1
-            while i < n and line[i] != '"':
-                if line[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                i += 1
-            i += 1  # closing quote (or end of line)
-            continue
-        i += 1
-    return None
 
 
 def _is_statement(line: str) -> bool:

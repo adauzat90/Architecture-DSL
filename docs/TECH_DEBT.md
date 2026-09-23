@@ -31,7 +31,7 @@ is a phase.
 | [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | Open |
 | [TD-7](#td-7-the-score-ignores-the-code-profile) | The score ignores the code profile | S | Medium | Open |
 | [TD-8](#td-8-statement-vocabulary-still-partly-hand-kept) | Statement vocabulary still partly hand-kept | M | Medium | Open |
-| [TD-9](#td-9-three-comment-scanners-one-wrong) | Three comment scanners, one wrong | S | Medium | Open |
+| [TD-9](#td-9-three-comment-scanners-one-wrong) | Three comment scanners, one wrong | S | Medium | Done |
 | [TD-10](#td-10-embedded-web-assets-and-the-agent-module) | Embedded web assets and the agent module | M | Low | Open |
 | [TD-11](#td-11-edit-payload-typing) | Edit payload typing | M | Low | Open |
 | [TD-12](#td-12-package-surface) | Package surface (`__init__.py`) | S | Low | Open |
@@ -319,12 +319,57 @@ all be generated from it.
 
 **Problem.** `fmt._comment_start` and `pragma.comment_start` (public since
 TD-3) are identical copies. `lsp._comment_start` is a third copy that doesn't
-handle `\"` escapes,
-so on `note "say \" # hi" # real` it returns the `#` inside the string. The
-compiler lexer has a fourth quote scanner of its own.
+handle `\"` escapes, so on `note "say \" # hi" # real` it returns the `#`
+inside the string. The compiler lexer has a fourth quote scanner of its own.
 
 **Fix.** Keep one public scanner that matches the lexer, use it everywhere, and
 add a test with an escaped quote.
+
+**Resolution.**
+- **One string reader.** `compiler.scan_string` holds the lexer's string rule:
+  `\"` and `\\` are the only escapes, and any other backslash stays as written.
+  `compiler.comment_start` is built on it.
+- **Who uses it.**
+  - `tokenize_line` reads strings with `scan_string`, so the lexer and the
+    scanner can't disagree.
+  - `fmt`, `pragma`, the LSP and `edits` all call `comment_start`.
+  - The formatter's own string reader also became `scan_string`, and so did
+    the LSP's `use`-path helpers (relpath, cursor-in-path, the parts and
+    `with` completions).
+  - The compiler's punctuation-only-line check stopped splitting on the first
+    `#`, and so did the layout brief parser.
+- **The bugs.**
+  - **LSP.** Hover and completion misread any line with an escaped quote, in
+    both directions:
+    - On `note "see \" # accept NAT_LIGHT" at 1,1`, hovering `NAT_LIGHT`
+      inside the string explained it as if it were a pragma.
+    - On `note "a\"" at 1,1 # barndsl: accept NAT_LIGHT`, the real pragma got
+      no hover and no code completion.
+
+    A `use` path containing `\"` was also misread. All three now follow the
+    lexer.
+  - **Briefs.** The brief parser cut each line at its first `#`, so
+    `plan "Unit #3"` came out named `Unit`.
+- **Nothing else changed.** Old and new code give identical results for:
+  - `fmt` on all 55 `.barn` files in the repo;
+  - a 20,736-line corpus of quote/escape/`#` combinations (tokens, formatting,
+    pragma parsing and compile diagnostics);
+  - the 476-plan drawing and diagnostic corpus.
+- **Independent review.** It compared old and new exhaustively on every line
+  of up to 9 characters built from `"`, `\`, `#`, `a` and space (2.44 million
+  lines). Lexer, formatter and pragma results were identical, and only the
+  intended LSP fix differed.
+- **Tests.** `tests/test_comment_scanner.py` covers:
+  - the scanner's edge cases;
+  - 28,561 generated lines, checking the lexer stops exactly where the comment
+    starts;
+  - every consumer sharing the one function;
+  - the formatter keeping an escaped quote inside its string;
+  - both LSP directions, the `use` path and the brief. Each of those tests
+    fails on the old code.
+- **Still separate.** The playground's JavaScript highlighter reads strings its
+  own way. Its rule (skip any backslash pair) finds the same string ends, but
+  it can't share Python code; that belongs with TD-10.
 
 ## TD-10. Embedded web assets and the agent module
 
@@ -510,5 +555,7 @@ builder half needs a machine with full Revit.
   the DXF export; fixed the DXF's ignored `hinge far`.
 - **TD-16** (PR #27): one default door-swing rule for the plan, DXF,
   validator and 3D model.
-- **TD-3**: no module imports another's private names; `barndsl dev audit`
-  enforces it.
+- **TD-3** (PR #28): no module imports another's private names; `barndsl dev
+  audit` enforces it.
+- **TD-9**: one comment scanner, the lexer's own (`compiler.comment_start` on
+  `scan_string`); fixed the LSP treating text after `\"` as a comment.

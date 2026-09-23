@@ -45,6 +45,7 @@ from .elements import (
     feet,
     inches,
 )
+from .compiler import comment_start
 from .constants import NATURAL_LIGHT_RATIO as _NAT_LIGHT_RATIO
 from .geometry import shared_edge
 
@@ -735,7 +736,8 @@ def parse_brief_fields(text: str, name: str, parse_room) -> dict:
     add_openings = True
 
     for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
+        cut = comment_start(raw)  # a `#` inside `plan "Unit #3"` isn't a comment
+        line = (raw if cut is None else raw[:cut]).strip()
         if not line:
             continue
         head, _, rest = line.partition(" ")
