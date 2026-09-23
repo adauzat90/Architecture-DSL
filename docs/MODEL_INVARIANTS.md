@@ -22,6 +22,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 
 - A whole plan has a `plan` header and should satisfy whole-building requirements such as envelope, entry, access, and program checks.
 - A headerless part is a fragment and must compile in fragment mode when scanned independently.
+- Every statement is either building-wide (`compiler.HOST_ONLY_STATEMENTS`, a `PART_HOST_STMT` error in a part) or part-legal (`compiler.PART_STATEMENTS`) — never silently accepted in a part and then ignored by the host.
 - Fragment compilation must avoid false whole-plan diagnostics like missing envelope or missing entry.
 - `use` composition validates the final composed plan after transforms, parameter substitution, and ID stamping.
 
@@ -37,6 +38,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - Diagnostic codes are stable API: CLI, LSP, docs, examples, pragmas, and agents rely on exact spelling.
 - Every emitted code must have a registry entry in `src/barndsl/diagnostics.py`.
 - Registry entries expose severity, category, owner, title, and explanation.
+- The registry severity matches every literal emit site unless the code is declared context-dependent (`_VARYING`); every code has an explicit or prefix category rule (no silent default). `barndsl dev audit` enforces both.
 - Validators should emit diagnostics in stable order.
 - Accepted diagnostics remain visible as audited deviations; they are not deleted from compile output.
 - Error diagnostics represent unbuildable or unrecoverable model problems and should not be accepted by pragma.
@@ -46,8 +48,10 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - `fmt` is line-preserving and comment-preserving; it normalizes whitespace/numbers but should not reorder statements.
 - `format_source(format_source(src)) == format_source(src)` must hold.
 - `emit_dsl` serializes the compiled model and intentionally drops comments.
-- For supported model features, `emit_dsl(compile_source(emit_dsl(plan)).plan)` should be a fixed point.
-- Flattened emission of composed plans should preserve resolved/stamped geometry even though source comments and `use` statements are removed.
+- `compile_source(emit_dsl(plan)).plan` rebuilds the same model as `plan` — every dataclass field except source positions (`line`/`col`/`*_line`) and the non-serialised `placement` hint. This is stronger than a text fixed point, which can't see a field the first emit already dropped; `tests/test_metamorphic.py` checks it for every example and for a fixture exercising every statement option.
+- `emit_dsl(compile_source(emit_dsl(plan)).plan)` is a fixed point.
+- Flattened emission of composed plans should preserve resolved/stamped geometry even though source comments and `use` statements are removed; `inline_use` must keep every stamped element type.
+- Known gap: `# barndsl: accept` pragmas are comments, not model state, so emission drops them and a re-emitted plan loses its accepted deviations. Carrying them through emit would need pragmas stored on the model (an open design decision).
 
 ## Exports and introspection
 

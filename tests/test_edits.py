@@ -567,6 +567,76 @@ def test_delete_room_unknown():
     assert not r.ok and r.error.kind == "unknown_room"
 
 
+# Every room-referencing statement form, all pointing at `b`.
+REFS = """\
+plan "Refs"
+envelope 40 x 20
+ceiling 9
+site 100 x 100
+drive at 0,0 size 10 x 10
+room a: living at 0,0 size 20 x 20
+room b: bedroom east-of a size 10 x 20
+room c: closet east-of b size 10 x 20
+require adjacent a b
+wall a - b bearing
+suite s: b c   # primary
+suite t: b
+zone z: s a t
+door a - b width 3
+entry a south width 3
+window b south width 4 offset 2
+outlet in b wall N offset 2
+switch in b wall N offset 4
+light in b at 5,5
+alarm smoke in b
+walk from b to drive
+"""
+
+
+def test_rename_room_updates_device_alarm_and_walk_references():
+    r = apply_edit(REFS, Edit("rename_room", room="b", to="bed"))
+    assert r.ok and r.changed
+    assert " b " not in r.source and not r.source.split("\n")[6].startswith("room b:")
+    for line in ("outlet in bed wall N", "switch in bed wall N", "light in bed at",
+                 "alarm smoke in bed", "walk from bed to drive"):
+        assert line in r.source
+    res = compile_source(r.source)
+    assert res.plan is not None and res.plan.room("bed") is not None
+    assert not [d for d in res.errors if d.code.endswith(("_REF", "_ROOM"))]
+
+
+def test_delete_room_leaves_no_dangling_references():
+    before = compile_source(REFS)
+    assert not before.errors, before.summary()
+    r = apply_edit(REFS, Edit("delete_room", room="b"))
+    assert r.ok and r.changed
+    for gone in ("require adjacent", "wall a - b", "outlet in", "switch in",
+                 "light in", "alarm smoke", "walk from", "suite t:"):
+        assert gone not in r.source
+    # `b` leaves the suite (comment kept); the emptied suite `t` leaves the zone.
+    assert "suite s: c   # primary" in r.source
+    assert "zone z: s a" in r.source
+    res = compile_source(r.source)
+    assert res.plan is not None
+    refs = sorted(d.code for d in res.errors if d.code.endswith(("_REF", "_ROOM")))
+    assert refs == []
+
+
+def test_every_statement_is_classified_for_room_references():
+    """A new statement that names a room must teach rename/delete about it."""
+    from barndsl.compiler import STATEMENT_KEYWORDS
+    from barndsl.edits import ROOM_REF_STATEMENTS
+
+    no_room_refs = {
+        "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "porch",
+        "stair", "frame", "roof", "orientation", "finish", "accessible", "site",
+        "setback", "building", "electrical", "street", "overhang", "climate", "use",
+        "param", "drive", "well", "septic", "service", "grade",
+    }
+    assert ROOM_REF_STATEMENTS.isdisjoint(no_room_refs)
+    assert ROOM_REF_STATEMENTS | no_room_refs == set(STATEMENT_KEYWORDS)
+
+
 # --- add_opening -------------------------------------------------------------
 
 

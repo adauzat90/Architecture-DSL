@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Protocol
 
 from .constants import (
+    BUILD_MODULE,
     COMFORT_HALLWAY_WIDTH,
     EPSILON,
     EXTERIOR_WALL_THICKNESS,
@@ -48,6 +49,7 @@ from .elements import (
     GARAGE_TYPES,
     HABITABLE_TYPES,
     INTERIOR_TYPES,
+    PUBLIC_TYPES,
     Barndominium,
     Direction,
     Room,
@@ -74,6 +76,15 @@ class _WallOpening(Protocol):
     wall: Direction
     offset: float
     width: float
+    line: int | None
+    col: int | None
+    end_col: int | None
+
+
+class _InRoom(Protocol):
+    """Structural view of a device placed ``in <room>`` (outlet/switch/light/alarm)."""
+
+    room: str
     line: int | None
     col: int | None
     end_col: int | None
@@ -258,8 +269,6 @@ DOOR_CLEARANCE_DEPTH = 3.0
 #: A window whose edge lands this close to an interior-partition corner collides
 #: with that wall's framing/trim — pull it toward the centre or the building corner.
 WINDOW_WALL_CLEAR = 0.5
-#: Exterior dimensions should land on this module (ft) for efficient material use.
-BUILD_MODULE = 3.0
 #: Two door swings overlapping by less than this (ft) are treated as just grazing.
 SWING_CLASH_EPS = 0.02
 #: Natural-ventilation floor (IRC R303.1): openable window area >= 4% of a
@@ -585,14 +594,6 @@ def _profile_tag(profile: Profile, field: str, base_str: str) -> str:
     return f" (the '{profile.name}' profile amends the IRC base of {base_str})"
 
 
-#: Public, shared living spaces — bedrooms ideally don't open straight onto these.
-PUBLIC_TYPES = {
-    RoomType.LIVING,
-    RoomType.GREAT_ROOM,
-    RoomType.KITCHEN,
-    RoomType.DINING,
-    RoomType.REC_ROOM,
-}
 BATH_TYPES = {RoomType.BATHROOM, RoomType.HALF_BATH}
 #: Dedicated-storage rooms, for the whole-house storage ratio (LOW_STORAGE) and
 #: the `program storage <sqft>` minimum.
@@ -615,13 +616,7 @@ WET_TYPES = {
 #: (ZONE_CROSS). Public = the shared living core; private = sleeping/bathing.
 #: Every other type (hall, closet, office, laundry, mudroom, garage, …) is
 #: neutral — it appears in both wings, so it neither triggers nor blocks a band.
-ZONE_PUBLIC_TYPES = {
-    RoomType.LIVING,
-    RoomType.GREAT_ROOM,
-    RoomType.KITCHEN,
-    RoomType.DINING,
-    RoomType.REC_ROOM,
-}
+ZONE_PUBLIC_TYPES = PUBLIC_TYPES
 ZONE_PRIVATE_TYPES = {RoomType.BEDROOM, RoomType.BATHROOM, RoomType.HALF_BATH}
 
 
@@ -636,11 +631,6 @@ def _same_suite(plan: Barndominium, a_id: str, b_id: str) -> bool:
         if a_id in s.members and b_id in s.members:
             return True
     return False
-
-
-def _suites_of(plan: Barndominium, room_id: str) -> list[str]:
-    """The ids of every declared suite that lists ``room_id`` as a member."""
-    return [s.id for s in (getattr(plan, "suites", None) or []) if room_id in s.members]
 
 
 def _sole_bedroom_suite(
@@ -1208,6 +1198,7 @@ def _run_full_plan_validators(plan: Barndominium, add, profile: Profile) -> None
     _validate_door_threshold(plan, add)
     _validate_water_heater(plan, add)
     _validate_guards(plan, add)
+    _validate_device_refs(plan, add)
     _validate_life_safety(plan, add)
     _validate_load_path(plan, add)
     _validate_plumbing_stack(plan, add)
@@ -3611,6 +3602,30 @@ def _validate_guards(plan: Barndominium, add) -> None:
         )
 
 
+def _validate_device_refs(plan: Barndominium, add) -> None:
+    """An ``outlet``/``switch``/``light``/``alarm`` must name a real room — like a
+    fixture's FIXTURE_ROOM, a mistyped id would otherwise draw and check nothing."""
+    known = {room.id for room in plan.rooms}
+    devices: list[tuple[str, _InRoom]] = [
+        *(("outlet", d) for d in plan.outlets),
+        *(("switch", d) for d in plan.switches),
+        *(("light", d) for d in plan.lights),
+        *(("alarm", d) for d in plan.alarms),
+    ]
+    for kind, device in devices:
+        if device.room in known:
+            continue
+        add(Issue(
+            Severity.ERROR,
+            "DEVICE_ROOM",
+            f"`{kind}` names unknown room '{device.room}'.",
+            line=device.line,
+            col=device.col,
+            end_col=device.end_col,
+            hint=f"Put the {kind} `in` a room that exists.",
+        ))
+
+
 def _validate_life_safety(plan: Barndominium, add) -> None:
     """Smoke/CO-alarm coverage (IRC R314/R315)."""
     by_id = {room.id: room for room in plan.rooms}
@@ -5237,7 +5252,7 @@ def _dq_storage_room(plan: Barndominium, graph, by_id, room: Room, add) -> None:
             "STORAGE_SHAPE",
             f"Storage room '{room.id}' is {_f(room.width)} x {_f(room.length)} ({long / short:.1f}:1) — a long, skinny storage aisle.",
             room=room.id,
-            hint="Make walk-in storage more compact (under ~3:1), or split it into closets/cabinets along circulation.",
+            hint=f"Make walk-in storage more compact (under ~{MAX_STORAGE_ASPECT:g}:1), or split it into closets/cabinets along circulation.",
         ))
     if not _has_any_door_or_opening(plan, room.id):
         add(Issue(

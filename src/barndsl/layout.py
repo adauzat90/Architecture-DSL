@@ -39,6 +39,7 @@ from .elements import (
     Barndominium,
     Direction,
     HABITABLE_TYPES,
+    PUBLIC_TYPES,
     Room,
     RoomType,
     feet,
@@ -53,13 +54,7 @@ _GLASS_PER_FT = feet(6.67) - feet(3.0)
 
 #: The rooms that form the open public core. Two of them sharing a wall get a
 #: cased passage rather than a door; :mod:`barndsl.layout2` bands them together.
-PUBLIC_CORE_TYPES = (
-    RoomType.LIVING,
-    RoomType.GREAT_ROOM,
-    RoomType.KITCHEN,
-    RoomType.DINING,
-    RoomType.REC_ROOM,
-)
+PUBLIC_CORE_TYPES = PUBLIC_TYPES
 #: How wide the cased passage between two public-core rooms is.
 PUBLIC_OPENING_WIDTH = feet(6)
 

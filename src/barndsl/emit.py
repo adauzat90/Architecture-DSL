@@ -27,10 +27,12 @@ from .elements import (
     Room,
     SiteSpec,
     Stair,
+    Suite,
     Switch,
     UseSpec,
     WallSpec,
     Window,
+    Zone,
 )
 
 T = TypeVar("T")
@@ -47,9 +49,15 @@ def _q(text: str) -> str:
 
 
 def _instance_emitters() -> tuple[tuple[type, str, Callable[[Any], str]], ...]:
+    """Every element type :func:`barndsl.compose.stamp_instance` can put in an
+    ``Instance.objects`` list, with its bucket and statement formatter. A stamped
+    type missing here would be silently dropped by ``inline_use``, so
+    ``tests/test_metamorphic.py`` asserts the coverage."""
     return (
         (Room, "rooms", _room_line),
         (WallSpec, "walls", _wall_line),
+        (Suite, "suites", _suite_line),
+        (Zone, "zones", _zone_line),
         (InteriorDoor, "doors", _interior_door_line),
         (ExteriorDoor, "exts", _exterior_door_line),
         (Window, "wins", _window_line),
@@ -60,7 +68,13 @@ def _instance_emitters() -> tuple[tuple[type, str, Callable[[Any], str]], ...]:
         (Alarm, "alarms", _alarm_line),
         (Note, "notes", _note_line),
         (Porch, "porches", _porch_line),
+        (Stair, "stairs", _stair_line),
     )
+
+
+def instance_emitter_types() -> tuple[type, ...]:
+    """The element types :func:`instance_lines` knows how to serialize."""
+    return tuple(cls for cls, _, _ in _instance_emitters())
 
 
 def instance_lines(inst: object) -> list[str]:
@@ -74,7 +88,8 @@ def instance_lines(inst: object) -> list[str]:
     :func:`emit_dsl`).
     """
     order = (
-        "rooms", "walls", "doors", "exts", "wins", "fixts", "elec", "alarms", "notes", "porches",
+        "rooms", "walls", "suites", "zones", "doors", "exts", "wins", "fixts", "elec",
+        "alarms", "notes", "porches", "stairs",
     )
     buckets: dict[str, list[str]] = {name: [] for name in order}
     emitters = _instance_emitters()
@@ -98,6 +113,8 @@ def _room_line(r: Room) -> str:
         line += f" ceiling {_n(ch)}"
     if getattr(r, "vaulted", False):
         line += " vaulted"
+    if r.floor is not None:
+        line += f" floor {_q(r.floor)}"
     return line
 
 
@@ -222,6 +239,14 @@ def _stair_line(s: Stair) -> str:
 
 def _wall_line(ws: WallSpec) -> str:
     return f"wall {ws.room_a} - {ws.room_b} {' '.join(ws.attributes)}"
+
+
+def _suite_line(s: Suite) -> str:
+    return f"suite {s.id}: {' '.join(s.members)}"
+
+
+def _zone_line(z: Zone) -> str:
+    return f"zone {z.id}: {' '.join(z.members)}"
 
 
 def _append_section(out: list[str], lines: list[str]) -> None:
@@ -411,9 +436,9 @@ def _append_contract_lines(
         out.append(_wall_line(ws))
     for s in keep(getattr(plan, "suites", None) or []):
         # Declared groupings ride the contract block, in declaration order.
-        out.append(f"suite {s.id}: {' '.join(s.members)}")
+        out.append(_suite_line(s))
     for z in keep(getattr(plan, "zones", None) or []):
-        out.append(f"zone {z.id}: {' '.join(z.members)}")
+        out.append(_zone_line(z))
     for note in (plan.notes or "").splitlines():
         if note.strip():
             out.append(f"note {_q(note.strip())}")

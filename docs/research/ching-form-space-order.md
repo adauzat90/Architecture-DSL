@@ -605,7 +605,7 @@ grouping.
   graph). For each, check whether it has a declared type and a reasonable size.
   Threshold: flag an articulation-point room typed `flex`/untyped, or under 40 sq ft, or with an
   aspect ratio over 4:1 that is not typed `hallway`.
-  Notes: barndsl already computes components via `_door_components_excluding()` in score.py, so
+  Notes: barndsl already computes components via `validation.components_excluding(door_graph(plan), …)`, so
   articulation points are nearly free. The transition space between shop and living is exactly
   this condition and deserves to be a real mudroom — see §10.
 

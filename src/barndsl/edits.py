@@ -1449,11 +1449,17 @@ def _opening_statement_refs(toks: list) -> list[int]:
     return refs
 
 
-def _fixture_statement_refs(toks: list) -> list[int]:
+def _in_room_statement_refs(toks: list) -> list[int]:
+    """``fixture``/``outlet``/``switch``/``light``/``alarm … in <room> …``."""
     for i in range(len(toks) - 1):
         if toks[i].text.lower() == "in":
             return [i + 1]
     return []
+
+
+def _walk_statement_refs(toks: list) -> list[int]:
+    """``walk from <room> to drive``."""
+    return [2] if len(toks) > 2 and toks[1].text.lower() == "from" else []
 
 
 def _require_statement_refs(toks: list) -> list[int]:
@@ -1471,6 +1477,9 @@ def _members_statement_refs(toks: list) -> list[int]:
     return list(range(2, len(toks)))  # index 1 is the suite/zone id, not a room
 
 
+#: Statement head -> the token indices on its line that name a room id. Every
+#: statement that references a room by id belongs here, or ``rename_room`` leaves
+#: it pointing at the old id (``ROOM_REF_STATEMENTS`` is audited in the tests).
 _ROOM_REF_FINDERS = {
     "room": _room_statement_refs,
     "door": _opening_statement_refs,
@@ -1478,11 +1487,19 @@ _ROOM_REF_FINDERS = {
     "wall": _opening_statement_refs,
     "window": lambda toks: [1],
     "entry": lambda toks: [1],
-    "fixture": _fixture_statement_refs,
+    "fixture": _in_room_statement_refs,
+    "outlet": _in_room_statement_refs,
+    "switch": _in_room_statement_refs,
+    "light": _in_room_statement_refs,
+    "alarm": _in_room_statement_refs,
+    "walk": _walk_statement_refs,
     "require": _require_statement_refs,
     "suite": _members_statement_refs,
     "zone": _members_statement_refs,
 }
+
+#: The statement heads that can reference a room by id (see ``_ROOM_REF_FINDERS``).
+ROOM_REF_STATEMENTS = frozenset(_ROOM_REF_FINDERS)
 
 
 def _rebuild_without(
@@ -1745,7 +1762,9 @@ def _delete_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
     assert room_line is not None
     delete = _room_dependent_lines(plan, rid, room_line)
     lines = _lines(source)
-    convert = _room_anchor_conversions(plan, result, lines, rid, delete)
+    member_delete, convert = _room_membership_rewrites(plan, lines, rid)
+    delete |= member_delete
+    convert.update(_room_anchor_conversions(plan, result, lines, rid, delete))
     new_source = _rebuild_without(lines, delete, convert)
     return EditResult(
         new_source, changed=True, line=room_line,
@@ -1763,12 +1782,51 @@ def _deletable_room_line(plan, result: CompileResult, rid: str) -> tuple[int | N
 
 
 def _room_dependent_lines(plan, rid: str, room_line: int) -> set[int]:
+    """The room's own line plus every statement that only makes sense with it:
+    openings, fixtures, devices, declared walls, requirements and walks."""
+    in_room = [
+        *plan.exterior_doors, *plan.windows, *plan.fixtures,
+        *plan.outlets, *plan.switches, *plan.lights, *plan.alarms,
+    ]
+    if plan.site_spec is not None:
+        in_room.extend(plan.site_spec.walks)
     delete: set[int] = {room_line}
-    delete.update(d.line for d in plan.interior_doors if rid in (d.room_a, d.room_b) and d.line is not None)
-    delete.update(door.line for door in plan.exterior_doors if door.room == rid and door.line is not None)
-    delete.update(window.line for window in plan.windows if window.room == rid and window.line is not None)
-    delete.update(fixture.line for fixture in plan.fixtures if fixture.room == rid and fixture.line is not None)
+    delete.update(o.line for o in in_room if o.room == rid and o.line is not None)
+    delete.update(
+        o.line for o in [*plan.interior_doors, *plan.wall_specs]
+        if rid in (o.room_a, o.room_b) and o.line is not None
+    )
+    delete.update(
+        req.line for req in plan.requirements
+        if rid in (req.a, req.b) and req.line is not None
+    )
     return delete
+
+
+def _room_membership_rewrites(plan, lines: list[str], rid: str) -> tuple[set[int], dict[int, str]]:
+    """Drop ``rid`` from the member lists of the suites and zones that name it.
+
+    A suite left with no members is deleted outright, and its id is then dropped
+    from any zone that grouped it (a zone emptied that way goes too), so the
+    deletion never leaves a SUITE_REF / ZONE_REF behind."""
+    delete: set[int] = set()
+    convert: dict[int, str] = {}
+    gone = {rid}
+    for group in [*plan.suites, *plan.zones]:
+        if group.line is None or not gone.intersection(group.members):
+            continue
+        if all(m in gone for m in group.members):
+            delete.add(group.line)
+            gone.add(group.id)
+            continue
+        raw = lines[group.line - 1]
+        toks = _tokenize_line(raw, group.line)
+        members = [toks[i] for i in _members_statement_refs(toks)]
+        kept = " ".join(t.text for t in members if t.text not in gone)
+        # Keep everything before the first member (`suite s: `) and after the
+        # last one (spacing, a trailing comment); rejoin the survivors between.
+        convert[group.line] = raw[:members[0].col - 1] + kept + raw[members[-1].end_col - 1:]
+    return delete, convert
 
 
 def _room_anchor_conversions(plan, result: CompileResult, lines: list[str], rid: str, delete: set[int]) -> dict[int, str]:

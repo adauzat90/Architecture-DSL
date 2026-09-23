@@ -57,18 +57,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .constants import GOOD_ASPECT
-from .elements import GARAGE_TYPES, HABITABLE_TYPES, Barndominium, RoomType
-from .validation import MIN_VOID_NOTE, Severity, _largest_void
-
-#: The public core a bedroom's daily route must reach without crossing a garage.
-_PUBLIC_TYPES = frozenset({
-    RoomType.LIVING,
-    RoomType.GREAT_ROOM,
-    RoomType.KITCHEN,
-    RoomType.DINING,
-    RoomType.REC_ROOM,
-})
+from .constants import GOOD_ASPECT, NATURAL_LIGHT_RATIO
+from .elements import GARAGE_TYPES, HABITABLE_TYPES, PUBLIC_TYPES, Barndominium, RoomType
+from .validation import (
+    MIN_VOID_NOTE,
+    Severity,
+    _largest_void,
+    components_excluding,
+    door_graph,
+)
 
 # --- weights (the contract; change these and the score changes meaning) ------
 
@@ -91,7 +88,7 @@ PROPORTION_WEIGHT = 8.0  #: max penalty for elongated habitable rooms
 WORST_ASPECT_EXCESS = 1.5  #: excess (i.e. 3.2:1) at which the full penalty applies
 BEDROOM_EXCESS_WEIGHT = 2.0  #: bedrooms count double in proportion (like layout2)
 DAYLIGHT_WEIGHT = 8.0  #: max penalty for under-glazed habitable rooms
-DAYLIGHT_RATIO = 0.08  #: IRC R303 glazing floor: 8% of habitable floor area
+DAYLIGHT_RATIO = NATURAL_LIGHT_RATIO  #: IRC R303 glazing floor (the NAT_LIGHT base)
 TOPOLOGY_WEIGHT = 15.0  #: max penalty for bedrooms reachable only through a garage/shop
 
 
@@ -278,38 +275,6 @@ def _daylight_penalty(plan: Barndominium) -> tuple[float, str | None]:
     )
 
 
-def _door_components_excluding(
-    plan: Barndominium, excluded: set[str]
-) -> list[set[str]]:
-    """Connected components of the interior-door graph with ``excluded`` rooms
-    removed. Replicated here (a tiny BFS over ``plan.interior_doors``) so the
-    score stays a pure, self-contained function of the compile result — the same
-    topology question :func:`barndsl.validation._dq_garage_passthrough` asks."""
-    graph: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
-    for d in plan.interior_doors:
-        if d.room_a in graph and d.room_b in graph:
-            graph[d.room_a].add(d.room_b)
-            graph[d.room_b].add(d.room_a)
-    comps: list[set[str]] = []
-    seen: set[str] = set()
-    for start in graph:
-        if start in excluded or start in seen:
-            continue
-        comp: set[str] = set()
-        stack = [start]
-        while stack:
-            node = stack.pop()
-            if node in comp:
-                continue
-            comp.add(node)
-            seen.add(node)
-            for nb in graph[node]:
-                if nb not in excluded and nb not in comp:
-                    stack.append(nb)
-        comps.append(comp)
-    return comps
-
-
 def _topology_penalty(plan: Barndominium) -> tuple[float, str | None]:
     """Fraction of bedrooms whose only interior route to the public core crosses a
     garage/shop — the through-garage circulation defect, as a continuous term.
@@ -322,11 +287,12 @@ def _topology_penalty(plan: Barndominium) -> tuple[float, str | None]:
     garages = {r.id for r in plan.rooms if r.type in GARAGE_TYPES}
     if not garages:
         return 0.0, None
-    publics = {r.id for r in plan.rooms if r.type in _PUBLIC_TYPES}
+    publics = {r.id for r in plan.rooms if r.type in PUBLIC_TYPES}
     beds = [r.id for r in plan.rooms if r.type is RoomType.BEDROOM]
     if not publics or not beds:
         return 0.0, None
-    comps = _door_components_excluding(plan, garages)
+    # The same topology question validation's GARAGE_PASSTHROUGH asks.
+    comps = components_excluding(door_graph(plan), garages)
     public_comp = next((c for c in comps if c & publics), None)
     if public_comp is None:
         return 0.0, None  # the public rooms themselves sit behind the garage

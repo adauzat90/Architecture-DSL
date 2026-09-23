@@ -40,7 +40,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
 from .compiler import DSL_REFERENCE, CompileResult, compile_source
-from .compiler import _KEYWORDS as _STMT_KEYWORDS
+from .compiler import STATEMENT_KEYWORDS as _STMT_KEYWORDS
 from .introspect import plan_summary, render_ascii_plan, summary_text
 from .score import ScoreReport, design_score
 from .validation import Issue, Severity

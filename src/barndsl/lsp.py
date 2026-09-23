@@ -33,14 +33,19 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlsplit
 
-from .compiler import DSL_REFERENCE, CompileResult, compile_source
+from .compiler import (
+    DSL_REFERENCE,
+    PLACEMENT_ANCHORS,
+    STATEMENT_KEYWORDS,
+    CompileResult,
+    compile_source,
+)
 from .compose import scan_parts
 from .diagnostics import REGISTRY, explain
 from .edits import Edit, apply_edit
 from .elements import ALARM_KINDS, RoomType
 from .fixtures import FIXTURES
 from .fmt import format_source
-from .playground import _STATEMENT_KEYWORDS
 from .render import fmt_ft_in
 from .validation import Issue, Severity
 
@@ -301,7 +306,7 @@ def _build_statement_docs() -> dict[str, str]:
     lines = DSL_REFERENCE.splitlines()
     in_section = False
     current: str | None = None
-    stmt_set = set(_STATEMENT_KEYWORDS) | {"outlet", "switch", "light", "use", "building"}
+    stmt_set = set(STATEMENT_KEYWORDS)
     for line in lines:
         if line.strip() == "Statements:":
             in_section = True
@@ -325,6 +330,14 @@ def _build_statement_docs() -> dict[str, str]:
 _STATEMENT_DOCS = _build_statement_docs()
 
 
+def statement_docs() -> dict[str, str]:
+    """Statement keyword -> its grammar block from ``DSL_REFERENCE`` (hover text).
+
+    A statement missing here has no grammar line under ``Statements:`` — the
+    ``barndsl dev audit`` gate checks every keyword has one."""
+    return dict(_STATEMENT_DOCS)
+
+
 # --- quick-fix snippet (shared with the playground JS heuristic, §3.7) -------
 
 #: A placeholder the author would still have to fill in — an incomplete snippet.
@@ -337,7 +350,7 @@ _QUICKFIX_EXAMPLE_LEAD = re.compile(r"(?:e\.g\.|for example|like)[\s,]*$", re.IG
 #: The statement heads a quick-fix snippet must start with — the same set the
 #: playground injects as ``HIGHLIGHT.statements`` (``HL_STMT`` in the JS), so the
 #: Python function and the JS ``quickFixSnippet`` agree by construction.
-_QUICKFIX_STATEMENTS = frozenset(_STATEMENT_KEYWORDS)
+_QUICKFIX_STATEMENTS = frozenset(STATEMENT_KEYWORDS)
 
 
 def quickfix_snippet(hint: str | None) -> str | None:
@@ -636,10 +649,7 @@ _KIND_FILE = 17
 #: Opening statement heads whose next id slot is a room id (mirrors the
 #: playground's ``AC_ROOM_HEADS``).
 _ROOM_HEADS = frozenset({"door", "open", "window", "entry"})
-_ANCHORS = frozenset({
-    "east-of", "west-of", "north-of", "south-of",
-    "right-of", "left-of", "above-of", "below-of",
-})
+_ANCHORS = frozenset(PLACEMENT_ANCHORS)
 _WALL_DIRS = ("north", "south", "east", "west")
 
 
@@ -730,7 +740,7 @@ def completions(
     if not toks:
         return [
             _item(kw, _KIND_KEYWORD, _statement_summary(kw))
-            for kw in sorted(_STATEMENT_KEYWORDS)
+            for kw in sorted(STATEMENT_KEYWORDS)
         ]
 
     # Room-id slot.

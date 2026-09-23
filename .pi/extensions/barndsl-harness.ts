@@ -142,8 +142,8 @@ function formatAudit(r: { code: number | null; stdout: string; stderr: string; c
     `barndsl repo audit (exit ${r.code ?? "signal"})`,
     `ok: ${j.ok}`,
     `problems: ${(j.problems ?? []).length ? (j.problems ?? []).join("; ") : "none"}`,
-    `statements: parser ${j.statement_keywords?.parser_count}, playground ${j.statement_keywords?.playground_count}, lsp quickfix ${j.statement_keywords?.lsp_quickfix_count}`,
-    `diagnostic registry: emitted ${j.diagnostics?.emitted_literal_issue_codes}, registered ${j.diagnostics?.registered_codes}, missing ${(j.diagnostics?.missing_registry ?? []).length}`,
+    `statements: parser ${j.statement_keywords?.parser_count}, host-only ${j.statement_keywords?.host_only_count}, part ${j.statement_keywords?.part_count}`,
+    `diagnostic registry: emitted ${j.diagnostics?.emitted_literal_issue_codes}, registered ${j.diagnostics?.registered_codes}, missing ${(j.diagnostics?.missing_registry ?? []).length}, severity drift ${(j.diagnostics?.severity_drift ?? []).length}, unclassified ${(j.diagnostics?.unclassified_category ?? []).length}`,
     `$ ${r.command}`,
     r.stderr.trim() ? `stderr:\n${trim(r.stderr)}` : "",
   ].filter(Boolean).join("\n");
