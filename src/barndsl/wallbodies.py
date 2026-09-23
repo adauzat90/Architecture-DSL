@@ -27,6 +27,7 @@ from .constants import (
 from .elements import Barndominium, Direction, Room
 from .geometry import (
     SharedEdge,
+    door_span,
     opening_endpoints,
     point_in_footprint,
     shared_edge,
@@ -154,15 +155,6 @@ def partition_class(plan: Barndominium, ra: Room, rb: Room) -> str:
     return INTERIOR
 
 
-def _interior_opening_interval(door, edge: SharedEdge) -> tuple[float, float]:
-    w = min(door.width, edge.length)
-    if door.offset is None:
-        start = edge.mid - w / 2.0
-    else:
-        start = edge.lo + max(0.0, min(door.offset, edge.length - w))
-    return start, start + w
-
-
 def _interior_openings(
     plan: Barndominium, ra: Room, rb: Room, edge: SharedEdge
 ) -> list[tuple[float, float]]:
@@ -170,7 +162,7 @@ def _interior_openings(
     for d in plan.interior_doors:
         if {d.room_a, d.room_b} != {ra.id, rb.id}:
             continue
-        out.append(_interior_opening_interval(d, edge))
+        out.append(door_span(edge, d))
     return out
 
 
@@ -411,7 +403,7 @@ def opening_gaps(plan: Barndominium, level: int) -> list[OpeningGap]:
                 continue
             if room_by_id.get(door.room_a) is None or room_by_id.get(door.room_b) is None:
                 continue
-            lo, hi = _interior_opening_interval(door, edge)
+            lo, hi = door_span(edge, door)
             cat = "opening" if getattr(door, "leaf", True) is False else "door"
             gaps.append(OpeningGap(lo, hi, edge.pos, edge.orientation, cls, cat))
     return gaps

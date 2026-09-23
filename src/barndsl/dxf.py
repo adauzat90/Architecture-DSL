@@ -43,7 +43,7 @@ import math
 
 from .constants import EXTERIOR_WALL_THICKNESS
 from .elements import Barndominium, Direction, Room
-from .geometry import opening_endpoints, shared_edge
+from .geometry import door_span, opening_endpoints, shared_edge
 from .render import RenderConfig, _Renderer, fmt_ft_in
 from .wallbodies import wall_bands
 
@@ -567,11 +567,8 @@ class _DxfWriter:
             edge = shared_edge(a, b)
             if edge is None:
                 continue
-            w = min(door.width, edge.length)
-            if door.offset is None:
-                start = edge.mid - w / 2.0
-            else:
-                start = edge.lo + max(0.0, min(door.offset, edge.length - w))
+            start, end = door_span(edge, door)
+            w = end - start
             kind = door.kind
             ox, oy = (edge.pos, start) if edge.orientation == "v" else (start, edge.pos)
             if kind in ("swing", "double", "french"):

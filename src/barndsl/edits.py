@@ -51,7 +51,7 @@ from .compiler import (
     compile_source,
 )
 from .elements import ALARM_KINDS, LIGHT_KINDS, RoomType
-from .geometry import shared_edge, wall_segment
+from .geometry import door_offset, shared_edge, wall_segment
 
 #: A valid room identifier for :class:`Edit` kinds that mint a new id
 #: (``add_room``, ``rename_room``): a leading letter/underscore then word chars.
@@ -568,7 +568,8 @@ def _opening_geom(plan, kind: str, obj) -> dict | None:
         else:
             ax, ay, bx, by = edge.lo, edge.pos, edge.hi, edge.pos
         wall_len = edge.length
-        offset = obj.offset if obj.offset is not None else max(0.0, (wall_len - obj.width) / 2.0)
+        # The authored offset (the handle edits source), or the centred default.
+        offset = obj.offset if obj.offset is not None else door_offset(edge, obj)
         return {
             "ax": ax, "ay": ay, "bx": bx, "by": by, "width": obj.width,
             "offset": offset, "min": 0.0, "max": max(0.0, wall_len - obj.width),
@@ -1272,7 +1273,7 @@ def _resolved_offset(plan, kind: str, obj) -> float | None:
         if a is not None and b is not None:
             edge = shared_edge(a, b)
             if edge is not None:
-                return max(0.0, (edge.length - obj.width) / 2.0)
+                return door_offset(edge, obj)
         return None
     return float(obj.offset)
 

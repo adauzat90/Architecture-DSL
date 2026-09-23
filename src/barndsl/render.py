@@ -14,7 +14,7 @@ from xml.sax.saxutils import escape
 
 from .constants import EPSILON, EXTERIOR_WALL_THICKNESS, INTERIOR_WALL_THICKNESS
 from .elements import Barndominium, Direction, RoomType
-from .geometry import opening_endpoints, shared_edge
+from .geometry import door_span, opening_endpoints, shared_edge
 from .wallbodies import WallBand, wall_bands
 
 # US architectural feet-and-inches glyphs: prime (feet) and double-prime (inches).
@@ -997,12 +997,8 @@ class _Renderer:
             edge = shared_edge(a, b)
             if edge is None:
                 continue
-            w = min(door.width, edge.length)
-            offset = getattr(door, "offset", None)
-            if offset is None:
-                start = edge.mid - w / 2  # centre on the shared wall
-            else:  # measured from the south/west end, clamped onto the wall
-                start = edge.lo + max(0.0, min(offset, edge.length - w))
+            start, end = door_span(edge, door)
+            w = end - start
             kind = getattr(door, "kind", "swing" if getattr(door, "leaf", True) else "cased")
             ox, oy = (edge.pos, start) if edge.orientation == "v" else (start, edge.pos)
             if kind == "swing":

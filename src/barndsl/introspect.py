@@ -38,11 +38,8 @@ import math
 
 from .constants import EPSILON
 from .elements import Barndominium, Direction, Room
-from .geometry import SharedEdge, point_in_footprint, shared_edge
-
-# The door-offset convention must be the validator's, not a re-derivation —
-# _door_interval is exactly what DOOR_OOB/OPENING_CLASH measure against.
-from .validation import _door_interval, exterior_walls
+from .geometry import SharedEdge, door_span, point_in_footprint, shared_edge
+from .validation import exterior_walls
 
 #: The narrowest opening worth reporting a span for (a stock 24-in leaf).
 #: Free runs thinner than this can't host a door or a useful window.
@@ -78,9 +75,8 @@ def _blocked_intervals(plan: Barndominium, room: Room, wall: Direction) -> list[
     """World-coordinate spans on ``room``'s ``wall`` already taken by openings.
 
     Windows and exterior doors are offset from the wall's start corner; an
-    interior door's span comes from :func:`~barndsl.validation._door_interval`
-    on its shared edge (offset from the shared wall's south/west end, ``None``
-    centred) — the identical arithmetic the clash checks use.
+    interior door's span comes from :func:`~barndsl.geometry.door_span` on its
+    shared edge — the same span the clash checks and the drawing use.
     """
     lo, _ = _wall_axis_interval(room, wall)
     blocked: list[tuple[float, float]] = []
@@ -98,7 +94,7 @@ def _blocked_intervals(plan: Barndominium, room: Room, wall: Direction) -> list[
             continue
         edge = shared_edge(room, other)
         if edge is not None and _edge_on_wall(room, wall, edge):
-            blocked.append(_door_interval(edge, d))
+            blocked.append(door_span(edge, d))
     return blocked
 
 

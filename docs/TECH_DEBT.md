@@ -23,7 +23,7 @@ is a phase.
 
 | ID | Item | Size | Priority | Status |
 |---|---|---|---|---|
-| [TD-1](#td-1-one-interior-door-span-rule) | One interior-door span rule | M | High | Open |
+| [TD-1](#td-1-one-interior-door-span-rule) | One interior-door span rule | M | High | Done |
 | [TD-2](#td-2-dxf-depends-on-render-internals) | DXF depends on render internals | M | High | Open |
 | [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Open |
 | [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Open |
@@ -56,6 +56,36 @@ the exports draw the door in different places.
 **Fix.** Add one public helper in `geometry`, have every site call it, and add
 a test that pins down the overrun case.
 
+**Resolution.**
+- **The rule.** `geometry.door_span(edge, door)` and its companion
+  `door_offset` hold the clamped rule, which every drawing and export already
+  used. They replace 14 copies, including five the review missed: two in
+  `fixtures`, one in `schedule.door_rows`, and two in `validation`.
+- **Behaviour change.** These now place an overrunning door where it is drawn:
+  - the Revit export, and the glTF and IFC exports built from it. A Revit
+    round trip now also pulls an overrun at either end back onto the wall;
+    before, it only fixed a negative offset;
+  - the introspection free spans;
+  - the schedule's offset column;
+  - the `STAIR_BLOCKS_DOOR` and `HALL_DEADEND` checks;
+  - the interior swing regions.
+
+  Only plans that already have `DOOR_FIT` or `DOOR_OOB` are affected.
+- **Deliberate exceptions:**
+  - `compose` still maps the authored offset, so `DOOR_OOB` survives stamping.
+  - The editor's drag handle and inspector show the authored offset.
+- **Tests.** `tests/test_door_span.py` covers:
+  - the helper itself;
+  - the public consumers (wall gaps, Revit, schedule, introspection) against
+    an overrunning door; the `DOOR_OOB` case fails on the old code;
+  - the swing checks against a too-wide door;
+  - both exceptions.
+- **Follow-up (pre-existing).** The playground draws its drag-handle line at
+  the authored offset, so for an overrunning door the line runs past the wall
+  while the plan's door sits clamped. The fix is to add a built-offset field to
+  the overlay payload, used only for drawing, and keep `offset` authored.
+- **Invariant.** Recorded in `MODEL_INVARIANTS.md`.
+
 ## TD-2. DXF depends on render internals
 
 **Problem.** `dxf.py` builds a `render._Renderer` and calls seven of its private
@@ -70,8 +100,8 @@ openings and dimension chains on the gallery plans.
 
 ## TD-3. Private cross-module imports
 
-**Problem.** 22 import sites in `src/` reach into another module's `_private`
-names (measured after PR #24):
+**Problem.** 21 import sites in `src/` reach into another module's `_private`
+names (measured after PR #24 and TD-1):
 
 - **compiler:** `_PLACEMENT`, `_tokenize_line` and `_parse_ft_in` (used by
   edits and fmt), `_did_you_mean` (used by compose).
@@ -79,8 +109,7 @@ names (measured after PR #24):
   other's privates.
 - **fixtures:** `_quarter_turns` (compose), `_is_mitred_corner` and
   `_rect_intersection` (render), `_door_swing_rects` (validation).
-- **validation:** `_door_interval` (introspect), `_pt_rect_dist` (packet),
-  `_largest_void` (score).
+- **validation:** `_pt_rect_dist` (packet), `_largest_void` (score).
 - **layout:** `_add_openings`, `_connect_adjacencies` and
   `_relieve_kitchen_passthrough`, used by layout2.
 - **Others:**

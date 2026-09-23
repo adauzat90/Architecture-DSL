@@ -19,7 +19,7 @@ import math
 from dataclasses import dataclass
 
 from .elements import Barndominium, Direction, Room, RoomType
-from .geometry import opening_endpoints
+from .geometry import door_span, opening_endpoints
 from .validation import clear_box, exterior_walls
 
 
@@ -1245,9 +1245,8 @@ def _door_swing_rects(plan: Barndominium, room: Room) -> list:
         edge = shared_edge(room, other)
         if edge is None:
             continue
-        w = min(int_door.width, edge.length)
-        offset = int_door.offset if int_door.offset is not None else max(0.0, (edge.length - w) / 2.0)
-        start = edge.lo + max(0.0, min(offset, edge.length - w))
+        start, end = door_span(edge, int_door)
+        w = end - start
         if edge.orientation == "v":  # wall runs north-south at x = edge.pos
             inward = edge.pos < room.center[0]
             bx = edge.pos if inward else edge.pos - w
@@ -1347,14 +1346,12 @@ def _openings_on_wall(plan: Barndominium, room: Room, wall: str) -> list[tuple[s
         want = "h" if horiz else "v"
         if edge.orientation != want or abs(edge.pos - wall_pos) > 1e-6:
             continue
-        w = min(idoor.width, edge.length)
-        offset = idoor.offset if idoor.offset is not None else max(0.0, (edge.length - w) / 2.0)
-        lo = edge.lo + max(0.0, min(offset, edge.length - w))
+        lo, hi = door_span(edge, idoor)
         label = (
             "the cased opening" if getattr(idoor, "kind", "swing") == "cased"
             else f"the door to '{other.id}'"
         )
-        out.append((label, lo, lo + w))
+        out.append((label, lo, hi))
     return out
 
 

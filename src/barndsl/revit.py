@@ -59,6 +59,7 @@ from .elements import (
 from .fixtures import resolve_room_fixtures
 from .geometry import (
     TOL,
+    door_span,
     footprint_area,
     footprint_boundary,
     opening_endpoints,
@@ -715,12 +716,8 @@ def _opening_geometry(plan, opening, kind):
         edge = shared_edge(a, b)
         if edge is None:
             return None
-        width = min(opening.width, edge.length)
-        if opening.offset is None:
-            lo = edge.lo + (edge.length - width) / 2.0
-        else:
-            lo = edge.lo + opening.offset
-        return edge.orientation, edge.pos, lo, lo + width, getattr(a, "level", 0)
+        lo, hi = door_span(edge, opening)
+        return edge.orientation, edge.pos, lo, hi, getattr(a, "level", 0)
     # exterior door or window: room + wall + offset + width
     room = plan.room(opening.room)
     if room is None:
