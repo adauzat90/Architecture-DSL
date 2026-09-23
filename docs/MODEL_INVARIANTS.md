@@ -51,7 +51,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - `compile_source(emit_dsl(plan)).plan` rebuilds the same model as `plan` — every dataclass field except source positions (`line`/`col`/`*_line`) and the non-serialised `placement` hint. This is stronger than a text fixed point, which can't see a field the first emit already dropped; `tests/test_metamorphic.py` checks it for every example and for a fixture exercising every statement option.
 - `emit_dsl(compile_source(emit_dsl(plan)).plan)` is a fixed point.
 - Flattened emission of composed plans should preserve resolved/stamped geometry even though source comments and `use` statements are removed; `inline_use` must keep every stamped element type.
-- Known gap: `# barndsl: accept` pragmas are comments, not model state, so emission drops them and a re-emitted plan loses its accepted deviations. Carrying them through emit would need pragmas stored on the model (an open design decision).
+- Known gap: `# barndsl: accept` pragmas are comments, not model state, so emission drops them and a re-emitted plan loses its accepted deviations. Carrying them through emit would need pragmas stored on the model (an open design decision; tracked as TD-14 in `docs/TECH_DEBT.md`).
 
 ## Exports and introspection
 
