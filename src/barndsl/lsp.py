@@ -38,7 +38,9 @@ from .compiler import (
     PLACEMENT_ANCHORS,
     STATEMENT_KEYWORDS,
     CompileResult,
+    comment_start,
     compile_source,
+    scan_string,
 )
 from .compose import scan_parts
 from .diagnostics import REGISTRY, explain
@@ -274,22 +276,6 @@ def _line_head(line: str) -> tuple[str, int]:
     start = len(line) - len(stripped)
     m = re.match(r"[A-Za-z0-9_\-]+", stripped)
     return (m.group(0).lower() if m else ""), start
-
-
-def _comment_start(line: str) -> int | None:
-    """Column of the ``#`` that begins a comment (not one inside a string), or
-    ``None`` — mirrors the lexer's quote handling."""
-    i, n = 0, len(line)
-    while i < n:
-        ch = line[i]
-        if ch == "#":
-            return i
-        if ch == '"':
-            i += 1
-            while i < n and line[i] != '"':
-                i += 1
-        i += 1
-    return None
 
 
 # --- shared statement docs (from DSL_REFERENCE) ------------------------------
@@ -557,7 +543,7 @@ def hover(text: str, result: CompileResult, line: int, char: int) -> dict | None
         return {"contents": {"kind": "markdown", "value": value}, "range": _range(line, start, end)}
 
     # 2. A diagnostic code inside an accept pragma comment.
-    cut = _comment_start(src_line)
+    cut = comment_start(src_line)
     if cut is not None and start >= cut and "accept" in src_line[cut:].lower():
         code = word.upper()
         if code in REGISTRY:
@@ -673,13 +659,21 @@ def _item(label: str, kind: int, detail: str | None = None) -> dict:
     return item
 
 
+def _use_string(line: str) -> tuple[int, int, str, bool] | None:
+    """The quoted relpath of a ``use "…"`` line, read the way the lexer reads
+    it: ``(open_quote, end, text, closed)``, or ``None`` when ``line`` isn't one."""
+    m = re.match(r'\s*use\s*"', line, re.I)
+    if m is None:
+        return None
+    text, end, closed = scan_string(line, m.end() - 1)
+    return m.end() - 1, end, text, closed
+
+
 def _use_string_prefix(before: str) -> bool:
     """True when ``before`` (line text up to the cursor) sits inside the quoted
-    relpath of a ``use "…`` statement (an odd number of quotes after ``use``)."""
-    s = before.lstrip()
-    if not s.lower().startswith("use"):
-        return False
-    return before.count('"') % 2 == 1
+    relpath of a ``use "…`` statement — the string is still open at the cursor."""
+    s = _use_string(before)
+    return s is not None and not s[3]
 
 
 def completions(
@@ -698,7 +692,7 @@ def completions(
     before = src_line[:char]
 
     # Inside an accept pragma: complete diagnostic codes.
-    cut = _comment_start(src_line)
+    cut = comment_start(src_line)
     if cut is not None and char > cut:
         comment = src_line[cut:char].lower()
         if re.search(r"accept\s+\S*$", comment):
@@ -718,14 +712,14 @@ def completions(
     # sandbox as the parts browser.
     sline = before.lstrip()
     if sline.lower().startswith("use ") and re.search(r"\bwith\b", sline, re.I):
-        mrel = re.search(r'use\s+"([^"]*)"', sline, re.I)
-        if mrel is not None:
+        rel = _use_relpath(sline)
+        if rel is not None:
             from .compose import scan_part_params
 
             already = set(re.findall(r"(\w+)\s*=", sline.split(" with ", 1)[-1]))
             return [
                 _item(f"{p}=", _KIND_VALUE, "param")
-                for p in scan_part_params(base_dir, mrel.group(1))
+                for p in scan_part_params(base_dir, rel)
                 if p not in already
             ]
         return []
@@ -860,19 +854,16 @@ def definition(
 
 
 def _cursor_in_use_string(line: str, char: int) -> bool:
-    """True when ``char`` falls inside the quoted relpath of a ``use`` line."""
-    if not line.lstrip().lower().startswith("use"):
-        return False
-    quotes = [i for i, c in enumerate(line) if c == '"']
-    if len(quotes) < 2:
-        return False
-    return quotes[0] < char <= quotes[1]
+    """True when ``char`` falls inside the (closed) quoted relpath of a ``use``
+    line — after the opening quote, up to and including the closing one."""
+    s = _use_string(line)
+    return s is not None and s[3] and s[0] < char <= s[1] - 1
 
 
 def _use_relpath(line: str) -> str | None:
     """The quoted relpath from a ``use "<relpath>" …`` line, or ``None``."""
-    m = re.match(r'\s*use\s+"([^"]*)"', line)
-    return m.group(1) if m else None
+    s = _use_string(line)
+    return s[2] if s is not None and s[3] else None
 
 
 def _part_room_line(part_path: str, local_id: str) -> int | None:

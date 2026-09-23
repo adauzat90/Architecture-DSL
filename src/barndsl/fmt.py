@@ -24,33 +24,12 @@ format_source(x)``.
 
 from __future__ import annotations
 
-from .compiler import STATEMENT_KEYWORDS, parse_ft_in
+from .compiler import STATEMENT_KEYWORDS, comment_start, parse_ft_in, scan_string
 
 _KEYWORD_SET = frozenset(STATEMENT_KEYWORDS)
 #: Braces are optional syntactic sugar the lexer drops; the canonical form omits
 #: them, so the formatter skips them too (matching ``emit_dsl``).
 _DROP = frozenset("{}")
-
-
-def _comment_start(line: str) -> int | None:
-    """Index of the first ``#`` that begins a comment (not one inside a string),
-    or ``None``. Mirrors the lexer's quote handling."""
-    i, n = 0, len(line)
-    while i < n:
-        ch = line[i]
-        if ch == "#":
-            return i
-        if ch == '"':
-            i += 1
-            while i < n and line[i] != '"':
-                if line[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                i += 1
-            i += 1
-            continue
-        i += 1
-    return None
 
 
 def _norm_word(text: str, is_first: bool) -> str:
@@ -82,20 +61,10 @@ def _ftokens(stmt: str) -> list[tuple[str, str]] | None:
             continue
         if ch == '"':
             start = i
-            i += 1
-            terminated = False
-            while i < n:
-                if stmt[i] == '"':
-                    i += 1
-                    terminated = True
-                    break
-                if stmt[i] == "\\" and i + 1 < n:
-                    i += 2
-                    continue
-                i += 1
+            _, i, terminated = scan_string(stmt, start)
             if not terminated:
                 return None
-            toks.append(("str", stmt[start:i]))
+            toks.append(("str", stmt[start:i]))  # verbatim, escapes and all
             continue
         if ch == ":":
             toks.append(("colon", ":"))
@@ -141,7 +110,7 @@ def _render(toks: list[tuple[str, str]]) -> str:
 
 def format_line(line: str) -> str:
     """Format a single source line (see the module docstring)."""
-    cut = _comment_start(line)
+    cut = comment_start(line)
     stmt = line if cut is None else line[:cut]
     comment = None if cut is None else line[cut:]
     if not stmt.strip():

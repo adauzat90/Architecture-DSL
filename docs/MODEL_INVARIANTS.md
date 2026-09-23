@@ -48,6 +48,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 ## Formatting and emission
 
 - `fmt` is line-preserving and comment-preserving; it normalizes whitespace/numbers but should not reorder statements.
+- Where a string ends and a comment starts is decided once, by the lexer's `compiler.scan_string` and `compiler.comment_start`. `fmt`, pragmas, the LSP, edits and the layout brief parser use them rather than scanning quotes themselves. The playground's JavaScript highlighter is the one exception (TD-10).
 - `format_source(format_source(src)) == format_source(src)` must hold.
 - `emit_dsl` serializes the compiled model and intentionally drops comments.
 - `compile_source(emit_dsl(plan)).plan` rebuilds the same model as `plan` — every dataclass field except source positions (`line`/`col`/`*_line`) and the non-serialised `placement` hint. This is stronger than a text fixed point, which can't see a field the first emit already dropped; `tests/test_metamorphic.py` checks it for every example and for a fixture exercising every statement option.
