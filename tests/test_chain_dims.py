@@ -8,6 +8,7 @@ break is left to the overall dimension line (no duplicated single-segment string
 from __future__ import annotations
 
 from barndsl import compile_source, render_svg
+from barndsl.drawing import chain_breaks, exterior_runs, opening_jambs, run_breaks, with_jambs
 from barndsl.elements import Barndominium, Room, RoomType
 from barndsl.render import RenderConfig, _Renderer
 
@@ -71,8 +72,7 @@ def test_chain_breaks_skip_full_and_inset_rooms():
         Room("big", RoomType.LIVING, 0, 0, 20, 12),
         Room("mid", RoomType.OFFICE, 5, 4, 6, 4),
     ]
-    r = _Renderer(plan, RenderConfig())
-    pts, lo, hi = r._chain_breaks("S", plan.rooms, 0.0, 0.0, 20.0, 12.0)
+    pts, lo, hi = chain_breaks("S", plan.rooms, 0.0, 0.0, 20.0, 12.0)
     assert pts == [0.0, 20.0] and (lo, hi) == (0.0, 20.0)
 
     # Two abutting rooms do partition the south wall at their shared edge.
@@ -81,8 +81,7 @@ def test_chain_breaks_skip_full_and_inset_rooms():
         Room("a", RoomType.LIVING, 0, 0, 12, 12),
         Room("b", RoomType.KITCHEN, 12, 0, 8, 12),
     ]
-    r2 = _Renderer(plan2, RenderConfig())
-    pts2, _, _ = r2._chain_breaks("S", plan2.rooms, 0.0, 0.0, 20.0, 12.0)
+    pts2, _, _ = chain_breaks("S", plan2.rooms, 0.0, 0.0, 20.0, 12.0)
     assert pts2 == [0.0, 12.0, 20.0]
 
 
@@ -90,11 +89,10 @@ def test_rectangular_plan_has_one_run_per_side_at_the_bounds():
     # The wing-aware run finder must degrade to the bounds edge on a plain
     # rectangle — one run per side — so rectangular plans are unchanged.
     plan = compile_source(_TWO_ROOM).plan  # 20 x 9, no wing
-    r = _Renderer(plan, RenderConfig())
-    assert r._exterior_runs("S") == [(0.0, 0.0, 20.0)]
-    assert r._exterior_runs("N") == [(9.0, 0.0, 20.0)]
-    assert r._exterior_runs("W") == [(0.0, 0.0, 9.0)]
-    assert r._exterior_runs("E") == [(20.0, 0.0, 9.0)]
+    assert exterior_runs(plan, "S") == [(0.0, 0.0, 20.0)]
+    assert exterior_runs(plan, "N") == [(9.0, 0.0, 20.0)]
+    assert exterior_runs(plan, "W") == [(0.0, 0.0, 9.0)]
+    assert exterior_runs(plan, "E") == [(20.0, 0.0, 9.0)]
 
 
 def _lshape_plan():
@@ -107,27 +105,25 @@ def test_wing_footprint_splits_notched_sides_into_per_offset_runs():
     # north and east faces are each notched into two colinear runs at *different*
     # wall offsets; the south and west faces stay single continuous runs.
     plan = _lshape_plan()
-    r = _Renderer(plan, RenderConfig())
-    assert r._exterior_runs("S") == [(0.0, 0.0, 54.0)]
-    assert r._exterior_runs("W") == [(0.0, 0.0, 30.0)]
+    assert exterior_runs(plan, "S") == [(0.0, 0.0, 54.0)]
+    assert exterior_runs(plan, "W") == [(0.0, 0.0, 30.0)]
     # North: the wing top (y=18, x 36→54) and the main-block top (y=30, x 0→36).
-    assert r._exterior_runs("N") == [(18.0, 36.0, 54.0), (30.0, 0.0, 36.0)]
+    assert exterior_runs(plan, "N") == [(18.0, 36.0, 54.0), (30.0, 0.0, 36.0)]
     # East: the wing east wall (x=54, y 0→18) and the main east wall above the
     # wing (x=36, y 18→30).
-    assert r._exterior_runs("E") == [(36.0, 18.0, 30.0), (54.0, 0.0, 18.0)]
+    assert exterior_runs(plan, "E") == [(36.0, 18.0, 30.0), (54.0, 0.0, 18.0)]
 
 
 def test_wing_run_breaks_only_collect_rooms_backing_that_run():
     plan = _lshape_plan()
-    r = _Renderer(plan, RenderConfig())
     rooms = plan.rooms
     # Main-block north run: bed1|closet1|bath|laundry partition x into 16+4+8+8.
-    assert r._run_breaks("N", rooms, 30.0, 0.0, 36.0) == [0.0, 16.0, 20.0, 28.0, 36.0]
+    assert run_breaks("N", rooms, 30.0, 0.0, 36.0) == [0.0, 16.0, 20.0, 28.0, 36.0]
     # Wing north run: master (12) + mcloset (6) — the hall's y2=18 wall does NOT
     # contribute because its x-extent [0,36] doesn't overlap the wing run [36,54].
-    assert r._run_breaks("N", rooms, 18.0, 36.0, 54.0) == [36.0, 48.0, 54.0]
+    assert run_breaks("N", rooms, 18.0, 36.0, 54.0) == [36.0, 48.0, 54.0]
     # Wing east run: mbath (9) + mcloset (9) stacked up the x=54 wall.
-    assert r._run_breaks("E", rooms, 54.0, 0.0, 18.0) == [0.0, 9.0, 18.0]
+    assert run_breaks("E", rooms, 54.0, 0.0, 18.0) == [0.0, 9.0, 18.0]
 
 
 def test_wing_plan_draws_a_chain_per_broken_run_at_its_own_offset():
@@ -179,11 +175,10 @@ _OPENINGS = (
 
 def test_openings_break_the_chain_wall_opening_wall():
     plan = compile_source(_OPENINGS).plan
-    r = _Renderer(plan, RenderConfig(show_room_dims=False))
     # The south run has NO interior room boundary, only opening jambs — yet it
     # now breaks at each jamb (hand-computed break coordinates).
-    pts, _, _ = r._chain_breaks("S", plan.rooms, 0.0, 0.0, 40.0, 24.0)
-    pts = r._with_jambs(pts, r._opening_jambs("S", plan.rooms, 0.0, 0.0, 40.0))
+    pts, _, _ = chain_breaks("S", plan.rooms, 0.0, 0.0, 40.0, 24.0)
+    pts = with_jambs(pts, opening_jambs(plan, "S", plan.rooms, 0.0, 0.0, 40.0))
     assert pts == [0.0, 6.0, 9.0, 14.0, 18.0, 24.0, 29.0, 40.0]
 
 
@@ -208,10 +203,9 @@ def test_tiny_jamb_segment_collapses_into_its_neighbour():
         "window b south width 4 offset 0.3\n"
     )
     plan = compile_source(src).plan
-    r = _Renderer(plan, RenderConfig(show_room_dims=False))
-    jambs = r._opening_jambs("S", plan.rooms, 0.0, 0.0, 40.0)
+    jambs = opening_jambs(plan, "S", plan.rooms, 0.0, 0.0, 40.0)
     assert sorted(jambs) == [20.3, 24.3]  # near + far jamb
-    merged = r._with_jambs([0.0, 20.0, 40.0], jambs)
+    merged = with_jambs([0.0, 20.0, 40.0], jambs)
     # 20.3 is within 1 ft of the room edge at 20 → dropped; 24.3 kept.
     assert merged == [0.0, 20.0, 24.3, 40.0]
 
@@ -228,8 +222,7 @@ def test_interior_doors_add_no_plan_leader():
         "door a - b width 3 offset 4\n"
     )
     plan = compile_source(src).plan
-    r = _Renderer(plan, RenderConfig())
     # No exterior openings → the south chain has only the room-boundary break.
-    pts, _, _ = r._chain_breaks("S", plan.rooms, 0.0, 0.0, 20.0, 12.0)
-    merged = r._with_jambs(pts, r._opening_jambs("S", plan.rooms, 0.0, 0.0, 20.0))
+    pts, _, _ = chain_breaks("S", plan.rooms, 0.0, 0.0, 20.0, 12.0)
+    merged = with_jambs(pts, opening_jambs(plan, "S", plan.rooms, 0.0, 0.0, 20.0))
     assert merged == [0.0, 12.0, 20.0]

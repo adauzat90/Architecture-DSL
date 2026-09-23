@@ -55,6 +55,7 @@ from .elements import (
     Room,
     RoomType,
 )
+from .drawing import door_leaf, swing_side
 from .geometry import (
     door_offset,
     door_span,
@@ -843,38 +844,17 @@ def _off_module(value: float, module: float = BUILD_MODULE, tol: float = EPSILON
     return abs(value - round(value / module) * module) > tol
 
 
-def _side_of(room: Room, edge) -> float:
-    """+1/-1 for the side of ``edge`` the room's center lies on (its own side)."""
-    cx, cy = room.center
-    return 1.0 if (cx if edge.orientation == "v" else cy) > edge.pos else -1.0
-
-
-def _swing_sgn(door, a: Room, b: Room, edge) -> float | None:
-    """Mirror the renderer: +1/-1 for the side the leaf swings into, or None to
-    fall back to the keep-inside-the-envelope heuristic."""
-    into = door.swing_into
-    room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
-    return None if room is None else _side_of(room, edge)
-
-
 def _swing_region(
     plan: Barndominium, orientation: str, ox: float, oy: float, w: float,
     hinge_far: bool, sgn: float | None, samples: int = 4,
 ) -> list[tuple[float, float]]:
     """The quarter-disc the leaf sweeps, as a small convex polygon (pie slice),
-    in plan coordinates — matching :meth:`SVGRenderer._door_symbol`."""
-    if orientation == "v":
-        if sgn is None:
-            sgn = 1.0 if (ox + w) <= plan.envelope_width else -1.0
-        hinge = (ox, oy + w) if hinge_far else (ox, oy)
-        latch = (ox, oy) if hinge_far else (ox, oy + w)
-        tip = (ox + sgn * w, hinge[1])
-    else:
-        if sgn is None:
-            sgn = 1.0 if (oy + w) <= plan.envelope_length else -1.0
-        hinge = (ox + w, oy) if hinge_far else (ox, oy)
-        latch = (ox, oy) if hinge_far else (ox + w, oy)
-        tip = (hinge[0], oy + sgn * w)
+    in plan coordinates — the leaf the plan draws (:func:`~barndsl.drawing.door_leaf`),
+    except that a leaf with no swing side is kept within the primary envelope
+    rather than the drawing's bounds (see ``docs/TECH_DEBT.md``, TD-16)."""
+    leaf = door_leaf(ox, oy, orientation, w, sgn, hinge_far,
+                     (plan.envelope_width, plan.envelope_length))
+    hinge, latch, tip = leaf.hinge, leaf.latch, leaf.tip
     a0 = math.atan2(latch[1] - hinge[1], latch[0] - hinge[0])
     a1 = math.atan2(tip[1] - hinge[1], tip[0] - hinge[0])
     d = a1 - a0
@@ -908,7 +888,7 @@ def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
         # The far leaf hinges at the opening's far end; its sweep starts at
         # the pair's midpoint, so shift the region to the outer half.
         start += width - leaf
-    sgn = _swing_sgn(door, a, b, edge)
+    sgn = swing_side(door, a, b, edge)
     if edge.orientation == "v":
         return _swing_region(plan, "v", edge.pos, start, leaf, hinge_far, sgn)
     return _swing_region(plan, "h", start, edge.pos, leaf, hinge_far, sgn)

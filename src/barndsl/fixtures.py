@@ -16,7 +16,7 @@ final layout is the designer's.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .elements import Barndominium, Direction, Room, RoomType
 from .geometry import door_span, opening_endpoints
@@ -299,6 +299,56 @@ def _is_mitred_corner(a: "Fixture", b: "Fixture") -> bool:
     _ix, _iy, iw, il = inter
     dmax = max(_counter_depth(a), _counter_depth(b))
     return iw <= dmax + 1e-6 and il <= dmax + 1e-6
+
+
+def miter_counters(room: Room, counters: list) -> tuple[list, list[tuple[float, float, float, float]]]:
+    """Resolve mitred counter corners for drawing: ``(counters, miters)``.
+
+    For each L/U join the later run is trimmed back to abut the earlier one
+    along its run axis, and the 45° miter diagonal is returned across the corner
+    square (from the square's outer corner — farthest from the room's centre —
+    to its inner one). The model keeps the full overlapping rectangles (the
+    takeoff counts the corner in both runs); only the drawing is trimmed, the
+    same way in the SVG plan and the DXF export."""
+    adjusted = list(counters)
+    miters: list[tuple[float, float, float, float]] = []
+    rcx, rcy = room.x + room.width / 2.0, room.y + room.length / 2.0
+    for i in range(len(adjusted)):
+        for j in range(i + 1, len(adjusted)):
+            a, b = adjusted[i], adjusted[j]
+            if not _is_mitred_corner(a, b):
+                continue
+            inter = _rect_intersection(
+                (a.x, a.y, a.width, a.length), (b.x, b.y, b.width, b.length)
+            )
+            if inter is None:
+                continue
+            ix, iy, iw, il = inter
+            # Trim b away from the joint along its run axis (its wall's axis;
+            # a free-standing run falls back to its longer side).
+            axis = (
+                "x" if b.wall in ("S", "N")
+                else "y" if b.wall in ("W", "E")
+                else ("x" if b.width >= b.length else "y")
+            )
+            if axis == "x":
+                if (ix - b.x) <= (b.x + b.width) - (ix + iw):  # joint at low-x end
+                    nb = replace(b, x=ix + iw, width=b.width - iw)
+                else:
+                    nb = replace(b, width=b.width - iw)
+            else:
+                if (iy - b.y) <= (b.y + b.length) - (iy + il):  # joint at low-y end
+                    nb = replace(b, y=iy + il, length=b.length - il)
+                else:
+                    nb = replace(b, length=b.length - il)
+            adjusted[j] = nb
+            # Miter diagonal: outer corner = the square's corner farthest from
+            # the room centre (the walls' meeting corner), to its opposite.
+            corners = [(ix, iy), (ix + iw, iy), (ix, iy + il), (ix + iw, iy + il)]
+            outer = max(corners, key=lambda c: (c[0] - rcx) ** 2 + (c[1] - rcy) ** 2)
+            inner = (ix + iw - (outer[0] - ix), iy + il - (outer[1] - iy))
+            miters.append((outer[0], outer[1], inner[0], inner[1]))
+    return adjusted, miters
 
 
 def _inset_pair(a: "Fixture", b: "Fixture"):

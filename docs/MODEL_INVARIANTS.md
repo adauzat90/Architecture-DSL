@@ -57,6 +57,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 ## Exports and introspection
 
 - Render/SVG, glTF, IFC, Revit exchange, schedules, cost, and packet outputs should lower the same compiled model.
+- The SVG plan and the DXF export draw door and window symbols, counter mitres, and the exterior dimension chains from one computation (`barndsl.drawing`, `fixtures.miter_counters`). They style that geometry and never re-derive it.
 - Exporters should not invent semantic IDs when stable plan IDs exist.
 - `barndsl inspect --json` and `src/barndsl/introspect.py` are the agent-facing source of truth for resolved geometry.
 
