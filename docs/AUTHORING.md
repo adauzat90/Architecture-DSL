@@ -693,7 +693,9 @@ warns). To frame a plan that has no `frame` line, `barndsl build plan.barn
   other; move one along its wall, swing it the other way, or make it pocket/sliding.
 - `DOOR_SWING_UNSET` — a bedroom/bath door with no `into` whose default swing
   opens *out* of the private room; pin it with `into <room>` so it opens into the
-  space it serves.
+  space it serves. (With no `into`, a leaf swings east/north, or into the other
+  room when it's too wide for that one. The plan, DXF, 3D model and every swing
+  check use that same side, and an exterior door always swings inward.)
 - `DOOR_SWING_PRIVACY` — a bedroom/bath door set to swing out into circulation;
   swing it `into` the private room so the leaf screens the view and folds to a wall.
 - `ENVELOPE_MODULE` — an exterior (envelope/wing) dimension isn't a multiple of

@@ -1165,9 +1165,9 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "A swing door serves a closet shallower than the door is wide, so the "
            "leaf can't fully open inside it. There is no IRC rule here — it's a "
            "usability nudge. Make it a bypass/sliding or bifold door so the leaf "
-           "doesn't fill the closet. Only a leaf swinging into the closet (or an "
-           "unspecified side) is judged; one explicitly swinging into the room is "
-           "fine."),
+           "doesn't fill the closet. Only a leaf that swings into the closet is "
+           "judged — by its `into`, or by default when it fits no better in the "
+           "room; a leaf that opens into the room is fine."),
         _c("PROGRAM_MISMATCH", W, "Plan doesn't match its program",
            "The rooms placed don't match the declared `program`: exact bed/bath "
            "counts, an at-least requirement for another room type (e.g. "

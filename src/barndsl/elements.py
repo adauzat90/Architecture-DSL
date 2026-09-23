@@ -288,8 +288,9 @@ class InteriorDoor:
     #: edge of the door. ``None`` centres it on the shared wall (the default).
     offset: float | None = None
     #: The room the leaf swings *into* (must be ``room_a`` or ``room_b``).
-    #: ``None`` lets the renderer pick a side; a value also enables the
-    #: swing-clearance check.
+    #: ``None`` swings it toward ``+x``/``+y`` (east/north) unless the leaf only
+    #: fits the other room (:func:`barndsl.drawing.swing_side`); a value also
+    #: enables the swing-clearance check.
     swing_into: str | None = None
     #: Which end of the opening the hinge is on: ``"near"`` (the south/west end,
     #: default) or ``"far"``. ``None`` means near.

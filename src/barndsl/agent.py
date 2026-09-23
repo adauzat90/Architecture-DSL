@@ -637,7 +637,7 @@ door hall - laundry width 2.5
 door hall - master width 3 into master
 door bed1 - closet1 width 2.5 offset 0.5 into bed1
 door master - mbath width 2.67 offset 0.5 into mbath
-door master - mcloset width 2.5 offset 0.5
+door master - mcloset width 2.5 offset 0.5 into master
 
 entry living south width 3 offset 14
 entry laundry north width 3 offset 2

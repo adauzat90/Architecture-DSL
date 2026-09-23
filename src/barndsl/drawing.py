@@ -5,8 +5,9 @@ The floor plan is drawn twice — :mod:`barndsl.render` as SVG and
 line and dimension tick in the same place. This module computes that geometry
 once, in plan feet (``x`` east, ``y`` north). Each renderer only translates it
 into its own vocabulary (SVG paths in screen pixels, DXF entities in model space)
-and keeps its own styling and draw order. The validator's swing checks build on
-the same leaf geometry.
+and keeps its own styling and draw order. The validator's swing checks and the
+3D model's door leaves use the same swing rule (:func:`swing_side`,
+:func:`inward_side`) and leaf geometry.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from .constants import EXTERIOR_WALL_THICKNESS, INTERIOR_WALL_THICKNESS
+from .constants import EPSILON, EXTERIOR_WALL_THICKNESS, INTERIOR_WALL_THICKNESS
 from .elements import (
     DOUBLE_LEAF_KINDS,
     Barndominium,
@@ -76,47 +77,65 @@ class DoorSymbol:
     zigzag: tuple[Point, ...] = ()
 
 
-def swing_bounds(plan: Barndominium) -> Point:
-    """The ``(max_x, max_y)`` a leaf with no swing side stays within: the plan
-    bounds widened by any porch outside the envelope (the drawing's extent)."""
+def drawing_bounds(plan: Barndominium) -> Point:
+    """The ``(max_x, max_y)`` of the drawing: the plan bounds widened by any
+    porch outside the envelope. A sliding panel or folded bifold is drawn on the
+    ``+x``/``+y`` side of its wall unless that would pass these bounds."""
     _, _, fx1, fy1 = plan.bounds()
     xs = [fx1] + [p.x + p.width for p in plan.porches]
     ys = [fy1] + [p.y + p.length for p in plan.porches]
     return max(xs), max(ys)
 
 
-def swing_side(door: InteriorDoor, a: Room, b: Room, edge: SharedEdge) -> float | None:
-    """``+1``/``-1`` for the side of the shared wall an interior door swings
-    into (toward ``+x``/``+y`` is ``+1``), or ``None`` when it names no
-    ``into`` room."""
-    into = door.swing_into
-    room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
-    if room is None:
-        return None
+# --- the swing rule ------------------------------------------------------------
+#
+# Which side a hinged leaf opens onto, for every consumer — the SVG plan, the DXF
+# export, the validator's clearance and clash checks and the 3D model:
+#
+# * an interior door that names an ``into`` room swings into it;
+# * one that doesn't swings toward ``+x``/``+y``, unless the leaf doesn't fit in
+#   the room on that side and does in the other;
+# * an exterior door swings into its own room.
+
+
+def swing_side(into: str | None, a: Room, b: Room, edge: SharedEdge, leaf: float) -> float:
+    """``+1``/``-1``: the side of the ``a``/``b`` shared wall an interior leaf
+    ``leaf`` ft wide swings into (toward ``+x``/``+y`` is ``+1``)."""
+    if into and into in (a.id, b.id):
+        return _side_of(a if into == a.id else b, edge)
+    plus, minus = (a, b) if _side_of(a, edge) > 0 else (b, a)
+    if _depth(plus, edge) + EPSILON < leaf <= _depth(minus, edge) + EPSILON:
+        return -1.0
+    return 1.0
+
+
+def inward_side(wall: Direction) -> float:
+    """``+1``/``-1``: the side of an exterior ``wall`` its room lies on (a south
+    or west wall has its room toward ``+y``/``+x``)."""
+    return 1.0 if wall in (Direction.SOUTH, Direction.WEST) else -1.0
+
+
+def _side_of(room: Room, edge: SharedEdge) -> float:
     cx, cy = room.center
     return 1.0 if (cx if edge.orientation == "v" else cy) > edge.pos else -1.0
 
 
-def door_leaf(
-    ox: float, oy: float, orientation: str, width: float,
-    sgn: float | None, hinge_far: bool, bounds: Point,
-) -> Leaf:
-    """The open leaf of a door whose opening starts at ``(ox, oy)``.
+def _depth(room: Room, edge: SharedEdge) -> float:
+    """How far ``room`` reaches away from the shared wall ``edge``."""
+    return room.width if edge.orientation == "v" else room.length
 
-    ``sgn`` is the side it swings into. ``None`` swings toward ``+x``/``+y``
-    unless the leaf would pass ``bounds`` (``max_x``, ``max_y``), then the other
-    way. ``hinge_far`` hinges it at the high-coordinate jamb instead of the low.
-    """
-    max_x, max_y = bounds
+
+def door_leaf(
+    ox: float, oy: float, orientation: str, width: float, sgn: float, hinge_far: bool,
+) -> Leaf:
+    """The open leaf of a door whose opening starts at ``(ox, oy)``, swinging
+    toward the ``sgn`` side of the wall; ``hinge_far`` hinges it at the
+    high-coordinate jamb instead of the low one."""
     if orientation == "v":
-        if sgn is None:
-            sgn = 1.0 if (ox + width) <= max_x else -1.0
         hinge = (ox, oy + width) if hinge_far else (ox, oy)
         latch = (ox, oy) if hinge_far else (ox, oy + width)
         tip = (ox + sgn * width, hinge[1])
     else:
-        if sgn is None:
-            sgn = 1.0 if (oy + width) <= max_y else -1.0
         hinge = (ox + width, oy) if hinge_far else (ox, oy)
         latch = (ox, oy) if hinge_far else (ox + width, oy)
         tip = (hinge[0], oy + sgn * width)
@@ -126,7 +145,7 @@ def door_leaf(
 def door_symbols(plan: Barndominium, level: int | None = None) -> list[DoorSymbol]:
     """Every door's plan symbol on ``level`` (all levels when ``None``):
     interior doors in plan order, then exterior doors."""
-    bounds = swing_bounds(plan)
+    bounds = drawing_bounds(plan)
     out: list[DoorSymbol] = []
     for door in plan.interior_doors:
         a, b = plan.room(door.room_a), plan.room(door.room_b)
@@ -141,7 +160,7 @@ def door_symbols(plan: Barndominium, level: int | None = None) -> list[DoorSymbo
         room = plan.room(xd.room)
         if room is None or (level is not None and room.level != level):
             continue
-        out.append(_exterior_symbol(room, xd, bounds))
+        out.append(_exterior_symbol(room, xd))
     return out
 
 
@@ -154,12 +173,13 @@ def _interior_symbol(
     ox, oy = (edge.pos, start) if o == "v" else (start, edge.pos)
     jambs = _jambs(ox, oy, o, w)
     if door.kind == "swing":
-        sgn = swing_side(door, a, b, edge)
-        leaf = door_leaf(ox, oy, o, w, sgn, door.hinge == "far", bounds)
+        sgn = swing_side(door.swing_into, a, b, edge, w)
+        leaf = door_leaf(ox, oy, o, w, sgn, door.hinge == "far")
         return DoorSymbol("swing", o, jambs, leaves=(leaf,))
     if door.kind in DOUBLE_LEAF_KINDS:
         # Two half-width leaves hinged at opposite jambs, meeting in the middle.
-        return DoorSymbol("swing", o, jambs, leaves=_pair(ox, oy, o, w, swing_side(door, a, b, edge), bounds))
+        sgn = swing_side(door.swing_into, a, b, edge, w / 2.0)
+        return DoorSymbol("swing", o, jambs, leaves=_pair(ox, oy, o, w, sgn))
     if door.kind in ("pocket", "sliding"):
         s = _keep_in(ox, oy, o, SLIDE_OFFSET, bounds)
         return DoorSymbol("slide", o, jambs, line=_along(ox, oy, o, w, s))
@@ -168,26 +188,26 @@ def _interior_symbol(
     return DoorSymbol("cased", o, jambs)
 
 
-def _exterior_symbol(room: Room, xd: ExteriorDoor, bounds: Point) -> DoorSymbol:
+def _exterior_symbol(room: Room, xd: ExteriorDoor) -> DoorSymbol:
     x1, y1, x2, y2 = opening_endpoints(room, xd.wall, xd.offset, xd.width)
     o = "h" if xd.wall in (Direction.NORTH, Direction.SOUTH) else "v"
     ox, oy = (min(x1, x2), y1) if o == "h" else (x1, min(y1, y2))
     w = xd.width
     jambs = _jambs(ox, oy, o, w)
+    sgn = inward_side(xd.wall)
     if xd.kind == "overhead":
         # The sectional panel rides its tracks just inside the room.
-        into = 1.0 if xd.wall in (Direction.SOUTH, Direction.WEST) else -1.0
-        return DoorSymbol("overhead", o, jambs, line=_along(ox, oy, o, w, OVERHEAD_TRACK * into))
+        return DoorSymbol("overhead", o, jambs, line=_along(ox, oy, o, w, OVERHEAD_TRACK * sgn))
     if xd.kind in DOUBLE_LEAF_KINDS:
-        return DoorSymbol("swing", o, jambs, leaves=_pair(ox, oy, o, w, None, bounds))
-    return DoorSymbol("swing", o, jambs, leaves=(door_leaf(ox, oy, o, w, None, False, bounds),))
+        return DoorSymbol("swing", o, jambs, leaves=_pair(ox, oy, o, w, sgn))
+    return DoorSymbol("swing", o, jambs, leaves=(door_leaf(ox, oy, o, w, sgn, False),))
 
 
-def _pair(ox: float, oy: float, o: str, w: float, sgn: float | None, bounds: Point) -> tuple[Leaf, Leaf]:
+def _pair(ox: float, oy: float, o: str, w: float, sgn: float) -> tuple[Leaf, Leaf]:
     half = w / 2.0
     nx, ny = (ox, oy + half) if o == "v" else (ox + half, oy)
-    return (door_leaf(ox, oy, o, half, sgn, False, bounds),
-            door_leaf(nx, ny, o, half, sgn, True, bounds))
+    return (door_leaf(ox, oy, o, half, sgn, False),
+            door_leaf(nx, ny, o, half, sgn, True))
 
 
 def _jambs(ox: float, oy: float, o: str, w: float) -> Segment:

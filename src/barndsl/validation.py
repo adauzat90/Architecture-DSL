@@ -55,7 +55,7 @@ from .elements import (
     Room,
     RoomType,
 )
-from .drawing import door_leaf, swing_side
+from .drawing import door_leaf, inward_side, swing_side
 from .geometry import (
     door_offset,
     door_span,
@@ -845,15 +845,13 @@ def _off_module(value: float, module: float = BUILD_MODULE, tol: float = EPSILON
 
 
 def _swing_region(
-    plan: Barndominium, orientation: str, ox: float, oy: float, w: float,
-    hinge_far: bool, sgn: float | None, samples: int = 4,
+    orientation: str, ox: float, oy: float, w: float,
+    hinge_far: bool, sgn: float, samples: int = 4,
 ) -> list[tuple[float, float]]:
     """The quarter-disc the leaf sweeps, as a small convex polygon (pie slice),
-    in plan coordinates — the leaf the plan draws (:func:`~barndsl.drawing.door_leaf`),
-    except that a leaf with no swing side is kept within the primary envelope
-    rather than the drawing's bounds (see ``docs/TECH_DEBT.md``, TD-16)."""
-    leaf = door_leaf(ox, oy, orientation, w, sgn, hinge_far,
-                     (plan.envelope_width, plan.envelope_length))
+    in plan coordinates — exactly the leaf the plan draws
+    (:func:`~barndsl.drawing.door_leaf`)."""
+    leaf = door_leaf(ox, oy, orientation, w, sgn, hinge_far)
     hinge, latch, tip = leaf.hinge, leaf.latch, leaf.tip
     a0 = math.atan2(latch[1] - hinge[1], latch[0] - hinge[0])
     a1 = math.atan2(tip[1] - hinge[1], tip[0] - hinge[0])
@@ -869,7 +867,7 @@ def _swing_region(
     return pts
 
 
-def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
+def _interior_swing_region(door, a: Room, b: Room, edge):
     """The swept region of an interior door's leaf, or None if nothing swings.
 
     Pocket/sliding/bifold/cased doors sweep no arc (a bifold folds flat against
@@ -888,14 +886,14 @@ def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
         # The far leaf hinges at the opening's far end; its sweep starts at
         # the pair's midpoint, so shift the region to the outer half.
         start += width - leaf
-    sgn = swing_side(door, a, b, edge)
+    sgn = swing_side(door.swing_into, a, b, edge, leaf)
     if edge.orientation == "v":
-        return _swing_region(plan, "v", edge.pos, start, leaf, hinge_far, sgn)
-    return _swing_region(plan, "h", start, edge.pos, leaf, hinge_far, sgn)
+        return _swing_region("v", edge.pos, start, leaf, hinge_far, sgn)
+    return _swing_region("h", start, edge.pos, leaf, hinge_far, sgn)
 
 
-def _exterior_swing_region(plan: Barndominium, room: Room, door):
-    """The swept region of an exterior door (renderer hinges near, keeps inside).
+def _exterior_swing_region(room: Room, door):
+    """The swept region of an exterior door (hinged near, swinging into its room).
 
     A double/french pair sweeps two half-width leaves; approximate it with the
     near leaf's quarter-disc (half the total width, hinged near)."""
@@ -905,9 +903,10 @@ def _exterior_swing_region(plan: Barndominium, room: Room, door):
         else door.width
     )
     x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
+    sgn = inward_side(door.wall)
     if door.wall in (Direction.NORTH, Direction.SOUTH):
-        return _swing_region(plan, "h", min(x1, x2), y1, w, False, None)
-    return _swing_region(plan, "v", x1, min(y1, y2), w, False, None)
+        return _swing_region("h", min(x1, x2), y1, w, False, sgn)
+    return _swing_region("v", x1, min(y1, y2), w, False, sgn)
 
 
 def _convex_overlap(poly_a, poly_b, eps: float = SWING_CLASH_EPS) -> bool:
@@ -4555,8 +4554,8 @@ def _dq_door_centered(plan: Barndominium, graph, by_id, add) -> None:
 
 def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
     # 8k. Door swings shouldn't overlap: two leaves sweeping into the same space
-    #     foul each other. Build each swing's swept quarter-disc (matching the
-    #     renderer) and test for overlap.
+    #     foul each other. Build each swing's swept quarter-disc (the leaf the
+    #     plan draws) and test for overlap — only between doors on one level.
     swings = []
     for d in plan.interior_doors:
         a, b = by_id.get(d.room_a), by_id.get(d.room_b)
@@ -4565,20 +4564,20 @@ def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
         edge = shared_edge(a, b)
         if edge is None:
             continue
-        region = _interior_swing_region(plan, d, a, b, edge)
+        region = _interior_swing_region(d, a, b, edge)
         if region is not None:
-            swings.append((f"'{d.room_a}'-'{d.room_b}'", region, d.line, d.col, d.end_col))
+            swings.append((f"'{d.room_a}'-'{d.room_b}'", region, a.level, d.line, d.col, d.end_col))
     for xd in plan.exterior_doors:
         r = by_id.get(xd.room)
         if r is None or xd.overhead:  # an overhead door rides up its tracks — no swing
             continue
         swings.append((f"the {xd.wall.value} entry to '{xd.room}'",
-                       _exterior_swing_region(plan, r, xd),
+                       _exterior_swing_region(r, xd), r.level,
                        xd.line, xd.col, xd.end_col))
     for i in range(len(swings)):
         for j in range(i + 1, len(swings)):
-            if _convex_overlap(swings[i][1], swings[j][1]):
-                lbl_i, _, line, col, end_col = swings[i]
+            if swings[i][2] == swings[j][2] and _convex_overlap(swings[i][1], swings[j][1]):
+                lbl_i, _, _, line, col, end_col = swings[i]
                 lbl_j = swings[j][0]
                 add(
                     Issue(
@@ -4619,7 +4618,7 @@ def _interior_privacy_swing_pair(plan: Barndominium, door, by_id: dict[str, Room
     edge = shared_edge(a, b)
     if edge is None:
         return None
-    region = _interior_swing_region(plan, door, a, b, edge)
+    region = _interior_swing_region(door, a, b, edge)
     if region is None:  # pocket/sliding/bifold/cased — no leaf to place
         return None
     target = _region_room(region, a, b, edge)
@@ -5577,9 +5576,9 @@ def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
     #      fully open because the closet isn't as deep as the door is wide, so the
     #      swing fills the closet. A bypass/sliding or bifold door clears the space.
     #      Doors here are author-declared (kinds aren't seeded), so this is an INFO
-    #      nudge — not a re-seed. Only a leaf that actually swings *into* the closet
-    #      (or an unspecified side the renderer might pick) is judged; one explicitly
-    #      swinging into the other room doesn't fill the closet.
+    #      nudge — not a re-seed. Only a leaf that swings *into* the closet — by
+    #      its `into`, or by the default swing rule — is judged; one opening into
+    #      the other room doesn't fill the closet.
     from .geometry import shared_edge
 
     for d in plan.interior_doors:
@@ -5591,13 +5590,13 @@ def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
         if (a.type is RoomType.CLOSET) == (b.type is RoomType.CLOSET):
             continue  # need exactly one closet side
         closet, other = (a, b) if a.type is RoomType.CLOSET else (b, a)
-        if d.swing_into is not None and d.swing_into != closet.id:
-            continue  # swings into the room, not the closet — the closet depth is moot
         edge = shared_edge(closet, other)
         if edge is None:
             continue
         lo, hi = door_span(edge, d)
         leaf = hi - lo
+        if swing_side(d.swing_into, a, b, edge, leaf) != swing_side(closet.id, a, b, edge, leaf):
+            continue  # swings into the room, not the closet — the closet depth is moot
         # Closet depth = the closet's extent perpendicular to the shared wall.
         depth = closet.width if edge.orientation == "v" else closet.length
         if depth + EPSILON < leaf:
