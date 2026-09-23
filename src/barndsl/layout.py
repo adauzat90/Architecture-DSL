@@ -51,6 +51,18 @@ from .geometry import shared_edge
 # used to size daylight windows; mirrors Window's defaults in elements.py.
 _GLASS_PER_FT = feet(6.67) - feet(3.0)
 
+#: The rooms that form the open public core. Two of them sharing a wall get a
+#: cased passage rather than a door; :mod:`barndsl.layout2` bands them together.
+PUBLIC_CORE_TYPES = (
+    RoomType.LIVING,
+    RoomType.GREAT_ROOM,
+    RoomType.KITCHEN,
+    RoomType.DINING,
+    RoomType.REC_ROOM,
+)
+#: How wide the cased passage between two public-core rooms is.
+PUBLIC_OPENING_WIDTH = feet(6)
+
 
 # --- the brief --------------------------------------------------------------
 
@@ -175,6 +187,11 @@ def solve_layout(brief: LayoutBrief) -> LayoutResult:
         plan.rooms.append(placed[spec.id])
 
     satisfied, unsatisfied = _connect_adjacencies(plan, brief, by_id)
+    bypassed = _relieve_kitchen_passthrough(plan)
+    if bypassed:
+        notes.append(
+            f"Added {bypassed} door(s) so traffic can bypass the kitchen work zone."
+        )
     if brief.add_openings:
         _add_openings(plan, brief, by_id, notes)
 
@@ -305,20 +322,116 @@ def _connect_adjacencies(
             unsatisfied.append((a, b))
             continue
         if shared_edge(ra, rb) is not None:
-            public_core = {
-                RoomType.LIVING,
-                RoomType.GREAT_ROOM,
-                RoomType.KITCHEN,
-                RoomType.DINING,
-                RoomType.REC_ROOM,
-            }
-            both_public = by_id[a].type in public_core and by_id[b].type in public_core
-            width = feet(6) if both_public else inches(32)
-            plan.connect(a, b, width=width)
+            both_public = (
+                by_id[a].type in PUBLIC_CORE_TYPES
+                and by_id[b].type in PUBLIC_CORE_TYPES
+            )
+            if both_public:
+                # The open core is a *cased* passage, not a 6 ft swing leaf — a
+                # door that wide would need two leaves to be buildable
+                # (DOOR_WIDE_SWING), and open-plan flow wants no door at all.
+                plan.opening(a, b, width=PUBLIC_OPENING_WIDTH)
+            else:
+                plan.connect(a, b, width=inches(32))
             satisfied.append((a, b))
         else:
             unsatisfied.append((a, b))
     return satisfied, unsatisfied
+
+
+def _relieve_kitchen_passthrough(plan: Barndominium, min_wall: float = inches(32)) -> int:
+    """Give traffic a way past the kitchen, and return how many doors that took.
+
+    A kitchen that is the *only* route between the dining room and the living /
+    great / rec room turns the work triangle into a corridor (KITCHEN_PASSTHROUGH).
+    The packing often produces exactly that: rooms tile the public band
+    ``living | kitchen | dining``, so dining's only requested adjacency is to the
+    kitchen. The fix is the one the diagnostic asks for — route circulation
+    *around* the kitchen — by adding one door on the widest shared wall that
+    bridges the two sides without passing through it (in practice the hall behind
+    the band). Each door merges the two components it bridges, so the loop ends
+    once no kitchen severs a public pair — or once no wall is wide enough, which
+    is the genuine "move the kitchen" case a door can't fix.
+    """
+    added = 0
+    while True:
+        bridge = _kitchen_bypass_wall(plan, min_wall)
+        if bridge is None:
+            return added
+        plan.connect(bridge[0], bridge[1], width=min_wall)
+        added += 1
+
+
+#: The rooms KITCHEN_PASSTHROUGH treats as the living end of the traffic route.
+_LIVING_LIKE = (RoomType.LIVING, RoomType.GREAT_ROOM, RoomType.REC_ROOM)
+
+
+def _kitchen_severances(plan: Barndominium):
+    """Yield ``(comps, dining_comp, living_comp)`` per kitchen-severed public pair.
+
+    Mirrors KITCHEN_PASSTHROUGH exactly: a kitchen with both a dining and a
+    living/great/rec door-neighbour, where dropping the kitchen from the door
+    graph leaves those two in different components. ``comps`` is the component
+    list the two indices point into.
+    """
+    from .validation import (  # local: validation imports geometry only
+        components_excluding,
+        door_graph,
+    )
+
+    by_id = {r.id: r for r in plan.rooms}
+    graph = door_graph(plan)
+    for kitchen in plan.rooms:
+        if kitchen.type is not RoomType.KITCHEN:
+            continue
+        comps = components_excluding(graph, {kitchen.id})
+        comp_of = {rid: i for i, comp in enumerate(comps) for rid in comp}
+        neighbours = [n for n in graph.get(kitchen.id, ()) if n in comp_of]
+        dining = {n for n in neighbours if by_id[n].type is RoomType.DINING}
+        living = {n for n in neighbours if by_id[n].type in _LIVING_LIKE}
+        severed = sorted(
+            {
+                (comp_of[d], comp_of[lv])
+                for d in dining
+                for lv in living
+                if comp_of[d] != comp_of[lv]
+            }
+        )
+        for d_comp, l_comp in severed:
+            yield comps, d_comp, l_comp
+
+
+def kitchen_is_a_corridor(plan: Barndominium) -> bool:
+    """True if some kitchen is the only route between dining and a living room.
+
+    The predicate behind KITCHEN_PASSTHROUGH, without the compile step, so a
+    solver can ask it of a candidate plan. Run it *after* the door passes: an
+    arrangement only counts as a corridor once nothing has bypassed it.
+    """
+    return any(True for _ in _kitchen_severances(plan))
+
+
+def _kitchen_bypass_wall(
+    plan: Barndominium, min_wall: float
+) -> tuple[str, str] | None:
+    """The widest shared wall that would relieve a kitchen pass-through, if any."""
+    by_id = {r.id: r for r in plan.rooms}
+    for comps, d_comp, l_comp in _kitchen_severances(plan):
+        best: tuple[float, str, str] | None = None
+        for a in comps[d_comp]:
+            for b in comps[l_comp]:
+                ra, rb = by_id[a], by_id[b]
+                if ra.level != rb.level:
+                    continue
+                edge = shared_edge(ra, rb)
+                if edge is None or edge.length < min_wall:
+                    continue
+                key = (-edge.length, a, b)  # widest wall, ties by id
+                if best is None or key < best:
+                    best = key
+        if best is not None:
+            return best[1], best[2]
+    return None
 
 
 # --- openings ---------------------------------------------------------------
@@ -333,14 +446,16 @@ def _add_openings(
     """Auto-add a front entry and egress/daylight windows on exterior walls."""
     from .validation import exterior_walls  # local: validation imports geometry only
 
-    # 1. Front entry on a public/mudroom room with an exterior wall.
+    # 1. Front entry on a public/mudroom room with an exterior wall, plus the
+    #    landing IRC R311.3 requires on the outside of it (DOOR_NO_LANDING).
     entry_room = _pick_entry_room(plan, brief)
     if entry_room is not None:
         eroom = plan.room(entry_room)
         assert eroom is not None  # _pick_entry_room only returns an existing room id
         walls = exterior_walls(plan, eroom)
         wall = Direction.SOUTH if Direction.SOUTH in walls else walls[0]
-        _add_opening(plan, eroom, wall, feet(3), is_entry=True)
+        if _add_opening(plan, eroom, wall, feet(3), is_entry=True):
+            _add_entry_landing(plan, eroom, plan.exterior_doors_for(eroom.id)[-1])
     else:
         notes.append("No room sits on an exterior wall for a front entry.")
 
@@ -444,36 +559,45 @@ def _glaze_to_ratio(
         return
     if not walls:
         return  # interior room — validation will flag NAT_LIGHT; nothing we can do
-    used_walls = {w.wall for w in plan.windows_for(room.id)}
-    # Prefer walls without a window yet, longest first, then any wall.
-    fresh = sorted(
-        (w for w in walls if w not in used_walls),
-        key=lambda d: _wall_len(room, d),
-        reverse=True,
-    )
-    rest = sorted(
-        (w for w in walls if w in used_walls),
-        key=lambda d: _wall_len(room, d),
-        reverse=True,
-    )
-    for wall in fresh + rest:
-        if need <= 1e-6:
+    # Sweep the walls repeatedly: one pass can fall short when a wall's free run
+    # is broken up (by the entry door, or by the trim reveal a window keeps off an
+    # interior partition), and the leftover run on another wall still fits glass.
+    # Each placement consumes wall length, so a pass that places nothing ends it.
+    while need > 1e-6:
+        progress = False
+        for wall in _glaze_wall_order(plan, room, walls):
+            if need <= 1e-6:
+                break
+            wall_len = _wall_len(room, wall)
+            # Round up to a neat half-foot so widths read cleanly.
+            raw = need / _GLASS_PER_FT
+            width = min(_round_half_up(raw), wall_len * 0.8)
+            if width < _MIN_WINDOW_WIDTH:
+                if wall_len * 0.8 < _MIN_WINDOW_WIDTH:
+                    continue  # wall too short for even a minimal window
+                width = _MIN_WINDOW_WIDTH
+            placed = _add_opening(plan, room, wall, width)
+            if placed > 1e-6:
+                progress = True
+            need -= placed * _GLASS_PER_FT
+        if not progress:
             break
-        wall_len = _wall_len(room, wall)
-        # Round up to a neat half-foot so widths read cleanly.
-        raw = need / _GLASS_PER_FT
-        width = min(_round_half_up(raw), wall_len * 0.8)
-        if width < _MIN_WINDOW_WIDTH:
-            if wall_len * 0.8 < _MIN_WINDOW_WIDTH:
-                continue  # wall too short for even a minimal window
-            width = _MIN_WINDOW_WIDTH
-        placed = _add_opening(plan, room, wall, width)
-        need -= placed * _GLASS_PER_FT
     if need > 1e-6:
         notes.append(
             f"Room '{room.id}' may still fall short of 8% daylight; its exterior "
             "walls can't hold enough glazing — enlarge a window or add a wall."
         )
+
+
+def _glaze_wall_order(
+    plan: Barndominium, room: Room, walls: list[Direction]
+) -> list[Direction]:
+    """Walls to try next: those without a window yet first, longest run first.
+
+    A stable sort, so walls of equal length keep the caller's order.
+    """
+    used = {w.wall for w in plan.windows_for(room.id)}
+    return sorted(walls, key=lambda d: (d in used, -_wall_len(room, d)))
 
 
 def _add_opening(
@@ -503,6 +627,9 @@ def _add_opening(
         cursor = max(cursor, hi)
     if wall_len - cursor > 1e-6:
         gaps.append((cursor, wall_len))
+    if not is_entry:
+        gaps = [_window_reveal(plan, room, wall, wall_len, g) for g in gaps]
+    gaps = [g for g in gaps if g[1] - g[0] > 1e-6]
     if not gaps:
         return 0.0  # wall is full — nothing we can place
     g_lo, g_hi = max(gaps, key=lambda g: g[1] - g[0])
@@ -515,6 +642,57 @@ def _add_opening(
     else:
         plan.add_window(room.id, wall, width=placed, offset=offset)
     return placed
+
+
+def _window_reveal(
+    plan: Barndominium,
+    room: Room,
+    wall: Direction,
+    wall_len: float,
+    gap: tuple[float, float],
+) -> tuple[float, float]:
+    """Shrink ``gap`` so a window in it keeps clear of an interior partition.
+
+    A window butting the partition where it lands on the exterior wall has no
+    room for its framing and trim (WINDOW_PARTITION). A *building* corner is
+    exempt — a window flush to one is fine — so the reveal is only taken at a wall
+    end whose perpendicular neighbour is a partition. Gap ends formed by another
+    opening are left alone: the door/window jambs already frame each other, and
+    stealing width there would cost daylight the room needs.
+    """
+    from .validation import WINDOW_WALL_CLEAR, building_corner
+
+    lo, hi = gap
+    if lo <= 1e-6 and not building_corner(plan, room, wall, False):
+        lo += WINDOW_WALL_CLEAR
+    if hi >= wall_len - 1e-6 and not building_corner(plan, room, wall, True):
+        hi -= WINDOW_WALL_CLEAR
+    return lo, hi
+
+
+def _add_entry_landing(plan: Barndominium, room: Room, door) -> None:
+    """Draw the landing IRC R311.3 requires outside an exterior door.
+
+    A stoop spanning the opening (a foot proud of each jamb) and reaching
+    :data:`~barndsl.validation.LANDING_MIN_DEPTH` clear of the wall, so you don't
+    step out into space. Without it every generated plan carries the same
+    DOOR_NO_LANDING / DOOR_THRESHOLD nudge it has no way to act on.
+    """
+    from .geometry import opening_endpoints
+    from .validation import LANDING_MIN_DEPTH
+
+    depth = LANDING_MIN_DEPTH + 1.0
+    flank = 1.0
+    x1, y1, x2, y2 = opening_endpoints(room, door.wall, door.offset, door.width)
+    if door.wall in (Direction.SOUTH, Direction.NORTH):
+        x = min(x1, x2) - flank
+        y = y1 - depth if door.wall is Direction.SOUTH else y1
+        w, length = abs(x2 - x1) + 2 * flank, depth
+    else:
+        y = min(y1, y2) - flank
+        x = x1 - depth if door.wall is Direction.WEST else x1
+        w, length = depth, abs(y2 - y1) + 2 * flank
+    plan.add_porch(f"{room.id}_landing", x=x, y=y, width=w, length=length)
 
 
 def _wall_len(room: Room, wall: Direction) -> float:

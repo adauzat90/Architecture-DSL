@@ -45,22 +45,19 @@ from .constants import GOOD_ASPECT
 from .elements import HABITABLE_TYPES, Barndominium, RoomType, feet, inches
 from .geometry import shared_edge
 from .layout import (
+    PUBLIC_CORE_TYPES,
     LayoutBrief,
     LayoutResult,
     RoomSpec,
     _add_openings,
     _connect_adjacencies,
+    _relieve_kitchen_passthrough,
+    kitchen_is_a_corridor,
     parse_brief_fields,
 )
 
 #: Rooms forming the open core; they tile the first band and share vertical walls.
-_PUBLIC = (
-    RoomType.LIVING,
-    RoomType.GREAT_ROOM,
-    RoomType.KITCHEN,
-    RoomType.DINING,
-    RoomType.REC_ROOM,
-)
+_PUBLIC = PUBLIC_CORE_TYPES
 #: Circulation; may be interior (no daylight needed) and sits between the bands.
 _CIRCULATION = (RoomType.HALLWAY,)
 #: Large non-habitable spaces that get their own band, so their bulk doesn't set
@@ -326,15 +323,48 @@ def _solve_bands(
     **gable-end column** rather than a full-width band — the barndominium idiom —
     so every habitable room keeps an exterior wall and the shop gets its own gable
     wall for the overhead door. All other programs use the plain band stack.
+
+    A row seats a room *between* its two neighbours, so the public band can leave
+    the kitchen as the only route from dining to the living room — and when the
+    two sides share no wall, no bypass door can relieve it. Only then (the check
+    is a graph predicate, not a compile) does this re-roll the band from other
+    seeds and take the first arrangement that clears the corridor **without**
+    dropping an adjacency the first one kept.
     """
+    first = _solve_bands_from(brief, specs, adj, None)
+    if not kitchen_is_a_corridor(first.plan):
+        return first
+    for seed in sorted(s.id for s in specs):
+        alt = _solve_bands_from(brief, specs, adj, seed)
+        if len(alt.unsatisfied) > len(first.unsatisfied):
+            continue  # never trade a requested adjacency for the nudge
+        if kitchen_is_a_corridor(alt.plan):
+            continue
+        alt.notes.append(
+            f"Re-ordered the public band from '{seed}' so the kitchen isn't the "
+            "only route between the dining and living rooms."
+        )
+        return alt
+    return first
+
+
+def _solve_bands_from(
+    brief: LayoutBrief2,
+    specs: list[RoomSpec2],
+    adj: dict[str, set[str]],
+    public_seed: str | None,
+) -> LayoutResult:
+    """One band-stack solve, with the public band's chain walked from ``public_seed``."""
     notes: list[str] = []
     utility = [s for s in specs if s.type in _LARGE_UTILITY]
     single_story = all(s.level == 0 for s in specs)
     if utility and single_story:
-        column = _solve_bands_with_column(brief, specs, adj, utility, notes)
+        column = _solve_bands_with_column(
+            brief, specs, adj, utility, notes, public_seed
+        )
         if column is not None:
             return column
-    bands = _build_bands(specs, adj, notes)
+    bands = _build_bands(specs, adj, notes, public_seed)
     env_w, env_l = _choose_envelope(bands, brief, notes)
     env_w, env_l = round(env_w, 2), round(env_l, 2)  # match the snapped grid
     placed = _dimension(bands, env_w, env_l)
@@ -347,6 +377,7 @@ def _solve_bands_with_column(
     adj: dict[str, set[str]],
     utility: list[RoomSpec2],
     notes: list[str],
+    public_seed: str | None = None,
 ) -> LayoutResult | None:
     """Seat garage/shop rooms as a full-depth gable-end column; band the rest.
 
@@ -364,7 +395,7 @@ def _solve_bands_with_column(
     if not house:
         return None
 
-    bands = _build_bands(house, adj, notes)
+    bands = _build_bands(house, adj, notes, public_seed)
 
     # The room that buffers the column from the house — the brief-declared neighbour
     # of a utility room that lives in the public band (a mudroom, ideally). It, and
@@ -582,6 +613,13 @@ def _finalize(
         notes.append(
             f"Added {added} circulation door(s) on shared walls to connect the plan."
         )
+    # Banding the public core as `living | kitchen | dining` leaves the kitchen as
+    # the only route between its neighbours; give traffic a way around it.
+    bypassed = _relieve_kitchen_passthrough(plan)
+    if bypassed:
+        notes.append(
+            f"Added {bypassed} door(s) so traffic can bypass the kitchen work zone."
+        )
     if brief.add_openings:
         if v1.entry_room is None:  # entry on a room connected to the rest
             v1.entry_room = _pick_connected_entry(plan)
@@ -591,7 +629,10 @@ def _finalize(
 
 
 def _build_bands(
-    specs: list[RoomSpec2], adj: dict[str, set[str]], notes: list[str]
+    specs: list[RoomSpec2],
+    adj: dict[str, set[str]],
+    notes: list[str],
+    public_seed: str | None = None,
 ) -> list[_Band]:
     """Classify rooms and stack them south→north: utility, public, hall, private.
 
@@ -643,7 +684,7 @@ def _build_bands(
     if utility:  # garage/shop: outermost, exterior gable wall, off the public core
         bands.append(_Band(_order_in_band(utility, adj), interior_ok=True))
     if public:
-        bands.append(_Band(_order_in_band(public, adj)))
+        bands.append(_Band(_order_in_band(public, adj, public_seed)))
     for h in halls:  # usually one; multiple halls each get a thin strip
         bands.append(_Band([h], interior_ok=True))
     if private:
@@ -654,7 +695,9 @@ def _build_bands(
     return bands
 
 
-def _order_in_band(rooms: list[RoomSpec2], adj: dict[str, set[str]]) -> list[RoomSpec2]:
+def _order_in_band(
+    rooms: list[RoomSpec2], adj: dict[str, set[str]], seed: str | None = None
+) -> list[RoomSpec2]:
     """Order a band's rooms so adjacent ones are neighbours (a greedy chain).
 
     Decompose the in-band adjacency graph into connected components and lay each
@@ -665,12 +708,20 @@ def _order_in_band(rooms: list[RoomSpec2], adj: dict[str, set[str]]) -> list[Roo
     the chain seeds at the wrong node. Components are concatenated in brief order;
     within a chain, ties break by (fewest remaining neighbours, brief order), so
     the walk stays deterministic and finishes each spur before moving on.
+
+    ``seed`` starts the walk of whichever component holds it, instead of that
+    component's lowest-degree endpoint; :func:`_solve_bands` sweeps it to re-roll a
+    row that seated the kitchen as a corridor. A seed outside these rooms is a
+    no-op, and the default (``None``) reproduces the historical order exactly.
     """
     if len(rooms) <= 2:
         return rooms
     pool = {r.id: r for r in rooms}
     order_index = {r.id: i for i, r in enumerate(rooms)}
     within = {rid: (adj[rid] & pool.keys()) for rid in pool}
+
+    def step_key(rid: str) -> tuple:
+        return (len(within[rid]), order_index[rid])
 
     ordered: list[str] = []
     seen: set[str] = set()
@@ -684,7 +735,7 @@ def _order_in_band(rooms: list[RoomSpec2], adj: dict[str, set[str]]) -> list[Roo
         if seed_id in seen:
             continue
         comp = _component(seed_id, within)
-        start = min(comp, key=lambda c: (len(within[c]), order_index[c]))
+        start = seed if seed in comp else min(comp, key=step_key)
         # Greedy walks within this component until every member is placed. Each
         # walk stops at a dead end; if the component still has unplaced members
         # (a branch), the next walk resumes from the unplaced room nearest the
@@ -696,17 +747,9 @@ def _order_in_band(rooms: list[RoomSpec2], adj: dict[str, set[str]]) -> list[Roo
                 ordered.append(cur)
                 seen.add(cur)
                 nbrs = [n for n in within[cur] if n not in seen]
-                cur = (
-                    min(nbrs, key=lambda rid: (len(within[rid]), order_index[rid]))
-                    if nbrs
-                    else None
-                )
+                cur = min(nbrs, key=step_key) if nbrs else None
             leftover = [c for c in comp if c not in seen]
-            pending = (
-                min(leftover, key=lambda c: (len(within[c]), order_index[c]))
-                if leftover
-                else None
-            )
+            pending = min(leftover, key=step_key) if leftover else None
     return [pool[rid] for rid in ordered]
 
 

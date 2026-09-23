@@ -131,6 +131,138 @@ def test_bedrooms_get_egress_windows():
         assert plan.windows_for(bed)
 
 
+def _band_with_the_kitchen_in_the_middle() -> LayoutBrief2:
+    # The idiomatic barndo core tiles `living | kitchen | dining` in one band, so
+    # dining's only requested neighbour is the kitchen — and everyday traffic
+    # between living and dining then crosses the work triangle.
+    return LayoutBrief2(
+        name="Core",
+        rooms=[
+            RoomSpec2("living", "living", area=380),
+            RoomSpec2("kitchen", "kitchen", area=280),
+            RoomSpec2("dining", "dining", area=170),
+            RoomSpec2("hall", "hallway", area=210, min_dim=4),
+            RoomSpec2("bed1", "bedroom", area=224),
+            RoomSpec2("bed2", "bedroom", area=156),
+            RoomSpec2("bath", "bathroom", area=100),
+        ],
+        adjacencies=[
+            ("living", "kitchen"),
+            ("kitchen", "dining"),
+            ("living", "hall"),
+            ("hall", "bed1"),
+            ("hall", "bed2"),
+            ("hall", "bath"),
+        ],
+    )
+
+
+def test_a_bypass_door_keeps_the_kitchen_out_of_the_traffic_route():
+    out = solve_layout2(_band_with_the_kitchen_in_the_middle())
+    result = compile_source(emit_dsl(out.plan), name=out.plan.name)
+    assert not any(
+        d.code == "KITCHEN_PASSTHROUGH" for d in result.diagnostics
+    ), result.report()
+    # The relief is a door around the kitchen, not a change to the program.
+    assert any("bypass the kitchen" in n for n in out.notes), out.notes
+    dining_doors = {
+        d.room_a if d.room_b == "dining" else d.room_b
+        for d in out.plan.interior_doors
+        if "dining" in (d.room_a, d.room_b)
+    }
+    assert dining_doors - {"kitchen"}, "dining is still reachable only through the kitchen"
+
+
+def _one_row_core() -> LayoutBrief2:
+    # No hall, so the whole program tiles a single public row. `r0` is a hub of
+    # degree 3 that a flat row can't seat, so the band drops one of its edges —
+    # and the walk's default choice leaves the kitchen `r3` wedged between the
+    # dining room and the living room with no wall for a bypass door.
+    return LayoutBrief2(
+        name="OneRow",
+        rooms=[
+            RoomSpec2("r0", "dining", area=120),
+            RoomSpec2("r1", "office", area=300),
+            RoomSpec2("r2", "living", area=120),
+            RoomSpec2("r3", "kitchen", area=200),
+            RoomSpec2("r4", "great_room", area=120),
+            RoomSpec2("r5", "closet", area=90),
+            RoomSpec2("r6", "mudroom", area=200),
+        ],
+        adjacencies=[
+            ("r0", "r1"), ("r0", "r3"), ("r0", "r6"),
+            ("r2", "r3"), ("r2", "r5"), ("r4", "r6"),
+        ],
+    )
+
+
+def test_the_band_re_rolls_when_no_door_can_bypass_the_kitchen():
+    out = solve_layout2(_one_row_core(), engine="bands")
+    result = compile_source(emit_dsl(out.plan), name=out.plan.name)
+    assert not any(
+        d.code == "KITCHEN_PASSTHROUGH" for d in result.diagnostics
+    ), result.report()
+    assert any("Re-ordered the public band" in n for n in out.notes), out.notes
+    # A row has to drop one of the hub's three edges either way — the re-roll
+    # picks a drop that doesn't make the kitchen a corridor, it doesn't drop more.
+    assert len(out.unsatisfied) == 1, out.unsatisfied
+
+
+def test_the_re_roll_never_trades_a_requested_adjacency_for_the_nudge():
+    # Here `r6` (great room) and `r5` (bedroom) hang off the kitchen alone, so the
+    # brief itself makes the kitchen a cut vertex: every ordering that clears
+    # KITCHEN_PASSTHROUGH costs an adjacency. The guard must keep the adjacency.
+    brief = LayoutBrief2(
+        name="CutVertex",
+        rooms=[
+            RoomSpec2("r0", "dining", area=168),
+            RoomSpec2("r1", "great_room", area=168),
+            RoomSpec2("r2", "office", area=300),
+            RoomSpec2("r3", "laundry", area=168),
+            RoomSpec2("r4", "great_room", area=300),
+            RoomSpec2("r5", "bedroom", area=144),
+            RoomSpec2("r6", "great_room", area=144),
+            RoomSpec2("r7", "kitchen", area=144),
+        ],
+        adjacencies=[
+            ("r0", "r2"), ("r0", "r7"), ("r1", "r2"), ("r1", "r3"),
+            ("r1", "r4"), ("r5", "r7"), ("r6", "r7"),
+        ],
+    )
+    baseline = len(solve_layout2(brief, engine="bands").unsatisfied)
+    out = solve_layout2(brief, engine="bands")
+    assert len(out.unsatisfied) == baseline == 1
+    assert not any("Re-ordered the public band" in n for n in out.notes), out.notes
+
+
+def test_kitchen_is_a_corridor_reads_the_door_graph_not_the_geometry():
+    from barndsl.layout import kitchen_is_a_corridor
+
+    # The irreducible shape: a brief asking for living-kitchen and kitchen-dining
+    # and nothing else. Every layout that honours both seats the kitchen between
+    # them, so neither a bypass door nor a re-roll can relieve it — the program
+    # itself made the kitchen a corridor, and the diagnostic is right to say so.
+    out = solve_layout2(
+        LayoutBrief2(
+            name="Corridor",
+            rooms=[
+                RoomSpec2("living", "living", area=300),
+                RoomSpec2("kitchen", "kitchen", area=200),
+                RoomSpec2("dining", "dining", area=180),
+            ],
+            adjacencies=[("living", "kitchen"), ("kitchen", "dining")],
+            add_openings=False,
+        ),
+        engine="bands",
+    )
+    assert out.unsatisfied == []
+    assert kitchen_is_a_corridor(out.plan)
+    # A door straight from living to dining is what relieves it — the predicate
+    # reads the door graph, so drawing that door is enough.
+    out.plan.opening("living", "dining", width=6)
+    assert not kitchen_is_a_corridor(out.plan)
+
+
 # --- room proportions -------------------------------------------------------
 
 
@@ -352,9 +484,11 @@ def test_oakline_example_compiles_clean():
     out = solve_layout2(parse_brief2(open(path).read()))
     result = compile_source(emit_dsl(out.plan), name=out.plan.name)
     assert not result.errors, result.report()
-    # The auto-layout now DECLARES `tempered` on the windows it places in R308.4
+    # The auto-layout DECLARES `tempered` on the windows it places in R308.4
     # hazard locations (via the shared predicate), so no WINDOW_TEMPERED warning
-    # survives — the plan is strictly clean of warnings.
+    # survives; the public core is cased rather than a 6 ft swing leaf, and a
+    # bypass door keeps the kitchen off the living-to-dining route — the plan is
+    # strictly clean of warnings.
     assert not result.warnings, result.report()
     assert out.unsatisfied == []
 

@@ -250,7 +250,9 @@ def test_pinwheel_example_compiles_clean_via_auto():
     assert any("dual" in n for n in out.notes)  # auto must reach for the dual here
     result = compile_source(emit_dsl(out.plan), name=out.plan.name)
     assert not result.errors, result.report()
-    # The auto-layout now declares `tempered` on its hazard-location windows, so
-    # WINDOW_TEMPERED no longer surfaces. The only soft warning left is NO_BATH
-    # (the minimal pinwheel has no room for a bath); nothing structural warns.
+    # The auto-layout declares `tempered` on its hazard-location windows, so
+    # WINDOW_TEMPERED no longer surfaces, and the great-room-to-kitchen link is a
+    # cased opening rather than a 6 ft swing leaf (DOOR_WIDE_SWING). The only soft
+    # warning left is NO_BATH (the minimal pinwheel has no room for a bath);
+    # nothing structural warns.
     assert all(d.code == "NO_BATH" for d in result.warnings), result.report()
