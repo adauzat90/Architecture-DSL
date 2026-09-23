@@ -222,6 +222,8 @@ Statements:
         # near the closet's width so every foot of rod is reachable); double/french
         # = a pair of half-width leaves (default 5 ft total). offset = ft from the
         # wall's S/W end; `into <room>` + `hinge near|far` set the swing side/hinge.
+        # With no `into` the leaf swings east/north, or into the other room when
+        # it's too wide for that one; an exterior door always swings inward.
         # The two-room forms `wall`, `door` and `open` accept `to` in place of the
         # `-` separator, so `door a to b` == `door a - b` (mind the spaces — the
         # dashless `a-b` reads as one token, and `a - b` still works too).

@@ -31,6 +31,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - Doors connect two rooms or a room to an exterior wall; windows/openings belong to a room wall.
 - Exterior-wall eligibility is derived from final geometry, not just the statement text.
 - Opening offsets are measured along the owning wall from that wall's canonical start.
+- A hinged leaf opens onto the side `drawing.swing_side` / `drawing.inward_side` give it. An interior door with `into` swings into that room. One without swings toward `+x`/`+y` unless the leaf only fits the other room. An exterior door swings into its room. The SVG plan, DXF export, validator and 3D model all use this rule and keep no default of their own. The Revit builder still uses its door family's default facing (`docs/TECH_DEBT.md`, TD-17).
 - An interior door sits where `geometry.door_span` puts it: the leaf is cut to the shared wall and the offset slid back onto it. `DOOR_FIT`/`DOOR_OOB` report the authored overrun; drawing, exports, schedules, introspection and clearance checks all use the built span. Two places keep the authored offset instead. Composition transforms it, so a stamped overrun still reports `DOOR_OOB`. The editor's drag handle and inspector read and write it, because they edit the source.
 - Validators should prefer deterministic anchors: room ID, opening statement line, or `use` line for instance-level findings.
 

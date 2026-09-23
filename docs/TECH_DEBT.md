@@ -38,7 +38,8 @@ is a phase.
 | [TD-13](#td-13-untyped-function-bodies) | Untyped function bodies | M | Low | Open |
 | [TD-14](#td-14-pragmas-are-lost-on-emit) | Pragmas are lost on emit | M | Low | Blocked (design) |
 | [TD-15](#td-15-tests-and-docs-hygiene) | Tests and docs hygiene | S | Low | Open |
-| [TD-16](#td-16-default-swing-side-differs-between-drawing-and-validation) | Default swing side differs between drawing and validation | M | High | Open (needs a rule) |
+| [TD-16](#td-16-default-swing-side-differs-between-drawing-and-validation) | Default swing side differs between drawing and validation | M | High | Done |
+| [TD-17](#td-17-revit-keeps-the-door-familys-default-swing) | Revit keeps the door family's default swing | S | Low | Open (needs Revit) |
 
 ## TD-1. One interior-door span rule
 
@@ -102,7 +103,7 @@ openings and dimension chains on the gallery plans.
 **Resolution.**
 - **The seam.** A new public module, `drawing.py`, computes in plan feet:
   - door symbols (`door_symbols`, built on `door_leaf`, `swing_side` and
-    `swing_bounds`);
+    `swing_bounds`, since reworked by TD-16);
   - window symbols (`window_symbols`);
   - the exterior dimension chains (`exterior_chains` and `overall_span`, with
     the break, jamb and face-of-stud helpers public beside them).
@@ -136,7 +137,7 @@ openings and dimension chains on the gallery plans.
     per-level split. Five deliberately introduced renderer bugs each failed
     it, the old hinge bug among them.
   - `test_chain_dims.py` and `test_dim_faces.py` now test the public functions.
-- **Found, not fixed:** TD-16.
+- **Found:** TD-16, fixed separately.
 
 ## TD-3. Private cross-module imports
 
@@ -368,9 +369,10 @@ side, and three consumers pick it three ways:
 | Validator's swing checks | The same, but bounded by the primary envelope only | `validation._swing_region` |
 | glTF/3D model | Toward its room: an exterior door's own room, or an interior door's first room | `gltf._swing_out` |
 
-**Problem.** In 7 of the 17 example plans, at least one leaf is drawn swinging
-one way and checked for clearance and clashes swinging the other way. The 3D
-model can disagree with both. The first two rules are each wrong somewhere:
+**Problem.** In 7 of the 10 whole-plan examples, at least one leaf is drawn
+swinging one way and checked for clearance and clashes swinging the other way.
+The 3D model disagreed with the drawing in all 10. The first two rules are each
+wrong somewhere:
 - **Validator.** In an L-shape (`gallery/lshape.barn`), every default-side
   interior door in the wing lies past the primary envelope, so the validator
   flips it away from the side it is drawn on.
@@ -378,12 +380,68 @@ model can disagree with both. The first two rules are each wrong somewhere:
   (`gallery/hall_spine.barn`, `gallery/homestead.barn`) is drawn swinging
   *outward* onto the porch, because the porch widens the bounds.
 
-**Needs a decision:** the default swing rule. A likely answer is that an
-exterior door swings into its room, and an interior door keeps `+x`/`+y`
-unless the leaf doesn't fit in the room on that side. That is close to what
-glTF does already. Once decided, put the rule in `drawing`, have the validator
-and `gltf` use it, and accept the drawing, 3D and diagnostic changes on those
-plans.
+**Decision (2026-09-23).** Exterior doors swing into their room. An interior
+door with no `into` swings toward `+x`/`+y`, unless the leaf doesn't fit in the
+room on that side and does in the other.
+
+**Resolution.**
+- **One rule.** `drawing.swing_side` and `drawing.inward_side` hold the rule,
+  and `drawing.door_leaf` no longer takes bounds.
+- **Every consumer uses it:**
+  - the SVG plan and the DXF export (through `door_symbols`);
+  - the validator's swing regions (`DOOR_SWING_CLASH`, `DOOR_SWING_UNSET`);
+  - `CLOSET_DOOR_SWING`, which now judges the side the leaf is drawn on
+    instead of any side the renderer "might pick";
+  - the glTF/3D door leaves (`gltf._leaf_out`).
+- **The drawing's bounds** now only place a sliding panel or a folded bifold,
+  which nothing else checks. They were renamed `drawing_bounds`.
+- **Fixed alongside.** `DOOR_SWING_CLASH` compared swings on different levels,
+  so an upstairs door could "clash" with an entry below it. Inward-swinging
+  entries made that more frequent. It now compares one level at a time.
+- **Gallery.** `gallery/lshape.barn` (and its copy embedded in the agent) now
+  pins its master-closet door `into master`. That door had always been drawn
+  swinging into the closet, the validator now says so, and gallery plans must
+  compile clean. `hall_spine` and `homestead` already pin theirs.
+- **Changes over the TD-2 corpus (476 plans), before the gallery edit:**
+  - **Drawings: 9 plans.**
+    - Six examples draw an entry beside a porch or wing swinging inward
+      instead of out over it: `hall_spine`, `homestead`, `gallery/lshape`,
+      `two_story`, and both `composed/cedar_ridge*`.
+    - Two generated plans have leaves too wide for either room. They now keep
+      `+y`, where the old bounds rule had turned them.
+    - The porch probe also changes.
+  - **Diagnostics: 4 plans.**
+    - Both L-shape examples' `DOOR_SWING_UNSET` now describe the side each
+      door is drawn on.
+    - Three `DOOR_SWING_CLASH` findings that existed only on the undrawn side
+      went away.
+  - **3D model.** It now agrees with the plan on every leaf of every example.
+- **Tests.** `tests/test_swing_rule.py` covers:
+  - the rule on both wall orientations and at its fit boundaries;
+  - 3D and plan agreement, with every 3D leaf matched to a drawn one, and
+    every exterior leaf opening into its room, for every example;
+  - the plan, the 3D model and the swing checks agreeing when:
+    - a leaf is too wide for its closet;
+    - a pair is fitted leaf by leaf;
+    - a north entry swings inward;
+  - no clash between levels.
+
+  Nine deliberately introduced bugs, each making one consumer drift back to a
+  rule of its own, all fail it.
+- **Not covered: Revit.** See TD-17.
+
+## TD-17. Revit keeps the door family's default swing
+
+**Problem.** With no `into`, the Revit builder
+(`revit/barndsl.extension/lib/barndsl_revit/builder.py`, `_flip_door_swing`)
+leaves a door at its family's default facing. The Revit model can then swing a
+default-side door differently from the plan, the DXF, the validator and the 3D
+model (TD-16).
+
+**Fix.** Add the resolved side to the `barndsl.revit/1` opening. Use a new
+field, not `swing_into`, so exchange round trips don't invent `into` clauses.
+The exporter half (`revit.to_revit_model`) can be built and tested here. The
+builder half needs a machine with full Revit.
 
 ## Done
 
@@ -403,5 +461,7 @@ plans.
   - The score uses the public door graph.
   - Firing and satisfied tests for six untested codes.
 - **TD-1** (PR #25): one interior-door span rule, `geometry.door_span`.
-- **TD-2**: one drawing geometry, `drawing.py`, for the SVG plan and the DXF
-  export; fixed the DXF's ignored `hinge far`.
+- **TD-2** (PR #26): one drawing geometry, `drawing.py`, for the SVG plan and
+  the DXF export; fixed the DXF's ignored `hinge far`.
+- **TD-16**: one default door-swing rule for the plan, DXF, validator and 3D
+  model.

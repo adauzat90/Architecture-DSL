@@ -67,8 +67,9 @@ import struct
 from dataclasses import dataclass, field
 
 from .constants import SLAB_THICKNESS
+from .drawing import swing_side
 from .elements import Barndominium, RoomType
-from .geometry import TOL
+from .geometry import TOL, shared_edge
 from .materials import (
     DOOR_MATERIAL,
     FIXTURE_FABRIC,
@@ -368,10 +369,11 @@ def _opening_span(wall: RevitWall, o: RevitOpening) -> tuple[float, float] | Non
 
 
 def _across_dir(wall: RevitWall) -> tuple[float, float]:
-    """A plan unit vector across the wall thickness (arbitrary but deterministic).
+    """The plan unit vector across the wall toward ``+x``/``+y``.
 
     Vertical runs (const x) face east ``(1, 0)``; horizontal runs face north
-    ``(0, 1)``. The caller flips the sign toward the room a leaf swings into.
+    ``(0, 1)`` — the ``+1`` side of :func:`barndsl.drawing.swing_side`. The
+    caller flips the sign toward the room a leaf swings into.
     """
     return (1.0, 0.0) if wall.orientation == "v" else (0.0, 1.0)
 
@@ -457,13 +459,28 @@ def _door_record(wall: RevitWall, o: RevitOpening, a: float, b: float,
     }
 
 
-def _swing_out(wall: RevitWall, o: RevitOpening, room_pt: dict) -> tuple[float, float]:
-    """The across-wall unit vector toward the side the leaf swings, deterministically.
+def _leaf_out(plan: Barndominium, wall: RevitWall, o: RevitOpening, leaf: float,
+              room_pt: dict) -> tuple[float, float]:
+    """The across-wall unit vector toward the side a hinged leaf ``leaf`` ft wide
+    swings onto: the swing rule the plan drawings and the validator use
+    (:func:`barndsl.drawing.swing_side`). An exterior door swings into its room."""
+    a = plan.room(o.rooms[0]) if len(o.rooms) == 2 else None
+    b = plan.room(o.rooms[1]) if len(o.rooms) == 2 else None
+    if not o.exterior and a is not None and b is not None:
+        edge = shared_edge(a, b)
+        if edge is not None:
+            sgn = swing_side(o.swing_into, a, b, edge, leaf)
+            bx, by = _across_dir(wall)
+            return (bx * sgn, by * sgn)
+    return _swing_out(wall, o, room_pt)
 
-    An interior swing door with a known ``swing_into`` opens toward that room's
-    centre; otherwise (and for exterior doors, which swing inward toward their one
-    room) we pick the side of the room the door serves. With no room to consult we
-    fall back to the wall's arbitrary ``_across_dir``.
+
+def _swing_out(wall: RevitWall, o: RevitOpening, room_pt: dict) -> tuple[float, float]:
+    """The across-wall unit vector toward the room an opening serves.
+
+    Toward its ``swing_into`` room's centre when it names one, else toward its
+    first room — for an exterior door, the room it opens into. With no room to
+    consult we fall back to the wall's arbitrary ``_across_dir``.
     """
     base = _across_dir(wall)
     c = wall.const_coord
@@ -563,8 +580,8 @@ def _add_swing(scene: Scene, wall: RevitWall, o: RevitOpening,
     opposite jambs. French leaves carry the glass pane material so they read as
     a glazed pair. Each leaf's record lets the viewer swing it about its own hinge.
     """
-    out = _swing_out(wall, o, room_pt)
     double = o.kind in ("double", "french")
+    out = _leaf_out(scene.plan, wall, o, (b - a) / 2.0 if double else b - a, room_pt)
     glassy = o.kind == "french"
     leaf_mat = GLASS_MATERIAL if glassy else DOOR_MATERIAL
     if double:

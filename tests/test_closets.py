@@ -163,8 +163,10 @@ def test_window_in_a_closet_is_an_info_nudge():
 
 
 def test_swing_hint_now_recommends_the_real_bifold_grammar():
-    # CLOSET_DOOR_SWING's fix used to name a kind the grammar didn't have.
-    plan = _reach_in({"width": 3.5, "offset": 1.0})  # 3.5 ft leaf > 3 ft depth
+    # CLOSET_DOOR_SWING's fix used to name a kind the grammar didn't have. The
+    # leaf must swing into the closet to fill it: left to default, a leaf too
+    # wide for the closet opens into the bedroom instead.
+    plan = _reach_in({"width": 3.5, "offset": 1.0, "swing_into": "closet"})  # 3.5 ft > 3 ft depth
     issues = _issues(plan, "CLOSET_DOOR_SWING")
     assert issues and "bifold" in issues[0].hint
 
