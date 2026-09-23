@@ -44,11 +44,11 @@ import re
 from dataclasses import dataclass
 
 from .compiler import (
-    _PLACEMENT,
+    PLACEMENT_ANCHORS,
     CompileResult,
-    _parse_ft_in,
-    _tokenize_line,
     compile_source,
+    parse_ft_in,
+    tokenize_line,
 )
 from .elements import ALARM_KINDS, LIGHT_KINDS, RoomType
 from .geometry import door_offset, shared_edge, wall_segment
@@ -491,7 +491,7 @@ def _as_feet(text: str) -> float:
     try:
         return float(text)
     except ValueError:
-        v = _parse_ft_in(text)
+        v = parse_ft_in(text)
         return v if v is not None else 0.0
 
 
@@ -799,7 +799,7 @@ def _validate_add_room_placement(edit: Edit) -> EditError | None:
             return EditError("malformed", "add_room `at` needs finite x and y")
         return None
     if edit.anchor is not None:
-        if edit.anchor not in _PLACEMENT:
+        if edit.anchor not in PLACEMENT_ANCHORS:
             return EditError("bad_value", f"unknown anchor {edit.anchor!r}")
         if not edit.of:
             return EditError("malformed", "add_room anchor needs an `of` room")
@@ -1172,7 +1172,7 @@ def _move_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
 
     lines = _lines(source)
     raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     size_idx = _room_size_index(toks)
     placement = toks[3:size_idx]
     if placement and placement[0].text.lower() == "at":
@@ -1209,7 +1209,7 @@ def _resize_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
 
     lines = _lines(source)
     raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     size_idx = _room_size_index(toks)
     wt, lt = toks[size_idx + 1], toks[size_idx + 3]  # size <W> x <L>
     newraw = _splice(raw, [
@@ -1247,7 +1247,7 @@ def _move_opening(source: str, result: CompileResult, edit: Edit) -> EditResult:
 
     lines = _lines(source)
     raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     off_num = _offset_number_token(toks)
     if off_num is not None:
         newraw = _splice(raw, [(off_num.col - 1, off_num.end_col - 1, _fmt(target))])
@@ -1325,7 +1325,7 @@ def _move_fixture(source: str, result: CompileResult, edit: Edit) -> EditResult:
     tx, ty = float(edit.x), float(edit.y)  # type: ignore[arg-type]
     lines = _lines(source)
     raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
 
     along_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "along"), None)
     if along_idx is not None:
@@ -1440,7 +1440,7 @@ def _room_ref_indices(toks: list) -> list[int]:
 
 def _room_statement_refs(toks: list) -> list[int]:
     refs = [1]  # the room being defined
-    refs.extend(i + 1 for i in range(3, len(toks)) if toks[i].text.lower() in _PLACEMENT and i + 1 < len(toks))
+    refs.extend(i + 1 for i in range(3, len(toks)) if toks[i].text.lower() in PLACEMENT_ANCHORS and i + 1 < len(toks))
     return refs
 
 
@@ -1541,7 +1541,7 @@ def _set_room_type(source: str, result: CompileResult, edit: Edit) -> EditResult
                           summary=f"{edit.room} already a {new_type}")
     lines = _lines(source)
     raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     tt = toks[2]  # `room <id>: <type> …`
     lines[line_no - 1] = _splice(raw, [(tt.col - 1, tt.end_col - 1, new_type)])
     return EditResult("\n".join(lines), changed=True, line=line_no,
@@ -1568,7 +1568,7 @@ def _rename_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
     lines = _lines(source)
     touched = 0
     for idx, raw in enumerate(lines):
-        toks = _tokenize_line(raw, idx + 1)
+        toks = tokenize_line(raw, idx + 1)
         edits = [
             (t.col - 1, t.end_col - 1, new)
             for ri in _room_ref_indices(toks)
@@ -1585,7 +1585,7 @@ def _rename_room(source: str, result: CompileResult, edit: Edit) -> EditResult:
 def _envelope_line(lines: list[str]) -> int | None:
     """The 1-based line of the ``envelope`` statement, or ``None``."""
     for i, raw in enumerate(lines, start=1):
-        toks = _tokenize_line(raw, i)
+        toks = tokenize_line(raw, i)
         if toks and toks[0].text.lower() == "envelope":
             return i
     return None
@@ -1733,7 +1733,7 @@ def _fit_envelope(source: str, result: CompileResult, edit: Edit) -> EditResult:
         ny = min(max(0.0, ny), max(0.0, env_l - nl))
         line_no = result.room_lines[r.id]
         raw = lines[line_no - 1]
-        toks = _tokenize_line(raw, line_no)
+        toks = tokenize_line(raw, line_no)
         size_idx = _room_size_index(toks)
         placement = toks[3:size_idx]
         wt, lt = toks[size_idx + 1], toks[size_idx + 3]  # size <W> x <L>
@@ -1821,7 +1821,7 @@ def _room_membership_rewrites(plan, lines: list[str], rid: str) -> tuple[set[int
             gone.add(group.id)
             continue
         raw = lines[group.line - 1]
-        toks = _tokenize_line(raw, group.line)
+        toks = tokenize_line(raw, group.line)
         members = [toks[i] for i in _members_statement_refs(toks)]
         kept = " ".join(t.text for t in members if t.text not in gone)
         # Keep everything before the first member (`suite s: `) and after the
@@ -1846,7 +1846,7 @@ def _anchor_conversion_for_room(other, result: CompileResult, lines: list[str], 
     line_no = result.room_lines.get(other.id)
     if line_no is None or line_no in delete:
         return None
-    toks = _tokenize_line(lines[line_no - 1], line_no)
+    toks = tokenize_line(lines[line_no - 1], line_no)
     anchors = [i for i in _room_ref_indices(toks) if i != 1]
     if not any(toks[i].text == rid for i in anchors):
         return None
@@ -1921,7 +1921,7 @@ def _apply_clause(raw: str, line_no: int, kw: str, value: str,
                   aliases: tuple[str, ...] = ()) -> str:
     """Rewrite the token after keyword ``kw`` (or any of ``aliases``) to ``value``,
     or, when the clause is absent, append ``kw value`` before any inline comment."""
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     names = (kw, *aliases)
     for i in range(len(toks) - 1):
         if toks[i].text.lower() in names:
@@ -1934,7 +1934,7 @@ def _apply_clause(raw: str, line_no: int, kw: str, value: str,
 def _remove_clause(raw: str, line_no: int, kw: str) -> str:
     """Delete a ``kw <value>`` pair (and the single space in front of it) from
     ``raw``; a no-op when the keyword isn't present."""
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     for i in range(len(toks) - 1):
         if toks[i].text.lower() == kw:
             start = toks[i].col - 1
@@ -2036,7 +2036,7 @@ def _fixture_seed_statement(edit: Edit, fixture, room, wall: str | None) -> str:
 def _rewrite_authored_fixture(source: str, edit: Edit, fixture, wall: str | None) -> EditResult:
     lines = _lines(source)
     raw = lines[fixture.source_line - 1]
-    toks = _tokenize_line(raw, fixture.source_line)
+    toks = tokenize_line(raw, fixture.source_line)
     along_idx = next((i for i, token in enumerate(toks) if token.text.lower() == "along"), None)
     if along_idx is not None:
         return _rewrite_counter_run_fixture(source, lines, raw, toks, along_idx, edit, fixture.source_line)
@@ -2098,7 +2098,7 @@ def _set_plan(source: str, result: CompileResult, edit: Edit) -> EditResult:
 
 def _statement_head_line(lines: list[str], name: str) -> int | None:
     for i, raw in enumerate(lines, start=1):
-        toks = _tokenize_line(raw, i)
+        toks = tokenize_line(raw, i)
         if toks and toks[0].text.lower() == name:
             return i
     return None
@@ -2110,7 +2110,7 @@ def _set_plan_name(lines: list[str], edit: Edit) -> EditError | None:
     line_no = _statement_head_line(lines, "plan")
     if line_no is None:
         return EditError("not_editable", "no `plan` line to rename")
-    toks = _tokenize_line(lines[line_no - 1], line_no)
+    toks = tokenize_line(lines[line_no - 1], line_no)
     name_token = next((token for token in toks[1:] if token.quoted), None)
     if name_token is None:
         return EditError("not_editable", "the `plan` line has no quoted name to rewrite")
@@ -2125,7 +2125,7 @@ def _set_plan_envelope(lines: list[str], edit: Edit) -> EditError | None:
     line_no = _statement_head_line(lines, "envelope")
     if line_no is None:
         return EditError("not_editable", "no `envelope` line to rewrite")
-    toks = _tokenize_line(lines[line_no - 1], line_no)  # envelope <W> x <L>
+    toks = tokenize_line(lines[line_no - 1], line_no)  # envelope <W> x <L>
     width_token, length_token = toks[1], toks[3]
     lines[line_no - 1] = _splice(lines[line_no - 1], [
         (width_token.col - 1, width_token.end_col - 1, _fmt(float(edit.env_w))),  # type: ignore[arg-type]
@@ -2149,7 +2149,7 @@ def _set_plan_ceiling(lines: list[str], edit: Edit) -> EditError | None:
 
 
 def _rewrite_ceiling_line(lines: list[str], line_no: int, ceiling: float) -> None:
-    toks = _tokenize_line(lines[line_no - 1], line_no)  # ceiling <H>
+    toks = tokenize_line(lines[line_no - 1], line_no)  # ceiling <H>
     height_token = toks[1]
     lines[line_no - 1] = _splice(lines[line_no - 1], [
         (height_token.col - 1, height_token.end_col - 1, _fmt(ceiling)),
@@ -2181,7 +2181,7 @@ def _note_target(result: CompileResult, index: int | None):
 
 def _plan_head_line(lines: list[str], name: str) -> int | None:
     for i, raw in enumerate(lines, start=1):
-        toks = _tokenize_line(raw, i)
+        toks = tokenize_line(raw, i)
         if toks and toks[0].text.lower() == name:
             return i
     return None
@@ -2218,7 +2218,7 @@ def _move_note(source: str, result: CompileResult, edit: Edit) -> EditResult:
                           summary=f"note already at {_fmt(tx)},{_fmt(ty)}")
     lines = _lines(source)
     raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     at_idx = next((i for i, t in enumerate(toks) if t.text.lower() == "at"), None)
     if at_idx is None or at_idx + 2 >= len(toks):
         return EditResult(source, error=EditError("not_editable",
@@ -2240,7 +2240,7 @@ def _set_note(source: str, result: CompileResult, edit: Edit) -> EditResult:
     nm, line_no = found
     lines = _lines(source)
     raw = lines[line_no - 1]
-    toks = _tokenize_line(raw, line_no)
+    toks = tokenize_line(raw, line_no)
     splices: list[tuple[int, int, str]] = []
     if edit.text is not None:
         qt = next((t for t in toks[1:] if t.quoted), None)
@@ -2529,10 +2529,10 @@ def _inline_use(source: str, result: CompileResult, edit: Edit) -> EditResult:
 def _with_comment(raw: str, stmt: str) -> str:
     """Replace ``raw``'s statement with ``stmt``, preserving any trailing comment
     and leading indentation."""
-    from .pragma import _comment_start
+    from .pragma import comment_start
 
     indent = raw[:len(raw) - len(raw.lstrip())]
-    cut = _comment_start(raw)
+    cut = comment_start(raw)
     comment = "" if cut is None else " " + raw[cut:].strip()
     return f"{indent}{stmt}{comment}"
 

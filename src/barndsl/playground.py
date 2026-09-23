@@ -122,9 +122,9 @@ from .render import (
     sheet_scale,
 )
 from .scaffold import starter_dsl
-from .schedule import _schedules
+from .schedule import schedule_tables
 from .score import design_score
-from .viewer import RENDERER_JS, _LAYER_LABELS, scene_json, viewer_html
+from .viewer import RENDERER_JS, LAYER_LABELS, scene_json, viewer_html
 from .views import elevation_svg, section_svg
 
 #: Maximum accepted request body (bytes) for POST /api/compile — a generous cap
@@ -602,7 +602,7 @@ def report_data(result: Any) -> dict:
                 "columns": [c.header for c in columns],
                 "rows": [[c.get(row) for c in columns] for row in rows],
             }
-            for title, columns, rows in _schedules(plan, True, True, True)
+            for title, columns, rows in schedule_tables(plan, True, True, True)
         ]
         areas = {
             "rooms": [
@@ -1389,7 +1389,7 @@ def render_app(initial_source: str, from_file: bool = False) -> str:
     return (
         _APP_HTML
         .replace("__RENDERER_JS__", RENDERER_JS)
-        .replace("__LAYER_LABELS__", json.dumps(_LAYER_LABELS))
+        .replace("__LAYER_LABELS__", json.dumps(LAYER_LABELS))
         .replace("__INITIAL_SOURCE__", _js_string(initial_source))
         .replace("__INITIAL_FROM_FILE__", "true" if from_file else "false")
         .replace("__SCAFFOLD_SOURCE__", _js_string(starter_dsl("My Barndo")))

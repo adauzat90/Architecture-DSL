@@ -222,7 +222,7 @@ inlines on every clean `compile_payload` (measured cheap: <1 ms and <8 KB for th
 gallery plans, so no second endpoint): the assembly **cost estimate**
 (`cost.estimate_cost` verbatim — total range, per-category breakdown, subtotals,
 $/sq ft and the planning-only disclaimer), the **door/window/room schedules**
-(`schedule._schedules` row builders), a per-room **areas** table whose total
+(`schedule.schedule_tables` row builders), a per-room **areas** table whose total
 reconciles with `metrics.assigned_sqft`, and — gated on a declared `climate` zone,
 skipped entirely otherwise — the IECC **envelope guidance** (`energy.envelope_targets`
 / `describe_targets`). No pricing or geometry is recomputed; a source module that

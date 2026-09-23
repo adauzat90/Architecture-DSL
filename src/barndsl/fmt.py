@@ -24,7 +24,7 @@ format_source(x)``.
 
 from __future__ import annotations
 
-from .compiler import STATEMENT_KEYWORDS, _parse_ft_in
+from .compiler import STATEMENT_KEYWORDS, parse_ft_in
 
 _KEYWORD_SET = frozenset(STATEMENT_KEYWORDS)
 #: Braces are optional syntactic sugar the lexer drops; the canonical form omits
@@ -63,7 +63,7 @@ def _norm_word(text: str, is_first: bool) -> str:
         return f"{float(text):g}"
     except ValueError:
         pass
-    ft_in = _parse_ft_in(text)
+    ft_in = parse_ft_in(text)
     if ft_in is not None:
         return f"{ft_in:g}"
     return text

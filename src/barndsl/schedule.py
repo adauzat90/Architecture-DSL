@@ -293,7 +293,7 @@ _WINDOW_COLS = [
 ]
 
 
-def _schedules(plan: Barndominium, rooms: bool, doors: bool, windows: bool):
+def schedule_tables(plan: Barndominium, rooms: bool, doors: bool, windows: bool):
     """Yield ``(title, columns, rows)`` for each requested schedule."""
     if rooms:
         yield "Room Schedule", _ROOM_COLS, room_rows(plan)
@@ -323,7 +323,7 @@ def schedules_markdown(
 ) -> str:
     """Render the requested schedules as Markdown (one table each)."""
     blocks = [f"# {plan.name} — Schedules"]
-    for title, columns, rows in _schedules(plan, rooms, doors, windows):
+    for title, columns, rows in schedule_tables(plan, rooms, doors, windows):
         blocks.append(f"## {title} ({len(rows)})")
         blocks.append(_markdown_table(columns, rows))
     return "\n\n".join(blocks) + "\n"
@@ -341,7 +341,7 @@ def schedules_csv(
     buf = io.StringIO()
     writer = csv.writer(buf)
     first = True
-    for title, columns, rows in _schedules(plan, rooms, doors, windows):
+    for title, columns, rows in schedule_tables(plan, rooms, doors, windows):
         if not first:
             buf.write("\n")
         first = False

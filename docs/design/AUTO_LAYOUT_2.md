@@ -182,7 +182,7 @@ Inputs (extend today's `LayoutBrief`):
 Output: absolute room rectangles (`Room.x/y/width/length`) that tile the
 envelope, honor the adjacencies as shared walls, and put exterior-needing rooms
 on the boundary — emitted straight into the existing IR, then doors/openings are
-added exactly as v1 already does (`_connect_adjacencies`, `_add_openings`).
+added exactly as v1 already does (`connect_adjacencies`, `place_openings`).
 
 This is, precisely, the **rectangular floor-plan / rectangular-dual problem**
 from VLSI-CAD and computational geometry.
@@ -303,7 +303,7 @@ layout2/
   stgraph.py      # the st-graph intermediate + longest-path dimensioner
   dimension.py    # SizeProgram + st-graphs → absolute wall coordinates
   solve.py        # orchestration: try slicing → (Phase 2) dual → v1 fallback;
-                  #   build Barndominium, reuse v1 _connect_adjacencies/_add_openings
+                  #   build Barndominium, reuse v1 connect_adjacencies/place_openings
   __init__.py     # solve_layout2(brief) -> LayoutResult (same result type as v1)
 ```
 
@@ -321,7 +321,7 @@ LayoutBrief2 ──topology.py──▶ (Gh, Gv) st-graphs ──dimension.py─
 
 Reuse, don't reinvent: `geometry.shared_edge` (verify adjacencies), `validation`
 (the objective + post-check), `emit_dsl`/`render` (output), and v1's
-`_connect_adjacencies` / `_add_openings` (doors + openings are already solved).
+`connect_adjacencies` / `place_openings` (doors + openings are already solved).
 The result type stays `LayoutResult` so the CLI and callers don't change.
 
 ### 7.2 The shared core: *st*-graph dimensioning (no LP solver)

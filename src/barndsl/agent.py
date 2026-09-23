@@ -2186,7 +2186,7 @@ def _brief2_from_prose(text: str):
     rooms.append(("hall", "hallway", 150, 4))  # min 4 = comfort hallway width
     rooms.append(("master", "bedroom", 224, None))
     # A closet per bedroom, sitting in the private band beside its bedroom (the
-    # adjacency below makes it the bedroom's row-neighbour, and _connect_adjacencies
+    # adjacency below makes it the bedroom's row-neighbour, and connect_adjacencies
     # cuts the door NO_CLOSET wants). The master gets a walk-in (min 4 ft so it isn't
     # a strip); the secondary bedrooms get reach-ins. Sizing rides the same area
     # scale as every other room, so the totals still track the stated floor area.
@@ -2240,7 +2240,7 @@ def _brief2_from_prose(text: str):
     if ensuite:
         lines.append("adjacent master mbath")
     # Each bedroom doors into its own closet (what NO_CLOSET checks for). The
-    # closet chains beside its bedroom in the private band, so _connect_adjacencies
+    # closet chains beside its bedroom in the private band, so connect_adjacencies
     # cuts the door on their shared wall.
     lines.append("adjacent master mcloset")
     for i in range(2, beds + 1):

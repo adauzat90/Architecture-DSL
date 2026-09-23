@@ -49,9 +49,9 @@ from .layout import (
     LayoutBrief,
     LayoutResult,
     RoomSpec,
-    _add_openings,
-    _connect_adjacencies,
-    _relieve_kitchen_passthrough,
+    place_openings,
+    connect_adjacencies,
+    relieve_kitchen_passthrough,
     kitchen_is_a_corridor,
     parse_brief_fields,
 )
@@ -598,7 +598,7 @@ def _finalize(
     # Reuse v1's door + opening logic by lowering to a v1 brief (final sizes).
     v1 = _as_v1_brief(brief, placed)
     v1_by_id = {s.id: s for s in v1.rooms}
-    satisfied, unsatisfied = _connect_adjacencies(plan, v1, v1_by_id)
+    satisfied, unsatisfied = connect_adjacencies(plan, v1, v1_by_id)
     # The tiling is one physically-connected mass, but the *door* graph can split
     # when a requested adjacency couldn't be honoured (e.g. a room can't be a row
     # neighbour of all three of its requested neighbours). Add the fewest doors on
@@ -610,7 +610,7 @@ def _finalize(
         )
     # Banding the public core as `living | kitchen | dining` leaves the kitchen as
     # the only route between its neighbours; give traffic a way around it.
-    bypassed = _relieve_kitchen_passthrough(plan)
+    bypassed = relieve_kitchen_passthrough(plan)
     if bypassed:
         notes.append(
             f"Added {bypassed} door(s) so traffic can bypass the kitchen work zone."
@@ -618,7 +618,7 @@ def _finalize(
     if brief.add_openings:
         if v1.entry_room is None:  # entry on a room connected to the rest
             v1.entry_room = _pick_connected_entry(plan)
-        _add_openings(plan, v1, v1_by_id, notes)
+        place_openings(plan, v1, v1_by_id, notes)
 
     return LayoutResult(plan, satisfied, unsatisfied, notes)
 

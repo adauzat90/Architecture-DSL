@@ -1332,7 +1332,7 @@ def effective_linear(material: Material, tint: str | None = None) -> list[float]
 # --- glTF space transform ----------------------------------------------------
 
 
-def _to_gltf(p) -> tuple[float, float, float]:
+def gltf_point(p) -> tuple[float, float, float]:
     """Plan ``(x, y, z)`` → glTF ``(x, z, -y)`` (y-up, right-handed)."""
     return (p[0], p[2], -p[1])
 
@@ -1393,8 +1393,8 @@ def _build_gltf(plan: Barndominium) -> tuple[dict, bytes]:
 
     layer_children: dict[str, list[int]] = {ly: [] for ly in Scene.LAYERS}
     for n in live:
-        verts = [_to_gltf(p) for p in n.positions]
-        norms = [_to_gltf(v) for v in n.normals]
+        verts = [gltf_point(p) for p in n.positions]
+        norms = [gltf_point(v) for v in n.normals]
         pos_bytes = b"".join(struct.pack("<3f", *v) for v in verts)
         nrm_bytes = b"".join(struct.pack("<3f", *v) for v in norms)
         idx_bytes = b"".join(struct.pack("<I", i) for i in n.indices)

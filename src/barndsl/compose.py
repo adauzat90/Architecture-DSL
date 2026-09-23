@@ -731,7 +731,7 @@ def _xform_fixture(xf: _Xform, f: PlacedFixture, alias: str, dims: dict) -> Plac
     remaps. Auto-placed fixtures (no ``at``) keep ``None`` x/y — they re-seed from
     the transformed room — with only wall/rotation remapped.
     """
-    from .fixtures import FIXTURES, _quarter_turns
+    from .fixtures import FIXTURES, quarter_turns
 
     if f.along is not None:
         # An `along` counter run: remap the run's wall and its span. A full-wall run
@@ -763,7 +763,7 @@ def _xform_fixture(xf: _Xform, f: PlacedFixture, alias: str, dims: dict) -> Plac
         spec = FIXTURES.get(f.kind)
         fw = float(f.width) if f.width else (spec.width if spec else 1.0)
         fd = spec.depth if spec else 1.0
-        if _quarter_turns(f.rotation) % 2 == 1:
+        if quarter_turns(f.rotation) % 2 == 1:
             fw, fd = fd, fw
         bx, by, _bw, _bl = xf.rect(f.x, f.y, fw, fd, rw, rl)
         nx, ny = bx, by
@@ -774,7 +774,7 @@ def _xform_fixture(xf: _Xform, f: PlacedFixture, alias: str, dims: dict) -> Plac
         rw, rl = dims.get(f.room, (0.0, 0.0))
         spec = FIXTURES.get(f.kind)
         fw = float(f.width) if f.width else (spec.width if spec else 1.0)
-        if _quarter_turns(f.rotation) % 2 == 1:
+        if quarter_turns(f.rotation) % 2 == 1:
             fw = spec.depth if spec else 1.0
         _nw, new_off = _remap_wall_offset(xf, f.wall, f.offset, fw, rw, rl)
     return dataclasses.replace(
@@ -823,12 +823,12 @@ def _prefix_part_internal(
 def _param_undeclared(use: UseSpec, key: str, declared: dict[str, float]) -> Issue:
     """A ``PARAM_UNDECLARED`` for a ``with`` key the part doesn't declare, anchored
     to the ``use`` line (Phase 20)."""
-    from .compiler import _did_you_mean
+    from .compiler import did_you_mean
 
     known = ", ".join(declared) if declared else "(none)"
     return Issue(
         Severity.ERROR, "PARAM_UNDECLARED",
-        f"{_did_you_mean(key, tuple(declared))}"
+        f"{did_you_mean(key, tuple(declared))}"
         f"part \"{use.relpath}\" declares no param '{key}'.",
         line=use.line, col=use.col, end_col=use.end_col,
         hint=f"The part's params are: {known}. Add `param {key} = <number>` to the "
@@ -842,7 +842,8 @@ def compose_uses(
     diagnostics: list[Issue],
     profile: object | None = None,
     *,
-    ctx: "_ComposeCtx | None" = None,
+    ctx: object | None = None,
+    self_path: str | None = None,
 ) -> Composition:
     """Resolve and stamp every ``use`` on ``plan`` (in place), appending
     resolution errors and (deduped) part-internal diagnostics to ``diagnostics``.
@@ -852,13 +853,15 @@ def compose_uses(
     the caller uses to reclassify the composed plan's stamped-room diagnostics.
 
     ``ctx`` (Phase 20) carries the nested-composition recursion state (sandbox
-    root, depth, cycle stack, shared memo + instance budget); ``None`` builds a
-    fresh top-level context from ``base_dir``. A part being composed (``depth ≥
-    1``) folds its parts' findings with the alias re-prefixed onto the room, so the
-    parent's one-level dedup composes across depths.
+    root, depth, cycle stack, shared memo + instance budget) through a nested
+    part's compile; anything else builds a fresh top-level context from
+    ``base_dir``, with ``self_path`` (the file being compiled) on the cycle stack.
+    A part being composed (``depth ≥ 1``) folds its parts' findings with the alias
+    re-prefixed onto the room, so the parent's one-level dedup composes across
+    depths.
     """
-    if ctx is None:
-        ctx = _ComposeCtx.top_level(base_dir, None)
+    if not isinstance(ctx, _ComposeCtx):
+        ctx = _ComposeCtx.top_level(base_dir, self_path)
     prefix_room = ctx.depth >= 1
     comp = Composition()
     aliases_seen: set[str] = set()

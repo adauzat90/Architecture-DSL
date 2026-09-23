@@ -61,6 +61,7 @@ from .geometry import (
     door_span,
     opening_endpoints,
     point_in_footprint,
+    point_rect_distance,
     rect_in_footprint,
     shared_edge,
     wall_faces_outside,
@@ -1453,15 +1454,6 @@ def _orphan_site_features(ss):
     return out
 
 
-def _pt_rect_dist(px: float, py: float, rect: tuple[float, float, float, float]) -> float:
-    """Distance from point ``(px, py)`` to axis-aligned rect ``(x1, y1, x2, y2)``
-    (0 if the point is inside)."""
-    x1, y1, x2, y2 = rect
-    dx = max(x1 - px, 0.0, px - x2)
-    dy = max(y1 - py, 0.0, py - y2)
-    return math.hypot(dx, dy)
-
-
 def _door_lot_point(room, door, bx: float, by: float) -> tuple[float, float]:
     """The midpoint of an exterior door, in lot feet (building origin at bx,by)."""
     mid = door.offset + door.width / 2.0
@@ -1525,7 +1517,7 @@ def _validate_well_septic_clearance(ss, add) -> None:
     sep = WELL_SEPTIC_MIN_SEPARATION
     for well in ss.wells:
         for septic in ss.septics:
-            dist = min(_pt_rect_dist(well.x, well.y, rect) for rect in septic.rects())
+            dist = min(point_rect_distance(well.x, well.y, rect) for rect in septic.rects())
             if dist < sep - EPSILON:
                 _add_well_septic_issue(well, septic, dist, sep, add)
 
@@ -1550,7 +1542,7 @@ def _validate_drive_door_access(plan: Barndominium, ss, bx: float, by: float, ad
     door_pts = _exterior_door_points(plan, bx, by)
     drive_rects = [(drive.x, drive.y, drive.x2, drive.y2) for drive in ss.drives]
     served = bool(ss.walks) or any(
-        min(_pt_rect_dist(px, py, rect) for rect in drive_rects) <= DRIVE_DOOR_REACH + EPSILON
+        min(point_rect_distance(px, py, rect) for rect in drive_rects) <= DRIVE_DOOR_REACH + EPSILON
         for _, (px, py) in door_pts
     )
     if door_pts and not served:
@@ -1669,7 +1661,7 @@ def _validate_porch_guards(plan: Barndominium, add) -> None:
         )
 
 
-def _largest_void(plan: Barndominium) -> tuple[float, tuple[float, float, float, float] | None]:
+def largest_void(plan: Barndominium) -> tuple[float, tuple[float, float, float, float] | None]:
     """The largest *connected* patch of footprint assigned to no room."""
     sections = plan.footprint_sections()
     if not sections:
@@ -1952,7 +1944,7 @@ def _validate_concentrated_void(plan: Barndominium, frac: float, add) -> None:
     # gap on its own so a room-sized rectangle of nothing is still visible.
     if frac > 1.001:
         return
-    void_area, bbox = _largest_void(plan)
+    void_area, bbox = largest_void(plan)
     if void_area < MIN_VOID_NOTE or bbox is None:
         return
     x1, y1, x2, y2 = bbox
@@ -4956,7 +4948,7 @@ def _dq_office_clearance(plan: Barndominium, graph, by_id, add) -> None:
     #     the clear (finish-face) interior, subtracts the door-swing keepouts the
     #     auto-placer already computes, and asks whether the desk box still fits
     #     against any of the four walls. INFO — livability guidance, not a gate.
-    from .fixtures import _door_swing_rects
+    from .fixtures import door_swing_rects
 
     need_along = DESK_WIDTH  # the desk's width runs along the wall
     need_deep = DESK_DEPTH + DESK_CHAIR_PULL  # desk depth + chair-pull off the wall
@@ -4966,7 +4958,7 @@ def _dq_office_clearance(plan: Barndominium, graph, by_id, add) -> None:
         x0, y0, cw, cl = clear_box(plan, room)
         if cw <= EPSILON or cl <= EPSILON:
             continue
-        keepouts = _door_swing_rects(plan, room)
+        keepouts = door_swing_rects(plan, room)
         if _desk_fits(x0, y0, cw, cl, need_along, need_deep, keepouts):
             continue
         add(

@@ -80,17 +80,24 @@ def _expand_paths(items: list[str]) -> list[Path]:
 # --- repo audit --------------------------------------------------------------
 
 
-def _literal_issue_sites() -> dict[str, dict[str, set[str]]]:
+def _src_trees() -> dict[Path, ast.Module]:
+    """Every ``src/barndsl`` module, parsed once for the audit's AST checks."""
+    trees: dict[Path, ast.Module] = {}
+    for path in sorted((SRC / "barndsl").glob("*.py")):
+        try:
+            trees[path] = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+    return trees
+
+
+def _literal_issue_sites(trees: dict[Path, ast.Module] | None = None) -> dict[str, dict[str, set[str]]]:
     """``{rel_path: {CODE: {severity, …}}}`` for every ``Issue(sev, "CODE", …)``
     call with a literal code in ``src/barndsl``. The severity is the lowercased
     ``Severity.<NAME>`` when the first argument is literal, else ``"computed"``."""
     out: dict[str, dict[str, set[str]]] = {}
-    for path in sorted((SRC / "barndsl").glob("*.py")):
+    for path, tree in (_src_trees() if trees is None else trees).items():
         if path.name == "diagnostics.py":
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:
             continue
         sites: dict[str, set[str]] = {}
         for node in ast.walk(tree):
@@ -117,6 +124,28 @@ def _literal_issue_sites() -> dict[str, dict[str, set[str]]]:
 
 def _literal_issue_codes() -> dict[str, list[str]]:
     return {path: sorted(sites) for path, sites in _literal_issue_sites().items()}
+
+
+def _private_imports(trees: dict[Path, ast.Module] | None = None) -> list[str]:
+    """Every import of another barndsl module's ``_private`` name in
+    ``src/barndsl``, as ``path:line imports module._name``. A helper two modules
+    share needs a public name (and a test) first."""
+    found: list[str] = []
+    for path, tree in (_src_trees() if trees is None else trees).items():
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if not (node.level or node.module == "barndsl" or node.module.startswith("barndsl.")):
+                continue  # stdlib or a third-party import
+            module = node.module.rsplit(".", 1)[-1]
+            if module == path.stem:
+                continue
+            found.extend(
+                f"{Path(_rel(path)).as_posix()}:{node.lineno} imports {module}.{alias.name}"
+                for alias in node.names
+                if alias.name.startswith("_") and not alias.name.startswith("__")
+            )
+    return found
 
 
 def _severity_drift(issue_sites: dict[str, dict[str, set[str]]]) -> list[str]:
@@ -167,7 +196,9 @@ def _matrix_drift() -> dict[str, list[str]]:
 
 
 def repo_audit() -> dict[str, Any]:
-    issue_sites = _literal_issue_sites()  # one AST pass over src/barndsl
+    trees = _src_trees()  # one parse of src/barndsl for every AST check
+    issue_sites = _literal_issue_sites(trees)
+    private_imports = _private_imports(trees)
     emitted = {c for sites in issue_sites.values() for c in sites}
     registered = set(REGISTRY)
     wiring = _statement_wiring()
@@ -208,6 +239,11 @@ def repo_audit() -> dict[str, Any]:
             "docs/DIAGNOSTIC_MATRIX.md is out of date (run `barndsl dev diag-matrix --out docs/DIAGNOSTIC_MATRIX.md`): "
             + ", ".join([*(f"+{c}" for c in matrix["missing"]), *(f"-{c}" for c in matrix["stale"])])
         )
+    if private_imports:
+        problems.append(
+            "modules import another module's private names (give the helper a public name): "
+            + ", ".join(private_imports)
+        )
 
     return {
         "ok": not problems,
@@ -229,6 +265,7 @@ def repo_audit() -> dict[str, Any]:
             "matrix_missing": matrix["missing"],
             "matrix_stale": matrix["stale"],
         },
+        "modules": {"private_imports": private_imports},
         "artifacts": {"pyc_sample": pyc, "agent_run_root_artifacts": agent_artifacts},
     }
 

@@ -294,10 +294,10 @@ def test_single_level_plan_walls_are_unchanged_plate_high_boxes():
 
 
 def test_y_up_mapping_sends_north_to_minus_z():
-    from barndsl.gltf import _to_gltf
+    from barndsl.gltf import gltf_point
 
     # Plan +y is north, +z is up. glTF is y-up: north → -z, up → +y.
-    assert _to_gltf((3.0, 5.0, 7.0)) == (3.0, 7.0, -5.0)
+    assert gltf_point((3.0, 5.0, 7.0)) == (3.0, 7.0, -5.0)
 
 
 def test_units_are_feet_in_asset_extras():

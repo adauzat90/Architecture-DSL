@@ -71,7 +71,7 @@ class AcceptPragma:
     pragma_line: int
 
 
-def _comment_start(line: str) -> int | None:
+def comment_start(line: str) -> int | None:
     """Index of the first ``#`` that begins a comment (not one inside a string),
     or ``None``. Mirrors the lexer's quote handling so a ``#`` in a quoted value
     (``note "a # b"``) isn't mistaken for a comment."""
@@ -96,7 +96,7 @@ def _comment_start(line: str) -> int | None:
 def _is_statement(line: str) -> bool:
     """True if ``line`` carries a statement (non-blank content before any
     comment). Matches ``compile_source``'s own notion of a statement line."""
-    cut = _comment_start(line)
+    cut = comment_start(line)
     head = line if cut is None else line[:cut]
     return bool(head.strip())
 
@@ -110,7 +110,7 @@ def parse_pragmas(source: str) -> list[AcceptPragma]:
     pragmas: list[AcceptPragma] = []
     for idx, raw in enumerate(lines):
         lineno = idx + 1
-        cut = _comment_start(raw)
+        cut = comment_start(raw)
         if cut is None:
             continue
         comment = raw[cut + 1:]

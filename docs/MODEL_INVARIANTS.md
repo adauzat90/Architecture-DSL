@@ -65,5 +65,6 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 ## Harness expectations
 
 - Prefer repo-native JSON helpers in `src/barndsl/devtools.py` over ad-hoc scripts.
+- No `src/barndsl` module imports another module's `_private` name. A helper two modules share gets a public name and a test; `barndsl dev audit` (and so `doctor`) fails otherwise.
 - Use `barndsl dev locate`, `barndsl dev diag-matrix`, and `barndsl dev fixtures` before changing unfamiliar features or rules.
 - Run `barndsl dev doctor` after architecture-affecting changes and add `--export-plan examples/gallery/lshape.barn` for geometry/export changes.

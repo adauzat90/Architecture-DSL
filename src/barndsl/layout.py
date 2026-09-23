@@ -181,14 +181,14 @@ def solve_layout(brief: LayoutBrief) -> LayoutResult:
     for spec in specs:
         plan.rooms.append(placed[spec.id])
 
-    satisfied, unsatisfied = _connect_adjacencies(plan, brief, by_id)
-    bypassed = _relieve_kitchen_passthrough(plan)
+    satisfied, unsatisfied = connect_adjacencies(plan, brief, by_id)
+    bypassed = relieve_kitchen_passthrough(plan)
     if bypassed:
         notes.append(
             f"Added {bypassed} door(s) so traffic can bypass the kitchen work zone."
         )
     if brief.add_openings:
-        _add_openings(plan, brief, by_id, notes)
+        place_openings(plan, brief, by_id, notes)
 
     return LayoutResult(plan, satisfied, unsatisfied, notes)
 
@@ -298,7 +298,7 @@ def _abut_candidates(a: Room, w: float, l: float) -> list[tuple[float, float]]:
     return out
 
 
-def _connect_adjacencies(
+def connect_adjacencies(
     plan: Barndominium, brief: LayoutBrief, by_id: dict[str, RoomSpec]
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Add a door for every requested adjacency whose rooms share a wall."""
@@ -334,7 +334,7 @@ def _connect_adjacencies(
     return satisfied, unsatisfied
 
 
-def _relieve_kitchen_passthrough(plan: Barndominium, min_wall: float = inches(32)) -> int:
+def relieve_kitchen_passthrough(plan: Barndominium, min_wall: float = inches(32)) -> int:
     """Give traffic a way past the kitchen, and return how many doors that took.
 
     A kitchen that is the *only* route between the dining room and the living /
@@ -432,7 +432,7 @@ def _kitchen_bypass_wall(
 # --- openings ---------------------------------------------------------------
 
 
-def _add_openings(
+def place_openings(
     plan: Barndominium,
     brief: LayoutBrief,
     by_id: dict[str, RoomSpec],
