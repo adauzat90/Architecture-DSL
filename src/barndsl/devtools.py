@@ -866,7 +866,7 @@ def doctor(
     add("lsp_smoke", lsp["ok"], {"basic_ok": lsp["basic_ok"], "composed_ok": lsp["composed_ok"], "strict_composed": lsp["strict_composed"]})
 
     impact = impact_tests(run=run_impact)
-    impact_details = {k: impact.get(k) for k in ("changed", "targets", "exit") if k in impact}
+    impact_details: dict[str, Any] = {k: impact.get(k) for k in ("changed", "targets", "exit") if k in impact}
     if run_impact:
         impact_details["stdout_tail"] = (impact.get("stdout") or "")[-4000:]
         impact_details["stderr_tail"] = (impact.get("stderr") or "")[-4000:]
