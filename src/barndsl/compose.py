@@ -81,7 +81,7 @@ PART_LOCAL_CODES = frozenset({
     # room overlaps within the part
     "OVERLAP",
     # devices (room-local rules)
-    "OUTLET_SPACING", "OUTLET_GFCI", "ROOM_NO_LIGHT",
+    "OUTLET_SPACING", "OUTLET_GFCI", "ROOM_NO_LIGHT", "DEVICE_ROOM",
 })
 
 

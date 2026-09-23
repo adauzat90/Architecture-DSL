@@ -584,9 +584,9 @@ def test_quickfix_parity_with_playground_js():
     statement-head set the playground injects as ``HIGHLIGHT.statements``)."""
     import re
 
-    from barndsl.playground import _STATEMENT_KEYWORDS
+    from barndsl.compiler import STATEMENT_KEYWORDS
 
-    stmt = set(_STATEMENT_KEYWORDS)
+    stmt = set(STATEMENT_KEYWORDS)
     placeholder = re.compile(r"\.\.\.|…|[<>]")
     example_lead = re.compile(r"(?:e\.g\.|for example|like)[\s,]*$", re.IGNORECASE)
 

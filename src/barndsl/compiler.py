@@ -7,41 +7,10 @@ returns a :class:`CompileResult` whose diagnostics carry line numbers, error
 codes, and concrete fix hints — like a compiler's error output. That diagnostic
 stream is what guides an author (or an agent) toward a correct design.
 
-Grammar (one statement per line; ``#`` starts a comment; ``{`` ``}`` optional)::
-
-    plan "Name"
-    envelope <W> x <L>
-    wing <W> x <L> at <x>,<y>          # optional — L/T/U footprint extensions
-    ceiling <H>
-    note "free text" [at <x>,<y> [level <n>]]  # design note; positioned = a plan leader callout
-    require adjacent|separate <a> <b>  # declared spatial intent, checked vs the plan
-    require exterior <room> [<wall>]   # (also: require area <room> >= <sqft>)
-    room <id>: <type> <placement> size <W> x <L> [level <n>]
-    wall <id_a> - <id_b> plumbing|bearing|rated   # attribute(s) of the shared wall
-    door <id_a> - <id_b> [width <w>] [offset <o>] [into <room>] [hinge near|far]
-    door <id> <wall> overhead [width <w>] [height <h>] [offset <o>]  # sectional garage door
-    open <id_a> - <id_b> [width <w>] [offset <o>]   # cased opening / walk-through (no leaf)
-    entry <id> <wall> [double|french] [width <w>] [offset <o>] [no-egress]
-    window <id> <wall> [casement|slider|fixed|double-hung] [width <w>] [offset <o>] [sill <s>] [head <h>]
-    porch <id> at <x>,<y> size <W> x <L> [covered|open]
-    stair <id> at <x>,<y> size <W> x <L> [from <lo>] [to <hi>]
-    fixture <kind> in <room> [at <x>,<y>] [wall N|S|E|W [offset <ft>]] [rotate <deg>]  # place a fixture/furnishing
-    use "<relpath>" as <alias> at <x>,<y> [level <n>] [mirror x|y] [rotate 90|180|270]  # stamp a part
-    outlet in <room> wall N|S|E|W offset <ft> [gfci]      # receptacle on a room wall
-    switch in <room> wall N|S|E|W offset <ft>             # wall switch
-    light in <room> at <x>,<y> [kind ceiling|pendant|fan|recessed]  # ceiling luminaire (room-local x,y)
-    alarm smoke|co|smoke_co in <room> [at <x>,<y>]        # smoke/CO alarm (room-level, IRC R314/R315)
-    building at <x>,<y>                # optional — place the building's SW corner on the lot
-    frame [bay <ft>] [span <ft>] [post <in>] [no-ridge]   # auto post-and-beam frame
-    roof gable|shed|monitor [pitch <rise:run>]            # optional roof form (default gable)
-
-``<placement>`` is ``at <x>,<y>`` (absolute), ``east-of|west-of|north-of|
-south-of <room>`` (abut an already-defined room), or one of each to pin a corner.
-
-Coordinates are in feet; origin (0,0) is the south-west corner, x→east, y→north.
-``<type>`` is a RoomType value (living, great_room, kitchen, bedroom,
-bathroom, foyer, storage, safe_room, shop, …); ``<wall>`` is
-north|south|east|west.
+The grammar — one statement per line, ``#`` starts a comment — is documented once,
+in :data:`DSL_REFERENCE` (the text agents, ``barndsl`` docs and LSP hover all
+read); the statements themselves are the keys of :data:`_STATEMENT_PARSERS`,
+exported as :data:`STATEMENT_KEYWORDS`.
 
 Any LENGTH field (a size, position, offset, width, setback, ceiling…) accepts a
 feet-and-inches literal as well as decimal feet: ``12-6`` (= 12′6″ = 12.5 ft),
@@ -58,8 +27,9 @@ import math
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from .constants import WALK_DEFAULT_WIDTH
 from .elements import (
@@ -86,27 +56,25 @@ from .validation import Issue, Severity, ValidationReport, validate
 if TYPE_CHECKING:  # the annotation-only import; runtime resolution is lazy
     from .profiles import Profile
 
-# Statement keywords, for "unknown statement" hints.
-_KEYWORDS = (
-    "plan", "envelope", "wing", "ceiling", "floor", "note", "program", "require",
-    "room", "wall", "door", "open", "entry", "window", "porch", "stair", "frame",
-    "roof", "orientation", "finish", "accessible", "site", "setback", "building",
-    "suite", "zone", "electrical", "street", "overhang", "climate", "fixture",
-    "outlet", "switch", "light", "alarm", "use", "param",
-    "drive", "walk", "well", "septic", "service", "grade",
-)
-
 #: Statements that describe a whole *building*, not a reusable block — illegal
 #: inside a part file (fragment mode) → ``PART_HOST_STMT``. A part borrows the
 #: host's. ``use`` is legal in a part (Phase 20 — nested composition, depth ≤ 2,
 #: guarded by :func:`barndsl.compose.compose_uses`); ``stair`` is legal too (Phase
 #: 20 — multi-level parts, a part may carry ``level 1`` rooms + a connecting
-#: stair). See the design doc §3.1.
-_HOST_ONLY = frozenset({
-    "plan", "envelope", "wing", "ceiling", "program", "require", "site",
+#: stair). See the design doc §3.1. Every statement is classified as exactly one
+#: of this set or :data:`PART_STATEMENTS` (the tests enforce it), so a new
+#: building-wide statement can't be silently dropped from a part.
+HOST_ONLY_STATEMENTS = frozenset({
+    "plan", "envelope", "wing", "ceiling", "floor", "program", "require", "site",
     "setback", "building", "street", "orientation", "roof", "overhang",
-    "finish", "frame", "electrical",
+    "finish", "frame", "electrical", "accessible", "climate",
     "drive", "walk", "well", "septic", "service", "grade",
+})
+
+#: Statements a part file may carry: its rooms and everything hung on them.
+PART_STATEMENTS = frozenset({
+    "note", "room", "wall", "door", "open", "entry", "window", "porch", "stair",
+    "suite", "zone", "fixture", "outlet", "switch", "light", "alarm", "use", "param",
 })
 
 #: Single-letter wall aliases the `fixture` statement accepts (N|S|E|W), plus the
@@ -880,6 +848,10 @@ _PLACEMENT = {
     "north-of": "north_of", "north_of": "north_of", "above": "north_of",
     "south-of": "south_of", "south_of": "south_of", "below": "south_of",
 }
+
+#: Every spelling a relative placement accepts (``east-of``, ``above``, …) — the
+#: editors' anchor lists derive from this rather than re-listing it.
+PLACEMENT_ANCHORS: tuple[str, ...] = tuple(_PLACEMENT)
 
 
 def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
@@ -2290,6 +2262,72 @@ def _parse_grade_statement(c: _Cursor, plan: Barndominium) -> None:
     c.expect_end()
 
 
+class _Stmt(NamedTuple):
+    """Everything a statement parser in :data:`_STATEMENT_PARSERS` may need."""
+
+    c: _Cursor
+    plan: Barndominium
+    smap: _SourceMap
+    kw: _Token
+    key: str
+    lineno: int
+    tokens: list[_Token]
+
+
+#: Statement keyword -> its parser. The ONE list of statements: the public
+#: :data:`STATEMENT_KEYWORDS` (hints, fmt, playground highlighting, LSP
+#: completions, the agent's DSL sniffing) derives from it, so a statement can't be
+#: parseable without being known everywhere else, or vice versa.
+_STATEMENT_PARSERS: dict[str, Callable[[_Stmt], None]] = {
+    "plan": lambda s: _parse_plan_statement(s.c, s.plan),
+    "envelope": lambda s: _parse_envelope_statement(s.c, s.plan),
+    "wing": lambda s: _parse_wing_statement(s.c, s.plan),
+    "ceiling": lambda s: _parse_ceiling_statement(s.c, s.plan),
+    "floor": lambda s: _parse_floor_statement(s.c, s.plan),
+    "note": lambda s: _parse_note_statement(s.c, s.plan, s.kw, s.lineno),
+    "program": lambda s: _parse_program_statement(s.c, s.plan, s.kw, s.lineno),
+    "require": lambda s: _parse_require_statement(s.c, s.plan, s.kw, s.lineno),
+    "room": lambda s: _parse_room_statement(s.c, s.plan, s.smap, s.lineno),
+    "wall": lambda s: _parse_wall_statement(s.c, s.plan, s.lineno),
+    "door": lambda s: _parse_door_statement(s.c, s.plan, s.lineno),
+    "open": lambda s: _parse_open_statement(s.c, s.plan, s.lineno),
+    "entry": lambda s: _parse_entry_statement(s.c, s.plan, s.lineno),
+    "window": lambda s: _parse_window_statement(s.c, s.plan, s.lineno),
+    "porch": lambda s: _parse_porch_statement(s.c, s.plan),
+    "stair": lambda s: _parse_stair_statement(s.c, s.plan, s.lineno),
+    "frame": lambda s: _parse_frame_statement(s.c, s.plan, s.kw, s.lineno),
+    "roof": lambda s: _parse_roof_statement(s.c, s.plan),
+    "orientation": lambda s: _parse_orientation_statement(s.c, s.plan),
+    "finish": lambda s: _parse_finish_statement(s.c, s.plan),
+    "accessible": lambda s: _parse_accessible_statement(s.c, s.plan),
+    "site": lambda s: _parse_site_statement(s.c, s.plan, s.kw, s.lineno),
+    "setback": lambda s: _parse_setback_statement(s.c, s.plan, s.kw, s.lineno),
+    "building": lambda s: _parse_building_statement(s.c, s.plan, s.kw, s.lineno),
+    "suite": lambda s: _parse_suite_statement(s.c, s.plan, s.kw, s.lineno),
+    "zone": lambda s: _parse_zone_statement(s.c, s.plan, s.kw, s.lineno),
+    "electrical": lambda s: _parse_electrical_marker_statement(s.c, s.plan),
+    "street": lambda s: _parse_street_statement(s.c, s.plan),
+    "overhang": lambda s: _parse_overhang_statement(s.c, s.plan),
+    "climate": lambda s: _parse_climate_statement(s.c, s.plan),
+    "fixture": lambda s: _parse_fixture_statement(s.c, s.plan, s.kw, s.lineno),
+    "outlet": lambda s: _parse_device_statement(s.c, s.plan, s.key, s.kw, s.lineno),
+    "switch": lambda s: _parse_device_statement(s.c, s.plan, s.key, s.kw, s.lineno),
+    "light": lambda s: _parse_light_statement(s.c, s.plan, s.kw, s.lineno),
+    "alarm": lambda s: _parse_alarm_statement(s.c, s.plan, s.kw, s.lineno),
+    "use": lambda s: _parse_use_statement(s.c, s.plan, s.kw, s.lineno),
+    "param": lambda s: _parse_param_statement(s.tokens, s.c, s.plan, s.kw),
+    "drive": lambda s: _parse_drive_statement(s.c, s.plan, s.kw, s.lineno),
+    "walk": lambda s: _parse_walk_statement(s.c, s.plan, s.kw, s.lineno),
+    "well": lambda s: _parse_well_statement(s.c, s.plan, s.kw, s.lineno),
+    "septic": lambda s: _parse_septic_statement(s.c, s.plan, s.kw, s.lineno),
+    "service": lambda s: _parse_service_statement(s.c, s.plan, s.kw, s.lineno),
+    "grade": lambda s: _parse_grade_statement(s.c, s.plan),
+}
+
+#: Every statement keyword, in reference order (for hints and did-you-mean).
+STATEMENT_KEYWORDS: tuple[str, ...] = tuple(_STATEMENT_PARSERS)
+
+
 def _parse_statement(
     tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int,
     param_env: dict[str, float] | None = None,
@@ -2297,62 +2335,16 @@ def _parse_statement(
     c = _Cursor(tokens, param_env=param_env)
     kw = c.take("a statement keyword")
     key = kw.text.lower()
-
-    handlers = {
-        "plan": lambda: _parse_plan_statement(c, plan),
-        "envelope": lambda: _parse_envelope_statement(c, plan),
-        "wing": lambda: _parse_wing_statement(c, plan),
-        "ceiling": lambda: _parse_ceiling_statement(c, plan),
-        "floor": lambda: _parse_floor_statement(c, plan),
-        "accessible": lambda: _parse_accessible_statement(c, plan),
-        "electrical": lambda: _parse_electrical_marker_statement(c, plan),
-        "street": lambda: _parse_street_statement(c, plan),
-        "overhang": lambda: _parse_overhang_statement(c, plan),
-        "climate": lambda: _parse_climate_statement(c, plan),
-        "orientation": lambda: _parse_orientation_statement(c, plan),
-        "finish": lambda: _parse_finish_statement(c, plan),
-        "site": lambda: _parse_site_statement(c, plan, kw, lineno),
-        "setback": lambda: _parse_setback_statement(c, plan, kw, lineno),
-        "building": lambda: _parse_building_statement(c, plan, kw, lineno),
-        "drive": lambda: _parse_drive_statement(c, plan, kw, lineno),
-        "walk": lambda: _parse_walk_statement(c, plan, kw, lineno),
-        "well": lambda: _parse_well_statement(c, plan, kw, lineno),
-        "septic": lambda: _parse_septic_statement(c, plan, kw, lineno),
-        "service": lambda: _parse_service_statement(c, plan, kw, lineno),
-        "grade": lambda: _parse_grade_statement(c, plan),
-        "roof": lambda: _parse_roof_statement(c, plan),
-        "note": lambda: _parse_note_statement(c, plan, kw, lineno),
-        "program": lambda: _parse_program_statement(c, plan, kw, lineno),
-        "require": lambda: _parse_require_statement(c, plan, kw, lineno),
-        "room": lambda: _parse_room_statement(c, plan, smap, lineno),
-        "wall": lambda: _parse_wall_statement(c, plan, lineno),
-        "suite": lambda: _parse_suite_statement(c, plan, kw, lineno),
-        "zone": lambda: _parse_zone_statement(c, plan, kw, lineno),
-        "door": lambda: _parse_door_statement(c, plan, lineno),
-        "open": lambda: _parse_open_statement(c, plan, lineno),
-        "entry": lambda: _parse_entry_statement(c, plan, lineno),
-        "window": lambda: _parse_window_statement(c, plan, lineno),
-        "porch": lambda: _parse_porch_statement(c, plan),
-        "stair": lambda: _parse_stair_statement(c, plan, lineno),
-        "frame": lambda: _parse_frame_statement(c, plan, kw, lineno),
-        "fixture": lambda: _parse_fixture_statement(c, plan, kw, lineno),
-        "outlet": lambda: _parse_device_statement(c, plan, key, kw, lineno),
-        "switch": lambda: _parse_device_statement(c, plan, key, kw, lineno),
-        "light": lambda: _parse_light_statement(c, plan, kw, lineno),
-        "alarm": lambda: _parse_alarm_statement(c, plan, kw, lineno),
-        "use": lambda: _parse_use_statement(c, plan, kw, lineno),
-        "param": lambda: _parse_param_statement(tokens, c, plan, kw),
-    }
-    handler = handlers.get(key)
+    handler = _STATEMENT_PARSERS.get(key)
     if handler is None:
         raise _ParseError(
             "UNKNOWN_STMT",
-            f"{_did_you_mean(kw.text, _KEYWORDS)}Unknown statement '{kw.text}'.",
+            f"{_did_you_mean(kw.text, STATEMENT_KEYWORDS)}Unknown statement '{kw.text}'.",
             kw.col,
-            hint=f"Statements start with one of: {', '.join(_KEYWORDS)}.",
+            hint=f"Statements start with one of: {', '.join(STATEMENT_KEYWORDS)}.",
             end_col=kw.end_col,
         )
-    handler()
+    handler(_Stmt(c, plan, smap, kw, key, lineno, tokens))
 
 
 # --- Result -----------------------------------------------------------------
@@ -2542,7 +2534,7 @@ def _record_empty_line_syntax(raw: str, lineno: int, diagnostics: list[Issue]) -
         line=lineno,
         col=col,
         end_col=col + 1,
-        hint=f"Each line is one statement; start with one of: {', '.join(_KEYWORDS)}.",
+        hint=f"Each line is one statement; start with one of: {', '.join(STATEMENT_KEYWORDS)}.",
     ))
     return True
 
@@ -2550,7 +2542,7 @@ def _record_empty_line_syntax(raw: str, lineno: int, diagnostics: list[Issue]) -
 def _record_fragment_host_statement(
     key: str, tok: _Token, lineno: int, diagnostics: list[Issue], fragment: bool,
 ) -> bool:
-    if not (fragment and key in _HOST_ONLY):
+    if not (fragment and key in HOST_ONLY_STATEMENTS):
         return False
     diagnostics.append(Issue(
         Severity.ERROR,

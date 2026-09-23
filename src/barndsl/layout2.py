@@ -41,7 +41,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .constants import GOOD_ASPECT
+from .constants import BUILD_MODULE, GOOD_ASPECT
 from .elements import HABITABLE_TYPES, Barndominium, RoomType, feet, inches
 from .geometry import shared_edge
 from .layout import (
@@ -519,14 +519,9 @@ def _column_width(utility: list[RoomSpec2], env_l: float) -> float:
     return max(total_area / max(env_l, 1e-6), max_min)
 
 
-#: The build module (ft) exterior dimensions snap to — matches
-#: :data:`barndsl.validation.BUILD_MODULE`, so a snapped envelope clears
-#: ENVELOPE_MODULE. Kept here (not imported) so layout2 stays free of validation.
-_BUILD_MODULE = 3.0
-
-
 def _snap_module(value: float, min_val: float = 0.0) -> float:
-    """Round ``value`` to the nearest :data:`_BUILD_MODULE` multiple, >= ``min_val``.
+    """Round ``value`` to the nearest :data:`~barndsl.constants.BUILD_MODULE`
+    multiple, >= ``min_val`` (so a snapped envelope clears ENVELOPE_MODULE).
 
     Snaps a raw dimension onto the 3-ft build module for buildable numbers, but
     never below ``min_val`` (a room minimum or the widest band) — it rounds *up*
@@ -534,9 +529,9 @@ def _snap_module(value: float, min_val: float = 0.0) -> float:
     """
     if value <= 0:
         return value
-    snapped = round(value / _BUILD_MODULE) * _BUILD_MODULE
+    snapped = round(value / BUILD_MODULE) * BUILD_MODULE
     while snapped + 1e-9 < min_val:
-        snapped += _BUILD_MODULE
+        snapped += BUILD_MODULE
     return snapped
 
 

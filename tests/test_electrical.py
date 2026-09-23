@@ -38,6 +38,31 @@ def _compile(extra: str):
     return compile_source(_SRC.format(extra=extra))
 
 
+# --- DEVICE_ROOM -------------------------------------------------------------
+
+
+def test_device_in_unknown_room_is_a_device_room_error():
+    r = _compile(
+        "outlet in livng wall S offset 3\n"
+        "switch in livng wall E offset 1\n"
+        "light in livng at 12,8\n"
+        "alarm smoke in livng"
+    )
+    hits = [d for d in r.errors if d.code == "DEVICE_ROOM"]
+    assert [d.line for d in hits] == [6, 7, 8, 9]
+    assert "livng" in hits[0].message and hits[0].col is not None
+
+
+def test_device_in_known_room_has_no_device_room_error():
+    r = _compile(
+        "outlet in living wall S offset 3\n"
+        "switch in living wall E offset 1\n"
+        "light in living at 12,8\n"
+        "alarm smoke in living"
+    )
+    assert "DEVICE_ROOM" not in _codes(r, "error")
+
+
 # --- parsing -----------------------------------------------------------------
 
 

@@ -133,6 +133,11 @@ FLOOR_ASSEMBLY_DEPTH = 12.0 / 12.0
 #: Default roof pitch (rise:run) for a barndominium gable — a modest 4:12.
 DEFAULT_ROOF_PITCH = 4.0 / 12.0
 
+#: Exterior dimensions should land on this module (ft) for efficient material use
+#: — the ENVELOPE_MODULE check (validation) and the solver's envelope snapping
+#: (layout2) share it, so a snapped envelope always clears the check.
+BUILD_MODULE = 3.0
+
 # --- wall thicknesses (nominal) ----------------------------------------------
 #: Nominal built thickness (feet) of an exterior shell wall (~2x6 + sheathing +
 #: cladding) and an interior partition (~2x4 + gypsum both sides). barndsl rooms

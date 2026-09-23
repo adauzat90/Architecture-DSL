@@ -8,8 +8,27 @@ from barndsl import devtools
 def test_repo_audit_has_no_wiring_drift():
     out = devtools.repo_audit()
     assert out["ok"], out["problems"]
-    assert out["statement_keywords"]["missing_in_playground"] == []
+    assert out["statement_keywords"]["missing_in_dsl_reference"] == []
+    assert out["statement_keywords"]["unclassified_host_or_part"] == []
     assert out["diagnostics"]["missing_registry"] == []
+    assert out["diagnostics"]["severity_drift"] == []
+    assert out["diagnostics"]["unclassified_category"] == []
+
+
+def test_repo_audit_checks_can_fail(monkeypatch):
+    """The audit's checks must be able to fail — a drift check comparing a list
+    with a copy of itself is no check at all."""
+    from barndsl import compiler, diagnostics
+
+    monkeypatch.setattr(devtools, "PART_STATEMENTS", compiler.PART_STATEMENTS - {"room"})
+    monkeypatch.setattr(diagnostics, "_VARYING", diagnostics._VARYING - {"FOYER_FLOW"})
+    monkeypatch.setattr(diagnostics, "_EXPLICIT_CATEGORIES",
+                        {k: v for k, v in diagnostics._EXPLICIT_CATEGORIES.items() if k != "MECH_ACCESS"})
+    out = devtools.repo_audit()
+    assert not out["ok"]
+    assert out["statement_keywords"]["unclassified_host_or_part"] == ["room"]
+    assert any(d.startswith("FOYER_FLOW") for d in out["diagnostics"]["severity_drift"])
+    assert out["diagnostics"]["unclassified_category"] == ["MECH_ACCESS"]
 
 
 def test_pi_extension_confines_file_tools_to_the_workspace():
@@ -57,7 +76,26 @@ def test_lsp_smoke_basic_passes_even_if_composed_fixture_regresses():
 
 
 def test_impact_targets_maps_lsp_change():
-    assert devtools.impact_targets(["src/barndsl/lsp.py"]) == ["tests/test_lsp.py"]
+    assert "tests/test_lsp.py" in devtools.impact_targets(["src/barndsl/lsp.py"])
+
+
+def test_impact_targets_cover_every_module_beyond_the_fallback():
+    """A change to any barndsl module runs at least one test that imports it,
+    not just the generic ``test_compiler.py`` fallback."""
+    src = devtools.ROOT / "src" / "barndsl"
+    thin = []
+    for path in sorted(src.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        targets = devtools.impact_targets([f"src/barndsl/{path.name}"])
+        if targets == ["tests/test_compiler.py"] and path.stem != "compiler":
+            thin.append(path.stem)
+    assert thin == []
+
+
+def test_impact_targets_add_metamorphic_suite_for_core_modules():
+    for mod in ("emit", "fmt", "compose", "elements"):
+        assert "tests/test_metamorphic.py" in devtools.impact_targets([f"src/barndsl/{mod}.py"])
 
 
 def test_feature_check_known_statement_is_wired():

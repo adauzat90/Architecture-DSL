@@ -90,13 +90,22 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .compare import compare_plans
-from .compiler import DSL_REFERENCE, _KEYWORDS, compile_source
+from .compiler import DSL_REFERENCE, PLACEMENT_ANCHORS, STATEMENT_KEYWORDS, compile_source
 from .compose import (  # scan_parts moved to compose (beside the `use` loader); re-exported here
     MAX_LISTED_PARTS,  # noqa: F401 — re-exported for backward compatibility
     MAX_PART_SNIFF_BYTES,  # noqa: F401 — re-exported for backward compatibility
     scan_parts,
 )
-from .elements import RoomType
+from .elements import (
+    ALARM_KINDS,
+    DOOR_KINDS,
+    DRIVE_SURFACES,
+    LIGHT_KINDS,
+    SERVICE_UTILITIES,
+    WALL_ATTRIBUTES,
+    WINDOW_KINDS,
+    RoomType,
+)
 from .cost import estimate_cost
 from .dxf import to_dxf
 from .edits import EditError, apply_edit, edit_from_json, opening_overlays
@@ -124,28 +133,22 @@ MAX_BODY = 1_000_000
 
 _ELEVATION_SIDES = ("south", "north", "east", "west")
 
-#: Statement heads the compiler's ``_parse_statement`` dispatch recognises.  The
-#: playground derives this from :mod:`barndsl.compiler` so editor highlighting,
-#: autocomplete and quick-fix validation cannot drift from the parser when a new
-#: DSL statement is added.
-_STATEMENT_KEYWORDS = tuple(_KEYWORDS)
-
 #: Secondary keywords — placement anchors, opening modifiers and option words that
 #: appear mid-statement (from the grammar in :data:`~barndsl.compiler.DSL_REFERENCE`).
-#: Highlighted the same muted "keyword" colour as the statement heads.
-_MODIFIER_KEYWORDS = (
+#: Highlighted the same muted "keyword" colour as the statement heads. The
+#: enumerations (anchors, door/window/light/alarm kinds, wall attributes, drive
+#: surfaces, utilities) come from the compiler/model so they can't drift.
+_MODIFIER_KEYWORDS = tuple(sorted({
     "x", "at", "size", "level", "vaulted", "width", "offset", "height", "sill",
     "head", "into", "hinge", "near", "far", "center", "align", "from", "to",
     "exterior", "overhead", "no-egress", "covered", "bay", "span", "post",
     "no-ridge", "pitch", "gable", "shed", "monitor", "siding", "adjacent",
     "separate", "area", "storage", "bed", "bath", "front", "side", "rear",
-    "swing", "cased", "pocket", "sliding", "bifold", "double", "french", "casement",
-    "slider", "fixed", "double-hung", "of",
-    "east-of", "west-of", "north-of", "south-of",
-    "right-of", "left-of", "above-of", "below-of",
-    "gravel", "concrete", "asphalt", "gas", "electric", "water", "field",
-    "with", "mirror", "rotate",
-)
+    "of", "field", "with", "mirror", "rotate", "in", "along", "depth", "kind",
+    "tempered", "gfci",
+    *PLACEMENT_ANCHORS, *DOOR_KINDS, *WINDOW_KINDS, *LIGHT_KINDS, *ALARM_KINDS,
+    *WALL_ATTRIBUTES, *DRIVE_SURFACES, *SERVICE_UTILITIES,
+}))
 
 
 def _highlight_tokens() -> dict:
@@ -163,10 +166,11 @@ def _highlight_tokens() -> dict:
     autocomplete against the same set the parser validates.
     """
     return {
-        "keywords": sorted(set(_STATEMENT_KEYWORDS) | set(_MODIFIER_KEYWORDS)),
+        "keywords": sorted(set(STATEMENT_KEYWORDS) | set(_MODIFIER_KEYWORDS)),
         "types": [t.value for t in RoomType],
-        "statements": sorted(_STATEMENT_KEYWORDS),
+        "statements": sorted(STATEMENT_KEYWORDS),
         "fixtures": sorted(FIXTURES),
+        "anchors": list(PLACEMENT_ANCHORS),
     }
 
 
@@ -3668,8 +3672,7 @@ document.getElementById('replace-all').addEventListener('click', replaceAll);
 // heads, placement anchors and `in`. Never inside a comment. Accepting replaces
 // the current word through the normal input path (renderGutter/renderHighlight).
 const acPop = document.getElementById('ac-pop');
-const AC_ANCHORS = new Set(['east-of','west-of','north-of','south-of',
-  'right-of','left-of','above-of','below-of']);
+const AC_ANCHORS = new Set(HIGHLIGHT.anchors || []);   // every placement spelling the parser accepts
 const AC_ROOM_HEADS = new Set(['door','open','window','entry']);
 let _acCharW = 0;
 function acCharWidth(){
@@ -6268,8 +6271,9 @@ function renderInspector(p){
       : '<button class="danger" data-btn="delfx">Delete fixture</button>') + '</div>';
 }
 
-const DP_ANCHORS = ['east-of', 'west-of', 'north-of', 'south-of',
-  'right-of', 'left-of', 'above-of', 'below-of'];
+// The add-room anchor picker: the parser's placement spellings minus the
+// snake_case duplicates (east_of == east-of).
+const DP_ANCHORS = (HIGHLIGHT.anchors || []).filter(a => a.indexOf('_') < 0);
 function nextRoomId(p, base){
   const ids = new Set(p.rooms.map(r => r.id));
   let n = 1, id = base;

@@ -823,14 +823,38 @@ def test_highlight_tokens_carry_statements_and_fixtures():
     # The editor's autocomplete and the diagnostics quick-fix need statement heads
     # and fixture kinds split out of the merged highlight vocab — derived from the
     # same sources the parser uses, so the two can't drift.
+    from barndsl.compiler import PLACEMENT_ANCHORS, STATEMENT_KEYWORDS
     from barndsl.fixtures import FIXTURES
-    from barndsl.playground import _STATEMENT_KEYWORDS, _highlight_tokens
+    from barndsl.playground import _highlight_tokens
 
     toks = _highlight_tokens()
-    assert toks["statements"] == sorted(_STATEMENT_KEYWORDS)
+    assert toks["statements"] == sorted(STATEMENT_KEYWORDS)
     assert toks["fixtures"] == sorted(FIXTURES)
     # every statement head is also in the merged keyword set (colouring is unchanged)
     assert set(toks["statements"]) <= set(toks["keywords"])
+    # anchors are the parser's own spellings (`above`, never the rejected `above-of`)
+    assert toks["anchors"] == list(PLACEMENT_ANCHORS)
+    assert "above" in toks["anchors"] and "above-of" not in toks["keywords"]
+
+
+def test_add_room_anchor_picker_offers_only_parseable_anchors():
+    """Every anchor the add-room form can submit must be one add_room accepts."""
+    from barndsl.edits import Edit, apply_edit
+
+    html = render_app(CLEAN)
+    assert "above-of" not in html and "below-of" not in html
+    for anchor in _highlight_tokens_anchor_picker():
+        src = 'plan "P"\nenvelope 40 x 40\nceiling 9\nroom a: living at 12,12 size 12 x 12\n'
+        r = apply_edit(src, Edit("add_room", room="b", rtype="bedroom", w=10, l=10,
+                                 anchor=anchor, of="a"))
+        assert r.ok, (anchor, r.error)
+
+
+def _highlight_tokens_anchor_picker():
+    # Mirrors the page's DP_ANCHORS filter (snake_case duplicates dropped).
+    from barndsl.playground import _highlight_tokens
+
+    return [a for a in _highlight_tokens()["anchors"] if "_" not in a]
 
 
 def test_app_ships_the_statement_and_fixture_lists_to_the_page():

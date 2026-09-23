@@ -24,9 +24,9 @@ format_source(x)``.
 
 from __future__ import annotations
 
-from .compiler import _KEYWORDS, _parse_ft_in
+from .compiler import STATEMENT_KEYWORDS, _parse_ft_in
 
-_KEYWORD_SET = frozenset(_KEYWORDS)
+_KEYWORD_SET = frozenset(STATEMENT_KEYWORDS)
 #: Braces are optional syntactic sugar the lexer drops; the canonical form omits
 #: them, so the formatter skips them too (matching ``emit_dsl``).
 _DROP = frozenset("{}")

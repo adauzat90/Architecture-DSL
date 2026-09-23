@@ -49,9 +49,11 @@ class CodeInfo:
 
 
 #: Codes whose severity depends on context (see :attr:`CodeInfo.severity`).
+#: ``barndsl dev audit`` checks every literal emit site against this: a code
+#: emitted at more than one severity (or a computed one) must be listed here.
 _VARYING = frozenset(
     {"NO_ACCESS", "ENTRY_PRIVATE", "DOOR_SWING", "DOOR_NO_LANDING", "AREA_VOID",
-     "MUDROOM_SHAPE", "SHOP_DEPTH"}
+     "MUDROOM_SHAPE", "SHOP_DEPTH", "FOYER_FLOW", "STORAGE_ACCESS"}
 )
 
 
@@ -83,7 +85,7 @@ _SITE_PREFIXES = ("SITE", "SETBACK", "DRIVE", "APPROACH", "SOLAR", "WELL", "SEPT
 _FIXTURE_PREFIXES = ("FIXTURE", "RANGE", "KITCHEN", "LAUNDRY", "BATH_CLEARANCE", "DRYER", "SINK", "PLUMBING", "WATER_HEATER", "WET_GROUP", "COUNTER")
 _OPENING_PREFIXES = ("DOOR", "WINDOW", "OPENING", "OPEN_", "OVERHEAD", "ENTRY_INTERIOR")
 _STRUCTURE_PREFIXES = ("FRAME", "BAY", "ROOF", "POST", "LOAD", "STAIR", "LOFT", "PORCH", "WING")
-_ELECTRICAL_PREFIXES = ("ELECTRICAL", "OUTLET", "RECEPTACLE", "ROOM_NO_LIGHT", "ALARM")
+_ELECTRICAL_PREFIXES = ("ELECTRICAL", "OUTLET", "RECEPTACLE", "ROOM_NO_LIGHT", "ALARM", "DEVICE")
 _COMPOSITION_PREFIXES = ("USE", "PARAM", "PART", "SUITE", "ZONE")
 _ACCESS_EGRESS_CODES = frozenset({
     "BEDROOM_EGRESS", "EGRESS_SIZE", "EGRESS_DOOR", "NAT_LIGHT", "VENT_AREA",
@@ -95,51 +97,82 @@ _CIRCULATION_CODES = frozenset({
     "NO_ENTRY", "NO_ACCESS", "NO_BACK_DOOR", "ENTRY_PRIVATE", "PRIVATE_PASSTHROUGH",
     "CLOSET_ACCESS", "CLOSET_DOOR_SWING", "MASTER_ENSUITE", "BATH_DISTANCE",
     "BED_PRIVACY", "BED_SOUND", "GARAGE_BEDROOM", "GARAGE_PASSTHROUGH",
+    "FOYER_FLOW", "STORAGE_ACCESS", "MECH_ACCESS", "MECH_BEDROOM", "SAFE_ROOM_ACCESS",
 })
 _PROGRAM_CODES = frozenset({"NO_PROGRAM", "PROGRAM_MISMATCH", "PROGRAM_AREA_OVERRUN", "BRIEF_ACCEPTANCE", "REQUIRE_REF", "REQUIRE_UNMET", "NO_BATH"})
 _GEOMETRY_PREFIXES = ("AREA", "ROOM", "FOOTPRINT", "OUT_OF_BOUNDS", "OVERLAP", "ENVELOPE")
+_GEOMETRY_CODES = frozenset({
+    "WALL_REF", "WALL_NOADJ", "NOTE_OUTSIDE", "ROOM_SIZE", "ROOM_HABITABLE", "ROOM_CLEAR",
+})
+_OPENING_CODES = frozenset({"ENTRY_INTERIOR", "DOOR_THRESHOLD", "SELF_DOOR"})
+_STRUCTURE_CODES = frozenset({"WALL_BEARING_AXIS"})
+_FIXTURE_CODES = frozenset({"WALL_UNUSED"})
 _QUALITY_CODES = frozenset({
     "DESIGN", "LOW_STORAGE", "NO_CLOSET", "CLOSET_DEPTH", "CLOSET_SHAPE", "CLOSET_WINDOW",
     "BATH_OVERSIZE", "BEDROOM_AREA", "BEDROOM_DIM", "BED_CLEARANCE", "DINING_CLEARANCE",
-    "OFFICE_CLEARANCE", "SHOP_DEPTH", "SHOP_DOOR_HEIGHT", "ROOM_CLEAR", "ROOM_HABITABLE",
-    "ROOM_PROPORTION", "ROOM_SIZE", "ROOM_TIGHT", "KITCHEN_FLOW", "ENERGY_ENVELOPE",
+    "OFFICE_CLEARANCE", "SHOP_DEPTH", "SHOP_DOOR_HEIGHT",
+    "ROOM_PROPORTION", "ROOM_TIGHT", "KITCHEN_FLOW", "ENERGY_ENVELOPE",
+    "FLEX_FUTURE_BED", "FOYER_SHAPE", "GREAT_ROOM_FLOW", "GREAT_ROOM_SCALE",
+    "REC_ROOM_NOISE", "REC_ROOM_SCALE", "STORAGE_SHAPE", "MECH_CLEARANCE",
+    "SAFE_ROOM_SIZE", "SAFE_ROOM_WINDOW", "SAFE_ROOM_EXTERIOR",
 })
+
+#: Explicitly listed codes -> category. Checked BEFORE the prefix rules, so an
+#: explicit listing always wins (``ROOM_TIGHT`` is quality coaching even though
+#: ``ROOM`` prefixes geometry). The sets are disjoint (tested).
+_EXPLICIT_CATEGORIES: dict[str, str] = {
+    **dict.fromkeys(_SYNTAX_CODES, "syntax"),
+    **dict.fromkeys(_PROGRAM_CODES, "program"),
+    **dict.fromkeys(_ACCESS_EGRESS_CODES, "access_egress"),
+    **dict.fromkeys(_CIRCULATION_CODES, "circulation"),
+    **dict.fromkeys(_GEOMETRY_CODES, "geometry"),
+    **dict.fromkeys(_OPENING_CODES, "opening"),
+    **dict.fromkeys(_STRUCTURE_CODES, "structure"),
+    **dict.fromkeys(_FIXTURE_CODES, "fixtures"),
+    **dict.fromkeys(_QUALITY_CODES, "quality"),
+    "FLOOR_FINISH": "finish",
+}
+
+#: Prefix rules, in precedence order, for codes not listed explicitly.
+_PREFIX_CATEGORIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("ACCEPT_",), "pragma"),
+    (_COMPOSITION_PREFIXES, "composition"),
+    (_SITE_PREFIXES, "site"),
+    (_ELECTRICAL_PREFIXES, "electrical"),
+    (_FIXTURE_PREFIXES, "fixtures"),
+    (_OPENING_PREFIXES, "opening"),
+    (_STRUCTURE_PREFIXES, "structure"),
+    (_CIRCULATION_PREFIXES, "circulation"),
+    (_GEOMETRY_PREFIXES, "geometry"),
+    (("REVIT_",), "export"),
+)
+
+#: The bucket for a code no rule classifies (``unclassified_codes`` lists them).
+_DEFAULT_CATEGORY = "quality"
+
+
+def _classified_category(code: str) -> str | None:
+    c = code.strip().upper()
+    if c in _EXPLICIT_CATEGORIES:
+        return _EXPLICIT_CATEGORIES[c]
+    for prefixes, category in _PREFIX_CATEGORIES:
+        if c.startswith(prefixes):
+            return category
+    return None
 
 
 def diagnostic_category(code: str) -> str:
     """Return the stable domain bucket for a diagnostic code."""
-    c = code.strip().upper()
-    if c.startswith("ACCEPT_"):
-        return "pragma"
-    if c in _SYNTAX_CODES:
-        return "syntax"
-    if c.startswith(_COMPOSITION_PREFIXES):
-        return "composition"
-    if c in _PROGRAM_CODES:
-        return "program"
-    if c.startswith(_SITE_PREFIXES):
-        return "site"
-    if c.startswith(_ELECTRICAL_PREFIXES):
-        return "electrical"
-    if c in _ACCESS_EGRESS_CODES:
-        return "access_egress"
-    if c.startswith(_FIXTURE_PREFIXES):
-        return "fixtures"
-    if c.startswith(_OPENING_PREFIXES) or c in {"ENTRY_INTERIOR", "DOOR_THRESHOLD"}:
-        return "opening"
-    if c.startswith(_STRUCTURE_PREFIXES):
-        return "structure"
-    if c.startswith(_CIRCULATION_PREFIXES) or c in _CIRCULATION_CODES:
-        return "circulation"
-    if c.startswith(_GEOMETRY_PREFIXES):
-        return "geometry"
-    if c == "FLOOR_FINISH":
-        return "finish"
-    if c.startswith("REVIT_"):
-        return "export"
-    if c in _QUALITY_CODES:
-        return "quality"
-    return "quality"
+    return _classified_category(code) or _DEFAULT_CATEGORY
+
+
+def unclassified_codes() -> list[str]:
+    """Registered codes that only reach the default bucket by falling through.
+
+    Every registered code should be listed explicitly or match a prefix rule, so
+    a new rule's owner is a decision rather than an accident; the audit gate
+    (``barndsl dev audit``) fails on any code this returns."""
+    return sorted(code for code in REGISTRY if _classified_category(code) is None)
 
 
 def diagnostic_owner(category: str) -> str:
@@ -456,6 +489,11 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "by roughly a wall thickness so the clear dimension still meets the "
            "minimum."),
         # --- fixtures & furnishings (the `fixture` statement) ----------------
+        _c("DEVICE_ROOM", E, "Device references unknown room",
+           "An `outlet`, `switch`, `light` or `alarm` statement places a device "
+           "`in` a room id that doesn't exist — a mistyped id would otherwise draw "
+           "nothing and silently skip the receptacle, lighting and alarm checks for "
+           "the room you meant. Reference a room that's defined."),
         _c("FIXTURE_ROOM", E, "Fixture references unknown room",
            "A `fixture` statement places a fixture `in` a room id that doesn't "
            "exist — a mistyped id would otherwise place nothing. Reference a room "
@@ -1031,7 +1069,8 @@ REGISTRY: dict[str, CodeInfo] = dict(
         _c("FOYER_FLOW", W, "Foyer entry flow problem",
            "A foyer should be the public arrival point: it wants an exterior entry, "
            "standing room, and a connection to the public core rather than only "
-           "private rooms."),
+           "private rooms. A foyer that connects only to private/service rooms is a "
+           "warning; a missing entry door or a tight foyer is an info."),
         _c("FOYER_SHAPE", I, "Foyer shaped like a corridor",
            "A foyer/entry should be a compact arrival space, not a long hallway "
            "running the length of the house."),
@@ -1040,7 +1079,9 @@ REGISTRY: dict[str, CodeInfo] = dict(
            "floor as aisle; make it compact or relabel it as hallway/cabinetry."),
         _c("STORAGE_ACCESS", W, "Storage room access problem",
            "Storage should have a usable door/opening. A shallow reach-in needs a "
-           "wide, centred door so stored goods aren't stranded beyond arm's reach."),
+           "wide, centred door so stored goods aren't stranded beyond arm's reach. "
+           "A storage room with no opening is a warning; one used as a pass-through "
+           "between other rooms is an info."),
         _c("GREAT_ROOM_SCALE", I, "Great room lacks great-room scale",
            "A great room should be larger and taller/opener than an ordinary living "
            "room; otherwise the label overstates the space."),

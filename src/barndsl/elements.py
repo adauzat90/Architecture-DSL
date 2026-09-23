@@ -129,6 +129,20 @@ INTERIOR_TYPES: frozenset[RoomType] = frozenset(
 #: equipment and fuel — so it carries the same dwelling-separation requirements.
 GARAGE_TYPES: frozenset[RoomType] = frozenset({RoomType.GARAGE, RoomType.SHOP})
 
+#: The shared public living core. Bedrooms ideally don't open straight onto it
+#: (validation), a bedroom's daily route must reach it without crossing a garage
+#: (score topology), two of them sharing a wall get a cased passage (layout), and
+#: it is the "public" band for the zone checks. One set, so those can't disagree.
+PUBLIC_TYPES: frozenset[RoomType] = frozenset(
+    {
+        RoomType.LIVING,
+        RoomType.GREAT_ROOM,
+        RoomType.KITCHEN,
+        RoomType.DINING,
+        RoomType.REC_ROOM,
+    }
+)
+
 
 class Direction(str, Enum):
     """A cardinal wall of a rectangular room."""

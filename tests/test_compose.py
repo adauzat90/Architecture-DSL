@@ -58,7 +58,9 @@ HOST_ONLY = [
     "program 2 bed", "require adjacent a b", "site 100 x 100",
     "setback front 20", "building at 0,0", "street south", "orientation 90",
     "roof gable", "overhang 1", 'finish siding "metal"', "frame bay 12",
-    "electrical",
+    "electrical", "accessible", "climate 4", "floor 1.5",
+    "drive at 0,0 size 10 x 10", "walk from bath to drive", "well at 1,1",
+    "septic at 1,1", "service water from N", "grade 2",
 ]
 
 
@@ -66,6 +68,16 @@ HOST_ONLY = [
 def test_host_only_statement_rejected_in_a_part(stmt):
     r = compile_source(BATH + stmt + "\n", fragment=True)
     assert "PART_HOST_STMT" in _codes(r), r.summary()
+
+
+def test_every_statement_is_host_only_or_part_legal():
+    """A new statement must be classified, or a building-wide one would be
+    silently accepted in a part and then dropped by the host."""
+    from barndsl.compiler import HOST_ONLY_STATEMENTS, PART_STATEMENTS, STATEMENT_KEYWORDS
+
+    assert HOST_ONLY_STATEMENTS.isdisjoint(PART_STATEMENTS)
+    assert HOST_ONLY_STATEMENTS | PART_STATEMENTS == set(STATEMENT_KEYWORDS)
+    assert {s.split()[0] for s in HOST_ONLY} == HOST_ONLY_STATEMENTS
 
 
 def test_stair_is_legal_in_a_part_now():

@@ -13,11 +13,18 @@ import re
 import subprocess
 import sys
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .compiler import DSL_REFERENCE, _KEYWORDS, compile_source, read_source_file
-from .diagnostics import REGISTRY
+from .compiler import (
+    HOST_ONLY_STATEMENTS,
+    PART_STATEMENTS,
+    STATEMENT_KEYWORDS,
+    compile_source,
+    read_source_file,
+)
+from .diagnostics import REGISTRY, unclassified_codes
 from .profiles import load_profile
 from .score import design_score
 
@@ -73,16 +80,19 @@ def _expand_paths(items: list[str]) -> list[Path]:
 # --- repo audit --------------------------------------------------------------
 
 
-def _literal_issue_codes() -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
-    for path in (SRC / "barndsl").glob("*.py"):
+def _literal_issue_sites() -> dict[str, dict[str, set[str]]]:
+    """``{rel_path: {CODE: {severity, …}}}`` for every ``Issue(sev, "CODE", …)``
+    call with a literal code in ``src/barndsl``. The severity is the lowercased
+    ``Severity.<NAME>`` when the first argument is literal, else ``"computed"``."""
+    out: dict[str, dict[str, set[str]]] = {}
+    for path in sorted((SRC / "barndsl").glob("*.py")):
         if path.name == "diagnostics.py":
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:
             continue
-        codes: set[str] = set()
+        sites: dict[str, set[str]] = {}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -90,32 +100,81 @@ def _literal_issue_codes() -> dict[str, list[str]]:
             if name != "Issue" or len(node.args) < 2:
                 continue
             arg = node.args[1]
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                if re.fullmatch(r"[A-Z][A-Z0-9_]+", arg.value):
-                    codes.add(arg.value)
-        if codes:
-            out[_rel(path)] = sorted(codes)
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                continue
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]+", arg.value):
+                continue
+            sev = node.args[0]
+            if isinstance(sev, ast.Attribute) and isinstance(sev.value, ast.Name) and sev.value.id == "Severity":
+                level = sev.attr.lower()
+            else:
+                level = "computed"
+            sites.setdefault(arg.value, set()).add(level)
+        if sites:
+            out[_rel(path)] = sites
     return out
 
 
+def _literal_issue_codes() -> dict[str, list[str]]:
+    return {path: sorted(sites) for path, sites in _literal_issue_sites().items()}
+
+
+def _severity_drift(issue_sites: dict[str, dict[str, set[str]]]) -> list[str]:
+    """Codes whose emit sites disagree with the registry's severity without being
+    declared context-dependent (``diagnostics._VARYING``)."""
+    seen: dict[str, set[str]] = {}
+    for sites in issue_sites.values():
+        for code, sevs in sites.items():
+            seen.setdefault(code, set()).update(sevs)
+    drift: list[str] = []
+    for code, sevs in sorted(seen.items()):
+        info = REGISTRY.get(code)
+        if info is None or info.varies:
+            continue
+        if sevs != {info.severity.value}:
+            drift.append(f"{code} (registry {info.severity.value}, emitted {'/'.join(sorted(sevs))})")
+    return drift
+
+
+def _statement_wiring() -> dict[str, list[str]]:
+    """Checks on the statement table that can actually drift: every keyword has a
+    grammar block in ``DSL_REFERENCE`` and is classified host-only XOR part-legal.
+    (Playground/LSP statement sets derive from ``STATEMENT_KEYWORDS`` by import.)"""
+    from .lsp import statement_docs
+
+    keywords = set(STATEMENT_KEYWORDS)
+    documented = set(statement_docs())
+    return {
+        "missing_in_dsl_reference": sorted(keywords - documented),
+        "unclassified_host_or_part": sorted(keywords - HOST_ONLY_STATEMENTS - PART_STATEMENTS),
+        "both_host_and_part": sorted(HOST_ONLY_STATEMENTS & PART_STATEMENTS),
+        "classified_non_keywords": sorted((HOST_ONLY_STATEMENTS | PART_STATEMENTS) - keywords),
+    }
+
+
+def _matrix_drift() -> dict[str, list[str]]:
+    """Codes the generated ``docs/DIAGNOSTIC_MATRIX.md`` is missing or still lists.
+
+    Only the code set is compared (not line numbers), so ordinary edits don't
+    churn it — but a new or removed rule does until the matrix is regenerated.
+    Outside a repo checkout (an installed package, no ``docs/``) there is nothing
+    to compare, so the check is skipped."""
+    path = ROOT / "docs" / "DIAGNOSTIC_MATRIX.md"
+    if not path.exists():
+        return {"missing": [], "stale": []}
+    listed = set(re.findall(r"^\| `([A-Z][A-Z0-9_]+)`", path.read_text(encoding="utf-8"), re.MULTILINE))
+    return {"missing": sorted(set(REGISTRY) - listed), "stale": sorted(listed - set(REGISTRY))}
+
+
 def repo_audit() -> dict[str, Any]:
-    parser = set(_KEYWORDS)
-    from .playground import _STATEMENT_KEYWORDS, _highlight_tokens
-    from . import lsp
-
-    playground = set(_STATEMENT_KEYWORDS)
-    lsp_quickfix = set(getattr(lsp, "_QUICKFIX_STATEMENTS", ()))
-    highlighted = set(_highlight_tokens().get("statements", ()))
-    emitted_by_file = _literal_issue_codes()
-    emitted = {c for codes in emitted_by_file.values() for c in codes}
+    issue_sites = _literal_issue_sites()  # one AST pass over src/barndsl
+    emitted = {c for sites in issue_sites.values() for c in sites}
     registered = set(REGISTRY)
-
-    missing_pg = sorted(parser - playground)
-    extra_pg = sorted(playground - parser)
-    missing_ref = sorted(k for k in parser if not re.search(r"\b" + re.escape(k) + r"\b", DSL_REFERENCE))
+    wiring = _statement_wiring()
     missing_registry = sorted(emitted - registered)
-    quickfix_drift = sorted(playground ^ lsp_quickfix)
-    highlight_drift = sorted(playground ^ highlighted)
+    severity_drift = _severity_drift(issue_sites)
+    unclassified = unclassified_codes()
+    matrix = _matrix_drift()
     unexplained = sorted(
         code for code, info in REGISTRY.items()
         if not info.title.strip() or len(info.explanation.strip()) < 20
@@ -127,40 +186,48 @@ def repo_audit() -> dict[str, Any]:
     agent_artifacts = sorted(str(p.relative_to(ROOT)) for p in ROOT.glob("agent-run-*"))
 
     problems: list[str] = []
-    if missing_pg:
-        problems.append("playground missing parser keywords: " + ", ".join(missing_pg))
-    if extra_pg:
-        problems.append("playground has non-parser keywords: " + ", ".join(extra_pg))
-    if missing_ref:
-        problems.append("DSL_REFERENCE missing keywords: " + ", ".join(missing_ref))
+    labels = {
+        "missing_in_dsl_reference": "statements with no grammar line under DSL_REFERENCE `Statements:`",
+        "unclassified_host_or_part": "statements in neither HOST_ONLY_STATEMENTS nor PART_STATEMENTS",
+        "both_host_and_part": "statements in both HOST_ONLY_STATEMENTS and PART_STATEMENTS",
+        "classified_non_keywords": "host/part classification names non-statements",
+    }
+    for key, label in labels.items():
+        if wiring[key]:
+            problems.append(f"{label}: " + ", ".join(wiring[key]))
     if missing_registry:
         problems.append("diagnostic codes missing registry entries: " + ", ".join(missing_registry))
-    if quickfix_drift:
-        problems.append("LSP quickfix statement-head set drifts from playground: " + ", ".join(quickfix_drift))
-    if highlight_drift:
-        problems.append("playground highlight statement list drifts from exported statement list: " + ", ".join(highlight_drift))
+    if severity_drift:
+        problems.append("emit-site severity differs from the registry (fix it or add the code to _VARYING): " + ", ".join(severity_drift))
+    if unclassified:
+        problems.append("diagnostic codes with no explicit category/prefix rule: " + ", ".join(unclassified))
     if unexplained:
         problems.append("registry entries with missing/too-short explanation: " + ", ".join(unexplained))
+    if matrix["missing"] or matrix["stale"]:
+        problems.append(
+            "docs/DIAGNOSTIC_MATRIX.md is out of date (run `barndsl dev diag-matrix --out docs/DIAGNOSTIC_MATRIX.md`): "
+            + ", ".join([*(f"+{c}" for c in matrix["missing"]), *(f"-{c}" for c in matrix["stale"])])
+        )
 
     return {
         "ok": not problems,
         "problems": problems,
         "statement_keywords": {
-            "parser_count": len(parser),
-            "playground_count": len(playground),
-            "lsp_quickfix_count": len(lsp_quickfix),
-            "missing_in_playground": missing_pg,
-            "extra_in_playground": extra_pg,
-            "missing_in_dsl_reference": missing_ref,
-            "lsp_quickfix_drift": quickfix_drift,
-            "highlight_drift": highlight_drift,
+            "parser_count": len(STATEMENT_KEYWORDS),
+            "host_only_count": len(HOST_ONLY_STATEMENTS),
+            "part_count": len(PART_STATEMENTS),
+            **wiring,
         },
         "diagnostics": {
             "emitted_literal_issue_codes": len(emitted),
             "registered_codes": len(registered),
             "missing_registry": missing_registry,
+            "severity_drift": severity_drift,
+            "unclassified_category": unclassified,
             "unexplained_registry": unexplained,
             "registered_not_seen_as_literal_issue": sorted(registered - emitted),
+            "matrix_missing": matrix["missing"],
+            "matrix_stale": matrix["stale"],
         },
         "artifacts": {"pyc_sample": pyc, "agent_run_root_artifacts": agent_artifacts},
     }
@@ -348,14 +415,14 @@ def locate(query: str, *, max_results: int = 80) -> dict[str, Any]:
             "registry": {"path": _rel(diagnostics), "line": _find_line(diagnostics, f'_c("{code}"')},
             "explain": f"barndsl explain {code}",
         }
-    if key in _KEYWORDS:
+    if key in STATEMENT_KEYWORDS:
         kinds.append("statement")
         exact["statement"] = {
             "keyword": key,
-            "compiler_keywords": {"path": _rel(parser), "line": _find_line(parser, f'"{key}"')},
-            "dsl_reference": {"path": _rel(parser), "line": _find_line(parser, f"{key} ") or _find_line(parser, f"{key}:")},
-            "playground": "src/barndsl/playground.py:_STATEMENT_KEYWORDS derives from compiler._KEYWORDS",
-            "lsp": "src/barndsl/lsp.py:_QUICKFIX_STATEMENTS derives from playground._STATEMENT_KEYWORDS",
+            "compiler_keywords": {"path": _rel(parser), "line": _find_line(parser, f'"{key}": lambda s:')},
+            "dsl_reference": {"path": _rel(parser), "line": _find_line(parser, f"  {key} ") or _find_line(parser, f"{key}:")},
+            "host_only": key in HOST_ONLY_STATEMENTS,
+            "derived": "playground/LSP/fmt/agent statement sets import compiler.STATEMENT_KEYWORDS",
         }
     command_line = _find_line(cli, f'add_parser("{key}"') or _find_line(cli, f"add_parser('{key}'")
     top_commands = {"compile", "build", "score", "inspect", "demo", "layout", "design", "revit", "revit-import", "fmt", "schedule", "new", "dxf", "ifc", "gltf", "view3d", "serve", "lsp", "elevation", "section", "watch", "compare", "revit-diff", "cost", "packet", "revit-log", "explain", "dev", "profiles"}
@@ -382,7 +449,7 @@ def locate(query: str, *, max_results: int = 80) -> dict[str, Any]:
     suggestions: list[str] = []
     if code in REGISTRY:
         suggestions.append(f"Use `barndsl explain {code}` for the human-facing rule rationale, then inspect source/tests hits.")
-    if key in _KEYWORDS:
+    if key in STATEMENT_KEYWORDS:
         suggestions.append(f"Use `barndsl dev feature-check {key}` after changing the statement wiring.")
     if not any(matches.values()) and not exact:
         suggestions.append("No direct hits found; try a shorter synonym or run `rg <term> src tests docs examples`.")
@@ -633,39 +700,41 @@ def feature_check(name: str, *, statement: bool = True) -> dict[str, Any]:
     """Check whether a DSL feature/statement appears wired across key surfaces.
 
     This is intentionally heuristic: it catches the high-value drift points that
-    make agent edits brittle (parser keyword, docs reference, playground/LSP
-    derived sets, and at least one test/doc mention) without requiring every
-    model-only feature to be a parser statement.
+    make agent edits brittle (parser dispatch, a grammar block in the reference,
+    the host/part and room-reference classifications, and at least one test/doc
+    mention) without requiring every model-only feature to be a parser statement.
+    Playground/LSP statement sets import ``STATEMENT_KEYWORDS``, so they need no
+    check of their own.
     """
     raw = name.strip()
     key = raw.lower()
-    from .playground import _STATEMENT_KEYWORDS, _highlight_tokens
-    from . import lsp
+    from .edits import ROOM_REF_STATEMENTS
+    from .lsp import statement_docs
 
-    parser = set(_KEYWORDS)
-    playground = set(_STATEMENT_KEYWORDS)
-    highlighted = set(_highlight_tokens().get("statements", ()))
-    lsp_quickfix = set(getattr(lsp, "_QUICKFIX_STATEMENTS", ()))
     test_mentions = _grep_mentions([ROOT / "tests"], key)
     doc_mentions = _grep_mentions([ROOT / "README.md", ROOT / "docs"], key)
 
     checks = [
-        {"name": "parser_keyword", "ok": (not statement) or key in parser, "details": key},
-        {"name": "dsl_reference", "ok": (not statement) or bool(re.search(r"\b" + re.escape(key) + r"\b", DSL_REFERENCE)), "details": "src/barndsl/compiler.py:DSL_REFERENCE"},
-        {"name": "playground_statement", "ok": (not statement) or key in playground, "details": "src/barndsl/playground.py"},
-        {"name": "playground_highlight", "ok": (not statement) or key in highlighted, "details": "highlight token export"},
-        {"name": "lsp_quickfix_statement", "ok": (not statement) or key in lsp_quickfix, "details": "src/barndsl/lsp.py"},
+        {"name": "parser_keyword", "ok": (not statement) or key in STATEMENT_KEYWORDS, "details": "src/barndsl/compiler.py:_STATEMENT_PARSERS"},
+        {"name": "dsl_reference", "ok": (not statement) or key in statement_docs(), "details": "src/barndsl/compiler.py:DSL_REFERENCE `Statements:` block"},
+        {"name": "host_or_part", "ok": (not statement) or key in (HOST_ONLY_STATEMENTS | PART_STATEMENTS), "details": "compiler.HOST_ONLY_STATEMENTS / PART_STATEMENTS"},
         {"name": "tests_mention", "ok": bool(test_mentions), "details": test_mentions[:12]},
         {"name": "docs_mention", "ok": bool(doc_mentions), "details": doc_mentions[:12]},
     ]
     missing = [c["name"] for c in checks if not c["ok"]]
     suggestions = []
     if "parser_keyword" in missing:
-        suggestions.append(f"Add `{key}` to compiler._KEYWORDS and parser dispatch, or rerun with statement=False for a model-only feature.")
+        suggestions.append(f"Add `{key}` to compiler._STATEMENT_PARSERS, or rerun with statement=False for a model-only feature.")
     if "dsl_reference" in missing:
-        suggestions.append("Document syntax/examples in DSL_REFERENCE.")
-    if any(x in missing for x in ("playground_statement", "playground_highlight", "lsp_quickfix_statement")):
-        suggestions.append("Run barndsl dev audit; statement surfaces should derive from compiler keywords.")
+        suggestions.append("Document syntax/examples as a 2-space-indented line under `Statements:` in DSL_REFERENCE.")
+    if "host_or_part" in missing:
+        suggestions.append("Classify the statement in compiler.HOST_ONLY_STATEMENTS or PART_STATEMENTS.")
+    grammar = statement_docs().get(key, "")
+    # `<room>`, `<id_a> - <id_b>` and `<id> <wall>` are room slots; a bare
+    # `porch <id>`/`stair <id>` names the element itself, not a room.
+    names_room = any(slot in grammar for slot in ("<room", "<id_a", "<id> <wall"))
+    if statement and names_room and key not in ROOM_REF_STATEMENTS:
+        suggestions.append("The grammar names a room id: add the statement to edits._ROOM_REF_FINDERS so rename/delete follow it.")
     if "tests_mention" in missing:
         suggestions.append("Add focused parser/validation/export/LSP tests for the feature.")
     if "docs_mention" in missing:
@@ -797,7 +866,7 @@ def doctor(
     add("lsp_smoke", lsp["ok"], {"basic_ok": lsp["basic_ok"], "composed_ok": lsp["composed_ok"], "strict_composed": lsp["strict_composed"]})
 
     impact = impact_tests(run=run_impact)
-    impact_details = {k: impact.get(k) for k in ("changed", "targets", "exit") if k in impact}
+    impact_details: dict[str, Any] = {k: impact.get(k) for k in ("changed", "targets", "exit") if k in impact}
     if run_impact:
         impact_details["stdout_tail"] = (impact.get("stdout") or "")[-4000:]
         impact_details["stderr_tail"] = (impact.get("stderr") or "")[-4000:]
@@ -808,16 +877,17 @@ def doctor(
         add("export_parity", export["ok"], {"path": export["path"], "results": [{"kind": r["kind"], "exit": r["exit"], "bytes": r["bytes"]} for r in export["results"]]})
 
     ok = all(c["ok"] for c in checks)
+    failed = {c["name"] for c in checks if not c["ok"]}
     next_steps: list[str] = []
-    if not audit["ok"]:
+    if "audit" in failed:
         next_steps.append("Fix repo-audit problems first; they usually indicate wiring drift.")
-    if checks[1]["ok"] is False:
+    if "gallery_gate" in failed:
         next_steps.append("Compile the listed gallery bad_files directly with `barndsl compile --json`.")
-    if not lsp["ok"]:
+    if "lsp_smoke" in failed:
         next_steps.append("Run `barndsl dev lsp-smoke --strict-composed` and inspect the failed checks.")
-    if run_impact and int(impact.get("exit", 0) or 0) != 0:
+    if "impact_tests" in failed:
         next_steps.append("Fix failing impact pytest targets before broader gates.")
-    if export_plan and not checks[-1]["ok"]:
+    if "export_parity" in failed:
         next_steps.append("Inspect .pi/artifacts export outputs and exporter stderr tails.")
     if not next_steps:
         next_steps.append("No immediate harness issues found. For geometry/export changes, rerun with --export-plan.")
@@ -827,11 +897,54 @@ def doctor(
 # --- impact tests ------------------------------------------------------------
 
 
+#: Modules whose contracts the cross-surface metamorphic tests pin (emit fixed
+#: points, model round-trips, stamped-type coverage, registry categories).
+_METAMORPHIC_MODULES = frozenset({
+    "compiler", "compose", "constants", "diagnostics", "edits", "elements", "emit",
+    "fmt", "geometry", "spatial", "validation",
+})
+
+
+@lru_cache(maxsize=1)
+def _test_import_index() -> dict[str, tuple[str, ...]]:
+    """``{module: (test files that import barndsl.<module> directly, …)}``."""
+    index: dict[str, set[str]] = {}
+    for path in sorted((ROOT / "tests").glob("test_*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        rel = f"tests/{path.name}"
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.startswith("barndsl."):
+                    names.append(node.module.split(".")[1])
+                elif node.module == "barndsl":
+                    names.extend(a.name for a in node.names)
+            elif isinstance(node, ast.Import):
+                names.extend(a.name.split(".")[1] for a in node.names if a.name.startswith("barndsl."))
+            for name in names:
+                index.setdefault(name, set()).add(rel)
+    return {m: tuple(sorted(ts)) for m, ts in index.items()}
+
+
 def impact_targets(changed: list[str]) -> list[str]:
+    """Map changed paths to the pytest files most likely to catch a regression:
+    a hand-kept map for indirect coverage, every test that imports a changed
+    ``barndsl`` module directly, and the metamorphic suite for core modules."""
     files = [p.replace("\\", "/") for p in changed]
     targets: set[str] = set()
     if not files:
         return ["tests/test_compiler.py"]
+    imports = _test_import_index()
+    for f in files:
+        m = re.fullmatch(r"src/barndsl/(\w+)\.py", f)
+        if m is None:
+            continue
+        targets.update(imports.get(m.group(1), ()))
+        if m.group(1) in _METAMORPHIC_MODULES:
+            targets.add("tests/test_metamorphic.py")
     mapping = [
         (("src/barndsl/validation.py", "src/barndsl/diagnostics.py", "src/barndsl/profiles.py"), ["tests/test_design_quality.py", "tests/test_compiler.py", "tests/test_profiles.py", "tests/test_metamorphic.py"]),
         (("src/barndsl/compiler.py",), ["tests/test_compiler.py", "tests/test_recovery.py", "tests/test_compose.py", "tests/test_compose_v2.py", "tests/test_metamorphic.py"]),
@@ -844,6 +957,8 @@ def impact_targets(changed: list[str]) -> list[str]:
         (("src/barndsl/revit.py",), ["tests/test_revit.py", "tests/test_revit_roundtrip.py"]),
         (("src/barndsl/fixtures.py",), ["tests/test_fixture_rules.py", "tests/test_fixtures.py"]),
         (("src/barndsl/score.py",), ["tests/test_agent_loop.py", "tests/test_compare.py"]),
+        (("src/barndsl/structure.py",), ["tests/test_structure.py", "tests/test_site_and_loadpath.py"]),
+        (("src/barndsl/builder.py",), ["tests/test_engine.py"]),
         (("src/barndsl/cli.py",), ["tests/test_cli_features.py", "tests/test_devtools.py"]),
         (("src/barndsl/devtools.py",), ["tests/test_devtools.py", "tests/test_cli_features.py"]),
     ]
@@ -941,11 +1056,12 @@ entry living south width 3
         "testFile": str(tfile),
         "testSkeleton": skeleton,
         "checklist": [
-            f"Add REGISTRY entry for {code} in src/barndsl/diagnostics.py ({severity}).",
-            "Add/extend a _validate_* function in src/barndsl/validation.py or the relevant domain module.",
-            "Call the validator from validate() in deterministic order if it is a new function.",
+            f"Add REGISTRY entry for {code} in src/barndsl/diagnostics.py ({severity}); if it can fire at more than one severity, add it to _VARYING.",
+            "Give the code a category: list it in the matching explicit set in diagnostics.py unless a prefix rule already classifies it (the audit fails on unclassified codes).",
+            "Add/extend a _validate_* or _dq_* function in src/barndsl/validation.py or the relevant domain module; put thresholds in constants.py (or a Profile field if they vary by jurisdiction).",
+            "Wire a new function into validation._run_full_plan_validators (whole-plan checks) or validation._DESIGN_QUALITY_CHECKS (design-quality checks), keeping deterministic order.",
             f"Fill in {tfile} with one firing and one non-firing plan.",
-            "Run barndsl dev rule-probe, barndsl dev audit, targeted tests, gallery gate, and export parity if geometry changed.",
+            "Run barndsl dev rule-probe, barndsl dev audit, targeted tests, gallery gate, and export parity if geometry changed; regenerate docs/DIAGNOSTIC_MATRIX.md.",
         ],
     }
 
@@ -953,15 +1069,16 @@ entry living south width 3
 def feature_scaffold(name: str, out: str | None = None, *, write: bool = True) -> dict[str, Any]:
     name = name.lower()
     checklist = [
-        f"Add `{name}` to compiler._KEYWORDS and parser dispatch in src/barndsl/compiler.py.",
-        "Update DSL_REFERENCE in src/barndsl/compiler.py with syntax and examples.",
+        f"Add `{name}` to compiler._STATEMENT_PARSERS (STATEMENT_KEYWORDS derives from it) with a _parse_{_snake(name)}_statement function.",
+        "Classify it in compiler.HOST_ONLY_STATEMENTS (building-wide) or PART_STATEMENTS (legal in a part file).",
+        "Document it as a 2-space-indented grammar line under `Statements:` in DSL_REFERENCE (LSP hover reads it).",
         "Add/extend dataclasses in src/barndsl/elements.py if model state is needed.",
-        "Update emit.py round-trip output for the new model field/statement.",
+        "Update emit.py so compile(emit(plan)) rebuilds the same model; if compose stamps the new element, add it to emit._instance_emitters.",
+        "If the statement names a room id, add it to edits._ROOM_REF_FINDERS (rename) and edits._room_dependent_lines (delete).",
         "Update fmt.py only if tokenization/normalization needs special handling.",
         "Playground/LSP statement sets are derived; add context-specific completions/hovers if useful.",
-        "Update edits.py if the feature should be direct-manipulable.",
         "Update render/views/gltf/ifc/revit/cost/schedule exports if geometry or takeoff changes.",
-        "Add parser, validation, emit round-trip, LSP/playground, and export parity tests.",
+        "Add the statement to tests/test_metamorphic.py KITCHEN_SINK (and EVERYTHING_PART if part-legal), plus parser/validation/LSP tests.",
         "Run barndsl dev audit, barndsl dev impact --run, gallery gate, and export parity.",
     ]
     md = "# Feature scaffold: `{}`\n\n{}\n".format(name, "\n".join(f"- [ ] {x}" for x in checklist))
