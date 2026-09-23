@@ -28,7 +28,7 @@ import pytest
 from barndsl import compile_source
 from barndsl.gltf import Scene, build_scene
 from barndsl.materials import GLASS_MATERIAL, PALETTE, TRIM_MATERIAL
-from barndsl.viewer import RENDERER_JS, LAYER_LABELS, scene_json
+from barndsl.viewer import LAYER_LABELS, RENDERER_JS, scene_json
 
 HERE = __import__("os").path.dirname(__file__)
 HARNESS = __import__("os").path.join(HERE, "renderer_phase7_harness.js")

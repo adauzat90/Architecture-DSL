@@ -854,14 +854,16 @@ def compose_uses(
 
     ``ctx`` (Phase 20) carries the nested-composition recursion state (sandbox
     root, depth, cycle stack, shared memo + instance budget) through a nested
-    part's compile; anything else builds a fresh top-level context from
-    ``base_dir``, with ``self_path`` (the file being compiled) on the cycle stack.
+    part's compile; ``None`` builds a fresh top-level context from ``base_dir``,
+    with ``self_path`` (the file being compiled) on the cycle stack.
     A part being composed (``depth ≥ 1``) folds its parts' findings with the alias
     re-prefixed onto the room, so the parent's one-level dedup composes across
     depths.
     """
-    if not isinstance(ctx, _ComposeCtx):
+    if ctx is None:
         ctx = _ComposeCtx.top_level(base_dir, self_path)
+    elif not isinstance(ctx, _ComposeCtx):
+        raise TypeError(f"compose_uses ctx must come from a nested compose, not {type(ctx).__name__}")
     prefix_room = ctx.depth >= 1
     comp = Composition()
     aliases_seen: set[str] = set()

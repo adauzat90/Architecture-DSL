@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from barndsl import compile_source
-from barndsl.compiler import PLACEMENT_ANCHORS, did_you_mean, parse_ft_in, tokenize_line
+from barndsl import compile_source, compose
+from barndsl.compiler import PLACEMENT_ANCHORS, compile_file, did_you_mean, parse_ft_in, tokenize_line
 from barndsl.fixtures import quarter_turns
 from barndsl.geometry import point_rect_distance
 from barndsl.pragma import comment_start
@@ -40,12 +40,18 @@ def test_did_you_mean_ranks_close_matches_or_says_nothing():
     assert did_you_mean("zzz", ("room",)) == ""
 
 
+def _placement_errors(anchor: str) -> list:
+    src = ('plan "P"\nenvelope 40 x 40\nceiling 9\n'
+           "room a: living at 10,10 size 10 x 10\n"
+           f"room b: office {anchor} a size 10 x 10\n")
+    return [d for d in compile_source(src).errors if d.code == "BAD_PLACEMENT"]
+
+
 def test_placement_anchors_are_what_the_parser_accepts():
     for anchor in PLACEMENT_ANCHORS:
-        src = ('plan "P"\nenvelope 40 x 40\nceiling 9\n'
-               "room a: living at 10,10 size 10 x 10\n"
-               f"room b: office {anchor} a size 10 x 10\n")
-        assert not [d for d in compile_source(src).errors if d.code == "BAD_PLACEMENT"], anchor
+        assert not _placement_errors(anchor), anchor
+    for word in ("beside", "above-of", "east"):
+        assert word not in PLACEMENT_ANCHORS and _placement_errors(word), word
 
 
 def test_comment_start_skips_hashes_inside_strings():
@@ -64,6 +70,26 @@ def test_point_rect_distance():
     assert point_rect_distance(1.0, 1.0, rect) == 0.0  # inside
     assert point_rect_distance(7.0, 6.0, rect) == 5.0  # 3-4-5 off the corner
     assert point_rect_distance(2.0, -1.5, rect) == 1.5  # straight below
+
+
+def test_a_host_that_uses_itself_is_one_clean_cycle(tmp_path):
+    # compose_uses puts the file being compiled on the cycle stack (its
+    # `self_path`), so a host that uses itself is caught before any part compile.
+    host = tmp_path / "host.barn"
+    host.write_text('plan "H"\nenvelope 60 x 40\nceiling 9\n'
+                    "room living: living at 0,0 size 20 x 18\n"
+                    "entry living south width 3 offset 8\n"
+                    'use "host.barn" as me at 24,0\n', encoding="utf-8")
+    compose.reset_fragment_compiles()
+    result = compile_file(str(host))
+    assert [d.code for d in result.diagnostics if d.code.startswith("USE")] == ["USE_CYCLE"]
+    assert compose.fragment_compiles() == 0
+
+
+def test_compose_uses_rejects_a_foreign_context():
+    plan = compile_source('plan "P"\nenvelope 20 x 20\nceiling 9\nroom a: living at 0,0 size 10 x 10\n').plan
+    with pytest.raises(TypeError):
+        compose.compose_uses(plan, None, [], ctx=object())
 
 
 def test_schedule_tables_yield_the_requested_schedules():

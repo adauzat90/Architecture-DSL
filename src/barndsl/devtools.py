@@ -126,25 +126,52 @@ def _literal_issue_codes() -> dict[str, list[str]]:
     return {path: sorted(sites) for path, sites in _literal_issue_sites().items()}
 
 
+def _is_private(name: str) -> bool:
+    return name.startswith("_") and not name.startswith("__")
+
+
 def _private_imports(trees: dict[Path, ast.Module] | None = None) -> list[str]:
-    """Every import of another barndsl module's ``_private`` name in
-    ``src/barndsl``, as ``path:line imports module._name``. A helper two modules
-    share needs a public name (and a test) first."""
+    """Every use of another barndsl module's ``_private`` name in ``src/barndsl``,
+    as ``path:line imports module._name``: imported by name (``from .x import
+    _y``) or reached through a module (``from . import x`` / ``import
+    barndsl.x as m`` then ``x._y`` / ``m._y``). A helper two modules share needs a
+    public name (and a test) first."""
+    trees = _src_trees() if trees is None else trees
+    modules = {path.stem for path in trees}
     found: list[str] = []
-    for path, tree in (_src_trees() if trees is None else trees).items():
+    for path, tree in trees.items():
+        where = Path(_rel(path)).as_posix()
+        # Local names bound to a barndsl module, and the module each names.
+        aliases: dict[str, str] = {}
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or not node.module:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("barndsl.") and alias.asname:
+                        aliases[alias.asname] = alias.name.rsplit(".", 1)[-1]
+            elif isinstance(node, ast.ImportFrom):
+                name = node.module or ""
+                package = name in ("", "barndsl")  # `from . import x` / `from barndsl import x`
+                if not (node.level or package or name.startswith("barndsl.")):
+                    continue  # stdlib or a third-party import
+                module = "barndsl" if package else name.rsplit(".", 1)[-1]
+                for alias in node.names:
+                    if package and alias.name in modules:
+                        aliases[alias.asname or alias.name] = alias.name
+                    elif module != path.stem and _is_private(alias.name):
+                        found.append(f"{where}:{node.lineno} imports {module}.{alias.name}")
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Attribute) and _is_private(node.attr)):
                 continue
-            if not (node.level or node.module == "barndsl" or node.module.startswith("barndsl.")):
-                continue  # stdlib or a third-party import
-            module = node.module.rsplit(".", 1)[-1]
-            if module == path.stem:
+            base = node.value
+            if isinstance(base, ast.Name) and base.id in aliases:
+                module = aliases[base.id]
+            elif (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                  and base.value.id == "barndsl" and base.attr in modules):
+                module = base.attr  # barndsl.x._y
+            else:
                 continue
-            found.extend(
-                f"{Path(_rel(path)).as_posix()}:{node.lineno} imports {module}.{alias.name}"
-                for alias in node.names
-                if alias.name.startswith("_") and not alias.name.startswith("__")
-            )
+            if module != path.stem:
+                found.append(f"{where}:{node.lineno} imports {module}.{node.attr}")
     return found
 
 
@@ -265,7 +292,8 @@ def repo_audit() -> dict[str, Any]:
             "matrix_missing": matrix["missing"],
             "matrix_stale": matrix["stale"],
         },
-        "modules": {"private_imports": private_imports},
+        # sources_scanned is 0 outside a repo checkout (no src/ to read).
+        "modules": {"sources_scanned": len(trees), "private_imports": private_imports},
         "artifacts": {"pyc_sample": pyc, "agent_run_root_artifacts": agent_artifacts},
     }
 

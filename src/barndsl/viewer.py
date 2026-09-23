@@ -49,7 +49,7 @@ import json
 import math
 
 from .elements import Barndominium
-from .gltf import Scene, gltf_point, build_scene, effective_linear
+from .gltf import Scene, build_scene, effective_linear, gltf_point
 from .materials import GLASS_MATERIAL
 
 #: Human labels for the layer toggles, in display order.

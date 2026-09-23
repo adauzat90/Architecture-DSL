@@ -193,13 +193,20 @@ Tests and tools add roughly 100 more sites. Most are `agent` privates in
   beside the other shared geometry.
 - **Removed.** `edits` checks anchors against the public `PLACEMENT_ANCHORS`
   instead of the parser's `_PLACEMENT` table.
-- **Seam, not a rename.** `compose.compose_uses` now builds its own top-level
-  recursion context (new `self_path` argument). The compiler no longer touches
-  `_ComposeCtx`, which stays private.
-- **Kept that way.** `barndsl dev audit` gained a `private_imports` check: any
-  `src/barndsl` module importing another module's `_private` name fails the
-  audit, and therefore doctor. `test_repo_audit_checks_can_fail` plants one to
-  prove the check can trip.
+- **Seam, not a rename.**
+  - `compose.compose_uses` now builds its own top-level recursion context, with
+    a new `self_path` argument, and rejects a context it didn't make.
+  - The compiler no longer touches `_ComposeCtx`, which stays private.
+  - A test pins that a host file using itself is still one clean `USE_CYCLE`.
+- **Kept that way.**
+  - `barndsl dev audit` gained a `private_imports` check. Any `src/barndsl`
+    module that reaches another module's `_private` name fails the audit, and
+    therefore doctor, whether it imports the name or reaches it through a module
+    (`from . import x; x._y`, `import barndsl.x as m; m._y`, `barndsl.x._y`).
+  - The audit also reports `sources_scanned`, which is 0 outside a repo
+    checkout.
+  - `test_repo_audit_checks_can_fail` plants every one of those forms to prove
+    each can trip.
 - **Tests.** `tests/test_public_seams.py` pins the contract of each newly
   public helper that only had indirect coverage.
 - **Out of scope.** Tests still import roughly 100 private names, mostly

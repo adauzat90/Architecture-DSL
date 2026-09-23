@@ -614,7 +614,7 @@ def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = Tr
     return _place_seeds(x0, y0, cw, cl, kinds, keepouts, _seed_gaps(room.type))
 
 
-def quarter_turns(rotation: float) -> int:
+def quarter_turns(rotation: float | None) -> int:
     """A rotation in degrees snapped to a plan quarter-turn count (0..3). The
     massing is axis-aligned, so a fixture turns in 90° steps; other angles snap to
     the nearest, keeping the plan glyph and the 3D box consistent."""

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from barndsl import compile_source
 from barndsl.fixtures import (
-    door_swing_rects,
     _rects_overlap,
+    door_swing_rects,
     plan_room_fixtures,
     resolve_room_fixtures,
 )

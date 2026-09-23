@@ -124,7 +124,7 @@ from .render import (
 from .scaffold import starter_dsl
 from .schedule import schedule_tables
 from .score import design_score
-from .viewer import RENDERER_JS, LAYER_LABELS, scene_json, viewer_html
+from .viewer import LAYER_LABELS, RENDERER_JS, scene_json, viewer_html
 from .views import elevation_svg, section_svg
 
 #: Maximum accepted request body (bytes) for POST /api/compile — a generous cap

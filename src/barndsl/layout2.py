@@ -49,11 +49,11 @@ from .layout import (
     LayoutBrief,
     LayoutResult,
     RoomSpec,
-    place_openings,
     connect_adjacencies,
-    relieve_kitchen_passthrough,
     kitchen_is_a_corridor,
     parse_brief_fields,
+    place_openings,
+    relieve_kitchen_passthrough,
 )
 
 #: Rooms forming the open core; they tile the first band and share vertical walls.

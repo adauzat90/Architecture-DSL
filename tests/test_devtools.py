@@ -31,16 +31,29 @@ def test_repo_audit_checks_can_fail(monkeypatch):
     planted = devtools.SRC / "barndsl" / "planted.py"
     monkeypatch.setattr(devtools, "_src_trees", lambda: {
         **real_trees(),
-        planted: ast.parse("from .compiler import _PLACEMENT, PLACEMENT_ANCHORS\n"
-                           "from barndsl.render import __all__\n"),
+        planted: ast.parse(
+            "from .compiler import _PLACEMENT, PLACEMENT_ANCHORS\n"   # 1: by name
+            "from barndsl.render import __all__, _Renderer\n"         # 2: absolute
+            "from . import fixtures\n"                                # 3
+            "import barndsl.schedule as sched\n"                      # 4
+            "import barndsl.geometry\n"                               # 5
+            "from .planted import _mine\n"                            # 6: its own
+            "fixtures._rect_intersection(sched._fmt_ft(1), barndsl.geometry._grid, _mine)\n"  # 7
+        ),
     })
     out = devtools.repo_audit()
     assert not out["ok"]
     assert out["statement_keywords"]["unclassified_host_or_part"] == ["room"]
     assert any(d.startswith("FOYER_FLOW") for d in out["diagnostics"]["severity_drift"])
     assert out["diagnostics"]["unclassified_category"] == ["MECH_ACCESS"]
-    # Only the private name is flagged — not the public one, nor a dunder.
-    assert out["modules"]["private_imports"] == ["src/barndsl/planted.py:1 imports compiler._PLACEMENT"]
+    # Private names are flagged however they're reached — never a public name,
+    # a dunder, or a module's own privates.
+    assert sorted(out["modules"]["private_imports"]) == sorted(
+        f"src/barndsl/planted.py:{line} imports {name}" for line, name in [
+            (1, "compiler._PLACEMENT"), (2, "render._Renderer"),
+            (7, "fixtures._rect_intersection"), (7, "schedule._fmt_ft"), (7, "geometry._grid"),
+        ]
+    )
 
 
 def test_pi_extension_confines_file_tools_to_the_workspace():
