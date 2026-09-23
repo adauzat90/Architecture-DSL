@@ -913,6 +913,90 @@ def test_agent_reads_model_and_max_tokens_from_env(monkeypatch):
     assert ag.max_tokens == 40000
 
 
+# -- thinking-budget resolution -----------------------------------------------
+# Reasoning tokens are billed inside max_tokens, so a heavy reasoner can spend the
+# whole cap thinking and emit no DSL. resolve_thinking bounds that per endpoint and
+# $BARNDSL_THINKING_BUDGET: adaptive on native Anthropic, a budgeted `enabled` on a
+# compat gateway (DeepSeek), with `off` as the guaranteed no-thinking lever.
+
+
+def test_resolve_thinking_native_default_is_adaptive(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv(A.THINKING_BUDGET_ENV_VAR, raising=False)
+    assert A.resolve_thinking(32000) == {"type": "adaptive"}
+    # An api.anthropic.com base URL still counts as native.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    assert A.resolve_thinking(32000) == {"type": "adaptive"}
+
+
+def test_resolve_thinking_gateway_default_is_budgeted_enabled(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.delenv(A.THINKING_BUDGET_ENV_VAR, raising=False)
+    assert A.resolve_thinking(32000) == {
+        "type": "enabled",
+        "budget_tokens": A.DEFAULT_THINKING_BUDGET,
+    }
+
+
+def test_resolve_thinking_explicit_budget_on_gateway(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv(A.THINKING_BUDGET_ENV_VAR, "5000")
+    assert A.resolve_thinking(32000) == {"type": "enabled", "budget_tokens": 5000}
+
+
+def test_resolve_thinking_budget_clamped_to_leave_output_room(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic")
+    monkeypatch.setenv(A.THINKING_BUDGET_ENV_VAR, "999999")
+    # Reserve a quarter of the 32000 cap (min 4000) for the reply → ceiling 24000.
+    assert A.resolve_thinking(32000) == {"type": "enabled", "budget_tokens": 24000}
+
+
+def test_resolve_thinking_budget_downgraded_to_adaptive_on_native(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv(A.THINKING_BUDGET_ENV_VAR, "8000")
+    # enabled+budget_tokens 400s on native Anthropic — fall back to adaptive.
+    assert A.resolve_thinking(32000) == {"type": "adaptive"}
+
+
+def test_resolve_thinking_off_disables_thinking(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    for off in ("off", "disabled", "0", "none", "OFF"):
+        monkeypatch.setenv(A.THINKING_BUDGET_ENV_VAR, off)
+        assert A.resolve_thinking(32000) == {"type": "disabled"}
+
+
+def test_resolve_thinking_adaptive_override_and_malformed_fallback(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv(A.THINKING_BUDGET_ENV_VAR, "adaptive")
+    assert A.resolve_thinking(32000) == {"type": "adaptive"}
+    # Malformed → endpoint default (gateway → budgeted enabled).
+    monkeypatch.setenv(A.THINKING_BUDGET_ENV_VAR, "lots")
+    assert A.resolve_thinking(32000)["type"] == "enabled"
+
+
+def test_agent_resolves_thinking_from_env(monkeypatch):
+    from barndsl import agent as A
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv(A.THINKING_BUDGET_ENV_VAR, "6000")
+    ag = BarndoAgent(client=FakeClient(sources=[CLEAN]))
+    assert ag._thinking == {"type": "enabled", "budget_tokens": 6000}
+
+
 def test_design_default_iterations_come_from_env(monkeypatch):
     """With no max_iterations arg, the loop runs $BARNDSL_MAX_ITERATIONS rounds."""
     from barndsl import agent as A

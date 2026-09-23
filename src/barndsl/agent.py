@@ -98,6 +98,116 @@ def resolve_max_tokens(max_tokens: int | None = None) -> int:
             return value
     return DEFAULT_MAX_TOKENS
 
+
+#: Default reasoning ("thinking") budget applied on a non-Anthropic gateway when
+#: :data:`THINKING_BUDGET_ENV_VAR` is unset. Reasoning tokens are billed *inside*
+#: ``max_tokens`` (chain-of-thought + reply share one budget), so an uncapped
+#: reasoner like ``deepseek-v4-pro`` can spend the whole cap thinking and leave
+#: nothing to emit the DSL. Native Anthropic keeps adaptive thinking (Opus decides
+#: dynamically) — the compat gateways don't implement adaptive, so they get an
+#: explicit budgeted cap instead.
+DEFAULT_THINKING_BUDGET = 8000
+
+#: Environment variable that caps the reasoning slice of each call. An integer
+#: requests ``{"type": "enabled", "budget_tokens": N}``; ``off``/``disabled``/
+#: ``none``/``0`` turns thinking off entirely (``{"type": "disabled"}`` — the one
+#: lever guaranteed to work on any gateway); ``adaptive`` forces adaptive thinking.
+THINKING_BUDGET_ENV_VAR = "BARNDSL_THINKING_BUDGET"
+
+#: Values (case-insensitive) that mean "no chain-of-thought at all".
+_THINKING_OFF_VALUES = frozenset({"off", "disabled", "none", "false", "0"})
+
+
+def _on_compat_gateway() -> bool:
+    """Whether ``ANTHROPIC_BASE_URL`` points at a non-Anthropic gateway.
+
+    Unset (or an ``api.anthropic.com`` URL) means native Anthropic, where adaptive
+    thinking is available and ``enabled`` + ``budget_tokens`` is rejected with a
+    400. Any other host is a compat gateway (e.g. DeepSeek), where the reverse
+    holds: adaptive isn't implemented, so an explicit budget is the lever.
+    """
+    base = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/")
+    return bool(base) and "api.anthropic.com" not in base
+
+
+def _thinking_budget_ceiling(max_tokens: int) -> int:
+    """The largest thinking budget that still leaves room to emit the reply.
+
+    Reserve at least a quarter of the cap (minimum 4000 tokens) for the visible
+    answer, so a budgeted reasoner can't consume everything and return an empty
+    plan — the exact failure the raised ``max_tokens`` default was papering over.
+    """
+    return max(1024, max_tokens - max(4000, max_tokens // 4))
+
+
+def resolve_thinking(max_tokens: int) -> dict[str, Any]:
+    """The ``thinking`` argument for a messages call, tuned to the endpoint.
+
+    Reasoning tokens are billed *inside* ``max_tokens``, so on a heavy reasoning
+    model the chain-of-thought can eat the whole cap and leave nothing to emit the
+    DSL. This picks the ``thinking`` shape that best bounds that, per
+    ``$BARNDSL_THINKING_BUDGET`` (:data:`THINKING_BUDGET_ENV_VAR`) and the endpoint:
+
+    - a positive integer → ``{"type": "enabled", "budget_tokens": N}``, clamped
+      below ``max_tokens`` (see :func:`_thinking_budget_ceiling`) so there is
+      always room to answer. NOTE: DeepSeek's Anthropic-compatible gateway
+      documents ``budget_tokens`` as *ignored* — the request still runs (thinking
+      stays on), so confirm via the response ``usage`` whether the cap actually
+      bites, and fall back to ``off`` if it doesn't.
+    - ``off``/``disabled``/``none``/``0`` → ``{"type": "disabled"}`` — the lever
+      guaranteed to work on any gateway: no chain-of-thought, the whole cap to output.
+    - ``adaptive`` → ``{"type": "adaptive"}`` — the model decides (native Anthropic
+      Opus 4.6+; undefined on compat gateways, which don't implement it).
+    - unset → ``adaptive`` on native Anthropic; ``enabled`` +
+      :data:`DEFAULT_THINKING_BUDGET` on a compat gateway.
+
+    Because ``enabled`` + ``budget_tokens`` 400s on native Anthropic (Opus 4.8/4.7
+    accept only ``adaptive``/``disabled``), an explicit integer budget on a native
+    endpoint is downgraded to ``adaptive`` with a warning — set a budget only when
+    ``ANTHROPIC_BASE_URL`` points at a compat gateway.
+    """
+    on_gateway = _on_compat_gateway()
+    raw = os.environ.get(THINKING_BUDGET_ENV_VAR)
+
+    if raw is not None:
+        val = raw.strip().lower()
+        if val in _THINKING_OFF_VALUES:
+            return {"type": "disabled"}
+        if val == "adaptive":
+            return {"type": "adaptive"}
+        try:
+            budget = int(val)
+        except ValueError:
+            budget = -1
+        if budget > 0:
+            if not on_gateway:
+                logger.warning(
+                    "%s=%s can't apply on native Anthropic (enabled+budget_tokens "
+                    "400s there — only adaptive/disabled are accepted); using "
+                    "adaptive thinking. Set a budget only when ANTHROPIC_BASE_URL "
+                    "points at a compat gateway (e.g. DeepSeek).",
+                    THINKING_BUDGET_ENV_VAR, raw,
+                )
+                return {"type": "adaptive"}
+            return {
+                "type": "enabled",
+                "budget_tokens": min(budget, _thinking_budget_ceiling(max_tokens)),
+            }
+        logger.warning(
+            "%s=%r is not a positive integer, 'adaptive', or an off value "
+            "(off/disabled/none/0); using the endpoint default.",
+            THINKING_BUDGET_ENV_VAR, raw,
+        )
+
+    # Unset or malformed: endpoint-aware default.
+    if not on_gateway:
+        return {"type": "adaptive"}
+    return {
+        "type": "enabled",
+        "budget_tokens": min(DEFAULT_THINKING_BUDGET, _thinking_budget_ceiling(max_tokens)),
+    }
+
+
 #: Below this score the design is not "done" even if the critic is satisfied.
 DEFAULT_TARGET_SCORE = 90.0
 
@@ -599,6 +709,11 @@ class BarndoAgent:
         # Output-token cap for generation and critique; big enough for a reasoning
         # model to think and still emit (see resolve_max_tokens / DEFAULT_MAX_TOKENS).
         self.max_tokens = resolve_max_tokens(max_tokens)
+        # The ``thinking`` shape for every call, tuned to the endpoint and
+        # $BARNDSL_THINKING_BUDGET so a reasoning model's chain-of-thought can't
+        # eat the whole max_tokens budget (see resolve_thinking). Resolved once
+        # here — ANTHROPIC_BASE_URL is stable per process.
+        self._thinking = resolve_thinking(self.max_tokens)
         self._client = client
 
     @property
@@ -672,7 +787,7 @@ class BarndoAgent:
                 max_tokens=self.max_tokens,
                 system=_GENERATE_SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
-                thinking={"type": "adaptive"},
+                thinking=self._thinking,
             ) as stream:
                 if on_activity is not None:
                     _pump_activity(stream, on_activity)
@@ -744,7 +859,7 @@ class BarndoAgent:
                 max_tokens=self.max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": content}],
-                thinking={"type": "adaptive"},
+                thinking=self._thinking,
             ) as stream:
                 if on_activity is not None:
                     _pump_activity(stream, on_activity)
