@@ -31,6 +31,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - Doors connect two rooms or a room to an exterior wall; windows/openings belong to a room wall.
 - Exterior-wall eligibility is derived from final geometry, not just the statement text.
 - Opening offsets are measured along the owning wall from that wall's canonical start.
+- An interior door sits where `geometry.door_span` puts it: the leaf is cut to the shared wall and the offset slid back onto it. `DOOR_FIT`/`DOOR_OOB` report the authored overrun; drawing, exports, schedules, introspection and clearance checks all use the built span. Two places keep the authored offset instead. Composition transforms it, so a stamped overrun still reports `DOOR_OOB`. The editor's drag handle and inspector read and write it, because they edit the source.
 - Validators should prefer deterministic anchors: room ID, opening statement line, or `use` line for instance-level findings.
 
 ## Diagnostics
@@ -51,7 +52,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - `compile_source(emit_dsl(plan)).plan` rebuilds the same model as `plan` — every dataclass field except source positions (`line`/`col`/`*_line`) and the non-serialised `placement` hint. This is stronger than a text fixed point, which can't see a field the first emit already dropped; `tests/test_metamorphic.py` checks it for every example and for a fixture exercising every statement option.
 - `emit_dsl(compile_source(emit_dsl(plan)).plan)` is a fixed point.
 - Flattened emission of composed plans should preserve resolved/stamped geometry even though source comments and `use` statements are removed; `inline_use` must keep every stamped element type.
-- Known gap: `# barndsl: accept` pragmas are comments, not model state, so emission drops them and a re-emitted plan loses its accepted deviations. Carrying them through emit would need pragmas stored on the model (an open design decision).
+- Known gap: `# barndsl: accept` pragmas are comments, not model state, so emission drops them and a re-emitted plan loses its accepted deviations. Carrying them through emit would need pragmas stored on the model (an open design decision; tracked as TD-14 in `docs/TECH_DEBT.md`).
 
 ## Exports and introspection
 

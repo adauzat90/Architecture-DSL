@@ -10,7 +10,7 @@ This checklist is optimized for both humans and coding agents.
    barndsl dev doctor
    ```
 
-   See `docs/MODEL_INVARIANTS.md` for coordinate, identity, fragment, diagnostic and emit/format invariants.
+   See `docs/MODEL_INVARIANTS.md` for coordinate, identity, fragment, diagnostic and emit/format invariants, and `docs/TECH_DEBT.md` for known structural debt in the area you are touching.
 
 2. Before editing an unfamiliar rule/feature, locate its breadcrumbs:
 

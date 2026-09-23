@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .elements import Barndominium, Direction, ExteriorDoor, InteriorDoor, Window
-from .geometry import opening_endpoints, shared_edge
+from .geometry import door_offset, door_span, opening_endpoints, shared_edge
 from .render import fmt_ft_in
 from .validation import clear_dimensions, exterior_walls
 
@@ -129,12 +129,8 @@ def _door_tag_point(plan, door, level) -> tuple[float, float] | None:
         edge = shared_edge(a, b)
         if edge is None:
             return None
-        w = min(door.width, edge.length)
-        offset = getattr(door, "offset", None)
-        start = edge.mid - w / 2 if offset is None else edge.lo + max(
-            0.0, min(offset, edge.length - w)
-        )
-        mid = start + w / 2.0
+        start, end = door_span(edge, door)
+        mid = (start + end) / 2.0
         if edge.orientation == "v":  # vertical wall at x = edge.pos
             inward = 1.0 if a.center[0] > edge.pos else -1.0
             return (edge.pos + inward * TAG_INSET_FT, mid)
@@ -184,17 +180,14 @@ def door_rows(plan: Barndominium) -> list[dict]:
     rows: list[dict] = []
     marks = {id(obj): mark for mark, obj in door_marks(plan)}
     for d in plan.interior_doors:
-        # Near-jamb offset from the shared wall's south/west start. An explicit
-        # `offset` is that distance directly; `None` centres the leaf, so the near
-        # jamb sits half the leftover to one side. `hi`/`lo` come from the shared
-        # edge (the wall the door actually sits on).
+        # Near-jamb offset from the shared wall's south/west start, where the
+        # door is drawn (a centred door sits half the leftover to one side).
         a, b = plan.room(d.room_a), plan.room(d.room_b)
         edge = shared_edge(a, b) if a is not None and b is not None else None
         if edge is None:
             offset, corner = None, ""
         else:
-            w = min(d.width, edge.length)
-            offset = d.offset if d.offset is not None else max(0.0, (edge.length - w) / 2.0)
+            offset = door_offset(edge, d)
             corner = "W" if edge.orientation == "h" else "S"
         rows.append(
             {

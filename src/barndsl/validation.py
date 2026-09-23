@@ -56,6 +56,8 @@ from .elements import (
     RoomType,
 )
 from .geometry import (
+    door_offset,
+    door_span,
     opening_endpoints,
     point_in_footprint,
     rect_in_footprint,
@@ -759,19 +761,6 @@ def _runs_off_wall(offset: float, width: float, wall_length: float) -> bool:
     return offset < -EPSILON or offset + width > wall_length + EPSILON
 
 
-def _door_interval(edge, door) -> tuple[float, float]:
-    """The door's span along its shared wall, in world coordinates.
-
-    ``offset`` is measured from the south/west end of the shared wall (``edge.lo``);
-    ``None`` centres the door on the wall.
-    """
-    if door.offset is None:
-        lo = edge.mid - door.width / 2.0
-    else:
-        lo = edge.lo + door.offset
-    return lo, lo + door.width
-
-
 def _zone_from_edge(edge, lo: float, hi: float, depth: float) -> tuple[float, float, float, float]:
     """The clear-floor rectangle straddling a wall edge over span ``[lo, hi]``.
 
@@ -911,13 +900,14 @@ def _interior_swing_region(plan: Barndominium, door, a: Room, b: Room, edge):
     """
     if door.kind not in ("swing", *DOUBLE_LEAF_KINDS):
         return None
-    leaf = door.width / 2.0 if door.kind in DOUBLE_LEAF_KINDS else door.width
-    start = edge.lo + door.offset if door.offset is not None else edge.mid - door.width / 2.0
+    start, end = door_span(edge, door)
+    width = end - start
+    leaf = width / 2.0 if door.kind in DOUBLE_LEAF_KINDS else width
     hinge_far = door.hinge == "far"
     if hinge_far and door.kind in DOUBLE_LEAF_KINDS:
         # The far leaf hinges at the opening's far end; its sweep starts at
         # the pair's midpoint, so shift the region to the outer half.
-        start += door.width - leaf
+        start += width - leaf
     sgn = _swing_sgn(door, a, b, edge)
     if edge.orientation == "v":
         return _swing_region(plan, "v", edge.pos, start, leaf, hinge_far, sgn)
@@ -2739,12 +2729,7 @@ def _interior_door_wall_span(plan: Barndominium, door) -> tuple[float, float] | 
     edge = shared_edge(a, b)
     if edge is None:
         return None
-    w = min(door.width, edge.length)
-    if door.offset is None:
-        start = edge.mid - w / 2
-    else:
-        start = edge.lo + max(0.0, min(door.offset, edge.length - w))
-    return start, start + w
+    return door_span(edge, door)
 
 
 def _validate_door_pair_spans(spans: list, add) -> None:
@@ -3111,16 +3096,11 @@ def _room_door_segments(
         edge = shared_edge(a, b)
         if edge is None:
             continue
-        w = min(d.width, edge.length)
-        offset = getattr(d, "offset", None)
-        if offset is None:
-            start = edge.mid - w / 2.0
-        else:
-            start = edge.lo + max(0.0, min(offset, edge.length - w))
+        start, end = door_span(edge, d)
         if edge.orientation == "v":
-            segs.append((edge.pos, start, edge.pos, start + w))
+            segs.append((edge.pos, start, edge.pos, end))
         else:
-            segs.append((start, edge.pos, start + w, edge.pos))
+            segs.append((start, edge.pos, end, edge.pos))
     return segs
 
 
@@ -4300,10 +4280,10 @@ def _validate_reach_in_single_door(room_id: str, by_id: dict[str, Room], door, a
 
 
 def _reach_in_door_span(room: Room, door, edge) -> tuple[float, float, float, float] | None:
-    width = min(door.width, edge.length)
+    start, end = door_span(edge, door)
+    width = end - start
     if width <= 0:
         return None
-    start = edge.lo + (edge.length - width) / 2.0 if door.offset is None else edge.lo + max(0.0, min(door.offset, edge.length - width))
     lo = room.y if edge.orientation == "v" else room.x
     hi = room.y2 if edge.orientation == "v" else room.x2
     return start, width, lo, hi
@@ -4504,7 +4484,7 @@ def _dq_stair_blocks_door(plan: Barndominium, graph, by_id, add) -> None:
             edge = shared_edge(a, b)
             if edge is None:
                 continue
-            lo, hi = _door_interval(edge, d)
+            lo, hi = door_span(edge, d)
             zx1, zy1, zx2, zy2 = _zone_from_edge(edge, lo, hi, DOOR_CLEARANCE_DEPTH)
             key = f"{a.id}-{b.id}"
             if key not in blocked and s.overlaps_rect(zx1, zy1, zx2, zy2):
@@ -4576,7 +4556,7 @@ def _dq_door_centered(plan: Barndominium, graph, by_id, add) -> None:
         edge = shared_edge(a, b)
         if edge is None:
             continue
-        margin = (edge.length - d.width) / 2.0
+        margin = door_offset(edge, d)  # centred: the gap to each corner
         if margin > DOOR_CORNER_MARGIN:
             add(
                 Issue(
@@ -5636,7 +5616,8 @@ def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
         edge = shared_edge(closet, other)
         if edge is None:
             continue
-        leaf = min(d.width, edge.length)
+        lo, hi = door_span(edge, d)
+        leaf = hi - lo
         # Closet depth = the closet's extent perpendicular to the shared wall.
         depth = closet.width if edge.orientation == "v" else closet.length
         if depth + EPSILON < leaf:
@@ -5724,7 +5705,7 @@ def _interior_hall_door_marks(plan: Barndominium, room: Room, by_id: dict[str, R
         edge = shared_edge(room, neighbor) if neighbor else None
         if edge is None:
             continue
-        lo, hi = _door_interval(edge, door)
+        lo, hi = door_span(edge, door)
         along_axis = (edge.orientation == "h") if long_x else (edge.orientation == "v")
         marks.append((lo, hi) if along_axis else (edge.pos, edge.pos))
     return marks

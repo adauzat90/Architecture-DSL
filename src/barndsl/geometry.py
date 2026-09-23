@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .elements import Direction, Room
+from .elements import Direction, InteriorDoor, Room
 
 TOL = 1e-6
 
@@ -51,6 +51,29 @@ def shared_edge(a: Room, b: Room, tol: float = TOL) -> SharedEdge | None:
             if hi - lo > tol:
                 return SharedEdge("h", pos, lo, hi)
     return None
+
+
+def door_span(edge: SharedEdge, door: InteriorDoor) -> tuple[float, float]:
+    """The world ``(lo, hi)`` an interior door occupies along its shared wall.
+
+    ``offset`` is measured from the south/west end of the shared wall
+    (``edge.lo``); ``None`` centres the door. The span is the door as built:
+    a leaf wider than the wall is cut to the wall, and an offset that would run
+    it off either end slides it back on. ``DOOR_FIT``/``DOOR_OOB`` report the
+    authored overrun; drawing, exports, schedules, introspection and every
+    clearance check use this span so they all put the door in one place.
+    """
+    lo = edge.lo + door_offset(edge, door)
+    return lo, lo + min(door.width, edge.length)
+
+
+def door_offset(edge: SharedEdge, door: InteriorDoor) -> float:
+    """How far the near jamb of :func:`door_span` sits from ``edge.lo`` — the
+    built offset, with a centred door resolved to half the leftover wall."""
+    width = min(door.width, edge.length)
+    if door.offset is None:
+        return (edge.length - width) / 2.0
+    return max(0.0, min(door.offset, edge.length - width))
 
 
 # --- rectilinear footprint (a union of axis-aligned rectangular sections) ----

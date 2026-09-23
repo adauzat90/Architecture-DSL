@@ -692,6 +692,10 @@ def _xform_door_offset(
     Otherwise the door's span endpoints are transformed and re-measured from the
     new shared edge's low end (the same S/W convention). If either room or the
     shared edge can't be resolved, the stored offset is kept unchanged.
+
+    This maps the *authored* span, not the built one from
+    :func:`~barndsl.geometry.door_span`, so a part door that runs off its wall
+    still reports ``DOOR_OOB`` once stamped.
     """
     offset = door.offset
     if offset is None:
