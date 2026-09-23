@@ -11,11 +11,13 @@ What it emits (see :data:`LAYERS` for the layer table):
 * **Walls** as *closed* ``LWPOLYLINE`` bodies with real thickness — the exterior
   shell as per-side bands centred on the envelope, interior partitions centred on
   each shared room edge — with door and window openings **cut out** of the band.
-* **Doors** as a leaf line + a 90° swing ``ARC`` (mirroring the SVG's hinge/swing
-  convention); **windows** as the classic sill / head / centre-glazing symbol.
+* **Doors** as a leaf line + a 90° swing ``ARC``; **windows** as the classic
+  sill / head / centre-glazing symbol. Both come from :mod:`barndsl.drawing`, the
+  symbol geometry the SVG plan draws too.
 * **Dimensions** in one of two flavors (``dims=``): the default ``"geometry"`` is
   *drawing geometry* — overall dims per side plus the exterior chain strings with
-  jamb breaks (the same breaks the SVG draws) as dim lines, extension lines, ticks
+  jamb breaks (:func:`barndsl.drawing.exterior_chains`, the same chains the SVG
+  draws) as dim lines, extension lines, ticks
   and ``TEXT`` on ``A-ANNO-DIMS``; ``"associative"`` emits real rotated-linear
   ``DIMENSION`` entities (one per segment) each backed by an anonymous ``*D<n>``
   block of that same exploded geometry, so a regenerating reader gets live dims
@@ -41,10 +43,17 @@ from __future__ import annotations
 
 import math
 
-from .constants import EXTERIOR_WALL_THICKNESS
-from .elements import Barndominium, Direction, Room
-from .geometry import door_span, opening_endpoints, shared_edge
-from .render import RenderConfig, _Renderer, fmt_ft_in
+from .drawing import (
+    DoorSymbol,
+    Leaf,
+    Segment,
+    door_symbols,
+    exterior_chains,
+    overall_span,
+    window_symbols,
+)
+from .elements import Barndominium, Room
+from .render import fmt_ft_in
 from .wallbodies import wall_bands
 
 #: Layer name → AutoCAD Color Index. AIA CAD Layer Guidelines discipline
@@ -130,10 +139,9 @@ class _DxfWriter:
         self._dimno = 0
         self.minx = self.miny = math.inf
         self.maxx = self.maxy = -math.inf
-        # A throwaway renderer supplies the (world-coordinate) chain-dimension
-        # break computation, so the DXF chain matches the SVG's exactly — in
-        # whichever dimension mode (nominal room lines vs face-of-stud).
-        self._r = _Renderer(plan, RenderConfig(dim_mode=dim_mode))
+        # Nominal room lines vs face-of-stud; the chain geometry for either comes
+        # from barndsl.drawing, so the DXF chains match the SVG's exactly.
+        self._dim_mode = dim_mode
 
     # -- low-level ---------------------------------------------------------
 
@@ -486,7 +494,7 @@ class _DxfWriter:
         rooms = [r for r in self.plan.rooms if r.level == level]
         self._walls(level, sfx)
         self._windows(level, sfx)
-        self._doors(level, rooms, sfx)
+        self._doors(level, sfx)
         self._fixtures(rooms, sfx)
         self._room_text(rooms, sfx)
         self._opening_tags(level, sfx)
@@ -528,213 +536,78 @@ class _DxfWriter:
         for band in wall_bands(self.plan, level):
             self.rect(band.x0, band.y0, band.x1, band.y1, layer)
 
-    # -- windows -----------------------------------------------------------
+    # -- windows and doors -------------------------------------------------
+    #
+    # The symbol geometry comes from :mod:`barndsl.drawing`, shared with the SVG
+    # plan; only the DXF vocabulary (layers, linetypes, ARC angles) lives here.
 
     def _windows(self, level: int, sfx: str) -> None:
+        # Both band faces, the glazing centre line, and a jamb at each end.
         layer = "A-GLAZ" + sfx
-        half = EXTERIOR_WALL_THICKNESS / 2.0
-        for win in self.plan.windows:
-            room = self.plan.room(win.room)
-            if room is None or room.level != level:
-                continue
-            x1, y1, x2, y2 = opening_endpoints(room, win.wall, win.offset, win.width)
-            if win.wall in (Direction.SOUTH, Direction.NORTH):
-                cy = y1
-                lo, hi = min(x1, x2), max(x1, x2)
-                self.line(lo, cy - half, hi, cy - half, layer)  # outer face
-                self.line(lo, cy + half, hi, cy + half, layer)  # inner face
-                self.line(lo, cy, hi, cy, layer)                # glazing centre
-                self.line(lo, cy - half, lo, cy + half, layer)  # jambs
-                self.line(hi, cy - half, hi, cy + half, layer)
-            else:
-                cx = x1
-                lo, hi = min(y1, y2), max(y1, y2)
-                self.line(cx - half, lo, cx - half, hi, layer)
-                self.line(cx + half, lo, cx + half, hi, layer)
-                self.line(cx, lo, cx, hi, layer)
-                self.line(cx - half, lo, cx + half, lo, layer)
-                self.line(cx - half, hi, cx + half, hi, layer)
+        for sym in window_symbols(self.plan, level):
+            for seg in (*sym.faces, sym.glazing, *sym.jambs):
+                self._segment(seg, layer)
 
-    # -- doors -------------------------------------------------------------
-
-    def _doors(self, level: int, rooms: list[Room], sfx: str) -> None:
+    def _doors(self, level: int, sfx: str) -> None:
         layer = "A-DOOR" + sfx
-        mx, my = self._swing_bounds()
-        for door in self.plan.interior_doors:
-            a, b = self.plan.room(door.room_a), self.plan.room(door.room_b)
-            if not (a and b) or not (a.level == b.level == level):
-                continue
-            edge = shared_edge(a, b)
-            if edge is None:
-                continue
-            start, end = door_span(edge, door)
-            w = end - start
-            kind = door.kind
-            ox, oy = (edge.pos, start) if edge.orientation == "v" else (start, edge.pos)
-            if kind in ("swing", "double", "french"):
-                sgn = self._swing_sgn(door, a, b, edge)
-                if kind == "swing":
-                    self._door_leaf(ox, oy, edge.orientation, w, layer, sgn, False, mx, my)
-                else:
-                    half = w / 2.0
-                    self._door_leaf(ox, oy, edge.orientation, half, layer, sgn, False, mx, my)
-                    if edge.orientation == "v":
-                        self._door_leaf(ox, oy + half, edge.orientation, half, layer, sgn, True, mx, my)
-                    else:
-                        self._door_leaf(ox + half, oy, edge.orientation, half, layer, sgn, True, mx, my)
-            elif kind in ("pocket", "sliding"):
-                self._slide_leaf(ox, oy, edge.orientation, w, layer, mx, my)
-            elif kind == "bifold":
-                self._bifold_leaf(ox, oy, edge.orientation, w, layer, mx, my)
+        for sym in door_symbols(self.plan, level):
+            if sym.kind == "swing":
+                for leaf in sym.leaves:
+                    self._door_leaf(leaf, layer)
+            elif sym.kind == "slide":
+                self._segment(sym.line, layer)
+            elif sym.kind == "bifold":
+                for (x1, y1), (x2, y2) in zip(sym.zigzag, sym.zigzag[1:]):
+                    self.line(x1, y1, x2, y2, layer)
+            elif sym.kind == "overhead":
+                self._overhead_leaf(sym, layer)
             # cased opening: the wall gap already reads as a passage — no leaf.
 
-        for xd in self.plan.exterior_doors:
-            room = self.plan.room(xd.room)
-            if room is None or room.level != level:
-                continue
-            x1, y1, x2, y2 = opening_endpoints(room, xd.wall, xd.offset, xd.width)
-            horizontal = xd.wall in (Direction.SOUTH, Direction.NORTH)
-            orient = "h" if horizontal else "v"
-            ox, oy = (min(x1, x2), y1) if horizontal else (x1, min(y1, y2))
-            if xd.kind == "overhead":
-                self._overhead_leaf(ox, oy, orient, xd.width, xd.wall, layer)
-            elif xd.kind in ("double", "french"):
-                half = xd.width / 2.0
-                self._door_leaf(ox, oy, orient, half, layer, None, False, mx, my)
-                if horizontal:
-                    self._door_leaf(ox + half, oy, orient, half, layer, None, True, mx, my)
-                else:
-                    self._door_leaf(ox, oy + half, orient, half, layer, None, True, mx, my)
-            else:
-                self._door_leaf(ox, oy, orient, xd.width, layer, None, False, mx, my)
+    def _segment(self, seg: Segment | None, layer: str, linetype: str | None = None) -> None:
+        if seg is not None:
+            (x1, y1), (x2, y2) = seg
+            self.line(x1, y1, x2, y2, layer, linetype=linetype)
 
-    def _swing_bounds(self) -> tuple[float, float]:
-        """The (max_x, max_y) the SVG renderer uses to keep a leaf inside the
-        envelope — plan bounds widened by any out-of-envelope porch."""
-        fx0, fy0, fx1, fy1 = self.plan.bounds()
-        xs = [fx1] + [p.x + p.width for p in self.plan.porches]
-        ys = [fy1] + [p.y + p.length for p in self.plan.porches]
-        return max(xs), max(ys)
-
-    @staticmethod
-    def _swing_sgn(door, a: Room, b: Room, edge) -> float | None:
-        into = door.swing_into
-        room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
-        if room is None:
-            return None
-        cx, cy = room.center
-        if edge.orientation == "v":
-            return 1.0 if cx > edge.pos else -1.0
-        return 1.0 if cy > edge.pos else -1.0
-
-    def _door_leaf(
-        self,
-        ox: float,
-        oy: float,
-        orientation: str,
-        w: float,
-        layer: str,
-        sgn: float | None,
-        hinge_far: bool,
-        mx: float,
-        my: float,
-    ) -> None:
-        """A door as an open leaf line plus a 90° swing arc, in world coords.
-
-        Mirrors :meth:`barndsl.render._Renderer._door_symbol`: the leaf runs from
-        the hinge to the open tip, the arc pivots about the hinge from tip to
-        latch. ``sgn`` picks the swing side (``None`` keeps the leaf inside the
-        envelope); ``hinge_far`` hinges at the high-coordinate jamb."""
-        if orientation == "v":
-            if sgn is None:
-                sgn = 1.0 if (ox + w) <= mx else -1.0
-            hinge = (ox, oy + w) if hinge_far else (ox, oy)
-            latch = (ox, oy) if hinge_far else (ox, oy + w)
-            tip = (ox + sgn * w, hinge[1])
-        else:
-            if sgn is None:
-                sgn = 1.0 if (oy + w) <= my else -1.0
-            hinge = (ox + w, oy) if hinge_far else (ox, oy)
-            latch = (ox, oy) if hinge_far else (ox + w, oy)
-            tip = (hinge[0], oy + sgn * w)
-        self.line(hinge[0], hinge[1], tip[0], tip[1], layer)
-        al = math.degrees(math.atan2(latch[1] - hinge[1], latch[0] - hinge[0])) % 360.0
-        at = math.degrees(math.atan2(tip[1] - hinge[1], tip[0] - hinge[0])) % 360.0
+    def _door_leaf(self, leaf: Leaf, layer: str) -> None:
+        """A hinged leaf as the open leaf line (hinge to tip) plus a 90° swing
+        ``ARC`` pivoting about the hinge from the tip to the latch."""
+        (hx, hy), (lx, ly), (tx, ty) = leaf.hinge, leaf.latch, leaf.tip
+        self.line(hx, hy, tx, ty, layer)
+        al = math.degrees(math.atan2(ly - hy, lx - hx)) % 360.0
+        at = math.degrees(math.atan2(ty - hy, tx - hx)) % 360.0
         # DXF arcs sweep CCW start→end; pick the order that spans the 90° quarter.
         start, end = (al, at) if (at - al) % 360.0 <= 180.0 else (at, al)
-        self.arc(hinge[0], hinge[1], w, start, end, layer)
+        self.arc(hx, hy, leaf.width, start, end, layer)
 
-    def _slide_leaf(
-        self, ox: float, oy: float, orientation: str, w: float, layer: str,
-        mx: float, my: float,
-    ) -> None:
-        """A pocket/sliding door: a slab line just inside the room (no arc)."""
-        d = 0.35
-        if orientation == "v":
-            s = d if (ox + d) <= mx else -d
-            self.line(ox + s, oy, ox + s, oy + w, layer)
-        else:
-            s = d if (oy + d) <= my else -d
-            self.line(ox, oy + s, ox + w, oy + s, layer)
-
-    def _bifold_leaf(
-        self, ox: float, oy: float, orientation: str, w: float, layer: str,
-        mx: float, my: float,
-    ) -> None:
-        """A bifold door: two half-open panel pairs as shallow Vs off the wall —
-        the plan zigzag. Mirrors :meth:`barndsl.render._Renderer._bifold_symbol`
-        (no swing arc; the panels fold flat against the jambs)."""
-        d = min(w / 4.0, 1.0)
-        if orientation == "v":
-            s = d if (ox + d) <= mx else -d
-            pts = [(ox, oy), (ox + s, oy + w / 4), (ox, oy + w / 2),
-                   (ox + s, oy + 3 * w / 4), (ox, oy + w)]
-        else:
-            s = d if (oy + d) <= my else -d
-            pts = [(ox, oy), (ox + w / 4, oy + s), (ox + w / 2, oy),
-                   (ox + 3 * w / 4, oy + s), (ox + w, oy)]
-        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
-            self.line(x1, y1, x2, y2, layer)
-
-    def _overhead_leaf(
-        self, ox: float, oy: float, orientation: str, w: float, wall: Direction,
-        layer: str,
-    ) -> None:
-        """An overhead/sectional garage door glyph — the plan convention: the door
-        panel drawn as a dashed line pair across the opening (the closed sectional
-        leaf), plus a dashed track line just inside the room. Mirrors the SVG's
-        :meth:`barndsl.render._Renderer._overhead_symbol` (dashed, no swing) as
-        closely as the DXF vocabulary allows."""
-        d = 0.5      # track offset inside the room, ft
+    def _overhead_leaf(self, sym: DoorSymbol, layer: str) -> None:
+        """An overhead/sectional garage door: the closed panel as a dashed line
+        pair across the opening, plus the dashed track line just inside the room
+        that the SVG draws too."""
         panel = 0.1  # half-thickness of the drawn panel across the opening, ft
         dash = "DASHED"
-        if orientation == "h":
-            s = d if wall is Direction.SOUTH else -d
-            self.line(ox, oy - panel, ox + w, oy - panel, layer, linetype=dash)  # panel
-            self.line(ox, oy + panel, ox + w, oy + panel, layer, linetype=dash)
-            self.line(ox, oy + s, ox + w, oy + s, layer, linetype=dash)          # track
+        (x1, y1), (x2, y2) = sym.jambs
+        if sym.orientation == "h":
+            self.line(x1, y1 - panel, x2, y2 - panel, layer, linetype=dash)
+            self.line(x1, y1 + panel, x2, y2 + panel, layer, linetype=dash)
         else:
-            s = d if wall is Direction.WEST else -d
-            self.line(ox - panel, oy, ox - panel, oy + w, layer, linetype=dash)
-            self.line(ox + panel, oy, ox + panel, oy + w, layer, linetype=dash)
-            self.line(ox + s, oy, ox + s, oy + w, layer, linetype=dash)
+            self.line(x1 - panel, y1, x2 - panel, y2, layer, linetype=dash)
+            self.line(x1 + panel, y1, x2 + panel, y2, layer, linetype=dash)
+        self._segment(sym.line, layer, linetype=dash)
 
     # -- fixtures / structure / outlines / text ----------------------------
 
     def _fixtures(self, rooms: list[Room], sfx: str) -> None:
-        from .fixtures import resolve_room_fixtures
+        from .fixtures import miter_counters, resolve_room_fixtures
 
         layer = "A-FLOR-FIXT" + sfx
         for room in rooms:
             fixtures = list(resolve_room_fixtures(self.plan, room))
             counters = [f for f in fixtures if f.kind == "counter"]
-            # Reuse the SVG renderer's counter-mitre computation (do NOT re-derive
-            # the trim math): counters meeting in an L/U corner are trimmed to abut
-            # along their run axis, with a 45° miter joint across the corner square.
-            # With no mitred corner, `trimmed` is the counters unchanged and
-            # `miters` is empty — so a plan without corner counters is byte-identical
-            # to the historical output.
-            trimmed, miters = self._r._miter_counters(room, counters)
+            # The counter mitres the SVG draws too: counters meeting in an L/U
+            # corner are trimmed to abut along their run axis, with a 45° miter
+            # joint across the corner square. With no mitred corner, `trimmed` is
+            # the counters unchanged and `miters` is empty.
+            trimmed, miters = miter_counters(room, counters)
             tmap = {id(c): t for c, t in zip(counters, trimmed)}
             for f in fixtures:
                 d = tmap.get(id(f), f)
@@ -819,31 +692,16 @@ class _DxfWriter:
         # Overall dims for each principal span.
         self._overall("S", fx0, fx1, fy0, layer)
         self._overall("W", fy0, fy1, fx0, layer)
-        # Chain strings: reuse the renderer's world-coordinate break computation.
+        # Chain strings: the same breaks and ticks the SVG draws.
         rooms = [r for r in self.plan.rooms if r.level == 0]
-        if self.plan.wings:
-            for side in ("S", "N", "W", "E"):
-                for offset, lo, hi in self._r._exterior_runs(side):
-                    room_pts = self._r._run_breaks(side, rooms, offset, lo, hi)
-                    jambs = self._r._opening_jambs(side, rooms, offset, lo, hi)
-                    pts = self._r._chain_ticks(side, room_pts, jambs, lo, hi, level=0)
-                    if len(pts) > 2:
-                        self._chain(side, pts, offset, layer)
-            return
-        for side in ("S", "N", "W", "E"):
-            room_pts, lo, hi = self._r._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
-            wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
-            span = (fx0, fx1) if side in ("S", "N") else (fy0, fy1)
-            jambs = self._r._opening_jambs(side, rooms, wall, *span)
-            pts = self._r._chain_ticks(side, room_pts, jambs, lo, hi, level=0)
-            if len(pts) > 2:
-                self._chain(side, pts, wall, layer)
+        for chain in exterior_chains(self.plan, rooms, 0, self._dim_mode):
+            self._chain(chain.side, list(chain.ticks), chain.wall, layer)
 
     def _overall(self, side: str, lo: float, hi: float, wall: float, layer: str) -> None:
         """The overall dimension string for one principal span, ``_OVERALL_GAP``
         outside its wall: extension lines, a dim line, ticks and a centred label.
         In faces mode the span runs outside-face to outside-face (Phase 18)."""
-        lo2, hi2 = self._r._overall_span(lo, hi)
+        lo2, hi2 = overall_span(lo, hi, self._dim_mode)
         self._dim_run(side, [lo2, hi2], wall, _OVERALL_GAP, layer, _DIM_H, ext=True)
 
     def _chain(self, side: str, pts: list[float], wall: float, layer: str) -> None:

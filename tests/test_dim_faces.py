@@ -17,7 +17,17 @@ from barndsl.constants import (
     INTERIOR_WALL_THICKNESS,
     PLUMBING_WALL_THICKNESS,
 )
+from barndsl.drawing import (
+    chain_breaks,
+    chain_ticks,
+    exterior_runs,
+    opening_jambs,
+    overall_span,
+    run_breaks,
+    wall_faces,
+)
 from barndsl.render import RenderConfig, _Renderer, fmt_ft_in
+from barndsl.wallbodies import wall_bands
 
 # A 12′ room (kitchen) between two 4.5 in interior partitions on the south wall:
 # rooms a(10) | kitchen(12) | c(10) partition the 32 ft south wall. The middle
@@ -33,13 +43,11 @@ _HANDMATH = (
 
 
 def _faces_ticks(plan, side="S"):
-    r = _Renderer(plan, RenderConfig(dim_mode="faces"))
     fx0, fy0, fx1, fy1 = plan.bounds()
-    room_pts, lo, hi = r._chain_breaks(side, plan.rooms, fx0, fy0, fx1, fy1)
+    room_pts, lo, hi = chain_breaks(side, plan.rooms, fx0, fy0, fx1, fy1)
     wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
-    span = (fx0, fx1) if side in ("S", "N") else (fy0, fy1)
-    jambs = r._opening_jambs(side, plan.rooms, wall, *span)
-    return r, r._chain_ticks(side, room_pts, jambs, lo, hi, 0), (lo, hi)
+    jambs = opening_jambs(plan, side, plan.rooms, wall, lo, hi)
+    return chain_ticks(side, room_pts, jambs, lo, hi, "faces", wall_bands(plan, 0)), (lo, hi)
 
 
 # -- hand math ---------------------------------------------------------------
@@ -47,7 +55,7 @@ def _faces_ticks(plan, side="S"):
 
 def test_faces_chain_hand_math_12ft_room_reads_clear_between_two_partitions():
     plan = compile_source(_HANDMATH).plan
-    _, ticks, (lo, hi) = _faces_ticks(plan, "S")
+    ticks, (lo, hi) = _faces_ticks(plan, "S")
     segs = [round(b - a, 6) for a, b in zip(ticks, ticks[1:])]
     half = INTERIOR_WALL_THICKNESS / 2.0
     # ticks: outside face | a's part face pair | kitchen's part face pair | out
@@ -67,10 +75,10 @@ def test_faces_chain_hand_math_12ft_room_reads_clear_between_two_partitions():
 
 def test_faces_chain_segments_sum_to_the_overall_invariant():
     plan = compile_source(_HANDMATH).plan
-    r, ticks, _ = _faces_ticks(plan, "S")
+    ticks, _ = _faces_ticks(plan, "S")
     segs_sum = ticks[-1] - ticks[0]
     fx0, _, fx1, _ = plan.bounds()
-    lo2, hi2 = r._overall_span(fx0, fx1)
+    lo2, hi2 = overall_span(fx0, fx1, "faces")
     overall = hi2 - lo2
     # The chain partitions [lo-ext, hi+ext], so segments always sum to the
     # faces-mode overall — nominal span plus one full exterior thickness.
@@ -96,7 +104,7 @@ def test_face_tick_lands_pixel_exact_on_the_drawn_band_edge():
     plan = compile_source(_HANDMATH).plan
     r = _Renderer(plan, RenderConfig(dim_mode="faces", show_room_dims=False))
     svg = r.render()
-    bands = r._dim_bands(0)
+    bands = wall_bands(plan, 0)
     # The vertical partition centred on x=10 (between a and kitchen).
     part = next(
         b for b in bands
@@ -106,8 +114,8 @@ def test_face_tick_lands_pixel_exact_on_the_drawn_band_edge():
     face_x = r.sx(min(b for b in (part.x0, part.x1)))
     # The band rect draws that face at this screen x; a chain tick sits on it too.
     assert f'x="{face_x:.1f}"' in svg  # the poché rect's left face
-    # And the renderer's face computation returns exactly the band's faces.
-    near, far = r._wall_faces("S", 10.0, bands)
+    # And the chain's face computation returns exactly the band's faces.
+    near, far = wall_faces("S", 10.0, bands)
     assert (near, far) == (min(part.x0, part.x1), max(part.x0, part.x1))
 
 
@@ -124,10 +132,9 @@ def test_plumbing_wall_gives_thicker_face_spacing_than_a_2x4_partition():
         "wall bath - hall plumbing\n"
     )
     plan = compile_source(src).plan
-    r = _Renderer(plan, RenderConfig(dim_mode="faces"))
-    bands = r._dim_bands(0)
-    wet_near, wet_far = r._wall_faces("S", 10.0, bands)   # bath|hall = plumbing
-    dry_near, dry_far = r._wall_faces("S", 20.0, bands)   # hall|bed = ordinary
+    bands = wall_bands(plan, 0)
+    wet_near, wet_far = wall_faces("S", 10.0, bands)   # bath|hall = plumbing
+    dry_near, dry_far = wall_faces("S", 20.0, bands)   # hall|bed = ordinary
     assert abs((wet_far - wet_near) - PLUMBING_WALL_THICKNESS) < 1e-9
     assert abs((dry_far - dry_near) - INTERIOR_WALL_THICKNESS) < 1e-9
     assert (wet_far - wet_near) > (dry_far - dry_near)
@@ -146,11 +153,10 @@ def test_faces_mode_leaves_opening_jambs_untouched():
         "window living south width 4 offset 14\n"
     )
     plan = compile_source(src).plan
-    r = _Renderer(plan, RenderConfig(dim_mode="faces"))
     fx0, fy0, fx1, fy1 = plan.bounds()
-    room_pts, lo, hi = r._chain_breaks("S", plan.rooms, fx0, fy0, fx1, fy1)
-    jambs = r._opening_jambs("S", plan.rooms, fy0, fx0, fx1)
-    ticks = r._chain_ticks("S", room_pts, jambs, lo, hi, 0)
+    room_pts, lo, hi = chain_breaks("S", plan.rooms, fx0, fy0, fx1, fy1)
+    jambs = opening_jambs(plan, "S", plan.rooms, fy0, fx0, fx1)
+    ticks = chain_ticks("S", room_pts, jambs, lo, hi, "faces", wall_bands(plan, 0))
     # No interior room break — only jambs. Each jamb tick stays at its exact
     # face-of-opening coordinate; only the two span ends move out by half a wall.
     ext = EXTERIOR_WALL_THICKNESS / 2.0
@@ -224,12 +230,12 @@ def test_wing_plan_renders_faces_mode_with_exterior_runs_per_wing():
     assert faces and faces != nominal
     # Each notched exterior run still produces its own chain — the faces
     # transform is applied per run, so the drawing has the wing suite's chain.
-    r = _Renderer(plan, RenderConfig(dim_mode="faces", show_room_dims=False))
     rooms = plan.rooms
-    for offset, lo, hi in r._exterior_runs("E"):
-        room_pts = r._run_breaks("E", rooms, offset, lo, hi)
-        jambs = r._opening_jambs("E", rooms, offset, lo, hi)
-        ticks = r._chain_ticks("E", room_pts, jambs, lo, hi, 0)
+    bands = wall_bands(plan, 0)
+    for offset, lo, hi in exterior_runs(plan, "E"):
+        room_pts = run_breaks("E", rooms, offset, lo, hi)
+        jambs = opening_jambs(plan, "E", rooms, offset, lo, hi)
+        ticks = chain_ticks("E", room_pts, jambs, lo, hi, "faces", bands)
         # Ends moved out by half an exterior wall on every run.
         ext = EXTERIOR_WALL_THICKNESS / 2.0
         assert abs(ticks[0] - (lo - ext)) < 1e-9

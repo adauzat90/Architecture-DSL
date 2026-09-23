@@ -12,10 +12,21 @@ import math
 from dataclasses import dataclass
 from xml.sax.saxutils import escape
 
-from .constants import EPSILON, EXTERIOR_WALL_THICKNESS, INTERIOR_WALL_THICKNESS
+from .constants import EPSILON
+from .drawing import (
+    Leaf,
+    chain_breaks,
+    door_symbols,
+    exterior_chains,
+    exterior_runs,
+    opening_jambs,
+    overall_span,
+    run_breaks,
+    window_symbols,
+    with_jambs,
+)
 from .elements import Barndominium, Direction, RoomType
-from .geometry import door_span, opening_endpoints, shared_edge
-from .wallbodies import WallBand, wall_bands
+from .wallbodies import wall_bands
 
 # US architectural feet-and-inches glyphs: prime (feet) and double-prime (inches).
 _FT = "′"  # ′
@@ -280,8 +291,6 @@ class _Renderer:
         self.plan = plan
         self.c = config
         self.parts: list[str] = []
-        #: Per-level wall-body band cache for the faces dim mode (lazy).
-        self._dim_band_cache: dict[int, list[WallBand]] = {}
 
         # World bounding box (whole footprint — incl. wings — plus out-of-envelope
         # porches).
@@ -632,14 +641,14 @@ class _Renderer:
         Placement comes from :func:`barndsl.fixtures.resolve_room_fixtures` (authored
         fixtures plus surviving auto-seeds), so the plan, the 3D model and the Revit
         exchange all agree on where each fixture sits."""
-        from .fixtures import resolve_room_fixtures
+        from .fixtures import miter_counters, resolve_room_fixtures
 
         for r in self.plan.rooms:
             if level is not None and r.level != level:
                 continue
             fixtures = resolve_room_fixtures(self.plan, r)
             counters = [f for f in fixtures if f.kind == "counter"]
-            trimmed, miters = self._miter_counters(r, counters)
+            trimmed, miters = miter_counters(r, counters)
             # Counters draw FIRST (z-under), the drafting convention: a sink or
             # range set into a run then draws cleanly over the countertop. Runs
             # meeting in a mitred corner are drawn trimmed to abut, with the 45°
@@ -658,57 +667,6 @@ class _Renderer:
             for f in fixtures:
                 if f.kind != "counter":
                     self._fixture_glyph(f)
-
-    def _miter_counters(self, room, counters):
-        """Resolve mitred counter corners for drawing: for each L/U join, trim the
-        later run back to abut the earlier one along its run axis, and return the
-        45° miter diagonal across the corner square (from the square's outer
-        corner — farthest from the room's centre — to its inner one). The model
-        keeps the full overlapping rectangles (the takeoff counts the corner in
-        both runs, documented); only the drawing is trimmed."""
-        from dataclasses import replace
-
-        from .fixtures import _is_mitred_corner, _rect_intersection
-
-        adjusted = list(counters)
-        miters: list[tuple[float, float, float, float]] = []
-        rcx, rcy = room.x + room.width / 2.0, room.y + room.length / 2.0
-        for i in range(len(adjusted)):
-            for j in range(i + 1, len(adjusted)):
-                a, b = adjusted[i], adjusted[j]
-                if not _is_mitred_corner(a, b):
-                    continue
-                inter = _rect_intersection(
-                    (a.x, a.y, a.width, a.length), (b.x, b.y, b.width, b.length)
-                )
-                if inter is None:
-                    continue
-                ix, iy, iw, il = inter
-                # Trim b away from the joint along its run axis (its wall's axis;
-                # a free-standing run falls back to its longer side).
-                axis = (
-                    "x" if b.wall in ("S", "N")
-                    else "y" if b.wall in ("W", "E")
-                    else ("x" if b.width >= b.length else "y")
-                )
-                if axis == "x":
-                    if (ix - b.x) <= (b.x + b.width) - (ix + iw):  # joint at low-x end
-                        nb = replace(b, x=ix + iw, width=b.width - iw)
-                    else:
-                        nb = replace(b, width=b.width - iw)
-                else:
-                    if (iy - b.y) <= (b.y + b.length) - (iy + il):  # joint at low-y end
-                        nb = replace(b, y=iy + il, length=b.length - il)
-                    else:
-                        nb = replace(b, length=b.length - il)
-                adjusted[j] = nb
-                # Miter diagonal: outer corner = the square's corner farthest from
-                # the room centre (the walls' meeting corner), to its opposite.
-                corners = [(ix, iy), (ix + iw, iy), (ix, iy + il), (ix + iw, iy + il)]
-                outer = max(corners, key=lambda c: (c[0] - rcx) ** 2 + (c[1] - rcy) ** 2)
-                inner = (ix + iw - (outer[0] - ix), iy + il - (outer[1] - iy))
-                miters.append((outer[0], outer[1], inner[0], inner[1]))
-        return adjusted, miters
 
     def _fx_ellipse(self, cx, cy, rx, ry, sw=0.8, fill="none"):
         self.parts.append(
@@ -960,99 +918,35 @@ class _Renderer:
             )
 
     def _draw_windows(self, level: int | None = None):
-        for win in self.plan.windows:
-            room = self.plan.room(win.room)
-            if not room:
-                continue
-            if level is not None and room.level != level:
-                continue
-            x1, y1, x2, y2 = opening_endpoints(room, win.wall, win.offset, win.width)
-            # The window fills the gap the wall band leaves: sill and head lines on
-            # the two band faces, the glazing line down the centre, and a jamb line
-            # closing each end — the same symbol the DXF draws, spanning the full
-            # wall thickness (windows sit on the exterior shell).
-            half = EXTERIOR_WALL_THICKNESS / 2.0
-            if win.wall in (Direction.NORTH, Direction.SOUTH):
-                cy = y1
-                a, b = min(x1, x2), max(x1, x2)
-                for yy in (cy - half, cy, cy + half):  # outer face / glazing / inner
-                    self._line(self.sx(a), self.sy(yy), self.sx(b), self.sy(yy), WINDOW_COLOR, 1.2)
-                for xx in (a, b):  # jambs across the band
-                    self._line(self.sx(xx), self.sy(cy - half), self.sx(xx), self.sy(cy + half), WINDOW_COLOR, 1.2)
-            else:
-                cx = x1
-                a, b = min(y1, y2), max(y1, y2)
-                for xx in (cx - half, cx, cx + half):
-                    self._line(self.sx(xx), self.sy(a), self.sx(xx), self.sy(b), WINDOW_COLOR, 1.2)
-                for yy in (a, b):
-                    self._line(self.sx(cx - half), self.sy(yy), self.sx(cx + half), self.sy(yy), WINDOW_COLOR, 1.2)
+        # The window fills the gap the wall band leaves: sill and head lines on
+        # the two band faces, the glazing line down the centre, and a jamb line
+        # closing each end — spanning the full wall thickness (windows sit on the
+        # exterior shell). The geometry is shared with the DXF export.
+        for sym in window_symbols(self.plan, level):
+            for seg in (sym.faces[0], sym.glazing, sym.faces[1], *sym.jambs):
+                self._segment(seg, WINDOW_COLOR, 1.2)
 
     def _draw_doors(self, level: int | None = None):
-        for door in self.plan.interior_doors:
-            a, b = self.plan.room(door.room_a), self.plan.room(door.room_b)
-            if not (a and b):
-                continue
-            if level is not None and not (a.level == b.level == level):
-                continue  # cross-level doors are shown via the stair, not here
-            edge = shared_edge(a, b)
-            if edge is None:
-                continue
-            start, end = door_span(edge, door)
-            w = end - start
-            kind = getattr(door, "kind", "swing" if getattr(door, "leaf", True) else "cased")
-            ox, oy = (edge.pos, start) if edge.orientation == "v" else (start, edge.pos)
-            if kind == "swing":
-                sgn = self._swing_sgn(door, a, b, edge)
-                hinge_far = getattr(door, "hinge", None) == "far"
-                self._door_symbol(ox, oy, edge.orientation, w, sgn, hinge_far)
-            elif kind in ("double", "french"):
-                # Two half-width leaves hinged at opposite jambs, meeting at
-                # the middle — the classic double-door plan symbol.
-                sgn = self._swing_sgn(door, a, b, edge)
-                half = w / 2.0
-                self._door_symbol(ox, oy, edge.orientation, half, sgn, False)
-                if edge.orientation == "v":
-                    self._door_symbol(ox, oy + half, edge.orientation, half, sgn, True)
-                else:
-                    self._door_symbol(ox + half, oy, edge.orientation, half, sgn, True)
-            elif kind in ("pocket", "sliding"):
-                self._slide_symbol(ox, oy, edge.orientation, w)
-            elif kind == "bifold":
-                self._bifold_symbol(ox, oy, edge.orientation, w)
-            else:  # cased opening
-                self._opening_symbol(ox, oy, edge.orientation, w)
-
-        for xdoor in self.plan.exterior_doors:
-            room = self.plan.room(xdoor.room)
-            if not room:
-                continue
-            if level is not None and room.level != level:
-                continue
-            x1, y1, x2, y2 = opening_endpoints(room, xdoor.wall, xdoor.offset, xdoor.width)
-            xkind = getattr(xdoor, "kind", "entry")
-            overhead = xkind == "overhead"
-            double = xkind in ("double", "french")
-            half = xdoor.width / 2.0
-            if xdoor.wall in (Direction.NORTH, Direction.SOUTH):
-                if overhead:
-                    sgn = 1.0 if xdoor.wall is Direction.SOUTH else -1.0
-                    self._overhead_symbol(min(x1, x2), y1, "h", xdoor.width, sgn)
-                elif double:  # two half-width leaves hinged at opposite jambs
-                    lo = min(x1, x2)
-                    self._door_symbol(lo, y1, "h", half)
-                    self._door_symbol(lo + half, y1, "h", half, hinge_far=True)
-                else:
-                    self._door_symbol(min(x1, x2), y1, "h", xdoor.width)
+        # Door symbols come from :func:`barndsl.drawing.door_symbols`, the same
+        # geometry the DXF export draws; only the SVG styling lives here.
+        for sym in door_symbols(self.plan, level):
+            if sym.kind == "swing":
+                for leaf in sym.leaves:
+                    self._door_symbol(leaf)
+            elif sym.kind == "slide":
+                self._segment(sym.line, WALL, 1.6)
+            elif sym.kind == "bifold":
+                path = " L ".join(f"{self.sx(px):.1f} {self.sy(py):.1f}" for px, py in sym.zigzag)
+                self._path(f"M {path}", WALL, 1.2)
+            elif sym.kind == "overhead":
+                self._segment(sym.line, WALL, 1.6, dash="5 3")
             else:
-                if overhead:
-                    sgn = 1.0 if xdoor.wall is Direction.WEST else -1.0
-                    self._overhead_symbol(x1, min(y1, y2), "v", xdoor.width, sgn)
-                elif double:
-                    lo = min(y1, y2)
-                    self._door_symbol(x1, lo, "v", half)
-                    self._door_symbol(x1, lo + half, "v", half, hinge_far=True)
-                else:
-                    self._door_symbol(x1, min(y1, y2), "v", xdoor.width)
+                self._opening_symbol(sym.jambs, sym.orientation)
+
+    def _segment(self, seg, stroke, sw=1.0, dash=None):
+        """Draw a plan-space segment ``((x1, y1), (x2, y2))``."""
+        (x1, y1), (x2, y2) = seg
+        self._line(self.sx(x1), self.sy(y1), self.sx(x2), self.sy(y2), stroke, sw, dash)
 
     def _draw_opening_tags(self, level: int | None = None) -> None:
         """Draw a D1…/W1… mark bubble on the room side of each door/window glyph.
@@ -1080,55 +974,16 @@ class _Renderer:
             fill=TAG_COLOR, weight="bold",
         )
 
-    @staticmethod
-    def _swing_sgn(door, a, b, edge) -> float | None:
-        """+1/-1 for the side the leaf swings into, or None to let the symbol
-        fall back to its keep-inside-the-envelope heuristic."""
-        into = getattr(door, "swing_into", None)
-        room = a if (into and into == a.id) else (b if (into and into == b.id) else None)
-        if room is None:
-            return None
-        cx, cy = room.center
-        return (1.0 if cx > edge.pos else -1.0) if edge.orientation == "v" else (
-            1.0 if cy > edge.pos else -1.0
-        )
-
-    def _door_symbol(
-        self,
-        ox: float,
-        oy: float,
-        orientation: str,
-        w: float,
-        sgn: float | None = None,
-        hinge_far: bool = False,
-    ):
-        """Draw a door at plan-space origin (ox, oy) as gap + leaf + swing arc.
-
-        ``sgn`` picks the swing side (None → keep the leaf inside the envelope);
-        ``hinge_far`` hinges at the far (high-coordinate) end of the opening
-        instead of the near end.
-        """
-        if orientation == "v":  # wall runs in +y; swing into +x or -x
-            if sgn is None:
-                sgn = 1.0 if (ox + w) <= self.max_x else -1.0
-            hinge = (ox, oy + w) if hinge_far else (ox, oy)
-            latch = (ox, oy) if hinge_far else (ox, oy + w)
-            tip = (ox + sgn * w, hinge[1])
-        else:  # wall runs in +x; swing into +y or -y
-            if sgn is None:
-                sgn = 1.0 if (oy + w) <= self.max_y else -1.0
-            hinge = (ox + w, oy) if hinge_far else (ox, oy)
-            latch = (ox, oy) if hinge_far else (ox + w, oy)
-            tip = (hinge[0], oy + sgn * w)
-
-        hx, hy = self.sx(hinge[0]), self.sy(hinge[1])
-        lx, ly = self.sx(latch[0]), self.sy(latch[1])
-        tx, ty = self.sx(tip[0]), self.sy(tip[1])
+    def _door_symbol(self, leaf: Leaf):
+        """Draw one hinged leaf as the open leaf line plus its swing arc."""
+        hx, hy = self.sx(leaf.hinge[0]), self.sy(leaf.hinge[1])
+        lx, ly = self.sx(leaf.latch[0]), self.sy(leaf.latch[1])
+        tx, ty = self.sx(leaf.tip[0]), self.sy(leaf.tip[1])
 
         # The wall band already leaves a clean gap under the opening, so draw only
         # the leaf and then the swing arc into it — no white-out needed.
         self._line(hx, hy, tx, ty, WALL, 1.2)
-        r = w * self.c.scale
+        r = leaf.width * self.c.scale
         # Pick the sweep flag that centres the arc on the hinge, so the swing
         # always bulges *away* from it (convex). A fixed flag is right for only
         # half the orientation/hinge/side combinations — the rest read concave.
@@ -1154,71 +1009,21 @@ class _Renderer:
         cy = -coef * dx + (y1 + y2) / 2.0
         return 1 if abs(cx - hinge[0]) + abs(cy - hinge[1]) < 1e-6 else 0
 
-    def _opening_symbol(self, ox: float, oy: float, orientation: str, w: float):
+    def _opening_symbol(self, jambs, orientation: str):
         """Draw a cased opening (walk-through) as a plain gap with jamb ticks.
 
         Unlike :meth:`_door_symbol` there is no leaf or swing arc — just the
         wall stopping at two jambs, which reads as an open passage.
         """
-        if orientation == "v":  # wall runs in +y
-            ends = ((ox, oy), (ox, oy + w))
-        else:  # wall runs in +x
-            ends = ((ox, oy), (ox + w, oy))
-
         # A cased opening is a plain gap in the wall band; mark the two jambs with a
         # short tick perpendicular to the wall so the passage reads as framed.
         t = 3.5
-        for px, py in ends:
+        for px, py in jambs:
             sx0, sy0 = self.sx(px), self.sy(py)
             if orientation == "v":
                 self._line(sx0 - t, sy0, sx0 + t, sy0, WALL, 1.2)
             else:
                 self._line(sx0, sy0 - t, sx0, sy0 + t, WALL, 1.2)
-
-    def _slide_symbol(self, ox: float, oy: float, orientation: str, w: float):
-        """Draw a pocket/sliding door: the gap plus a slab line parallel to the
-        wall, set just inside one room (no swing arc)."""
-        d = 0.35  # how far the panel sits off the wall, ft
-        # The band already leaves the gap; draw only the slab line just inside a room.
-        if orientation == "v":  # wall runs in +y at x=ox
-            s = d if (ox + d) <= self.max_x else -d
-            self._line(self.sx(ox + s), self.sy(oy), self.sx(ox + s), self.sy(oy + w), WALL, 1.6)
-        else:  # wall runs in +x at y=oy
-            s = d if (oy + d) <= self.max_y else -d
-            self._line(self.sx(ox), self.sy(oy + s), self.sx(ox + w), self.sy(oy + s), WALL, 1.6)
-
-    def _bifold_symbol(self, ox: float, oy: float, orientation: str, w: float):
-        """Draw a bifold door: two half-open panel pairs, each a shallow V with
-        its apex just off the wall — the classic plan zigzag. No swing arc; the
-        panels fold flat against the jambs."""
-        d = min(w / 4.0, 1.0)  # apex projection off the wall, ft
-        if orientation == "v":  # wall runs in +y at x=ox
-            s = d if (ox + d) <= self.max_x else -d
-            pts = [(ox, oy), (ox + s, oy + w / 4), (ox, oy + w / 2),
-                   (ox + s, oy + 3 * w / 4), (ox, oy + w)]
-        else:  # wall runs in +x at y=oy
-            s = d if (oy + d) <= self.max_y else -d
-            pts = [(ox, oy), (ox + w / 4, oy + s), (ox + w / 2, oy),
-                   (ox + 3 * w / 4, oy + s), (ox + w, oy)]
-        path = " L ".join(f"{self.sx(px):.1f} {self.sy(py):.1f}" for px, py in pts)
-        self._path(f"M {path}", WALL, 1.2)
-
-    def _overhead_symbol(self, ox: float, oy: float, orientation: str, w: float, sgn: float):
-        """Draw an overhead/sectional garage door: the gap plus a dashed track
-        line set just inside the room (the segmented panel riding its tracks —
-        no leaf, no swing arc). ``sgn`` points into the room (+x/+y is +1)."""
-        d = 0.5 * sgn  # how far the track line sits inside the room, ft
-        # The band already leaves the gap; draw only the dashed track line inside.
-        if orientation == "v":  # wall runs in +y at x=ox
-            self._line(
-                self.sx(ox + d), self.sy(oy), self.sx(ox + d), self.sy(oy + w),
-                WALL, 1.6, dash="5 3",
-            )
-        else:  # wall runs in +x at y=oy
-            self._line(
-                self.sx(ox), self.sy(oy + d), self.sx(ox + w), self.sy(oy + d),
-                WALL, 1.6, dash="5 3",
-            )
 
     def _draw_stairs(self, level: int):
         for s in self.plan.stairs:
@@ -1325,8 +1130,8 @@ class _Renderer:
         fx0, fy0, fx1, fy1 = self.plan.bounds()
         # In faces mode the overall runs outside-face to outside-face (nominal +
         # one exterior thickness per axis); nominal mode leaves the span untouched.
-        wx0, wx1 = self._overall_span(fx0, fx1)
-        wy0, wy1 = self._overall_span(fy0, fy1)
+        wx0, wx1 = overall_span(fx0, fx1, self.c.dim_mode)
+        wy0, wy1 = overall_span(fy0, fy1, self.c.dim_mode)
         # Overall width dimension below the plan.
         y = self.top + self.content_h + 28
         self._dim_line(
@@ -1337,16 +1142,6 @@ class _Renderer:
         self._dim_line(
             x, self.sy(wy0), x, self.sy(wy1), fmt_ft_in(wy1 - wy0), horizontal=False
         )
-
-    def _overall_span(self, lo: float, hi: float) -> tuple[float, float]:
-        """The overall-dimension endpoints for the active dim mode. Nominal keeps
-        the bounds (byte-identical); faces pushes each end out by half an exterior
-        wall so the string reads outside face to outside face — matching the drawn
-        poché, which straddles the same nominal envelope line by the same half."""
-        if self.c.dim_mode == "faces":
-            ext = EXTERIOR_WALL_THICKNESS / 2.0
-            return lo - ext, hi + ext
-        return lo, hi
 
     def _draw_post_dims(self) -> None:
         """When the plan carries a placed frame, print ONE dimension string along
@@ -1423,312 +1218,37 @@ class _Renderer:
             )
 
     # -- chained per-side exterior dimension strings -----------------------
+    #
+    # The chain geometry (breaks, jambs, face-of-stud ticks) is shared with the
+    # DXF export in :mod:`barndsl.drawing`; this class only lays the strings out.
 
     #: Offset (px) of a chain dimension line from its exterior wall — inside the
     #: overall dimension line (28/34 px out), so the two rows read as one family.
     _CHAIN_OFFSET = 15.0
     _CHAIN_TICK = 4.0
-    #: A jamb break is only worth drawing when it leaves a segment at least this
-    #: wide (ft) on either side — a jamb hard against a room corner (or another
-    #: jamb) collapses into its neighbour rather than crowd the chain with a
-    #: sliver too narrow to label.
-    _MIN_JAMB_SEG_FT = 1.0
-
-    def _opening_jambs(
-        self, side: str, rooms: list, offset: float, lo: float, hi: float,
-        tol: float = 1e-6,
-    ) -> list[float]:
-        """Near/far jamb coordinates of exterior openings on this run.
-
-        An exterior window or door on ``side`` whose host room's matching wall
-        lies on the run ``offset`` contributes its two jambs (projected onto the
-        chain axis, clamped to ``[lo, hi]``). These are the breaks that make the
-        outermost chain read wall-segment / opening-width / wall-segment."""
-        want = {
-            "S": Direction.SOUTH, "N": Direction.NORTH,
-            "W": Direction.WEST, "E": Direction.EAST,
-        }[side]
-        room_by_id = {r.id: r for r in rooms}
-        coords: list[float] = []
-        openings = [(w.room, w.wall, w.offset, w.width) for w in self.plan.windows]
-        openings += [
-            (d.room, d.wall, d.offset, d.width) for d in self.plan.exterior_doors
-        ]
-        for rid, wall, off, width in openings:
-            if wall != want:
-                continue
-            room = room_by_id.get(rid)
-            if room is None:
-                continue
-            edge_coord = {"S": room.y, "N": room.y2, "W": room.x, "E": room.x2}[side]
-            if abs(edge_coord - offset) > tol:
-                continue
-            x1, y1, x2, y2 = opening_endpoints(room, wall, off, width)
-            near, far = (x1, x2) if side in ("S", "N") else (y1, y2)
-            for c in (near, far):
-                if lo - tol <= c <= hi + tol:
-                    coords.append(min(max(c, lo), hi))
-        return coords
-
-    def _with_jambs(self, pts: list[float], jambs: list[float]) -> list[float]:
-        """Fold opening ``jambs`` into the room-edge break ``pts``, keeping the
-        room edges and dropping any jamb that would leave a segment narrower than
-        :data:`_MIN_JAMB_SEG_FT` (it collapses into the neighbouring break)."""
-        out = list(pts)
-        for j in sorted(jambs):
-            if all(abs(j - p) >= self._MIN_JAMB_SEG_FT for p in out):
-                out.append(j)
-        out.sort()
-        return out
-
-    def _chain_breaks(
-        self,
-        side: str,
-        rooms: list,
-        fx0: float,
-        fy0: float,
-        fx1: float,
-        fy1: float,
-        tol: float = 1e-6,
-    ) -> tuple[list[float], float, float]:
-        """Break points partitioning one exterior ``side`` (N/S/E/W).
-
-        Collect where the edges of rooms *touching* that exterior wall project
-        onto it, add the envelope span ends, then sort, clamp and dedupe. Rooms
-        inset from the wall contribute nothing (their edges aren't on it), so a
-        side no room reaches back onto degrades to the bare span (one segment).
-        Returns ``(points, span_lo, span_hi)``.
-        """
-        if side in ("S", "N"):
-            lo, hi = fx0, fx1
-            if side == "S":
-                touch = [r for r in rooms if abs(r.y - fy0) <= tol]
-            else:
-                touch = [r for r in rooms if abs(r.y2 - fy1) <= tol]
-            raw = [c for r in touch for c in (r.x, r.x2)]
-        else:
-            lo, hi = fy0, fy1
-            if side == "W":
-                touch = [r for r in rooms if abs(r.x - fx0) <= tol]
-            else:
-                touch = [r for r in rooms if abs(r.x2 - fx1) <= tol]
-            raw = [c for r in touch for c in (r.y, r.y2)]
-        pts: list[float] = []
-        for c in sorted([lo, hi, *raw]):
-            c = min(max(c, lo), hi)
-            if not pts or c - pts[-1] > tol:
-                pts.append(c)
-        return pts, lo, hi
 
     def _level_has_north_chain(self, level: int) -> bool:
         rooms = [r for r in self.plan.rooms if r.level == level]
         fx0, fy0, fx1, fy1 = self.plan.bounds()
         if not self.plan.wings:
-            pts, _, _ = self._chain_breaks("N", rooms, fx0, fy0, fx1, fy1)
-            pts = self._with_jambs(pts, self._opening_jambs("N", rooms, fy1, fx0, fx1))
+            pts, _, _ = chain_breaks("N", rooms, fx0, fy0, fx1, fy1)
+            pts = with_jambs(pts, opening_jambs(self.plan, "N", rooms, fy1, fx0, fx1))
             return len(pts) > 2
         # Wing plans: only a chain on the top-most north run (offset == max_y)
         # rides in the title band — an inset wing run sits in the notch, clear.
-        for offset, lo, hi in self._exterior_runs("N"):
-            breaks = self._with_jambs(
-                self._run_breaks("N", rooms, offset, lo, hi),
-                self._opening_jambs("N", rooms, offset, lo, hi),
+        for offset, lo, hi in exterior_runs(self.plan, "N"):
+            breaks = with_jambs(
+                run_breaks("N", rooms, offset, lo, hi),
+                opening_jambs(self.plan, "N", rooms, offset, lo, hi),
             )
             if abs(offset - fy1) <= 1e-6 and len(breaks) > 2:
                 return True
         return False
 
-    def _exterior_runs(self, side: str) -> list[tuple[float, float, float]]:
-        """Distinct colinear exterior wall runs facing ``side`` (S/N/W/E).
-
-        Each run is ``(offset, lo, hi)``: its wall coordinate (y for S/N, x for
-        W/E) and the span it covers on the perpendicular axis. A plain rectangle
-        yields exactly one run per side (the bounds edge), so wing-free plans keep
-        the old single-chain-per-side behaviour; an L/T/U footprint yields one run
-        per notched face, each at its own wall offset.
-        """
-        from .geometry import footprint_boundary, point_in_footprint
-
-        sections = self.plan.footprint_sections()
-        eps = 1e-3
-        intervals: dict[float, list[tuple[float, float]]] = {}
-        for (x1, y1), (x2, y2) in footprint_boundary(sections):
-            if side in ("S", "N"):
-                if abs(y1 - y2) > 1e-9:
-                    continue  # want a horizontal edge
-                offset = y1
-                mid = (x1 + x2) / 2.0
-                inside_hi = point_in_footprint(sections, mid, offset + eps)
-                inside_lo = point_in_footprint(sections, mid, offset - eps)
-                faces = (
-                    "S" if inside_hi and not inside_lo
-                    else "N" if inside_lo and not inside_hi else None
-                )
-                a, b = sorted((x1, x2))
-            else:
-                if abs(x1 - x2) > 1e-9:
-                    continue  # want a vertical edge
-                offset = x1
-                mid = (y1 + y2) / 2.0
-                inside_hi = point_in_footprint(sections, offset + eps, mid)
-                inside_lo = point_in_footprint(sections, offset - eps, mid)
-                faces = (
-                    "W" if inside_hi and not inside_lo
-                    else "E" if inside_lo and not inside_hi else None
-                )
-                a, b = sorted((y1, y2))
-            if faces != side:
-                continue
-            intervals.setdefault(offset, []).append((a, b))
-        runs: list[tuple[float, float, float]] = []
-        for offset, ivs in intervals.items():
-            ivs.sort()
-            cur_lo, cur_hi = ivs[0]
-            for lo, hi in ivs[1:]:
-                if lo <= cur_hi + 1e-9:
-                    cur_hi = max(cur_hi, hi)
-                else:
-                    runs.append((offset, cur_lo, cur_hi))
-                    cur_lo, cur_hi = lo, hi
-            runs.append((offset, cur_lo, cur_hi))
-        runs.sort()
-        return runs
-
-    def _run_breaks(
-        self,
-        side: str,
-        rooms: list,
-        offset: float,
-        lo: float,
-        hi: float,
-        tol: float = 1e-6,
-    ) -> list[float]:
-        """Break points partitioning one exterior run (``offset``, span ``[lo,hi]``).
-
-        Like :meth:`_chain_breaks` but keyed to a specific wall run: a room
-        contributes only when its wall lies on this run's ``offset`` *and* its
-        extent overlaps ``[lo, hi]`` — so a wing's north run collects only the
-        rooms backing that wing, not rooms on the deeper main-block wall.
-        """
-        if side in ("S", "N"):
-            edge = (lambda r: r.y) if side == "S" else (lambda r: r.y2)
-            touch = [
-                r for r in rooms
-                if abs(edge(r) - offset) <= tol
-                and min(r.x2, hi) - max(r.x, lo) > tol
-            ]
-            raw = [c for r in touch for c in (r.x, r.x2)]
-        else:
-            edge = (lambda r: r.x) if side == "W" else (lambda r: r.x2)
-            touch = [
-                r for r in rooms
-                if abs(edge(r) - offset) <= tol
-                and min(r.y2, hi) - max(r.y, lo) > tol
-            ]
-            raw = [c for r in touch for c in (r.y, r.y2)]
-        pts: list[float] = []
-        for c in sorted([lo, hi, *raw]):
-            c = min(max(c, lo), hi)
-            if not pts or c - pts[-1] > tol:
-                pts.append(c)
-        return pts
-
     @staticmethod
     def _label_min_px(label: str) -> float:
         """Rough pixel run a size-9 segment label needs (skip it below this)."""
         return len(label) * 5.5
-
-    # -- face-of-stud dimension convention (Phase 18) ----------------------
-
-    def _dim_bands(self, level: int) -> list[WallBand]:
-        """The shared wall-body bands for ``level``, cached — the same rectangles
-        the poché and DXF draw, so a face tick lands pixel-exact on a band edge."""
-        if level not in self._dim_band_cache:
-            self._dim_band_cache[level] = wall_bands(self.plan, level)
-        return self._dim_band_cache[level]
-
-    def _wall_faces(
-        self, side: str, coord: float, bands: list[WallBand], tol: float = 1e-6,
-    ) -> tuple[float, float]:
-        """The two face coordinates (on the chain axis) of the wall crossing the
-        chain at nominal interior break ``coord``.
-
-        The crossing wall is perpendicular to the chain, so a S/N chain reads a
-        vertical band's ``x`` faces and a W/E chain a horizontal band's ``y``
-        faces — straight off the shared :mod:`barndsl.wallbodies` geometry, which
-        already carries the real class thickness (a plumbing wall is the thicker
-        2x6). An interior partition is preferred over an exterior return that
-        happens to align. Falls back to ±half an ordinary partition when no band
-        sits on the line (a break with no framed wall — rare)."""
-        want = "v" if side in ("S", "N") else "h"
-        best: tuple[float, float] | None = None
-        best_interior = False
-        for b in bands:
-            if b.orientation != want:
-                continue
-            f0, f1 = (b.x0, b.x1) if want == "v" else (b.y0, b.y1)
-            if abs((f0 + f1) / 2.0 - coord) > tol:
-                continue
-            interior = b.kind == "interior"
-            if best is None or (interior and not best_interior):
-                best = (min(f0, f1), max(f0, f1))
-                best_interior = interior
-                if interior:
-                    break
-        if best is not None:
-            return best
-        half = INTERIOR_WALL_THICKNESS / 2.0
-        return (coord - half, coord + half)
-
-    def _chain_ticks(
-        self,
-        side: str,
-        room_pts: list[float],
-        jamb_pts: list[float],
-        lo: float,
-        hi: float,
-        level: int = 0,
-        tol: float = 1e-6,
-    ) -> list[float]:
-        """Final chain tick coordinates for the active dim mode.
-
-        ``room_pts`` are the nominal room-edge breaks including the two span
-        endpoints (``room_pts[0] == lo``, ``room_pts[-1] == hi``); ``jamb_pts``
-        the opening jambs. In ``"nominal"`` mode this is exactly the historical
-        ``_with_jambs(room_pts, jamb_pts)`` — byte-identical.
-
-        In ``"faces"`` mode the two span ends move OUT to the outside envelope
-        face (± half an exterior wall), each interior room break becomes the TWO
-        faces of the wall crossing there (a thin wall-thickness segment), and the
-        opening jambs stay exactly where they are (already face-of-opening). The
-        ticks partition ``[lo-ext, hi+ext]``, so the segments always sum to the
-        faces-mode overall."""
-        if self.c.dim_mode != "faces":
-            return self._with_jambs(room_pts, jamb_pts)
-        ext = EXTERIOR_WALL_THICKNESS / 2.0
-        bands = self._dim_bands(level)
-        ticks: list[float] = []
-        for p in room_pts:
-            if abs(p - lo) <= tol:
-                ticks.append(lo - ext)  # outside face, low end
-            elif abs(p - hi) <= tol:
-                ticks.append(hi + ext)  # outside face, high end
-            else:
-                near, far = self._wall_faces(side, p, bands)
-                ticks.append(near)
-                ticks.append(far)
-        # Jambs stay put; drop only those that would collapse against a room break
-        # (same rule the nominal chain uses so the two modes agree on which slivers
-        # are worth a tick).
-        for j in sorted(jamb_pts):
-            if all(abs(j - p) >= self._MIN_JAMB_SEG_FT for p in room_pts):
-                ticks.append(j)
-        ticks.sort()
-        out: list[float] = []
-        for c in ticks:
-            if not out or c - out[-1] > tol:
-                out.append(c)
-        return out
 
     def _draw_chain_dims(self, level: int | None = None) -> None:
         """Draw a chained dimension string along each exterior side that has an
@@ -1738,31 +1258,9 @@ class _Renderer:
         reads wall-segment / opening-width / wall-segment. A side with no room
         boundary *and* no opening is left to the overall dimension (no duplicated
         single-segment string)."""
-        fx0, fy0, fx1, fy1 = self.plan.bounds()
-        lvl = level or 0
         rooms = [r for r in self.plan.rooms if level is None or r.level == level]
-        if self.plan.wings:
-            # L/T/U footprint: chain along each notched exterior run at its own
-            # wall offset, not the rectangular bounds.
-            for side in ("S", "N", "W", "E"):
-                for offset, lo, hi in self._exterior_runs(side):
-                    room_pts = self._run_breaks(side, rooms, offset, lo, hi)
-                    jambs = self._opening_jambs(side, rooms, offset, lo, hi)
-                    pts = self._chain_ticks(side, room_pts, jambs, lo, hi, lvl)
-                    if len(pts) <= 2:
-                        continue
-                    self._chain_string(side, pts, offset)
-            return
-        for side in ("S", "N", "W", "E"):
-            room_pts, lo, hi = self._chain_breaks(side, rooms, fx0, fy0, fx1, fy1)
-            wall = {"S": fy0, "N": fy1, "W": fx0, "E": fx1}[side]
-            jambs = (self._opening_jambs(side, rooms, wall, fx0, fx1)
-                     if side in ("S", "N") else
-                     self._opening_jambs(side, rooms, wall, fy0, fy1))
-            pts = self._chain_ticks(side, room_pts, jambs, lo, hi, lvl)
-            if len(pts) <= 2:
-                continue  # no interior break and no opening — overall dim covers it
-            self._chain_string(side, pts, wall)
+        for chain in exterior_chains(self.plan, rooms, level or 0, self.c.dim_mode):
+            self._chain_string(chain.side, list(chain.ticks), chain.wall)
 
     def _chain_string(self, side: str, pts: list[float], wall_coord: float) -> None:
         off, tick = self._CHAIN_OFFSET, self._CHAIN_TICK

@@ -24,7 +24,7 @@ is a phase.
 | ID | Item | Size | Priority | Status |
 |---|---|---|---|---|
 | [TD-1](#td-1-one-interior-door-span-rule) | One interior-door span rule | M | High | Done |
-| [TD-2](#td-2-dxf-depends-on-render-internals) | DXF depends on render internals | M | High | Open |
+| [TD-2](#td-2-dxf-depends-on-render-internals) | DXF depends on render internals | M | High | Done |
 | [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Open |
 | [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Open |
 | [TD-5](#td-5-validationpy-size-and-duplicated-thresholds) | `validation.py` size and duplicated thresholds | L | Medium | Open |
@@ -38,6 +38,7 @@ is a phase.
 | [TD-13](#td-13-untyped-function-bodies) | Untyped function bodies | M | Low | Open |
 | [TD-14](#td-14-pragmas-are-lost-on-emit) | Pragmas are lost on emit | M | Low | Blocked (design) |
 | [TD-15](#td-15-tests-and-docs-hygiene) | Tests and docs hygiene | S | Low | Open |
+| [TD-16](#td-16-default-swing-side-differs-between-drawing-and-validation) | Default swing side differs between drawing and validation | M | High | Open (needs a rule) |
 
 ## TD-1. One interior-door span rule
 
@@ -98,17 +99,55 @@ and DXF output can drift apart without any test noticing.
 module that both renderers use. Then check the two exports for the same
 openings and dimension chains on the gallery plans.
 
+**Resolution.**
+- **The seam.** A new public module, `drawing.py`, computes in plan feet:
+  - door symbols (`door_symbols`, built on `door_leaf`, `swing_side` and
+    `swing_bounds`);
+  - window symbols (`window_symbols`);
+  - the exterior dimension chains (`exterior_chains` and `overall_span`, with
+    the break, jamb and face-of-stud helpers public beside them).
+
+  The counter mitres became the public `fixtures.miter_counters`.
+- **Who uses it.**
+  - `render` and `dxf` now only style this geometry. The DXF export no longer
+    builds an SVG renderer, and it imports only `fmt_ft_in` from `render`.
+  - The validator's swing regions use `door_leaf` and `swing_side`. They were a
+    fourth copy of the leaf math and a third copy of the swing-side rule.
+  - Three private imports are gone (see TD-3).
+- **Bug fixed.** The DXF ignored `hinge far` on a single interior swing door
+  and always hinged it at the near jamb, while the SVG honoured it.
+- **Verification.** The corpus was 476 plans: every example, 400 generated
+  plans, probes of each door kind on each wall, a porch plan and a wing plan.
+  - The SVG is byte-identical in both dimension modes.
+  - Every DXF flavour is byte-identical to the old code with only the one-line
+    hinge fix applied.
+  - Every diagnostic is unchanged.
+  - An independent review repeated the check on 1,210 plans of its own,
+    including multi-level plans and counter mitres, with the same result.
+- **Tests.**
+  - `tests/test_drawing.py` reads both outputs back for every example:
+    - the DXF quarter arcs and the SVG leaf lines and arcs sit on the shared
+      leaves;
+    - the window lines match the shared window symbols;
+    - both outputs tick every chain at the shared coordinates, in both
+      dimension modes.
+
+    It also pins the hinge regression, each door kind's geometry and the
+    per-level split. Five deliberately introduced renderer bugs each failed
+    it, the old hinge bug among them.
+  - `test_chain_dims.py` and `test_dim_faces.py` now test the public functions.
+- **Found, not fixed:** TD-16.
+
 ## TD-3. Private cross-module imports
 
-**Problem.** 21 import sites in `src/` reach into another module's `_private`
-names (measured after PR #24 and TD-1):
+**Problem.** 18 import sites in `src/` reach into another module's `_private`
+names (measured after TD-2):
 
 - **compiler:** `_PLACEMENT`, `_tokenize_line` and `_parse_ft_in` (used by
   edits and fmt), `_did_you_mean` (used by compose).
 - **compose:** `_ComposeCtx`, used by compiler, so the two depend on each
   other's privates.
-- **fixtures:** `_quarter_turns` (compose), `_is_mitred_corner` and
-  `_rect_intersection` (render), `_door_swing_rects` (validation).
+- **fixtures:** `_quarter_turns` (compose), `_door_swing_rects` (validation).
 - **validation:** `_pt_rect_dist` (packet), `_largest_void` (score).
 - **layout:** `_add_openings`, `_connect_adjacencies` and
   `_relieve_kitchen_passthrough`, used by layout2.
@@ -117,7 +156,6 @@ names (measured after PR #24 and TD-1):
   - `viewer._LAYER_LABELS` (playground)
   - `gltf._to_gltf` (viewer)
   - `pragma._comment_start` (edits)
-  - `render._Renderer` (dxf; see TD-2)
 
 Tests and tools add roughly 100 more sites. Most are `agent` privates in
 `test_agent_loop.py`.
@@ -319,6 +357,34 @@ should be an ADR, because it changes the model contract.
   - `docs/ARCHITECTURE.md` doesn't mention about 20 modules, including
     `layout`, `layout2`, `viewer` and `compose`.
 
+## TD-16. Default swing side differs between drawing and validation
+
+Found while doing TD-2. A door leaf with no `into` room gets a default swing
+side, and three consumers pick it three ways:
+
+| Consumer | Default side | Where |
+|---|---|---|
+| SVG plan, DXF | `+x`/`+y`, unless the leaf would pass the plan bounds widened by any porch | `drawing.door_leaf`, `drawing.swing_bounds` |
+| Validator's swing checks | The same, but bounded by the primary envelope only | `validation._swing_region` |
+| glTF/3D model | Toward its room: an exterior door's own room, or an interior door's first room | `gltf._swing_out` |
+
+**Problem.** In 7 of the 17 example plans, at least one leaf is drawn swinging
+one way and checked for clearance and clashes swinging the other way. The 3D
+model can disagree with both. The first two rules are each wrong somewhere:
+- **Validator.** In an L-shape (`gallery/lshape.barn`), every default-side
+  interior door in the wing lies past the primary envelope, so the validator
+  flips it away from the side it is drawn on.
+- **Drawing.** An exterior door on a wall with a porch beyond it
+  (`gallery/hall_spine.barn`, `gallery/homestead.barn`) is drawn swinging
+  *outward* onto the porch, because the porch widens the bounds.
+
+**Needs a decision:** the default swing rule. A likely answer is that an
+exterior door swings into its room, and an interior door keeps `+x`/`+y`
+unless the leaf doesn't fit in the room on that side. That is close to what
+glTF does already. Once decided, put the rule in `drawing`, have the validator
+and `gltf` use it, and accept the drawing, 3D and diagnostic changes on those
+plans.
+
 ## Done
 
 - **PR #24 (2026-09).**
@@ -336,3 +402,6 @@ should be an ADR, because it changes the model contract.
   - One `PUBLIC_TYPES` and one `BUILD_MODULE`.
   - The score uses the public door graph.
   - Firing and satisfied tests for six untested codes.
+- **TD-1** (PR #25): one interior-door span rule, `geometry.door_span`.
+- **TD-2**: one drawing geometry, `drawing.py`, for the SVG plan and the DXF
+  export; fixed the DXF's ignored `hinge far`.
