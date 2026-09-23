@@ -238,9 +238,9 @@ def test_good_shop_plan_scores_clean():
 
 
 def _ctx(plan):
-    from barndsl.validation import _door_graph
+    from barndsl.validation import door_graph
 
-    return _door_graph(plan), {r.id: r for r in plan.rooms}
+    return door_graph(plan), {r.id: r for r in plan.rooms}
 
 
 def test_passthrough_check_isolated_fires_on_cut_vertex_shop():

@@ -738,8 +738,12 @@ def _zone_room_sets(plan: Barndominium, by_id: dict[str, Room]) -> dict[str, set
     return out
 
 
-def _door_graph(plan: Barndominium) -> dict[str, set[str]]:
-    """Adjacency by interior doors (who can walk to whom)."""
+def door_graph(plan: Barndominium) -> dict[str, set[str]]:
+    """Adjacency by interior doors (who can walk to whom).
+
+    Public because the auto-layout asks the same circulation questions of a
+    candidate plan that the design-quality checks ask of a compiled one.
+    """
     graph: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
     for d in plan.interior_doors:
         if d.room_a in graph and d.room_b in graph:
@@ -796,10 +800,15 @@ def _ext_door_zone(room: Room, door, depth: float) -> tuple[float, float, float,
     return x1 - depth, min(y1, y2), x1 + depth, max(y1, y2)
 
 
-def _building_corner(plan: Barndominium, room: Room, wall: Direction, at_end: bool) -> bool:
+def building_corner(plan: Barndominium, room: Room, wall: Direction, at_end: bool) -> bool:
     """Is the given end of ``room``'s ``wall`` a *building* corner (vs an interior
     partition junction)? A corner is a building corner when the perpendicular wall
-    meeting it there is also on the envelope."""
+    meeting it there is also on the envelope.
+
+    Public because the auto-layout places its windows against the SAME predicate
+    WINDOW_PARTITION checks — a window may sit flush to a building corner but must
+    keep a trim reveal off a partition junction.
+    """
     ext = set(exterior_walls(plan, room))
     if wall in (Direction.SOUTH, Direction.NORTH):
         perp = Direction.EAST if at_end else Direction.WEST
@@ -1010,13 +1019,14 @@ def _nearest_distance(
     return None
 
 
-def _components_excluding(
+def components_excluding(
     graph: dict[str, set[str]], excluded: set[str]
 ) -> list[set[str]]:
     """Connected components of the door graph with ``excluded`` rooms removed.
 
     Used to ask "if you couldn't walk through these rooms, what's still
-    connected?" — the basis of the pass-through-a-private-room checks.
+    connected?" — the basis of the pass-through-a-private-room checks, and
+    public so the auto-layout can apply the same test before compiling.
     """
     comps: list[set[str]] = []
     seen: set[str] = set()
@@ -3610,7 +3620,7 @@ def _validate_life_safety(plan: Barndominium, add) -> None:
         _add_alarm_teaching_reminder(bedrooms, add)
         return
     smoke_rooms = {alarm.room for alarm in alarms if alarm.is_smoke}
-    adjacency = _door_graph(plan)
+    adjacency = door_graph(plan)
     _validate_bedroom_smoke_alarms(bedrooms, smoke_rooms, add)
     _validate_sleeping_area_smoke_alarms(bedrooms, smoke_rooms, adjacency, by_id, add)
     _validate_level_smoke_alarms(plan, alarms, by_id, add)
@@ -3861,7 +3871,7 @@ def _dq_kitchen_passthrough(plan: Barndominium, graph, by_id, add) -> None:
         )
         if len(public_neighbors) < 2:
             continue
-        comps = _components_excluding(graph, {room.id})
+        comps = components_excluding(graph, {room.id})
         comp_by_room = {rid: comp for comp in comps for rid in comp}
         severed_pair: tuple[str, str] | None = None
         for a in public_neighbors:
@@ -3961,7 +3971,7 @@ def _dq_private_passthrough(plan: Barndominium, graph, by_id, add) -> None:
         gate_ids = {r.id for r in plan.rooms if r.type in gate_types}
         if not gate_ids:
             continue
-        comps = _components_excluding(graph, gate_ids)
+        comps = components_excluding(graph, gate_ids)
         if len(comps) <= 1:
             continue
         main = max(comps, key=len)
@@ -4756,8 +4766,8 @@ def _dq_window_partition(plan: Barndominium, graph, by_id, add) -> None:
             continue
         wall_len = _wall_length(r, w.wall)
         near, far = w.offset, w.offset + w.width
-        hit_start = near < WINDOW_WALL_CLEAR and not _building_corner(plan, r, w.wall, False)
-        hit_end = (wall_len - far) < WINDOW_WALL_CLEAR and not _building_corner(
+        hit_start = near < WINDOW_WALL_CLEAR and not building_corner(plan, r, w.wall, False)
+        hit_end = (wall_len - far) < WINDOW_WALL_CLEAR and not building_corner(
             plan, r, w.wall, True
         )
         if hit_start or hit_end:
@@ -5331,7 +5341,7 @@ def _is_pass_through_room(room_id: str, graph: dict[str, set[str]]) -> bool:
     neighbors = sorted(graph.get(room_id, ()))
     if len(neighbors) < 2:
         return False
-    comps = _components_excluding(graph, {room_id})
+    comps = components_excluding(graph, {room_id})
     if len(comps) < 2:
         return False
     touched = 0
@@ -5398,7 +5408,7 @@ def _dq_garage_passthrough(plan: Barndominium, graph, by_id, add) -> None:
     # Drop the garages and see what's still connected. A detached shop with no
     # interior door isn't a cut vertex — removing an isolated node leaves the
     # public/bedroom components exactly as they were, so it never fires here.
-    comps = _components_excluding(graph, garages)
+    comps = components_excluding(graph, garages)
     public_comp = next((c for c in comps if c & publics), None)
     if public_comp is None:
         return  # public rooms are only reachable through the garage themselves
@@ -5785,7 +5795,7 @@ def _validate_design_quality(plan: Barndominium, add, profile: Profile = DEFAULT
     open-concept flow, bedroom privacy, and bath proximity. Each individual
     check lives in its own ``_dq_*`` function (see ``_DESIGN_QUALITY_CHECKS``).
     """
-    graph = _door_graph(plan)
+    graph = door_graph(plan)
     by_id = {r.id: r for r in plan.rooms}
     for check in _DESIGN_QUALITY_CHECKS:
         # Only the hall-comfort nudge reads jurisdiction thresholds; every other

@@ -117,7 +117,7 @@ Existing model concepts these rules can lean on, for reference:
 `Barndominium.envelope` + `wings` (footprint rectangles), `Room` (x, y, width, length, type,
 level), `RoomType` (24 members incl. `SHOP`, `GARAGE`), `HABITABLE_TYPES`, `INTERIOR_TYPES`,
 `GARAGE_TYPES`, `_PUBLIC_TYPES`, `Zone` (declared band), `Suite` (declared bedroom group),
-`InteriorDoor` / `ExteriorDoor` / `Window`, `_door_graph()` (permeability graph),
+`InteriorDoor` / `ExteriorDoor` / `Window`, `door_graph()` (permeability graph),
 `SiteSpec` + `street` (approach direction), `orientation` (true-north azimuth), `FrameSpec`
 (bays, posts, beams).
 
@@ -522,7 +522,7 @@ are already the beginnings of an openings-quality suite.
 ### Relevance to barndsl
 
 This is the chapter that supplies barndsl's missing "what kind of plan is this?" classifier.
-The existing model has all the inputs: room rectangles for geometry, `_door_graph()` for
+The existing model has all the inputs: room rectangles for geometry, `door_graph()` for
 connectivity, and `Zone` / `Suite` for declared intent.
 
 Barndominiums are overwhelmingly **linear** (bar of shop + bar of living, spine hall) or **linear
@@ -1605,7 +1605,7 @@ The following were used to verify terminology, taxonomy completeness, and numeri
 
 - `D:\CodeProjects\Architecture-DSL\src\barndsl\score.py` — the eight score components these rules would feed.
 - `D:\CodeProjects\Architecture-DSL\src\barndsl\diagnostics.py` — the diagnostic registry (code, severity, category, title, explanation).
-- `D:\CodeProjects\Architecture-DSL\src\barndsl\validation.py` — `_door_graph()`, `_dq_*` design-quality checks.
+- `D:\CodeProjects\Architecture-DSL\src\barndsl\validation.py` — `door_graph()`, `_dq_*` design-quality checks.
 - `D:\CodeProjects\Architecture-DSL\src\barndsl\constants.py` and `profiles.py` — existing thresholds.
 - `D:\CodeProjects\Architecture-DSL\docs\DIAGNOSTIC_MATRIX.md` — the current 212-code surface.
 - `D:\CodeProjects\Architecture-DSL\docs\MODEL_INVARIANTS.md` — coordinate and unit conventions (decimal feet, SW-corner origin).

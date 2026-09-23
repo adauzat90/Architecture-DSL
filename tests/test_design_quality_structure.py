@@ -13,15 +13,15 @@ from barndsl import compile_source
 from barndsl.elements import Barndominium
 from barndsl.validation import (
     _DESIGN_QUALITY_CHECKS,
-    _door_graph,
     _dq_kitchen_flow,
     _dq_kitchen_passthrough,
     _validate_design_quality,
+    door_graph,
 )
 
 
 def _ctx(plan: Barndominium):
-    return _door_graph(plan), {r.id: r for r in plan.rooms}
+    return door_graph(plan), {r.id: r for r in plan.rooms}
 
 
 def test_registry_is_well_formed():
