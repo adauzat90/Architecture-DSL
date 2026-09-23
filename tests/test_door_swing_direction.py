@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from barndsl import compile_source
 from barndsl.fixtures import (
-    _door_swing_rects,
     _rects_overlap,
+    door_swing_rects,
     plan_room_fixtures,
     resolve_room_fixtures,
 )
@@ -139,7 +139,7 @@ door hall - bath into bath offset 2
 """
     plan = compile_source(src).plan
     bath = plan.room("bath")
-    keepouts = _door_swing_rects(plan, bath)
+    keepouts = door_swing_rects(plan, bath)
     assert keepouts, "the swinging door should reserve an arc"
     for f in plan_room_fixtures(plan, bath):
         assert not any(
@@ -154,7 +154,7 @@ door hall - bath into bath offset 2
 
 
 def _no_swing_overlap(plan, room) -> None:
-    keepouts = _door_swing_rects(plan, room)
+    keepouts = door_swing_rects(plan, room)
     assert keepouts, "expected the hinged door to reserve an arc"
     for f in resolve_room_fixtures(plan, room):
         assert not any(
@@ -195,7 +195,7 @@ door shop - mud
     plan = compile_source(src).plan
     shop = plan.room("shop")
     # The only arc in the shop is the interior door's — the overhead adds none.
-    assert len(_door_swing_rects(plan, shop)) == 1
+    assert len(door_swing_rects(plan, shop)) == 1
 
 
 def test_authored_wall_fixture_slides_clear_of_a_swing():
@@ -209,7 +209,7 @@ fixture wardrobe in office wall W
 """
     plan = compile_source(src).plan
     office = plan.room("office")
-    keepouts = _door_swing_rects(plan, office)
+    keepouts = door_swing_rects(plan, office)
     ward = next(f for f in resolve_room_fixtures(plan, office) if f.kind == "wardrobe")
     assert not any(
         _rects_overlap((ward.x, ward.y, ward.width, ward.length), b) for b in keepouts

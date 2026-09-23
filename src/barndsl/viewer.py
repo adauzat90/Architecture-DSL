@@ -49,11 +49,11 @@ import json
 import math
 
 from .elements import Barndominium
-from .gltf import Scene, _to_gltf, build_scene, effective_linear
+from .gltf import Scene, build_scene, effective_linear, gltf_point
 from .materials import GLASS_MATERIAL
 
 #: Human labels for the layer toggles, in display order.
-_LAYER_LABELS = {
+LAYER_LABELS = {
     "walls": "Walls",
     "roof": "Roof",
     "frame": "Frame",
@@ -348,9 +348,9 @@ def scene_json(scene: Scene) -> dict:
         verts: list[float] = []
         norms: list[float] = []
         for p in n.positions:
-            verts.extend(_to_gltf(p))
+            verts.extend(gltf_point(p))
         for v in n.normals:
-            norms.extend(_to_gltf(v))
+            norms.extend(gltf_point(v))
         mat = n.material
         entry = {
             "name": n.name,
@@ -431,7 +431,7 @@ def viewer_html(plan: Barndominium, scene: Scene | None = None) -> str:
     )
     title = plan.name
     payload = json.dumps(data, separators=(",", ":"))
-    labels = json.dumps(_LAYER_LABELS)
+    labels = json.dumps(LAYER_LABELS)
     # The renderer is injected as a value (not through str.format), so its own
     # braces need no doubling; only the CSS braces in _TEMPLATE are doubled.
     return _TEMPLATE.format(

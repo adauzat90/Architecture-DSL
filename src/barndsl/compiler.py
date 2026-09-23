@@ -100,7 +100,7 @@ from .fixtures import FIXTURE_KINDS as _FIXTURE_KINDS  # noqa: E402
 _FIXTURES = ", ".join(sorted(_FIXTURE_KINDS))
 
 
-def _did_you_mean(word: str, options: tuple[str, ...] | list[str]) -> str:
+def did_you_mean(word: str, options: tuple[str, ...] | list[str]) -> str:
     """A leading ``Did you mean `x` or `y`?`` clause for ``word`` against
     ``options`` (empty when nothing is close). Mirrors the accept-pragma's use of
     :func:`difflib.get_close_matches` so a misspelled keyword/type ranks the near
@@ -409,7 +409,7 @@ Example:
 
 
 @dataclass
-class _Token:
+class Token:
     text: str
     line: int
     col: int  # 1-based
@@ -461,7 +461,7 @@ _FT_IN_DASH = re.compile(r"^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$")
 _FT_IN_INCH = re.compile(r"^(-?\d+(?:\.\d+)?)″$")
 
 
-def _parse_ft_in(text: str) -> float | None:
+def parse_ft_in(text: str) -> float | None:
     """Parse a feet-and-inches length literal to decimal feet, or ``None`` if
     ``text`` isn't one of the accepted forms (see the module note above). Inches
     outside ``[0, 12)`` make it *not* a length literal (returns ``None``), so the
@@ -526,7 +526,7 @@ def _ftin_string_hint(raw: str, quote_col: int) -> str | None:
     )
 
 
-def _units_word_hint(toks: list[_Token], unit_idx: int) -> str | None:
+def _units_word_hint(toks: list[Token], unit_idx: int) -> str | None:
     """Teach ``12 feet 6 inches`` — a length spelled out in words.
 
     ``toks[unit_idx]`` is a ``feet``/``ft``/``foot`` token; the token before it is
@@ -566,8 +566,8 @@ def _units_word_hint(toks: list[_Token], unit_idx: int) -> str | None:
     )
 
 
-def _tokenize_line(line: str, lineno: int) -> list[_Token]:
-    tokens: list[_Token] = []
+def tokenize_line(line: str, lineno: int) -> list[Token]:
+    tokens: list[Token] = []
     i, n = 0, len(line)
     while i < n:
         ch = line[i]
@@ -593,7 +593,7 @@ def _tokenize_line(line: str, lineno: int) -> list[_Token]:
             # Span covers the quotes (and any escapes): from the opening quote
             # through whatever we consumed, so the caret underlines "...".
             tokens.append(
-                _Token(
+                Token(
                     buf, lineno, start + 1, end=i + 1, quoted=True,
                     unterminated=not terminated,
                 )
@@ -604,7 +604,7 @@ def _tokenize_line(line: str, lineno: int) -> list[_Token]:
         while i < n and line[i] not in _SEPARATORS and line[i] not in _DROP and line[i] not in '#"':
             buf += line[i]
             i += 1
-        tokens.append(_Token(buf, lineno, start + 1))
+        tokens.append(Token(buf, lineno, start + 1))
     return tokens
 
 
@@ -629,7 +629,7 @@ class _ParseError(Exception):
 
 
 class _Cursor:
-    def __init__(self, tokens: list[_Token], param_env: dict[str, float] | None = None):
+    def __init__(self, tokens: list[Token], param_env: dict[str, float] | None = None):
         self.toks = tokens
         self.i = 0
         #: Parametric-part environment (Phase 20). When compiling a part fragment
@@ -643,10 +643,10 @@ class _Cursor:
     def eol_col(self) -> int:
         return self.toks[-1].end_col if self.toks else 1
 
-    def peek(self) -> _Token | None:
+    def peek(self) -> Token | None:
         return self.toks[self.i] if self.i < len(self.toks) else None
 
-    def take(self, what: str) -> _Token:
+    def take(self, what: str) -> Token:
         t = self.peek()
         if t is None:
             raise _ParseError(
@@ -672,7 +672,7 @@ class _Cursor:
             # 12′, 12'6, 6″). These aren't valid floats, so try them here — the
             # single-token property is what keeps `12-6` (ft-in) distinct from
             # `12 - 6` / `a - b` (which tokenize with a standalone `-`).
-            ft_in = _parse_ft_in(t.text)
+            ft_in = parse_ft_in(t.text)
             if ft_in is not None:
                 return ft_in
             # Parametric parts (Phase 20): inside a part fragment, a bare param
@@ -686,7 +686,7 @@ class _Cursor:
                     return self.param_env[t.text]
                 raise _ParseError(
                     "PARAM_UNKNOWN",
-                    f"{_did_you_mean(t.text, tuple(self.param_env))}"
+                    f"{did_you_mean(t.text, tuple(self.param_env))}"
                     f"'{t.text}' is not a declared param.",
                     t.col,
                     end_col=t.end_col,
@@ -759,7 +759,7 @@ class _Cursor:
             )
         return int(float(t.text))
 
-    def ident(self, what: str) -> _Token:
+    def ident(self, what: str) -> Token:
         """Take an identifier/name token, rejecting an empty `\"\"` literal."""
         t = self.take(what)
         if t.text == "":
@@ -772,7 +772,7 @@ class _Cursor:
             )
         return t
 
-    def keyword(self, expected: str) -> _Token:
+    def keyword(self, expected: str) -> Token:
         t = self.take(f"'{expected}'")
         if t.text.lower() != expected:
             # A first-timer spelling a length in words (`size 12 feet 6 inches x
@@ -794,7 +794,7 @@ class _Cursor:
         except ValueError:
             raise _ParseError(
                 "BAD_TYPE",
-                f"{_did_you_mean(t.text, _TYPE_VALUES)}Unknown room type '{t.text}'.",
+                f"{did_you_mean(t.text, _TYPE_VALUES)}Unknown room type '{t.text}'.",
                 t.col,
                 hint=f"Use one of: {_TYPES}.",
                 end_col=t.end_col,
@@ -856,7 +856,7 @@ _PLACEMENT = {
 PLACEMENT_ANCHORS: tuple[str, ...] = tuple(_PLACEMENT)
 
 
-def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
+def _parse_placement(c: "_Cursor") -> tuple[dict, "Token | None"]:
     """Parse a room's position: ``at <x>,<y>`` or ``<dir> <ref_room>``.
 
     Returns ``(add_room_kwargs, ref_token)`` — kwargs are either ``{x, y}`` or a
@@ -873,7 +873,7 @@ def _parse_placement(c: "_Cursor") -> tuple[dict, "_Token | None"]:
     # One or two relative anchors. Two must be on different axes (one of
     # east/west, one of north/south) — that pins a room into a corner/pocket.
     kwargs: dict = {}
-    first_ref: _Token | None = None
+    first_ref: Token | None = None
     while (tok := c.peek()) is not None and tok.text.lower() in _PLACEMENT:
         dir_tok = c.take("a placement")
         rel = _PLACEMENT[dir_tok.text.lower()]
@@ -941,7 +941,7 @@ def _scan_param_defaults(source: str) -> dict[str, float]:
     authoritative parse flags the duplicate."""
     defaults: dict[str, float] = {}
     for raw in source.splitlines():
-        toks = _tokenize_line(raw, 0)
+        toks = tokenize_line(raw, 0)
         if not toks or toks[0].text.lower() != "param":
             continue
         rest = "".join(t.text for t in toks[1:])
@@ -962,14 +962,14 @@ def _param_value(text: str) -> float | None:
     try:
         v = float(text)
     except ValueError:
-        return _parse_ft_in(text)
+        return parse_ft_in(text)
     return v if math.isfinite(v) else None
 
 
 # --- statement parsers: site / lot features ---------------------------------
 
 
-def _parse_site_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_site_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`site <W> x <L>` — lot dimensions (east-west x north-south feet)."""
     w = c.number("site width")
     c.keyword("x")
@@ -981,7 +981,7 @@ def _parse_site_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: in
     ss.line, ss.col, ss.end_col = lineno, kw.col, kw.end_col
 
 
-def _parse_setback_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_setback_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`setback [front <n>] [side <n>] [rear <n>]` — any subset, any order."""
     front = side = rear = None
     while (tok := c.peek()) is not None:
@@ -1016,7 +1016,7 @@ def _parse_setback_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno:
     ss.setback_line, ss.setback_col, ss.setback_end_col = lineno, kw.col, kw.end_col
 
 
-def _parse_building_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_building_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`building at <x>,<y>` — plan origin (SW envelope corner) on the lot."""
     c.keyword("at")
     bx = c.number("the building x on the lot")
@@ -1028,7 +1028,7 @@ def _parse_building_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno
     ss.building_line, ss.building_col, ss.building_end_col = lineno, kw.col, kw.end_col
 
 
-def _parse_drive_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_drive_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`drive at <x>,<y> size <w> x <l> [gravel|concrete|asphalt]`."""
     from .elements import Drive
 
@@ -1056,7 +1056,7 @@ def _parse_drive_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: i
     )
 
 
-def _parse_walk_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_walk_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`walk from <room> to drive [width <ft>]`."""
     from .elements import Walk
 
@@ -1082,7 +1082,7 @@ def _parse_walk_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: in
     )
 
 
-def _parse_well_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_well_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`well at <x>,<y>` — water well point in lot feet."""
     from .elements import Well
 
@@ -1093,7 +1093,7 @@ def _parse_well_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: in
     plan._site().wells.append(Well(wx, wy, line=lineno, col=kw.col, end_col=kw.end_col))
 
 
-def _parse_septic_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_septic_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`septic at <x>,<y> [field <w> x <l>]`."""
     from .elements import Septic
 
@@ -1121,7 +1121,7 @@ def _parse_septic_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: 
     )
 
 
-def _parse_service_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_service_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`service <electric|water|gas> from <N|S|E|W>` — utility drop."""
     from .elements import Service
 
@@ -1155,7 +1155,7 @@ def _parse_service_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno:
 # --- statement parsers: brief contract --------------------------------------
 
 
-def _parse_program_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_program_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """`program <n> bed ...` — intended counts and area/storage targets."""
     beds = c.count("the bedroom count")
     unit = c.take("'bed'")
@@ -1186,7 +1186,7 @@ def _parse_program_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno:
         if cat is None:
             raise _ParseError(
                 "BAD_TYPE",
-                f"{_did_you_mean(noun.text, _TYPE_VALUES)}"
+                f"{did_you_mean(noun.text, _TYPE_VALUES)}"
                 f"Unknown program room type '{noun.text}'.",
                 noun.col,
                 end_col=noun.end_col,
@@ -1206,7 +1206,7 @@ def _parse_program_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno:
     plan.program_spec.end_col = kw.end_col
 
 
-def _parse_require_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_require_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     """Parse declared spatial intent (`require ...`) and stamp its source span."""
     kind_tok = c.take("a requirement kind (adjacent|separate|exterior|area)")
     kind = kind_tok.text.lower()
@@ -1358,7 +1358,7 @@ def _parse_wall_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
     ws.line, ws.col, ws.end_col = lineno, a_tok.col, a_tok.end_col
 
 
-def _parse_suite_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_suite_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     sid_tok = c.ident("a suite id")
     members: list[str] = []
     while c.peek() is not None:
@@ -1377,7 +1377,7 @@ def _parse_suite_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: i
     s.line, s.col, s.end_col = lineno, kw.col, kw.end_col
 
 
-def _parse_zone_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_zone_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     zid_tok = c.ident("a zone id")
     zmembers: list[str] = []
     while c.peek() is not None:
@@ -1410,7 +1410,7 @@ def _default_interior_door_width(kind: str) -> float:
 
 
 def _parse_interior_door_statement(
-    c: _Cursor, plan: Barndominium, a_tok: _Token, a: str, lineno: int,
+    c: _Cursor, plan: Barndominium, a_tok: Token, a: str, lineno: int,
 ) -> None:
     c.take("'-'")  # consume the separator
     b = c.ident("the second room id").text
@@ -1505,7 +1505,7 @@ def _parse_exterior_door_options(c: _Cursor) -> tuple[float, float, bool, str]:
 
 
 def _parse_exterior_door_statement(
-    c: _Cursor, plan: Barndominium, a_tok: _Token, a: str, lineno: int,
+    c: _Cursor, plan: Barndominium, a_tok: Token, a: str, lineno: int,
 ) -> None:
     wall = c.wall()
     kind_tok = c.take("'exterior' or 'overhead'")
@@ -1595,7 +1595,7 @@ def _parse_roof_statement(c: _Cursor, plan: Barndominium) -> None:
         )
 
 
-def _parse_note_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_note_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     text = c.take("a quoted note").text
     nxt = c.peek()
     if nxt is not None and nxt.text.lower() == "at":
@@ -1753,7 +1753,7 @@ def _parse_stair_statement(c: _Cursor, plan: Barndominium, lineno: int) -> None:
         )
 
 
-def _parse_frame_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_frame_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     bay, span, post, ridge = 12.0, 40.0, inches(6), True
     while c.peek() is not None:
         opt = c.take("an option").text.lower()
@@ -1814,7 +1814,7 @@ class _FixtureOptions:
     run_depth: float | None = None
 
 
-def _apply_fixture_option(c: _Cursor, tok: _Token, opt: str, state: _FixtureOptions) -> None:
+def _apply_fixture_option(c: _Cursor, tok: Token, opt: str, state: _FixtureOptions) -> None:
     if opt == "at":
         state.x = c.number("the fixture x offset")
         state.y = c.number("the fixture y offset")
@@ -1856,7 +1856,7 @@ def _parse_fixture_options(c: _Cursor) -> _FixtureOptions:
     return state
 
 
-def _parse_fixture_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_fixture_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     from .fixtures import FIXTURES
 
     kind_tok = c.ident("a fixture kind")
@@ -1893,7 +1893,7 @@ def _parse_fixture_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno:
     pf.line, pf.col, pf.end_col = lineno, kw.col, kw.end_col
 
 
-def _parse_device_statement(c: _Cursor, plan: Barndominium, key: str, kw: _Token, lineno: int) -> None:
+def _parse_device_statement(c: _Cursor, plan: Barndominium, key: str, kw: Token, lineno: int) -> None:
     c.keyword("in")
     room_tok = c.ident("a room id")
     wall = None
@@ -1938,7 +1938,7 @@ def _parse_device_statement(c: _Cursor, plan: Barndominium, key: str, kw: _Token
         switch.line, switch.col, switch.end_col = lineno, kw.col, kw.end_col
 
 
-def _parse_light_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_light_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     c.keyword("in")
     room_tok = c.ident("a room id")
     c.keyword("at")
@@ -1972,7 +1972,7 @@ def _parse_light_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: i
     lm.line, lm.col, lm.end_col = lineno, kw.col, kw.end_col
 
 
-def _parse_alarm_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_alarm_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     kind_tok = c.ident("an alarm kind (smoke|co|smoke_co)")
     akind = kind_tok.text.lower()
     if akind not in _ALARM_KIND_SET:
@@ -2008,7 +2008,7 @@ def _parse_alarm_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: i
 # --- statement parsers: composition and params ------------------------------
 
 
-def _parse_use_param_pairs(c: _Cursor, kw: _Token, uparams: dict[str, float]) -> None:
+def _parse_use_param_pairs(c: _Cursor, kw: Token, uparams: dict[str, float]) -> None:
     c.keyword("with")
     seen_pair = False
     while (pt := c.peek()) is not None and "=" in pt.text and not pt.quoted:
@@ -2061,7 +2061,7 @@ class _UseOptions:
     params: dict[str, float] = field(default_factory=dict)
 
 
-def _parse_use_header(c: _Cursor) -> tuple[_Token, _Token, float, float]:
+def _parse_use_header(c: _Cursor) -> tuple[Token, Token, float, float]:
     path_tok = c.take("a quoted part path")
     if not path_tok.quoted:
         raise _ParseError(
@@ -2118,7 +2118,7 @@ def _parse_use_rotation(c: _Cursor) -> int:
     return ang
 
 
-def _parse_use_options(c: _Cursor, kw: _Token) -> _UseOptions:
+def _parse_use_options(c: _Cursor, kw: Token) -> _UseOptions:
     opts = _UseOptions()
     while (tok := c.peek()) is not None:
         opt = tok.text.lower()
@@ -2142,7 +2142,7 @@ def _parse_use_options(c: _Cursor, kw: _Token) -> _UseOptions:
     return opts
 
 
-def _parse_use_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int) -> None:
+def _parse_use_statement(c: _Cursor, plan: Barndominium, kw: Token, lineno: int) -> None:
     from .elements import UseSpec
 
     path_tok, alias_tok, ux, uy = _parse_use_header(c)
@@ -2164,7 +2164,7 @@ def _parse_use_statement(c: _Cursor, plan: Barndominium, kw: _Token, lineno: int
     )
 
 
-def _parse_param_statement(tokens: list[_Token], c: _Cursor, plan: Barndominium, kw: _Token) -> None:
+def _parse_param_statement(tokens: list[Token], c: _Cursor, plan: Barndominium, kw: Token) -> None:
     rest = "".join(t.text for t in tokens[1:])
     pname, psep, pval = rest.partition("=")
     if not psep or not _PARAM_NAME_RE.match(pname):
@@ -2270,10 +2270,10 @@ class _Stmt(NamedTuple):
     c: _Cursor
     plan: Barndominium
     smap: _SourceMap
-    kw: _Token
+    kw: Token
     key: str
     lineno: int
-    tokens: list[_Token]
+    tokens: list[Token]
 
 
 #: Statement keyword -> its parser. The ONE list of statements: the public
@@ -2331,7 +2331,7 @@ STATEMENT_KEYWORDS: tuple[str, ...] = tuple(_STATEMENT_PARSERS)
 
 
 def _parse_statement(
-    tokens: list[_Token], plan: Barndominium, smap: _SourceMap, lineno: int,
+    tokens: list[Token], plan: Barndominium, smap: _SourceMap, lineno: int,
     param_env: dict[str, float] | None = None,
 ) -> None:
     c = _Cursor(tokens, param_env=param_env)
@@ -2341,7 +2341,7 @@ def _parse_statement(
     if handler is None:
         raise _ParseError(
             "UNKNOWN_STMT",
-            f"{_did_you_mean(kw.text, STATEMENT_KEYWORDS)}Unknown statement '{kw.text}'.",
+            f"{did_you_mean(kw.text, STATEMENT_KEYWORDS)}Unknown statement '{kw.text}'.",
             kw.col,
             hint=f"Statements start with one of: {', '.join(STATEMENT_KEYWORDS)}.",
             end_col=kw.end_col,
@@ -2481,7 +2481,7 @@ def _parse_source_lines(
     """Parse all source lines into ``plan``; return True if recovery skipped any."""
     skipped = False
     for lineno, raw in enumerate(source.splitlines(), start=1):
-        toks = _tokenize_line(raw, lineno)
+        toks = tokenize_line(raw, lineno)
         unterminated = next((t for t in toks if t.unterminated), None)
         if unterminated is not None:
             ftin_hint = _ftin_string_hint(raw, unterminated.col)
@@ -2542,7 +2542,7 @@ def _record_empty_line_syntax(raw: str, lineno: int, diagnostics: list[Issue]) -
 
 
 def _record_fragment_host_statement(
-    key: str, tok: _Token, lineno: int, diagnostics: list[Issue], fragment: bool,
+    key: str, tok: Token, lineno: int, diagnostics: list[Issue], fragment: bool,
 ) -> bool:
     if not (fragment and key in HOST_ONLY_STATEMENTS):
         return False
@@ -2561,7 +2561,7 @@ def _record_fragment_host_statement(
 
 
 def _record_param_in_plan(
-    key: str, tok: _Token, lineno: int, diagnostics: list[Issue], fragment: bool,
+    key: str, tok: Token, lineno: int, diagnostics: list[Issue], fragment: bool,
 ) -> bool:
     if fragment or key != "param":
         return False
@@ -2588,10 +2588,9 @@ def _compose_plan_uses(
 ) -> object | None:
     if not plan.uses:
         return None
-    from .compose import _ComposeCtx, compose_uses
+    from .compose import compose_uses
 
-    ctx = compose_ctx if isinstance(compose_ctx, _ComposeCtx) else _ComposeCtx.top_level(base_dir, self_path)
-    return compose_uses(plan, base_dir, diagnostics, profile, ctx=ctx)
+    return compose_uses(plan, base_dir, diagnostics, profile, ctx=compose_ctx, self_path=self_path)
 
 
 def _place_frame_for_compile(plan: Barndominium, diagnostics: list[Issue], skipped: bool) -> None:

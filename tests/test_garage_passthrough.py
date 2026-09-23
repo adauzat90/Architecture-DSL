@@ -428,7 +428,7 @@ window bed south width 4 offset 4
 
 
 def test_area_void_silent_on_fully_tiled_plan():
-    from barndsl.validation import MIN_CONCENTRATED_VOID, _largest_void
+    from barndsl.validation import MIN_CONCENTRATED_VOID, largest_void
 
     src = """\
 plan "Tiled"
@@ -443,7 +443,7 @@ window bed south width 4 offset 3
 """
     result = compile_source(src)
     assert "AREA_VOID" not in {d.code for d in result.infos}
-    area, bbox = _largest_void(result.plan)
+    area, bbox = largest_void(result.plan)
     assert area < MIN_CONCENTRATED_VOID
 
 

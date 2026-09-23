@@ -13,22 +13,47 @@ def test_repo_audit_has_no_wiring_drift():
     assert out["diagnostics"]["missing_registry"] == []
     assert out["diagnostics"]["severity_drift"] == []
     assert out["diagnostics"]["unclassified_category"] == []
+    assert out["modules"]["private_imports"] == []
 
 
 def test_repo_audit_checks_can_fail(monkeypatch):
     """The audit's checks must be able to fail — a drift check comparing a list
     with a copy of itself is no check at all."""
+    import ast
+
     from barndsl import compiler, diagnostics
 
     monkeypatch.setattr(devtools, "PART_STATEMENTS", compiler.PART_STATEMENTS - {"room"})
     monkeypatch.setattr(diagnostics, "_VARYING", diagnostics._VARYING - {"FOYER_FLOW"})
     monkeypatch.setattr(diagnostics, "_EXPLICIT_CATEGORIES",
                         {k: v for k, v in diagnostics._EXPLICIT_CATEGORIES.items() if k != "MECH_ACCESS"})
+    real_trees = devtools._src_trees
+    planted = devtools.SRC / "barndsl" / "planted.py"
+    monkeypatch.setattr(devtools, "_src_trees", lambda: {
+        **real_trees(),
+        planted: ast.parse(
+            "from .compiler import _PLACEMENT, PLACEMENT_ANCHORS\n"   # 1: by name
+            "from barndsl.render import __all__, _Renderer\n"         # 2: absolute
+            "from . import fixtures\n"                                # 3
+            "import barndsl.schedule as sched\n"                      # 4
+            "import barndsl.geometry\n"                               # 5
+            "from .planted import _mine\n"                            # 6: its own
+            "fixtures._rect_intersection(sched._fmt_ft(1), barndsl.geometry._grid, _mine)\n"  # 7
+        ),
+    })
     out = devtools.repo_audit()
     assert not out["ok"]
     assert out["statement_keywords"]["unclassified_host_or_part"] == ["room"]
     assert any(d.startswith("FOYER_FLOW") for d in out["diagnostics"]["severity_drift"])
     assert out["diagnostics"]["unclassified_category"] == ["MECH_ACCESS"]
+    # Private names are flagged however they're reached — never a public name,
+    # a dunder, or a module's own privates.
+    assert sorted(out["modules"]["private_imports"]) == sorted(
+        f"src/barndsl/planted.py:{line} imports {name}" for line, name in [
+            (1, "compiler._PLACEMENT"), (2, "render._Renderer"),
+            (7, "fixtures._rect_intersection"), (7, "schedule._fmt_ft"), (7, "geometry._grid"),
+        ]
+    )
 
 
 def test_pi_extension_confines_file_tools_to_the_workspace():

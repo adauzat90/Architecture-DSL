@@ -610,11 +610,11 @@ def plan_room_fixtures(plan: Barndominium, room: Room, *, avoid_doors: bool = Tr
     x0, y0, cw, cl = clear_box(plan, room)
     if cw <= 0 or cl <= 0:
         return []
-    keepouts = tuple(_door_swing_rects(plan, room)) if avoid_doors else ()
+    keepouts = tuple(door_swing_rects(plan, room)) if avoid_doors else ()
     return _place_seeds(x0, y0, cw, cl, kinds, keepouts, _seed_gaps(room.type))
 
 
-def _quarter_turns(rotation: float) -> int:
+def quarter_turns(rotation: float | None) -> int:
     """A rotation in degrees snapped to a plan quarter-turn count (0..3). The
     massing is axis-aligned, so a fixture turns in 90° steps; other angles snap to
     the nearest, keeping the plan glyph and the 3D box consistent."""
@@ -656,7 +656,7 @@ def _place_explicit(
     spec = FIXTURES[pf.kind]
     width = float(pf.width) if getattr(pf, "width", None) else spec.width
     depth = spec.depth
-    if _quarter_turns(getattr(pf, "rotation", 0.0)) % 2 == 1:
+    if quarter_turns(getattr(pf, "rotation", 0.0)) % 2 == 1:
         width, depth = depth, width  # a quarter turn swaps the footprint axes
     wall = pf.wall.name[0] if getattr(pf, "wall", None) is not None else ""
 
@@ -757,7 +757,7 @@ def resolve_room_fixtures(plan: Barndominium, room: Room) -> list[Fixture]:
     explicit_kinds = {pf.kind for pf in explicit}
     surviving = [k for k in fixtures_for(room.type) if k not in explicit_kinds]
     keepouts = (
-        tuple(_door_swing_rects(plan, room))
+        tuple(door_swing_rects(plan, room))
         + tuple(_opening_keepout_rects(plan, room))
         + tuple(_window_keepout_rects(plan, room))
     )
@@ -866,7 +866,7 @@ def validate_fixtures(plan: Barndominium, add) -> None:
                         )
                     )
                     break
-            for door in _door_swing_rects(plan, room):
+            for door in door_swing_rects(plan, room):
                 if _rects_overlap(rects[i], door):
                     add(
                         Issue(
@@ -1257,7 +1257,7 @@ def _fmt(v: float) -> str:
     return f"{v:g}"
 
 
-def _door_swing_rects(plan: Barndominium, room: Room) -> list:
+def door_swing_rects(plan: Barndominium, room: Room) -> list:
     """Coarse swing-clearance rectangles for the leaves opening into ``room`` — a
     width-deep band inside each hinged door on one of the room's walls, interior
     partitions and exterior entries alike (an overhead door rides its tracks, a

@@ -80,17 +80,24 @@ def _expand_paths(items: list[str]) -> list[Path]:
 # --- repo audit --------------------------------------------------------------
 
 
-def _literal_issue_sites() -> dict[str, dict[str, set[str]]]:
+def _src_trees() -> dict[Path, ast.Module]:
+    """Every ``src/barndsl`` module, parsed once for the audit's AST checks."""
+    trees: dict[Path, ast.Module] = {}
+    for path in sorted((SRC / "barndsl").glob("*.py")):
+        try:
+            trees[path] = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+    return trees
+
+
+def _literal_issue_sites(trees: dict[Path, ast.Module] | None = None) -> dict[str, dict[str, set[str]]]:
     """``{rel_path: {CODE: {severity, …}}}`` for every ``Issue(sev, "CODE", …)``
     call with a literal code in ``src/barndsl``. The severity is the lowercased
     ``Severity.<NAME>`` when the first argument is literal, else ``"computed"``."""
     out: dict[str, dict[str, set[str]]] = {}
-    for path in sorted((SRC / "barndsl").glob("*.py")):
+    for path, tree in (_src_trees() if trees is None else trees).items():
         if path.name == "diagnostics.py":
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:
             continue
         sites: dict[str, set[str]] = {}
         for node in ast.walk(tree):
@@ -117,6 +124,55 @@ def _literal_issue_sites() -> dict[str, dict[str, set[str]]]:
 
 def _literal_issue_codes() -> dict[str, list[str]]:
     return {path: sorted(sites) for path, sites in _literal_issue_sites().items()}
+
+
+def _is_private(name: str) -> bool:
+    return name.startswith("_") and not name.startswith("__")
+
+
+def _private_imports(trees: dict[Path, ast.Module] | None = None) -> list[str]:
+    """Every use of another barndsl module's ``_private`` name in ``src/barndsl``,
+    as ``path:line imports module._name``: imported by name (``from .x import
+    _y``) or reached through a module (``from . import x`` / ``import
+    barndsl.x as m`` then ``x._y`` / ``m._y``). A helper two modules share needs a
+    public name (and a test) first."""
+    trees = _src_trees() if trees is None else trees
+    modules = {path.stem for path in trees}
+    found: list[str] = []
+    for path, tree in trees.items():
+        where = Path(_rel(path)).as_posix()
+        # Local names bound to a barndsl module, and the module each names.
+        aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("barndsl.") and alias.asname:
+                        aliases[alias.asname] = alias.name.rsplit(".", 1)[-1]
+            elif isinstance(node, ast.ImportFrom):
+                name = node.module or ""
+                package = name in ("", "barndsl")  # `from . import x` / `from barndsl import x`
+                if not (node.level or package or name.startswith("barndsl.")):
+                    continue  # stdlib or a third-party import
+                module = "barndsl" if package else name.rsplit(".", 1)[-1]
+                for alias in node.names:
+                    if package and alias.name in modules:
+                        aliases[alias.asname or alias.name] = alias.name
+                    elif module != path.stem and _is_private(alias.name):
+                        found.append(f"{where}:{node.lineno} imports {module}.{alias.name}")
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Attribute) and _is_private(node.attr)):
+                continue
+            base = node.value
+            if isinstance(base, ast.Name) and base.id in aliases:
+                module = aliases[base.id]
+            elif (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                  and base.value.id == "barndsl" and base.attr in modules):
+                module = base.attr  # barndsl.x._y
+            else:
+                continue
+            if module != path.stem:
+                found.append(f"{where}:{node.lineno} imports {module}.{node.attr}")
+    return found
 
 
 def _severity_drift(issue_sites: dict[str, dict[str, set[str]]]) -> list[str]:
@@ -167,7 +223,9 @@ def _matrix_drift() -> dict[str, list[str]]:
 
 
 def repo_audit() -> dict[str, Any]:
-    issue_sites = _literal_issue_sites()  # one AST pass over src/barndsl
+    trees = _src_trees()  # one parse of src/barndsl for every AST check
+    issue_sites = _literal_issue_sites(trees)
+    private_imports = _private_imports(trees)
     emitted = {c for sites in issue_sites.values() for c in sites}
     registered = set(REGISTRY)
     wiring = _statement_wiring()
@@ -208,6 +266,11 @@ def repo_audit() -> dict[str, Any]:
             "docs/DIAGNOSTIC_MATRIX.md is out of date (run `barndsl dev diag-matrix --out docs/DIAGNOSTIC_MATRIX.md`): "
             + ", ".join([*(f"+{c}" for c in matrix["missing"]), *(f"-{c}" for c in matrix["stale"])])
         )
+    if private_imports:
+        problems.append(
+            "modules import another module's private names (give the helper a public name): "
+            + ", ".join(private_imports)
+        )
 
     return {
         "ok": not problems,
@@ -229,6 +292,8 @@ def repo_audit() -> dict[str, Any]:
             "matrix_missing": matrix["missing"],
             "matrix_stale": matrix["stale"],
         },
+        # sources_scanned is 0 outside a repo checkout (no src/ to read).
+        "modules": {"sources_scanned": len(trees), "private_imports": private_imports},
         "artifacts": {"pyc_sample": pyc, "agent_run_root_artifacts": agent_artifacts},
     }
 

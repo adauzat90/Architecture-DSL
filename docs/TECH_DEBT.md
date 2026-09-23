@@ -25,7 +25,7 @@ is a phase.
 |---|---|---|---|---|
 | [TD-1](#td-1-one-interior-door-span-rule) | One interior-door span rule | M | High | Done |
 | [TD-2](#td-2-dxf-depends-on-render-internals) | DXF depends on render internals | M | High | Done |
-| [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Open |
+| [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Done |
 | [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Open |
 | [TD-5](#td-5-validationpy-size-and-duplicated-thresholds) | `validation.py` size and duplicated thresholds | L | Medium | Open |
 | [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | Open |
@@ -168,6 +168,50 @@ Tests and tools add roughly 100 more sites. Most are `agent` privates in
 
 `AGENTS.md` says to add a public seam before relying on a private import.
 
+**Resolution.**
+- **Renamed in place.** Each shared helper now has a public name, where it
+  already lived:
+
+  | Module | Was | Now |
+  |---|---|---|
+  | compiler | `_tokenize_line`, `_Token` | `tokenize_line`, `Token` |
+  | compiler | `_parse_ft_in` | `parse_ft_in` |
+  | compiler | `_did_you_mean` | `did_you_mean` |
+  | fixtures | `_quarter_turns`, `_door_swing_rects` | `quarter_turns`, `door_swing_rects` |
+  | layout | `_add_openings` | `place_openings` (`add_openings` is a brief field) |
+  | layout | `_connect_adjacencies`, `_relieve_kitchen_passthrough` | `connect_adjacencies`, `relieve_kitchen_passthrough` |
+  | schedule | `_schedules` | `schedule_tables` |
+  | validation | `_largest_void` | `largest_void` |
+  | viewer | `_LAYER_LABELS` | `LAYER_LABELS` |
+  | gltf | `_to_gltf` | `gltf_point` (`to_gltf` is the exporter) |
+  | pragma | `_comment_start` | `comment_start` |
+
+  The compiler already exposed `DSL_REFERENCE`, `STATEMENT_KEYWORDS` and
+  `PLACEMENT_ANCHORS`, so its lexer helpers became public there instead of
+  moving to a new module.
+- **Moved.** `validation._pt_rect_dist` is now `geometry.point_rect_distance`,
+  beside the other shared geometry.
+- **Removed.** `edits` checks anchors against the public `PLACEMENT_ANCHORS`
+  instead of the parser's `_PLACEMENT` table.
+- **Seam, not a rename.**
+  - `compose.compose_uses` now builds its own top-level recursion context, with
+    a new `self_path` argument, and rejects a context it didn't make.
+  - The compiler no longer touches `_ComposeCtx`, which stays private.
+  - A test pins that a host file using itself is still one clean `USE_CYCLE`.
+- **Kept that way.**
+  - `barndsl dev audit` gained a `private_imports` check. Any `src/barndsl`
+    module that reaches another module's `_private` name fails the audit, and
+    therefore doctor, whether it imports the name or reaches it through a module
+    (`from . import x; x._y`, `import barndsl.x as m; m._y`, `barndsl.x._y`).
+  - The audit also reports `sources_scanned`, which is 0 outside a repo
+    checkout.
+  - `test_repo_audit_checks_can_fail` plants every one of those forms to prove
+    each can trip.
+- **Tests.** `tests/test_public_seams.py` pins the contract of each newly
+  public helper that only had indirect coverage.
+- **Out of scope.** Tests still import roughly 100 private names, mostly
+  `agent` internals in `test_agent_loop.py`. The audit covers `src/` only.
+
 ## TD-4. `Issue` and `Severity` live in the validator
 
 **Problem.** `diagnostics`, `pragma`, `compose`, `lsp` and `revitlog` import the
@@ -273,8 +317,9 @@ all be generated from it.
 
 ## TD-9. Three comment scanners, one wrong
 
-**Problem.** `fmt._comment_start` and `pragma._comment_start` are identical
-copies. `lsp._comment_start` is a third copy that doesn't handle `\"` escapes,
+**Problem.** `fmt._comment_start` and `pragma.comment_start` (public since
+TD-3) are identical copies. `lsp._comment_start` is a third copy that doesn't
+handle `\"` escapes,
 so on `note "say \" # hi" # real` it returns the `#` inside the string. The
 compiler lexer has a fourth quote scanner of its own.
 
@@ -463,5 +508,7 @@ builder half needs a machine with full Revit.
 - **TD-1** (PR #25): one interior-door span rule, `geometry.door_span`.
 - **TD-2** (PR #26): one drawing geometry, `drawing.py`, for the SVG plan and
   the DXF export; fixed the DXF's ignored `hinge far`.
-- **TD-16**: one default door-swing rule for the plan, DXF, validator and 3D
-  model.
+- **TD-16** (PR #27): one default door-swing rule for the plan, DXF,
+  validator and 3D model.
+- **TD-3**: no module imports another's private names; `barndsl dev audit`
+  enforces it.

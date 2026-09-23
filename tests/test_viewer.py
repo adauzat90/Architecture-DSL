@@ -11,7 +11,7 @@ import json
 import os
 
 from barndsl import compile_source, viewer_html, write_viewer
-from barndsl.viewer import _LAYER_LABELS
+from barndsl.viewer import LAYER_LABELS
 
 EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples")
 
@@ -71,8 +71,8 @@ def test_every_present_layer_is_toggleable():
     end = html.index("</script>", start)
     data = json.loads(html[start:end])
     for layer in data["layers"]:
-        assert layer in _LAYER_LABELS
-        assert _LAYER_LABELS[layer] in html
+        assert layer in LAYER_LABELS
+        assert LAYER_LABELS[layer] in html
 
 
 def test_write_viewer_produces_one_file(tmp_path):

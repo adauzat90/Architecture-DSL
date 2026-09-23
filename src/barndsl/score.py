@@ -62,7 +62,7 @@ from .elements import GARAGE_TYPES, HABITABLE_TYPES, PUBLIC_TYPES, Barndominium,
 from .validation import (
     MIN_VOID_NOTE,
     Severity,
-    _largest_void,
+    largest_void,
     components_excluding,
     door_graph,
 )
@@ -160,7 +160,7 @@ def _space_penalty(plan: Barndominium) -> tuple[float, str | None]:
     # zeroes the score before this term matters. A wall-thickness sliver of slack
     # between rooms still never pings. Scales the void's share of the footprint
     # into a penalty capped at VOID_SPACE_WEIGHT.
-    void_area, bbox = _largest_void(plan)
+    void_area, bbox = largest_void(plan)
     void_pen = 0.0
     if void_area >= MIN_VOID_NOTE:
         void_pen = min(VOID_SPACE_WEIGHT, VOID_SPACE_WEIGHT * (void_area / footprint) / VOID_FULL_FRAC)

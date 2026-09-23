@@ -28,7 +28,7 @@ import pytest
 from barndsl import compile_source
 from barndsl.gltf import Scene, build_scene
 from barndsl.materials import GLASS_MATERIAL, PALETTE, TRIM_MATERIAL
-from barndsl.viewer import RENDERER_JS, _LAYER_LABELS, scene_json
+from barndsl.viewer import LAYER_LABELS, RENDERER_JS, scene_json
 
 HERE = __import__("os").path.dirname(__file__)
 HARNESS = __import__("os").path.join(HERE, "renderer_phase7_harness.js")
@@ -102,7 +102,7 @@ def test_new_layers_present_in_scene_and_labels():
     # The two new layers exist in LAYERS, appear in a mixed plan's scene layers, and
     # each has a toggle label.
     assert "trim" in Scene.LAYERS and "ceilings" in Scene.LAYERS
-    assert "trim" in _LAYER_LABELS and "ceilings" in _LAYER_LABELS
+    assert "trim" in LAYER_LABELS and "ceilings" in LAYER_LABELS
     layers = scene_json(build_scene(_plan(MIX)))["layers"]
     assert "trim" in layers          # baseboards ride the trim layer
     assert "ceilings" in layers      # the bedroom ceiling

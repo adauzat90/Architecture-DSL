@@ -26,7 +26,7 @@ from xml.sax.saxutils import escape
 
 from .cost import estimate_cost
 from .render import RenderConfig, render_site_svg, render_svg, sheet_scale
-from .schedule import _schedules
+from .schedule import schedule_tables
 from .score import design_score
 
 _CSS = """
@@ -286,7 +286,7 @@ def _site_feature_clearance_rows(plan: Any) -> list[tuple[str, str, str, bool]]:
     Empty unless the relevant features are declared."""
     from .constants import WELL_SEPTIC_MIN_SEPARATION
     from .render import fmt_ft_in
-    from .validation import _pt_rect_dist
+    from .geometry import point_rect_distance
 
     ss = plan.site_spec
     rows: list[tuple[str, str, str, bool]] = []
@@ -294,7 +294,7 @@ def _site_feature_clearance_rows(plan: Any) -> list[tuple[str, str, str, bool]]:
     sep = WELL_SEPTIC_MIN_SEPARATION
     for wi, wl in enumerate(ss.wells):
         for si, sp in enumerate(ss.septics):
-            dist = min(_pt_rect_dist(wl.x, wl.y, rect) for rect in sp.rects())
+            dist = min(point_rect_distance(wl.x, wl.y, rect) for rect in sp.rects())
             label = "Well ↔ septic"
             if len(ss.wells) > 1 or len(ss.septics) > 1:
                 label += f" (#{wi + 1}↔#{si + 1})"
@@ -402,7 +402,7 @@ def _site_plan(plan: Any) -> str:
 
 def _schedule_tables(plan: Any) -> str:
     blocks = []
-    for title, columns, rows in _schedules(plan, True, True, True):
+    for title, columns, rows in schedule_tables(plan, True, True, True):
         head = "".join(f"<th>{_tag(c.header)}</th>" for c in columns)
         if rows:
             body = "\n".join(

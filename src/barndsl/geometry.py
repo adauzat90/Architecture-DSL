@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .elements import Direction, InteriorDoor, Room
@@ -185,6 +186,15 @@ def footprint_boundary(
             if not covered(i + 1, j):
                 edges.append(((x1, y0), (x1, y1)))
     return edges
+
+
+def point_rect_distance(px: float, py: float, rect: tuple[float, float, float, float]) -> float:
+    """Distance from point ``(px, py)`` to the axis-aligned rectangle
+    ``(x1, y1, x2, y2)`` — 0 when the point is inside it."""
+    x1, y1, x2, y2 = rect
+    dx = max(x1 - px, 0.0, px - x2)
+    dy = max(y1 - py, 0.0, py - y2)
+    return math.hypot(dx, dy)
 
 
 def wall_faces_outside(
