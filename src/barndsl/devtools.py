@@ -1202,7 +1202,7 @@ entry living south width 3
             f"Add REGISTRY entry for {code} in src/barndsl/diagnostics.py ({severity}); if it can fire at more than one severity, add it to _VARYING.",
             "Give the code a category: list it in the matching explicit set in diagnostics.py unless a prefix rule already classifies it (the audit fails on unclassified codes).",
             "Add/extend a _validate_* or _dq_* function in src/barndsl/validation.py or the relevant domain module; put thresholds in constants.py (or a Profile field if they vary by jurisdiction).",
-            "Wire a new function into validation._run_full_plan_validators (whole-plan checks) or validation._DESIGN_QUALITY_CHECKS (design-quality checks), keeping deterministic order.",
+            "Give the check the (ctx: CheckContext, add) signature, read the profile from ctx, and list it once in validation._PLAN_CHECKS (or _SHELL_CHECKS if it must run on an empty plan) where it should run; the order is the report order.",
             f"Fill in {tfile} with one firing and one non-firing plan.",
             "Run barndsl dev rule-probe, barndsl dev audit, targeted tests, gallery gate, and export parity if geometry changed; regenerate docs/DIAGNOSTIC_MATRIX.md.",
         ],

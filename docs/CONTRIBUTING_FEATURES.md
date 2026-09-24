@@ -36,7 +36,7 @@ This checklist is optimized for both humans and coding agents.
 ## Adding a diagnostic rule
 
 - Add or reuse a deterministic validator in `src/barndsl/validation.py` or the relevant domain module. Put its threshold in `constants.py` (or a `Profile` field when it varies by jurisdiction), not inline.
-- Wire a new function into `validation._run_full_plan_validators` (whole-plan checks) or `validation._DESIGN_QUALITY_CHECKS` (design-quality checks); both run in a fixed order.
+- Write the check as `_validate_x(ctx: CheckContext, add)` (or `_dq_x` for a design-quality nudge). Read the plan, the profile and the shared door graph from `ctx`, never a default profile. List it once in `validation._PLAN_CHECKS` (or `_SHELL_CHECKS` for a shell/site check that must run on an empty plan) where it should run: the list order is the order diagnostics are reported in. `tests/test_check_registry.py` fails on a check that takes a `CheckContext` but isn't listed.
 - Emit `Issue(Severity.X, "CODE", ...)` with a literal code, in stable order.
 - Register the code in `src/barndsl/diagnostics.py` with title and explanation. The registry severity must match every literal emit site; a code that genuinely fires at more than one severity goes in `_VARYING`.
 - Give it a category: list it in the matching explicit set in `diagnostics.py` unless a prefix rule already classifies it. Explicit listings win over prefixes, and `barndsl dev audit` fails on any code that only reaches the default bucket.

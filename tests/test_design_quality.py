@@ -1,4 +1,4 @@
-"""Tests for the design-quality INFO nudges added to `_validate_design_quality`.
+"""Tests for the design-quality INFO nudges (the `_dq_*` checks in `validation`).
 
 These never block a compile (they are INFO, so `is_valid` stays true); they flow
 through the same diagnostic channel as code errors to coach the author toward a
