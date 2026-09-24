@@ -249,6 +249,36 @@ def test_render_feedback_is_score_headed_structured_and_deterministic():
     assert render_feedback(compile_source(MEDIOCRE)) == text
 
 
+def test_render_feedback_puts_whole_plan_notes_first():
+    # The critic's notes, TRUNCATED and plan-level checks have no source line.
+    # The writer must act on them first, and the design loop was tuned with them
+    # leading, so they come before every line-anchored diagnostic, in the order
+    # they were added; the line-anchored ones follow in line order.
+    import re
+
+    from barndsl.issues import Issue, Severity
+
+    result = compile_source(MEDIOCRE)
+    added = [
+        Issue(Severity.INFO, "DESIGN", "BLOCKING: the shop cuts the house in two"),
+        Issue(Severity.INFO, "DESIGN", "a suggestion"),
+        Issue(Severity.INFO, "TRUNCATED", "your reply was cut off"),
+    ]
+    result.diagnostics.extend(added)
+    lines = [ln for ln in render_feedback(result).splitlines()
+             if re.match(r"(error|warning|info) [A-Z_]+", ln)]
+    assert len(lines) == len(result.diagnostics)
+    anchored = [int(m.group(1)) for ln in lines if (m := re.search(r" line (\d+): ", ln))]
+    notes = len(lines) - len(anchored)
+    assert anchored and notes >= len(added)
+    assert all(not re.search(r" line \d+: ", ln) for ln in lines[:notes])
+    assert anchored == sorted(anchored)
+    # The agent's own notes keep the order the agent added them in.
+    assert [ln.split(": ", 1)[1] for ln in lines[notes - len(added):notes]] == [
+        "BLOCKING: the shop cuts the house in two", "a suggestion", "your reply was cut off",
+    ]
+
+
 def test_render_feedback_on_a_clean_plan_reports_no_zero_components():
     result = compile_source(CLEAN)
     text = render_feedback(result)
