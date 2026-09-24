@@ -43,7 +43,7 @@ from .compiler import DSL_REFERENCE, CompileResult, compile_source
 from .compiler import STATEMENT_KEYWORDS as _STMT_KEYWORDS
 from .introspect import plan_summary, render_ascii_plan, summary_text
 from .score import ScoreReport, design_score
-from .issues import Issue, Severity
+from .issues import Issue, Severity, report_order
 
 logger = logging.getLogger(__name__)
 
@@ -963,11 +963,10 @@ def render_feedback(
 ) -> str:
     """Render a compact, deterministic feedback block for the revision prompt.
 
-    Structured fields from :meth:`CompileResult.to_dict` — one line per
-    diagnostic (``severity CODE (room) line N: message | hint: ...``) headed by
-    the score total, its non-zero per-component deductions and their cause
-    lines (:attr:`ScoreReport.details` — the worst offenders, by name and
-    number). When the compile produced a plan, the geometry pack from
+    Structured fields, headed by the score total, its non-zero per-component
+    deductions and their cause lines (:attr:`ScoreReport.details` — the worst
+    offenders, by name and number), then one line per diagnostic (``severity
+    CODE (room) line N: message | hint: ...``), whole-plan notes first. When the compile produced a plan, the geometry pack from
     :func:`barndsl.introspect.plan_summary` is appended — resolved room
     rectangles with exterior walls, the door/adjacency edges, unplaced
     footprint pockets, and the free wall spans an opening can legally use — so
@@ -1028,12 +1027,20 @@ def render_feedback(
             )
     for name, cause in score.details.items():
         lines.append(f"  {name} -{score.components[name]:g}: {cause}")
-    for d in result.to_dict()["diagnostics"]:
-        where = f" ({d['room']})" if d["room"] else ""
-        loc = f" line {d['line']}" if d["line"] else ""
-        line = f"{d['severity']} {d['code']}{where}{loc}: {d['message']}"
-        if d["hint"]:
-            line += f" | hint: {d['hint']}"
+    # Whole-plan notes (no source line) lead, in list order: the compile's
+    # plan-level checks (NO_BATH, ...) in report order, then the agent's own
+    # feedback (the critic's DESIGN and BLOCKING lines, TRUNCATED, NO_PROGRAM)
+    # in the order it appended them. They are what the writer must act on
+    # first, and the design loop was tuned with them there. The line-anchored
+    # diagnostics follow in report order.
+    notes = [d for d in result.diagnostics if not d.line]
+    anchored = sorted((d for d in result.diagnostics if d.line), key=report_order)
+    for d in notes + anchored:
+        where = f" ({d.room})" if d.room else ""
+        loc = f" line {d.line}" if d.line else ""
+        line = f"{d.severity.value} {d.code}{where}{loc}: {d.message}"
+        if d.hint:
+            line += f" | hint: {d.hint}"
         lines.append(line)
     if result.plan is not None:
         lines.append(summary_text(plan_summary(result.plan)))

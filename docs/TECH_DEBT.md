@@ -516,12 +516,31 @@ from `validation` for compatibility. Then break the fixtures/validation cycle.
   - In the text report, the JSON and the permit packet, plan-level
     diagnostics with no line (`NO_BATH`, `NO_BACK_DOOR`, …) now come last
     instead of first.
-  - So do the agent's own line-less notes in its revision prompt, which is
-    built from `to_dict()`: the critic's `DESIGN` suggestions and `BLOCKING`
-    lines, `TRUNCATED` and `NO_PROGRAM`. They used to lead the diagnostics
-    block and now follow the line-anchored ones. The design loop was tuned
-    against the old prompt, so if their place matters, `render_feedback`
-    should list them first on purpose.
+  - The same happened to the agent's own line-less notes in its revision
+    prompt, which was built from `to_dict()`: the critic's `DESIGN`
+    suggestions and `BLOCKING` lines, `TRUNCATED` and `NO_PROGRAM`. They used
+    to lead the diagnostics block and moved after the line-anchored ones.
+    **Follow-up:** `render_feedback` now lists whole-plan notes first on
+    purpose, since the writer must act on them first and the design loop was
+    tuned with them there. It reads `result.diagnostics` directly, so the
+    agent's notes stay in the order they were added. The compile's
+    plan-level checks come before them, then the line-anchored diagnostics
+    in report order.
+
+    Compared with the tuned prompts, on 456 plans with the same critic notes
+    appended:
+    - every prompt again has its notes first (none did after TD-6c);
+    - the agent's notes sit in the same place and order in all 456;
+    - the line-anchored diagnostics follow the same sequence of line numbers
+      in all 456;
+    - everything outside the diagnostics block is identical.
+
+    What still differs is order inside a group. The compile's plan-level
+    checks now come in report order, by severity (errors first) then code,
+    not in check order; that changes the notes block in 440 of 456 prompts.
+    In 134 prompts, two diagnostics on the same line swap places. 16 prompts
+    are byte-identical. Grouping the prompt by severity would be a further
+    change to the tuned prompt; try it only with live runs.
   - A part's own findings all take the host's `use` line and column, so in
     the host they sort by severity then code, not by the part's line. Each
     message still starts `in part <file>:<line>`.
