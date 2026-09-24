@@ -26,7 +26,7 @@ is a phase.
 | [TD-1](#td-1-one-interior-door-span-rule) | One interior-door span rule | M | High | Done |
 | [TD-2](#td-2-dxf-depends-on-render-internals) | DXF depends on render internals | M | High | Done |
 | [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Done |
-| [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Open |
+| [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Done |
 | [TD-5](#td-5-validationpy-size-and-duplicated-thresholds) | `validation.py` size and duplicated thresholds | L | Medium | Open |
 | [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | Open |
 | [TD-7](#td-7-the-score-ignores-the-code-profile) | The score ignores the code profile | S | Medium | Open |
@@ -222,11 +222,75 @@ functions.
 **Fix.** Move `Issue` and `Severity` to a new `issues.py`, and re-export them
 from `validation` for compatibility. Then break the fixtures/validation cycle.
 
+**Resolution.**
+- **New module.** `issues.py` holds `Severity`, `Issue` and `ValidationReport`
+  and imports nothing else from barndsl.
+  - `validation` re-exports all three, so `from barndsl.validation import
+    Issue` still works.
+  - `compiler`, `diagnostics`, `pragma`, `compose`, `lsp`, `revitlog`,
+    `agent`, `score` and `cli` import the types from `issues`. So do the tests
+    and `tools/`, which lets `barndsl dev impact` map a change in `issues.py`
+    or `geometry.py` to the tests that use it.
+- **The cycle.** `fixtures` imported `clear_box` and `exterior_walls` from
+  `validation` at module level, and `validation` imported `fixtures` back
+  inside six functions.
+  - The wall helpers moved to `geometry`, which `fixtures` already used:
+    `exterior_walls`, `plumbing_wall_sides`, `clear_dimensions` and
+    `clear_box`.
+  - `fixtures` now takes nothing from `validation`, and `validation` imports
+    `fixtures` once, at module level. Two `fixtures` helpers that took `Issue`
+    and `Severity` as parameters, to work around the lazy import, now use the
+    module's own import.
+  - `validation` still exposes the moved helpers, and the wall-thickness
+    constants they used, which `constants.py` promises stay reachable there.
+    Only two names are no longer reachable through it, and nothing used them:
+    the private `_wall_halves`, and `wall_faces_outside`, a `geometry`
+    function it happened to import. `barndsl.clear_dimensions` is unchanged.
+- **Other lazy imports removed.** `wallbodies` wrapped `exterior_walls` in a
+  function only to import it late, and `layout` imported it inside three
+  functions. Both, and `layout2`, now import it from `geometry` at module
+  level. `schedule`, `introspect`, `revit` and `cli` also take the helpers from
+  `geometry`.
+- **Kept that way.** `barndsl dev audit` gained a `reexport_imports` check.
+  - It fails when a `src/barndsl` module takes a name through a module that
+    only re-exports it. It catches the same forms as the private-import check:
+    `from .validation import Issue`, `from barndsl.validation import Issue`,
+    `validation.Issue` after `from . import validation` or `import
+    barndsl.validation as v`, and `from . import Issue` through the package.
+    The message names where the name is defined.
+  - The package `__init__` itself is exempt.
+  - Nothing tripped it before this change.
+- **Nothing else changed.** Old and new code give identical results on 456
+  plans (the review corpus plus every example file):
+  - all 7,122 diagnostics, every field;
+  - the SVG, DXF and Revit exports;
+  - door schedules, introspection and the score;
+  - each room's exterior walls, clear box and fixtures.
+- **Tests.** `tests/test_issues_module.py` checks that:
+  - the types load from `issues.py` alone, and it has no barndsl imports;
+  - the old import paths give the same objects;
+  - `issues`, `geometry` and `fixtures` never reach `validation`, in any
+    import form, inside a function, or through another module.
+
+  `test_repo_audit_checks_can_fail` plants every re-export form, and
+  `test_defined_names_counts_every_module_level_binding` covers what counts as
+  defined. Each new check failed on a planted regression.
+- **Independent review.** No bugs found. Its follow-ups are in: the tests and
+  the impact map above, the names `validation` still exposes, the stale
+  parameters, the wider layering test and audit check, and wording.
+- **Left.** Other import cycles remain, all through imports inside functions;
+  none is a module-level cycle:
+  - `validation`, `render` and `schedule`, through `render.fmt_ft_in`,
+    `validation.loft_guard_edges` and `validation.window_tempered_reason`;
+  - `elements` with `fixtures`, `geometry`, `solar` and `structure` (model
+    methods that call helpers);
+  - `compiler`, `compose` and `pragma`.
+
 ## TD-5. `validation.py` size and duplicated thresholds
 
 **Problem.**
-- **Size.** `validation.py` is about 7,500 lines, with about 390 top-level
-  functions and about 90 module-level constants. Meanwhile `constants.py`
+- **Size.** `validation.py` is about 7,250 lines (after TD-4), with about 380
+  top-level functions and about 90 module-level constants. Meanwhile `constants.py`
   claims to be the single source of truth.
 - **Duplicated thresholds:**
   - The 0.85 coverage bar is written twice in `validation` and once in `score`.
@@ -557,5 +621,8 @@ builder half needs a machine with full Revit.
   validator and 3D model.
 - **TD-3** (PR #28): no module imports another's private names; `barndsl dev
   audit` enforces it.
-- **TD-9**: one comment scanner, the lexer's own (`compiler.comment_start` on
-  `scan_string`); fixed the LSP treating text after `\"` as a comment.
+- **TD-9** (PR #29): one comment scanner, the lexer's own
+  (`compiler.comment_start` on `scan_string`); fixed the LSP treating text
+  after `\"` as a comment.
+- **TD-4**: the diagnostic types live in `issues.py`; `fixtures` no longer
+  imports `validation`; `barndsl dev audit` flags imports through a re-export.

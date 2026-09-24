@@ -18,7 +18,7 @@ from barndsl import (
     validate,
 )
 from barndsl.fixtures import resolve_room_fixtures
-from barndsl.validation import clear_box
+from barndsl.geometry import clear_box
 
 
 def _codes(plan):

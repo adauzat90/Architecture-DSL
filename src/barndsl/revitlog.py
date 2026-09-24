@@ -4,7 +4,7 @@ The pyRevit *Build Plan* button writes a ``*.buildlog.json`` sidecar recording
 every element's outcome (created / kept / skipped / failed, with reasons —
 see ``revit/barndsl.extension/lib/barndsl_revit/report.py``). Nothing read it
 back until now. :func:`buildlog_issues` turns that log into the same
-:class:`~barndsl.validation.Issue` shape the compiler emits, so the target
+:class:`~barndsl.issues.Issue` shape the compiler emits, so the target
 Revit environment itself becomes part of the compile-fix loop:
 
 - a **failed** element (an API error) is a ``REVIT_FAIL`` warning;
@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .validation import Issue, Severity
+from .issues import Issue, Severity
 
 #: Build-note fragments that mean "a stand-in was used / a pass degraded" —
 #: worth surfacing to the author; other notes are progress chatter.

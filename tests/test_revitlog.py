@@ -25,7 +25,7 @@ from barndsl_revit import report as revit_report  # noqa: E402
 from barndsl.cli import main  # noqa: E402
 from barndsl.diagnostics import REGISTRY  # noqa: E402
 from barndsl.revitlog import buildlog_issues, issues_to_dict  # noqa: E402
-from barndsl.validation import Severity  # noqa: E402
+from barndsl.issues import Severity  # noqa: E402
 
 
 def _log(**kw):

@@ -25,7 +25,7 @@ from barndsl.layout2 import (
     _prepare,
     solve_layout2,
 )
-from barndsl.validation import exterior_walls
+from barndsl.geometry import exterior_walls
 
 
 def _pinwheel() -> LayoutBrief2:

@@ -244,7 +244,7 @@ def _program_summary(plan) -> str:
 
 
 def _print_coords(plan) -> None:
-    from .validation import exterior_walls
+    from .geometry import exterior_walls
 
     print("Resolved geometry (ft):")
     for r in plan.rooms:
@@ -1155,7 +1155,7 @@ def _cmd_revit_log(args: argparse.Namespace) -> int:
         for issue in issues:
             print(issue)
     # Exit like `compile --strict`: failures/skips (warnings) are the signal.
-    from .validation import Severity
+    from .issues import Severity
 
     return 1 if any(i.severity is not Severity.INFO for i in issues) else 0
 
@@ -1313,7 +1313,7 @@ def _cmd_explain(args: argparse.Namespace) -> int:
 
     if args.code is None:
         # No code given: list every code, grouped by severity.
-        from .validation import Severity
+        from .issues import Severity
 
         for sev in (Severity.ERROR, Severity.WARNING, Severity.INFO):
             codes = sorted(c for c, i in REGISTRY.items() if i.severity is sev)

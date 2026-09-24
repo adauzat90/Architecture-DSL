@@ -13,7 +13,7 @@ The summary has four parts:
 
     rooms       each room's resolved rectangle, level, and which of its walls
                 lie on the footprint boundary (the same footprint-aware
-                :func:`~barndsl.validation.exterior_walls` every check uses);
+                :func:`~barndsl.geometry.exterior_walls` every check uses);
     adjacency   the compiler's door graph — one edge per interior door/opening
                 (room pair, kind, width);
     unplaced    footprint area no room covers, per level, as total square feet
@@ -38,8 +38,7 @@ import math
 
 from .constants import EPSILON
 from .elements import Barndominium, Direction, Room
-from .geometry import SharedEdge, door_span, point_in_footprint, shared_edge
-from .validation import exterior_walls
+from .geometry import SharedEdge, door_span, exterior_walls, point_in_footprint, shared_edge
 
 #: The narrowest opening worth reporting a span for (a stock 24-in leaf).
 #: Free runs thinner than this can't host a door or a useful window.

@@ -49,7 +49,7 @@ from .elements import ALARM_KINDS, RoomType
 from .fixtures import FIXTURES
 from .fmt import format_source
 from .render import fmt_ft_in
-from .validation import Issue, Severity
+from .issues import Issue, Severity
 
 # --- JSON-RPC framing --------------------------------------------------------
 

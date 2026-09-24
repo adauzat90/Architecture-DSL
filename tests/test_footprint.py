@@ -10,7 +10,8 @@ from barndsl.geometry import (
     point_in_footprint,
     rect_in_footprint,
 )
-from barndsl.validation import exterior_walls, validate
+from barndsl.geometry import exterior_walls
+from barndsl.validation import validate
 
 # An L-shaped plan: 40×40 main block + a 22×20 east wing (primary suite).
 L_SRC = """\

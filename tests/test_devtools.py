@@ -14,6 +14,7 @@ def test_repo_audit_has_no_wiring_drift():
     assert out["diagnostics"]["severity_drift"] == []
     assert out["diagnostics"]["unclassified_category"] == []
     assert out["modules"]["private_imports"] == []
+    assert out["modules"]["reexport_imports"] == []
 
 
 def test_repo_audit_checks_can_fail(monkeypatch):
@@ -39,6 +40,14 @@ def test_repo_audit_checks_can_fail(monkeypatch):
             "import barndsl.geometry\n"                               # 5
             "from .planted import _mine\n"                            # 6: its own
             "fixtures._rect_intersection(sched._fmt_ft(1), barndsl.geometry._grid, _mine)\n"  # 7
+            "from .validation import Issue, validate\n"               # 8: a re-export, its own
+            "from barndsl.validation import clear_box\n"              # 9
+            "from .issues import Severity\n"                          # 10: from its home
+            "from . import validation\n"                              # 11
+            "import barndsl.validation as v\n"                        # 12
+            "validation.Severity, v.clear_box, v.validate, barndsl.validation.Issue\n"  # 13
+            "from . import Issue\n"                                   # 14: through the package
+            "from .elements import math\n"                            # 15: a stdlib name
         ),
     })
     out = devtools.repo_audit()
@@ -54,6 +63,38 @@ def test_repo_audit_checks_can_fail(monkeypatch):
             (7, "fixtures._rect_intersection"), (7, "schedule._fmt_ft"), (7, "geometry._grid"),
         ]
     )
+    # A name taken through a module that only re-exports it is flagged, however
+    # it's reached, with its real home; one the module defines, or imported from
+    # its home, isn't.
+    assert sorted(out["modules"]["reexport_imports"]) == sorted(
+        f"src/barndsl/planted.py:{line} imports {name}" for line, name in [
+            (8, "validation.Issue (defined in issues)"),
+            (9, "validation.clear_box (defined in geometry)"),
+            (13, "validation.Severity (defined in issues)"),
+            (13, "validation.clear_box (defined in geometry)"),
+            (13, "validation.Issue (defined in issues)"),
+            (14, "barndsl.Issue (defined in issues)"),
+            (15, "elements.math (not defined in barndsl)"),
+        ]
+    )
+
+
+def test_defined_names_counts_every_module_level_binding():
+    import ast
+
+    tree = ast.parse(
+        "import os\nfrom .x import imported\n"
+        "def f():\n    global g\n    g = 1\n    local = 2\n"
+        "class C: pass\n"
+        "a, (b, *c) = 1, (2, 3)\n"
+        "for i in []: pass\n"
+        "with open('p') as fh: pass\n"
+        "squares = [k * k for k in range(3) if (w := k)]\n"
+        "match 1:\n    case [m, *rest]: pass\n    case {**more}: pass\n    case int() as n: pass\n"
+    )
+    assert devtools._defined_names(tree) == {
+        "f", "g", "C", "a", "b", "c", "i", "fh", "squares", "w", "m", "rest", "more", "n",
+    }
 
 
 def test_pi_extension_confines_file_tools_to_the_workspace():

@@ -38,6 +38,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 ## Diagnostics
 
 - Diagnostic codes are stable API: CLI, LSP, docs, examples, pragmas, and agents rely on exact spelling.
+- `Issue`, `Severity` and `ValidationReport` live in `barndsl.issues`, which imports nothing else from barndsl, so code that reports a diagnostic doesn't depend on the validator. `validation` re-exports them for older callers.
 - Every emitted code must have a registry entry in `src/barndsl/diagnostics.py`.
 - Registry entries expose severity, category, owner, title, and explanation.
 - The registry severity matches every literal emit site unless the code is declared context-dependent (`_VARYING`); every code has an explicit or prefix category rule (no silent default). `barndsl dev audit` enforces both.
@@ -67,5 +68,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 
 - Prefer repo-native JSON helpers in `src/barndsl/devtools.py` over ad-hoc scripts.
 - No `src/barndsl` module imports another module's `_private` name. A helper two modules share gets a public name and a test; `barndsl dev audit` (and so `doctor`) fails otherwise.
+- A module imports a name from the module that defines it, never through one that only re-exports it (the package `__init__` aside). `barndsl dev audit` fails otherwise and names the real home.
+- `issues`, `geometry` and `fixtures` sit below `validation` and never import it, not even inside a function. `validation` imports `fixtures` at module level.
 - Use `barndsl dev locate`, `barndsl dev diag-matrix`, and `barndsl dev fixtures` before changing unfamiliar features or rules.
 - Run `barndsl dev doctor` after architecture-affecting changes and add `--export-plan examples/gallery/lshape.barn` for geometry/export changes.

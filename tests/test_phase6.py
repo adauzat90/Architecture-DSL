@@ -26,7 +26,7 @@ from barndsl.packet import build_packet
 from barndsl.playground import compile_payload
 from barndsl.schedule import window_rows
 from barndsl.score import design_score
-from barndsl.validation import Severity
+from barndsl.issues import Severity
 
 GALLERY = Path(__file__).resolve().parent.parent / "examples" / "gallery"
 

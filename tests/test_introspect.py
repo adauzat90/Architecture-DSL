@@ -18,7 +18,7 @@ import json
 
 from barndsl import compile_source, plan_summary, summary_text
 from barndsl.cli import main
-from barndsl.validation import exterior_walls
+from barndsl.geometry import exterior_walls
 
 # Full-coverage two-room plan: a centred interior door plus two south openings.
 FULL = """\

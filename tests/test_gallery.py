@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from barndsl import compile_file, compile_source, emit_dsl
-from barndsl.validation import Severity
+from barndsl.issues import Severity
 
 GALLERY = Path(__file__).resolve().parent.parent / "examples" / "gallery"
 PLANS = sorted(GALLERY.glob("*.barn"))

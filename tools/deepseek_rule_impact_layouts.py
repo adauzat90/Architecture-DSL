@@ -58,7 +58,7 @@ for search_root in (ROOT, SRC):
 
 from barndsl import compile_source, render_svg  # noqa: E402
 from barndsl.score import design_score  # noqa: E402
-from barndsl.validation import Issue, Severity  # noqa: E402
+from barndsl.issues import Issue, Severity  # noqa: E402
 
 
 DEFAULT_MODEL = "deepseek-v4-pro"

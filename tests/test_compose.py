@@ -18,7 +18,7 @@ from barndsl.compiler import compile_file, compile_source
 from barndsl.edits import apply_edit, edit_from_json
 from barndsl.emit import emit_dsl, instance_lines
 from barndsl.fmt import format_source
-from barndsl.validation import Severity
+from barndsl.issues import Severity
 
 REPO = Path(__file__).resolve().parent.parent
 COMPOSED = REPO / "examples" / "composed"

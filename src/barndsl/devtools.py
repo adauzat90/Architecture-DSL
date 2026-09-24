@@ -130,6 +130,46 @@ def _is_private(name: str) -> bool:
     return name.startswith("_") and not name.startswith("__")
 
 
+def _module_refs(tree: ast.Module, modules: set[str]) -> list[tuple[int, str, str]]:
+    """``(line, module, name)`` for every name ``tree`` takes from a barndsl
+    module: imported by name (``from .x import n`` / ``from barndsl.x import n``,
+    or ``from . import n`` from the package, whose module is ``"barndsl"``) or
+    reached through a module (``from . import x`` / ``import barndsl.x as m``,
+    then ``x.n`` / ``m.n``, or ``barndsl.x.n``)."""
+    refs: list[tuple[int, str, str]] = []
+    # Local names bound to a barndsl module, and the module each names.
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("barndsl.") and alias.asname:
+                    aliases[alias.asname] = alias.name.rsplit(".", 1)[-1]
+        elif isinstance(node, ast.ImportFrom):
+            name = node.module or ""
+            package = name in ("", "barndsl")  # `from . import x` / `from barndsl import x`
+            if not (node.level or package or name.startswith("barndsl.")):
+                continue  # stdlib or a third-party import
+            module = "barndsl" if package else name.rsplit(".", 1)[-1]
+            for alias in node.names:
+                if package and alias.name in modules:
+                    aliases[alias.asname or alias.name] = alias.name
+                else:
+                    refs.append((node.lineno, module, alias.name))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        base = node.value
+        if isinstance(base, ast.Name) and base.id in aliases:
+            module = aliases[base.id]
+        elif (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+              and base.value.id == "barndsl" and base.attr in modules):
+            module = base.attr  # barndsl.x.n
+        else:
+            continue
+        refs.append((node.lineno, module, node.attr))
+    return refs
+
+
 def _private_imports(trees: dict[Path, ast.Module] | None = None) -> list[str]:
     """Every use of another barndsl module's ``_private`` name in ``src/barndsl``,
     as ``path:line imports module._name``: imported by name (``from .x import
@@ -141,37 +181,65 @@ def _private_imports(trees: dict[Path, ast.Module] | None = None) -> list[str]:
     found: list[str] = []
     for path, tree in trees.items():
         where = Path(_rel(path)).as_posix()
-        # Local names bound to a barndsl module, and the module each names.
-        aliases: dict[str, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.startswith("barndsl.") and alias.asname:
-                        aliases[alias.asname] = alias.name.rsplit(".", 1)[-1]
-            elif isinstance(node, ast.ImportFrom):
-                name = node.module or ""
-                package = name in ("", "barndsl")  # `from . import x` / `from barndsl import x`
-                if not (node.level or package or name.startswith("barndsl.")):
-                    continue  # stdlib or a third-party import
-                module = "barndsl" if package else name.rsplit(".", 1)[-1]
-                for alias in node.names:
-                    if package and alias.name in modules:
-                        aliases[alias.asname or alias.name] = alias.name
-                    elif module != path.stem and _is_private(alias.name):
-                        found.append(f"{where}:{node.lineno} imports {module}.{alias.name}")
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Attribute) and _is_private(node.attr)):
+        for line, module, name in _module_refs(tree, modules):
+            if module != path.stem and _is_private(name):
+                found.append(f"{where}:{line} imports {module}.{name}")
+    return found
+
+
+def _defined_names(tree: ast.Module) -> set[str]:
+    """Names a module binds itself at module level (functions, classes,
+    assignments, loop and ``match`` targets, ``global`` names), as opposed to
+    names it only imports."""
+    # A function's `global x` binds a module-level x.
+    names = {n for node in ast.walk(tree) if isinstance(node, ast.Global) for n in node.names}
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            continue  # its body binds local names, not module ones
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Lambda)):
+            continue
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # Its loop variables are its own; only a walrus inside binds out here.
+            names.update(n.target.id for n in ast.walk(node)
+                         if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name))
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+        stack.extend(ast.iter_child_nodes(node))
+    return names
+
+
+def _reexport_imports(trees: dict[Path, ast.Module] | None = None) -> list[str]:
+    """Every name a ``src/barndsl`` module takes from another barndsl module (or
+    the package) that doesn't define it but only imports it, as ``path:line
+    imports x.N (defined in y)``. ``validation`` still re-exports ``Issue`` for
+    older callers; a module taking it from there depends on the whole validator
+    for one type. The package ``__init__`` itself is exempt: re-exporting is its
+    job."""
+    trees = _src_trees() if trees is None else trees
+    modules = {path.stem for path in trees}
+    defined = {path.stem: _defined_names(tree) for path, tree in trees.items()}
+    found: list[str] = []
+    for path, tree in trees.items():
+        if path.stem == "__init__":
+            continue
+        where = Path(_rel(path)).as_posix()
+        for line, module, name in _module_refs(tree, modules):
+            source = "__init__" if module == "barndsl" else module
+            if source == path.stem or source not in defined:
                 continue
-            base = node.value
-            if isinstance(base, ast.Name) and base.id in aliases:
-                module = aliases[base.id]
-            elif (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
-                  and base.value.id == "barndsl" and base.attr in modules):
-                module = base.attr  # barndsl.x._y
-            else:
+            if name in defined[source] or name == "*" or name.startswith("__"):
                 continue
-            if module != path.stem:
-                found.append(f"{where}:{node.lineno} imports {module}.{node.attr}")
+            homes = sorted(m for m, names in defined.items() if name in names and m != "__init__")
+            home = f"defined in {', '.join(homes)}" if homes else "not defined in barndsl"
+            found.append(f"{where}:{line} imports {module}.{name} ({home})")
     return found
 
 
@@ -226,6 +294,7 @@ def repo_audit() -> dict[str, Any]:
     trees = _src_trees()  # one parse of src/barndsl for every AST check
     issue_sites = _literal_issue_sites(trees)
     private_imports = _private_imports(trees)
+    reexport_imports = _reexport_imports(trees)
     emitted = {c for sites in issue_sites.values() for c in sites}
     registered = set(REGISTRY)
     wiring = _statement_wiring()
@@ -271,6 +340,11 @@ def repo_audit() -> dict[str, Any]:
             "modules import another module's private names (give the helper a public name): "
             + ", ".join(private_imports)
         )
+    if reexport_imports:
+        problems.append(
+            "modules import a name through a module that only re-exports it (import it where it's defined): "
+            + ", ".join(reexport_imports)
+        )
 
     return {
         "ok": not problems,
@@ -293,7 +367,11 @@ def repo_audit() -> dict[str, Any]:
             "matrix_stale": matrix["stale"],
         },
         # sources_scanned is 0 outside a repo checkout (no src/ to read).
-        "modules": {"sources_scanned": len(trees), "private_imports": private_imports},
+        "modules": {
+            "sources_scanned": len(trees),
+            "private_imports": private_imports,
+            "reexport_imports": reexport_imports,
+        },
         "artifacts": {"pyc_sample": pyc, "agent_run_root_artifacts": agent_artifacts},
     }
 
@@ -1011,7 +1089,7 @@ def impact_targets(changed: list[str]) -> list[str]:
         if m.group(1) in _METAMORPHIC_MODULES:
             targets.add("tests/test_metamorphic.py")
     mapping = [
-        (("src/barndsl/validation.py", "src/barndsl/diagnostics.py", "src/barndsl/profiles.py"), ["tests/test_design_quality.py", "tests/test_compiler.py", "tests/test_profiles.py", "tests/test_metamorphic.py"]),
+        (("src/barndsl/validation.py", "src/barndsl/diagnostics.py", "src/barndsl/issues.py", "src/barndsl/profiles.py"), ["tests/test_design_quality.py", "tests/test_compiler.py", "tests/test_profiles.py", "tests/test_metamorphic.py"]),
         (("src/barndsl/compiler.py",), ["tests/test_compiler.py", "tests/test_recovery.py", "tests/test_compose.py", "tests/test_compose_v2.py", "tests/test_metamorphic.py"]),
         (("src/barndsl/lsp.py",), ["tests/test_lsp.py"]),
         (("src/barndsl/playground.py",), ["tests/test_playground.py", "tests/test_playground_agent.py"]),

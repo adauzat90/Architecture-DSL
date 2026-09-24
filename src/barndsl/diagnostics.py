@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .validation import Severity
+from .issues import Severity
 
 
 @dataclass(frozen=True)
