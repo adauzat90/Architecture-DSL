@@ -28,7 +28,7 @@ is a phase.
 | [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Done |
 | [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Done |
 | [TD-5](#td-5-validationpy-size-and-duplicated-thresholds) | `validation.py` size and duplicated thresholds | L | Medium | Open |
-| [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | In progress (6a done) |
+| [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | In progress (6a, 6b done) |
 | [TD-7](#td-7-the-score-ignores-the-code-profile) | The score ignores the code profile | S | Medium | Open |
 | [TD-8](#td-8-statement-vocabulary-still-partly-hand-kept) | Statement vocabulary still partly hand-kept | M | Medium | Open |
 | [TD-9](#td-9-three-comment-scanners-one-wrong) | Three comment scanners, one wrong | S | Medium | Done |
@@ -347,7 +347,7 @@ from `validation` for compatibility. Then break the fixtures/validation cycle.
 - **TD-6a:** check wiring and profile threading. Done; see below.
 - **TD-6b:** the rule metadata on `CodeInfo`. **Decided by the project owner
   (2026-09-24):** `CodeInfo` gets the `hint` field ADR 0002 promises; the ADR
-  stays as it is.
+  stays as it is. Done; see below.
 - **TD-6c:** fold the regex guards into the audit, and sort the diagnostics.
   **Decided by the project owner (2026-09-24):** the final diagnostics list is
   sorted, even though that changes the output order. It is sorted once, in
@@ -423,6 +423,69 @@ from `validation` for compatibility. Then break the fixtures/validation cycle.
 - **Docs.** `CONTRIBUTING_FEATURES.md`, the `rule-scaffold` checklist and
   `MODEL_INVARIANTS.md` describe the new wiring. `DIAGNOSTIC_MATRIX.md` was
   regenerated; only its test and doc references had gone stale.
+
+**Resolution (TD-6b).**
+- **One entry per code.** `CodeInfo` gained four fields:
+  - `hint`: the general answer to "how do I fix this?", which ADR 0002
+    promised and the registry lacked;
+  - `severities`: every severity the code can fire at, written `also=` on the
+    entry;
+  - `part_local`: a composed part reports the code once, for itself;
+  - `accept_denied`: an `accept` pragma may never waive it.
+- **Derived, not kept by hand.** `_VARYING` is gone; `varies` means "more than
+  one allowed severity". `compose.PART_LOCAL_CODES` and
+  `pragma.ACCEPT_DENIED_CODES` keep their names but are read off the entries.
+  They hold exactly the codes they held before: 40 part-local, 1 denied, 9
+  varying.
+- **Category stays rule-based.** `CodeInfo.category` still comes from the
+  explicit sets and prefix rules: 98 codes are listed and 138 match a prefix.
+  Writing a category onto all 236 entries would add an edit for every new code
+  whose prefix already classifies it, and the audit already fails on an
+  unclassified code. A middle way remains open: an optional `category=` on an
+  entry, falling back to the prefix rules, would retire the explicit sets
+  without touching the 138.
+- **Hints.** All 236 entries have one.
+  - They were drafted from each code's explanation and its emit-site hints,
+    then reviewed one by one.
+  - Every example statement in them (62) compiles without a parse error.
+  - Thresholds a profile can change say so, for example "the profile's
+    daylight ratio (8% under the IRC)".
+  - `barndsl explain` and LSP hover show the hint under the explanation, and
+    list every severity a varying code can fire at.
+- **A stricter audit.**
+  - Every emit site must fire at a severity its entry allows. The old check
+    skipped a varying code entirely.
+  - It reads both branches of `Severity.X if … else Severity.Y`, and follows
+    a same-module helper that only returns literal severities, such as
+    `_no_access_severity`. No emit site with a literal code is left
+    unreadable.
+  - An entry with a missing or short hint fails, as a missing explanation
+    already did.
+  - `CodeInfo` refuses an entry whose usual severity isn't one it allows.
+- **Tests.**
+  - `tests/test_code_info.py` covers the hints, the allowed severities,
+    `explain()`, the derived sets, and a plan firing `NO_ACCESS` at both of
+    its severities.
+  - `test_repo_audit_checks_can_fail` plants a disallowed severity, a
+    disallowed conditional branch, one read through a helper, and a short
+    hint.
+  - Each check failed on a planted regression.
+- **Independent review.** It found no bugs. It checked every entry's code,
+  severity, title and explanation against the old code, and every allowed
+  severity against the emit sites. Its follow-ups are in:
+  - two inaccurate hints fixed: `BAD_WALL` (room walls take full names only)
+    and `EGRESS_SIZE` (a high sill, and every R310 minimum);
+  - fuller `NO_ACCESS`, `BEDROOM_EGRESS` and `STAIR_HANDRAIL` hints;
+  - the stale `SETBACK` and `NO_ACCESS` explanations corrected: `building at`
+    exists, and stairs do make an upper room reachable;
+  - the audit reads severity helpers;
+  - the post-init check.
+- **Left.**
+  - The `STAIR_HANDRAIL` diagnostic's own hint still says "both sides if the
+    flight is wider than 44 in". IRC R311.7.8 asks for one side. Fixing it
+    changes emitted output, so it is not in this package.
+  - `DSL_REFERENCE` documents `street <wall>` as taking n|s|e|w, but the
+    parser only accepts full wall names there.
 
 ## TD-7. The score ignores the code profile
 
@@ -705,5 +768,8 @@ builder half needs a machine with full Revit.
 - **TD-9** (PR #29): one comment scanner, the lexer's own
   (`compiler.comment_start` on `scan_string`); fixed the LSP treating text
   after `\"` as a comment.
-- **TD-4**: the diagnostic types live in `issues.py`; `fixtures` no longer
-  imports `validation`; `barndsl dev audit` flags imports through a re-export.
+- **TD-4** (PR #30): the diagnostic types live in `issues.py`; `fixtures` no
+  longer imports `validation`; `barndsl dev audit` flags imports through a
+  re-export.
+- **TD-6a** (PR #31): every validator check takes one context and is listed
+  once, in run order; no profile defaults.

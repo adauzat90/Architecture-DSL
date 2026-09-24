@@ -44,6 +44,7 @@ from .elements import (
     Room,
     UseSpec,
 )
+from .diagnostics import REGISTRY
 from .geometry import shared_edge
 from .issues import Issue, Severity
 
@@ -61,28 +62,9 @@ MAX_PART_BYTES = 256 * 1024
 #: fixtures, openings or devices that fires **regardless of where the part is
 #: placed**. Only these survive a fragment compile as the part's own diagnostics;
 #: every other (whole-building / placement-dependent) code is dropped in fragment
-#: mode and instead surfaces per-instance on the composed plan. Kept deliberately
-#: conservative — a code left out here simply surfaces per-use instead of once,
-#: never the reverse (which would wrongly dedupe a real placement issue).
-PART_LOCAL_CODES = frozenset({
-    "DUP_ID",
-    # room geometry (a room's own shape/size — independent of placement)
-    "ROOM_SIZE", "ROOM_TIGHT", "ROOM_PROPORTION", "MUDROOM_SHAPE", "ROOM_GEOMETRY",
-    "ROOM_CLEAR", "ROOM_HABITABLE",
-    "BEDROOM_AREA", "BEDROOM_DIM", "CLOSET_SHAPE", "BATH_CLEARANCE",
-    "LAUNDRY_FIT", "BATH_OVERSIZE", "OPEN_BATH", "BATH_DISTANCE",
-    # fixtures & furniture clearances (room-local)
-    "FIXTURE_TOILET_CLEARANCE", "FIXTURE_FRONT", "FIXTURE_BACKING",
-    "FIXTURE_DOOR", "FIXTURE_OVERLAP", "FIXTURE_OOB", "FIXTURE_ROOM",
-    "FIXTURE_ROOM_TYPE", "FIXTURE_EGRESS", "BED_CLEARANCE", "DINING_CLEARANCE",
-    "KITCHEN_TRIANGLE", "KITCHEN_FIT", "RANGE_LANDING", "DRYER_VENT",
-    # openings that clash with the part's own geometry/fixtures
-    "OPENING_CLASH", "OPENING_SIZE", "DOOR_HITS_FIXTURE", "DOOR_SWING_CLASH",
-    # room overlaps within the part
-    "OVERLAP",
-    # devices (room-local rules)
-    "OUTLET_SPACING", "OUTLET_GFCI", "ROOM_NO_LIGHT", "DEVICE_ROOM",
-})
+#: mode and instead surfaces per-instance on the composed plan. Each code says so
+#: on its registry entry (:attr:`~barndsl.diagnostics.CodeInfo.part_local`).
+PART_LOCAL_CODES = frozenset(code for code, info in REGISTRY.items() if info.part_local)
 
 
 @dataclass

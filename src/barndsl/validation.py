@@ -3610,8 +3610,8 @@ def _validate_unreachable_rooms(plan: Barndominium, unreachable: set[str], reach
 
 
 def _no_access_severity(room: Room | None) -> Severity:
-    # A loft reaches the floor by stairs, which aren't modelled yet, so an
-    # unreachable loft is a warning, not a hard error (like closets/pantries).
+    # An unreachable closet, pantry or loft is a warning, not a hard error: it
+    # may be open to the room beside it rather than behind a door.
     if room and room.type in (RoomType.CLOSET, RoomType.PANTRY, RoomType.LOFT):
         return Severity.WARNING
     return Severity.ERROR
