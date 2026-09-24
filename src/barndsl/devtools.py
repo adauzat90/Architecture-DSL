@@ -123,10 +123,25 @@ def _severity_helpers(tree: ast.Module) -> dict[str, set[str]]:
     return helpers
 
 
+def _code_of(node: ast.expr) -> str | None:
+    """The diagnostic code ``node`` spells, if it is a literal one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if re.fullmatch(r"[A-Z][A-Z0-9_]+", node.value):
+            return node.value
+    return None
+
+
 def _literal_issue_sites(trees: dict[Path, ast.Module] | None = None) -> dict[str, dict[str, set[str]]]:
-    """``{rel_path: {CODE: {severity, …}}}`` for every ``Issue(sev, "CODE", …)``
-    call with a literal code in ``src/barndsl``; the severities are what
-    :func:`_severity_levels` reads from ``sev``."""
+    """``{rel_path: {CODE: {severity, …}}}`` for every literal code an emit site
+    in ``src/barndsl`` names:
+
+    - ``Issue(sev, "CODE", …)``, at what :func:`_severity_levels` reads from ``sev``;
+    - ``_ParseError("CODE", …)``, at ``error``: ``compile_source`` reports every
+      parse error as an ERROR;
+    - ``Severity.X, "CODE"`` side by side in a tuple, a table an emit loop reads
+      (``revitlog``'s build statuses), at ``X``.
+
+    A code reached only through a lookup (``_REACH_IN_ACCESS``) isn't seen."""
     out: dict[str, dict[str, set[str]]] = {}
     for path, tree in (_src_trees() if trees is None else trees).items():
         if path.name == "diagnostics.py":
@@ -134,17 +149,24 @@ def _literal_issue_sites(trees: dict[Path, ast.Module] | None = None) -> dict[st
         sites: dict[str, set[str]] = {}
         helpers = _severity_helpers(tree)
         for node in ast.walk(tree):
+            if isinstance(node, ast.Tuple):
+                for sev, elt in zip(node.elts, node.elts[1:]):
+                    levels = _severity_levels(sev)
+                    code = _code_of(elt)
+                    if code and "computed" not in levels:
+                        sites.setdefault(code, set()).update(levels)
+                continue
             if not isinstance(node, ast.Call):
                 continue
             name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
-            if name != "Issue" or len(node.args) < 2:
-                continue
-            arg = node.args[1]
-            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
-                continue
-            if not re.fullmatch(r"[A-Z][A-Z0-9_]+", arg.value):
-                continue
-            sites.setdefault(arg.value, set()).update(_severity_levels(node.args[0], helpers))
+            if name == "_ParseError" and node.args:
+                code = _code_of(node.args[0])
+                if code:
+                    sites.setdefault(code, set()).add("error")
+            elif name == "Issue" and len(node.args) >= 2:
+                code = _code_of(node.args[1])
+                if code:
+                    sites.setdefault(code, set()).update(_severity_levels(node.args[0], helpers))
         if sites:
             out[_rel(path)] = sites
     return out
@@ -1232,7 +1254,7 @@ entry living south width 3
             f"Add a REGISTRY entry for {code} in src/barndsl/diagnostics.py ({severity}) with a title, an explanation and a general `hint=`; list any other severity it can fire at in `also=`, and set `part_local=True` if a composed part should report it once for itself.",
             "Give the code a category: list it in the matching explicit set in diagnostics.py unless a prefix rule already classifies it (the audit fails on unclassified codes).",
             "Add/extend a _validate_* or _dq_* function in src/barndsl/validation.py or the relevant domain module; put thresholds in constants.py (or a Profile field if they vary by jurisdiction).",
-            "Give the check the (ctx: CheckContext, add) signature, read the profile from ctx, and list it once in validation._PLAN_CHECKS (or _SHELL_CHECKS if it must run on an empty plan) where it should run; the order is the report order.",
+            "Give the check the (ctx: CheckContext, add) signature, read the profile from ctx, and list it once in validation._PLAN_CHECKS (or _SHELL_CHECKS if it must run on an empty plan) where it should run; the compile sorts diagnostics into report order, so the run order only breaks ties.",
             f"Fill in {tfile} with one firing and one non-firing plan.",
             "Run barndsl dev rule-probe, barndsl dev audit, targeted tests, gallery gate, and export parity if geometry changed; regenerate docs/DIAGNOSTIC_MATRIX.md.",
         ],

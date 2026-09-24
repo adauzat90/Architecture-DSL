@@ -51,7 +51,7 @@ from .elements import (
     RoomType,
     inches,
 )
-from .issues import Issue, Severity, ValidationReport
+from .issues import Issue, Severity, ValidationReport, report_order
 from .validation import validate
 
 if TYPE_CHECKING:  # the annotation-only import; runtime resolution is lazy
@@ -2423,7 +2423,7 @@ class CompileResult:
         """Compiler-style diagnostic listing with column-accurate carets."""
         src_lines = self.source.splitlines()
         lines = [self.summary()]
-        for d in sorted(self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)):
+        for d in sorted(self.diagnostics, key=report_order):
             lines.extend(_format_diagnostic(d, filename, src_lines))
         return "\n".join(lines)
 
@@ -2456,9 +2456,7 @@ class CompileResult:
                     "file": getattr(d, "file", None),
                     "part": getattr(d, "part", None),
                 }
-                for d in sorted(
-                    self.diagnostics, key=lambda i: (i.line or 0, i.col or 0)
-                )
+                for d in sorted(self.diagnostics, key=report_order)
             ],
         }
 
@@ -2739,7 +2737,6 @@ def _finish_fragment(
     against the nested part's already-folded part-internal diagnostics, exactly
     as the host does for its stamps."""
     from .compose import PART_LOCAL_CODES, normalize_part_origin
-    from .pragma import apply_pragmas
 
     if not plan.rooms:
         diagnostics.append(Issue(
@@ -2747,7 +2744,7 @@ def _finish_fragment(
             "A part declares no rooms — an empty part composes nothing.",
             hint="Add at least one `room`, e.g. `room bath: bathroom at 0,0 size 8 x 8`.",
         ))
-        apply_pragmas(diagnostics, pragmas)
+        _settle(diagnostics, pragmas)
         return CompileResult(plan, diagnostics, source, room_lines=dict(smap.room_line))
 
     if normalize_part_origin(plan) != (0.0, 0.0):
@@ -2768,8 +2765,18 @@ def _finish_fragment(
     except Exception:
         report = None
     _append_fragment_validation_issues(report, diagnostics, smap, composition, PART_LOCAL_CODES)
-    apply_pragmas(diagnostics, pragmas)
+    _settle(diagnostics, pragmas)
     return CompileResult(plan, diagnostics, source, room_lines=dict(smap.room_line))
+
+
+def _settle(diagnostics: list[Issue], pragmas: list) -> None:
+    """Every compile's last step: apply the ``accept`` pragmas, once each
+    diagnostic carries its final line, then sort the list into
+    :func:`~barndsl.issues.report_order`."""
+    from .pragma import apply_pragmas  # lazy: pragma imports this module
+
+    apply_pragmas(diagnostics, pragmas)
+    diagnostics.sort(key=report_order)
 
 
 def compile_source(
@@ -2810,7 +2817,7 @@ def compile_source(
       loader for nested composition (the sandbox root, depth, cycle stack, shared
       memo + instance budget). External callers leave them ``None``.
     """
-    from .pragma import apply_pragmas, parse_pragmas
+    from .pragma import parse_pragmas
 
     # Strip a leading UTF-8 BOM for API callers who pass raw file text (the CLI's
     # read helper strips it too; stripping here keeps direct compile_source users
@@ -2863,7 +2870,7 @@ def compile_source(
     # empty/garbage input scores a flat zero with no misleading semantic cascade;
     # see score.py's plan-None handling).
     if skipped and not plan.rooms:
-        apply_pragmas(diagnostics, pragmas)
+        _settle(diagnostics, pragmas)
         return CompileResult(None, diagnostics, source, room_lines=dict(smap.room_line))
 
     # Derive the structural frame (if requested) before checks, so the validator
@@ -2878,8 +2885,8 @@ def compile_source(
     # Suppression pragmas run last, once every diagnostic carries its resolved
     # line (semantic issues were just anchored to their room's statement line):
     # a pragma downgrades the matched warnings/infos to accepted INFOs and flags
-    # any that can't be honoured.
-    apply_pragmas(diagnostics, pragmas)
+    # any that can't be honoured. Then the list is sorted into report order.
+    _settle(diagnostics, pragmas)
     return CompileResult(
         plan, diagnostics, source, recovered=skipped, room_lines=dict(smap.room_line)
     )
