@@ -38,9 +38,9 @@ This checklist is optimized for both humans and coding agents.
 - Add or reuse a deterministic validator in `src/barndsl/validation.py` or the relevant domain module. Put its threshold in `constants.py` (or a `Profile` field when it varies by jurisdiction), not inline.
 - Write the check as `_validate_x(ctx: CheckContext, add)` (or `_dq_x` for a design-quality nudge). Read the plan, the profile and the shared door graph from `ctx`, never a default profile. List it once in `validation._PLAN_CHECKS` (or `_SHELL_CHECKS` for a shell/site check that must run on an empty plan) where it should run: the list order is the order diagnostics are reported in. `tests/test_check_registry.py` fails on a check that takes a `CheckContext` but isn't listed.
 - Emit `Issue(Severity.X, "CODE", ...)` with a literal code, in stable order.
-- Register the code in `src/barndsl/diagnostics.py` with title and explanation. The registry severity must match every literal emit site; a code that genuinely fires at more than one severity goes in `_VARYING`.
+- Register the code in `src/barndsl/diagnostics.py` with a title, an explanation and a general `hint=` (how to fix it, independent of any plan). Every literal emit site must fire at a severity the entry allows: its usual severity, plus any listed in `also=` for a code that genuinely varies with context.
 - Give it a category: list it in the matching explicit set in `diagnostics.py` unless a prefix rule already classifies it. Explicit listings win over prefixes, and `barndsl dev audit` fails on any code that only reaches the default bucket.
-- A room-local code that a composed part should report once (not per `use`) also belongs in `compose.PART_LOCAL_CODES`.
+- A room-local code that a composed part should report once (not per `use`) gets `part_local=True` on its entry; one that an `accept` pragma must never waive gets `accept_denied=True`. `compose.PART_LOCAL_CODES` and `pragma.ACCEPT_DENIED_CODES` are read off the entries.
 - Add tests with a minimal failing source and a minimal satisfied source; prefer fixtures from `docs/FIXTURE_CATALOG.md` before inventing a large plan.
 - Probe quickly while iterating:
 

@@ -41,11 +41,13 @@ from .issues import Issue, Severity
 #: Structural design-flaw codes that an `accept` pragma may NOT waive, even
 #: though they fire as warnings/infos rather than errors. These describe a broken
 #: *building* — a plan you can compile but shouldn't build — not a jurisdiction
-#: judgement call, so silencing them out of the design score would let a
-#: structurally-broken plan score high on a technicality. An `accept` naming one
-#: is refused exactly like an accept on an error (ACCEPT_DENIED), so the
-#: diagnostic keeps its severity and keeps deducting. Kept small and deliberate.
-ACCEPT_DENIED_CODES: frozenset[str] = frozenset({"GARAGE_PASSTHROUGH"})
+#: judgement call. An `accept` naming one is refused exactly like an accept on an
+#: error (ACCEPT_DENIED), so the diagnostic keeps its severity and keeps
+#: deducting. Each code says so on its registry entry
+#: (:attr:`~barndsl.diagnostics.CodeInfo.accept_denied`).
+ACCEPT_DENIED_CODES: frozenset[str] = frozenset(
+    code for code, info in REGISTRY.items() if info.accept_denied
+)
 
 #: ``barndsl: accept <CODE> ["reason"]`` — matched against a comment's text (the
 #: part after ``#``). The code is an identifier; the reason is an optional quoted

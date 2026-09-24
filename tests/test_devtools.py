@@ -21,11 +21,17 @@ def test_repo_audit_checks_can_fail(monkeypatch):
     """The audit's checks must be able to fail — a drift check comparing a list
     with a copy of itself is no check at all."""
     import ast
+    import dataclasses
 
     from barndsl import compiler, diagnostics
+    from barndsl.issues import Severity
 
     monkeypatch.setattr(devtools, "PART_STATEMENTS", compiler.PART_STATEMENTS - {"room"})
-    monkeypatch.setattr(diagnostics, "_VARYING", diagnostics._VARYING - {"FOYER_FLOW"})
+    reg = diagnostics.REGISTRY
+    # FOYER_FLOW fires as a warning or an info; allow only the warning.
+    monkeypatch.setitem(reg, "FOYER_FLOW", dataclasses.replace(
+        reg["FOYER_FLOW"], severities=frozenset({Severity.WARNING})))
+    monkeypatch.setitem(reg, "NO_BATH", dataclasses.replace(reg["NO_BATH"], hint="Add one."))
     monkeypatch.setattr(diagnostics, "_EXPLICIT_CATEGORIES",
                         {k: v for k, v in diagnostics._EXPLICIT_CATEGORIES.items() if k != "MECH_ACCESS"})
     real_trees = devtools._src_trees
@@ -48,12 +54,23 @@ def test_repo_audit_checks_can_fail(monkeypatch):
             "validation.Severity, v.clear_box, v.validate, barndsl.validation.Issue\n"  # 13
             "from . import Issue\n"                                   # 14: through the package
             "from .elements import math\n"                            # 15: a stdlib name
+            "Issue(Severity.ERROR if x else Severity.INFO, 'SHOP_DEPTH', 'm')\n"  # 16: both branches
+            "def _sev(x):\n    return Severity.ERROR if x else Severity.INFO\n"  # 17-18: a helper
+            "Issue(_sev(1), 'DUP_ID', 'm')\n"                        # 19: read through it
         ),
     })
     out = devtools.repo_audit()
     assert not out["ok"]
     assert out["statement_keywords"]["unclassified_host_or_part"] == ["room"]
-    assert any(d.startswith("FOYER_FLOW") for d in out["diagnostics"]["severity_drift"])
+    # An emit site outside the entry's allowed severities drifts, including one
+    # branch of a conditional severity (SHOP_DEPTH allows warning or info) and a
+    # severity a same-module helper returns (DUP_ID is only ever an error).
+    assert out["diagnostics"]["severity_drift"] == [
+        "DUP_ID (registry error, emitted error/info)",
+        "FOYER_FLOW (registry warning, emitted info/warning)",
+        "SHOP_DEPTH (registry info/warning, emitted error/info/warning)",
+    ]
+    assert out["diagnostics"]["unexplained_registry"] == ["NO_BATH"]  # hint too short
     assert out["diagnostics"]["unclassified_category"] == ["MECH_ACCESS"]
     # Private names are flagged however they're reached — never a public name,
     # a dunder, or a module's own privates.

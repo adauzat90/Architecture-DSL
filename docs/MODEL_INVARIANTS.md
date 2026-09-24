@@ -40,8 +40,8 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - Diagnostic codes are stable API: CLI, LSP, docs, examples, pragmas, and agents rely on exact spelling.
 - `Issue`, `Severity` and `ValidationReport` live in `barndsl.issues`, which imports nothing else from barndsl, so code that reports a diagnostic doesn't depend on the validator. `validation` re-exports them for older callers.
 - Every emitted code must have a registry entry in `src/barndsl/diagnostics.py`.
-- Registry entries expose severity, category, owner, title, and explanation.
-- The registry severity matches every literal emit site unless the code is declared context-dependent (`_VARYING`); every code has an explicit or prefix category rule (no silent default). `barndsl dev audit` enforces both.
+- Registry entries expose severity, category, owner, title, explanation, and a general fix hint (ADR 0002). An entry also lists every severity the code can fire at, whether a composed part reports it once for itself (`part_local`), and whether an `accept` pragma may never waive it (`accept_denied`). `compose.PART_LOCAL_CODES` and `pragma.ACCEPT_DENIED_CODES` are derived from the entries, never kept by hand.
+- Every literal emit site fires at a severity its entry allows, and a severity the audit can't read needs an entry that allows more than one. Every entry has an explanation and a hint, and every code has an explicit or prefix category rule (no silent default). `barndsl dev audit` enforces all three.
 - Validators should emit diagnostics in stable order.
 - Every validator check is a `check(ctx, add)` listed once in `validation._SHELL_CHECKS` or `_PLAN_CHECKS`, which set its run order. It reads the plan and the profile from its frozen `CheckContext`, which also shares state derived from the plan (the door graph, rooms by id). Only `validate()` falls back to the IRC baseline (`DEFAULT`); no check or helper defaults the profile or names `DEFAULT`. `tests/test_check_registry.py` enforces the registration, the signature and the profile rule.
 - Accepted diagnostics remain visible as audited deviations; they are not deleted from compile output.

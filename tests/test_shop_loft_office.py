@@ -226,5 +226,5 @@ def test_new_codes_are_registered_with_the_right_severity():
     ):
         assert code in REGISTRY, code
         assert REGISTRY[code].severity.value == sev, code
-    # SHOP_DEPTH is tiered, so it's in the _VARYING set.
+    # SHOP_DEPTH is tiered, so its entry allows both severities.
     assert REGISTRY["SHOP_DEPTH"].varies

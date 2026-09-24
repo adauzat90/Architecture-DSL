@@ -91,15 +91,48 @@ def _src_trees() -> dict[Path, ast.Module]:
     return trees
 
 
+def _severity_levels(sev: ast.expr, helpers: dict[str, set[str]] | None = None) -> set[str]:
+    """The severities an emit site's first argument can take: the lowercased
+    ``Severity.<NAME>``, both branches of ``Severity.X if … else Severity.Y``,
+    what a same-module helper in ``helpers`` can return (see
+    :func:`_severity_helpers`), or ``"computed"`` for anything the audit can't
+    read."""
+    if isinstance(sev, ast.Attribute) and isinstance(sev.value, ast.Name) and sev.value.id == "Severity":
+        return {sev.attr.lower()}
+    if isinstance(sev, ast.IfExp):
+        return _severity_levels(sev.body, helpers) | _severity_levels(sev.orelse, helpers)
+    if isinstance(sev, ast.Call) and isinstance(sev.func, ast.Name) and sev.func.id in (helpers or {}):
+        return set((helpers or {})[sev.func.id])
+    return {"computed"}
+
+
+def _severity_helpers(tree: ast.Module) -> dict[str, set[str]]:
+    """Module-level functions whose every ``return`` is a literal severity (or a
+    conditional between two), and the severities each can return, e.g.
+    ``_no_access_severity`` → error/warning."""
+    helpers: dict[str, set[str]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        returns = [n.value for n in ast.walk(node) if isinstance(n, ast.Return)]
+        if not returns or any(r is None for r in returns):
+            continue
+        levels = set().union(*(_severity_levels(r) for r in returns if r is not None))
+        if "computed" not in levels:
+            helpers[node.name] = levels
+    return helpers
+
+
 def _literal_issue_sites(trees: dict[Path, ast.Module] | None = None) -> dict[str, dict[str, set[str]]]:
     """``{rel_path: {CODE: {severity, …}}}`` for every ``Issue(sev, "CODE", …)``
-    call with a literal code in ``src/barndsl``. The severity is the lowercased
-    ``Severity.<NAME>`` when the first argument is literal, else ``"computed"``."""
+    call with a literal code in ``src/barndsl``; the severities are what
+    :func:`_severity_levels` reads from ``sev``."""
     out: dict[str, dict[str, set[str]]] = {}
     for path, tree in (_src_trees() if trees is None else trees).items():
         if path.name == "diagnostics.py":
             continue
         sites: dict[str, set[str]] = {}
+        helpers = _severity_helpers(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -111,12 +144,7 @@ def _literal_issue_sites(trees: dict[Path, ast.Module] | None = None) -> dict[st
                 continue
             if not re.fullmatch(r"[A-Z][A-Z0-9_]+", arg.value):
                 continue
-            sev = node.args[0]
-            if isinstance(sev, ast.Attribute) and isinstance(sev.value, ast.Name) and sev.value.id == "Severity":
-                level = sev.attr.lower()
-            else:
-                level = "computed"
-            sites.setdefault(arg.value, set()).add(level)
+            sites.setdefault(arg.value, set()).update(_severity_levels(node.args[0], helpers))
         if sites:
             out[_rel(path)] = sites
     return out
@@ -244,8 +272,9 @@ def _reexport_imports(trees: dict[Path, ast.Module] | None = None) -> list[str]:
 
 
 def _severity_drift(issue_sites: dict[str, dict[str, set[str]]]) -> list[str]:
-    """Codes whose emit sites disagree with the registry's severity without being
-    declared context-dependent (``diagnostics._VARYING``)."""
+    """Codes emitted at a severity their registry entry doesn't allow
+    (:attr:`~barndsl.diagnostics.CodeInfo.severities`). A severity the audit
+    can't read (``"computed"``) is allowed only on a context-dependent entry."""
     seen: dict[str, set[str]] = {}
     for sites in issue_sites.values():
         for code, sevs in sites.items():
@@ -253,10 +282,11 @@ def _severity_drift(issue_sites: dict[str, dict[str, set[str]]]) -> list[str]:
     drift: list[str] = []
     for code, sevs in sorted(seen.items()):
         info = REGISTRY.get(code)
-        if info is None or info.varies:
+        if info is None:
             continue
-        if sevs != {info.severity.value}:
-            drift.append(f"{code} (registry {info.severity.value}, emitted {'/'.join(sorted(sevs))})")
+        allowed = {s.value for s in info.severities}
+        if not sevs <= allowed | ({"computed"} if info.varies else set()):
+            drift.append(f"{code} (registry {'/'.join(sorted(allowed))}, emitted {'/'.join(sorted(sevs))})")
     return drift
 
 
@@ -304,7 +334,7 @@ def repo_audit() -> dict[str, Any]:
     matrix = _matrix_drift()
     unexplained = sorted(
         code for code, info in REGISTRY.items()
-        if not info.title.strip() or len(info.explanation.strip()) < 20
+        if not info.title.strip() or len(info.explanation.strip()) < 20 or len(info.hint.strip()) < 20
     )
 
     # Informational hygiene only: ignored artifacts should not fail an audit, but
@@ -325,11 +355,11 @@ def repo_audit() -> dict[str, Any]:
     if missing_registry:
         problems.append("diagnostic codes missing registry entries: " + ", ".join(missing_registry))
     if severity_drift:
-        problems.append("emit-site severity differs from the registry (fix it or add the code to _VARYING): " + ", ".join(severity_drift))
+        problems.append("emit-site severity isn't one its registry entry allows (fix the site, or list the other severity in the entry's `also=`): " + ", ".join(severity_drift))
     if unclassified:
         problems.append("diagnostic codes with no explicit category/prefix rule: " + ", ".join(unclassified))
     if unexplained:
-        problems.append("registry entries with missing/too-short explanation: " + ", ".join(unexplained))
+        problems.append("registry entries with a missing or too-short explanation or hint: " + ", ".join(unexplained))
     if matrix["missing"] or matrix["stale"]:
         problems.append(
             "docs/DIAGNOSTIC_MATRIX.md is out of date (run `barndsl dev diag-matrix --out docs/DIAGNOSTIC_MATRIX.md`): "
@@ -1199,7 +1229,7 @@ entry living south width 3
         "testFile": str(tfile),
         "testSkeleton": skeleton,
         "checklist": [
-            f"Add REGISTRY entry for {code} in src/barndsl/diagnostics.py ({severity}); if it can fire at more than one severity, add it to _VARYING.",
+            f"Add a REGISTRY entry for {code} in src/barndsl/diagnostics.py ({severity}) with a title, an explanation and a general `hint=`; list any other severity it can fire at in `also=`, and set `part_local=True` if a composed part should report it once for itself.",
             "Give the code a category: list it in the matching explicit set in diagnostics.py unless a prefix rule already classifies it (the audit fails on unclassified codes).",
             "Add/extend a _validate_* or _dq_* function in src/barndsl/validation.py or the relevant domain module; put thresholds in constants.py (or a Profile field if they vary by jurisdiction).",
             "Give the check the (ctx: CheckContext, add) signature, read the profile from ctx, and list it once in validation._PLAN_CHECKS (or _SHELL_CHECKS if it must run on an empty plan) where it should run; the order is the report order.",
