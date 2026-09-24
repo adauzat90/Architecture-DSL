@@ -1,11 +1,18 @@
-"""Geometry helpers shared by validation and rendering."""
+"""Geometry helpers shared by validation and rendering, including a room's
+walls: which face the outside, and the clear floor left inside them."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
-from .elements import Direction, InteriorDoor, Room
+from .constants import (
+    EPSILON,
+    EXTERIOR_WALL_THICKNESS,
+    INTERIOR_WALL_THICKNESS,
+    PLUMBING_WALL_THICKNESS,
+)
+from .elements import Barndominium, Direction, InteriorDoor, Room
 
 TOL = 1e-6
 
@@ -242,3 +249,118 @@ def opening_endpoints(
     x = room.x if wall is Direction.WEST else room.x2
     y1 = room.y + offset
     return x, y1, x, y1 + width
+
+
+def exterior_walls(plan: Barndominium, room: Room, tol: float = EPSILON) -> list[Direction]:
+    """Walls of ``room`` that lie on the building envelope (can take windows).
+
+    For a plain rectangular footprint this is the four envelope edges; for an
+    L/T/U footprint (``wing`` blocks) a wall counts only when it faces *outside*
+    the footprint union — a wall on the seam between two abutting blocks is
+    interior even if it sits at the primary envelope's edge.
+    """
+    if not plan.wings:
+        walls: list[Direction] = []
+        if abs(room.y) <= tol:
+            walls.append(Direction.SOUTH)
+        if abs(room.y2 - plan.envelope_length) <= tol:
+            walls.append(Direction.NORTH)
+        if abs(room.x) <= tol:
+            walls.append(Direction.WEST)
+        if abs(room.x2 - plan.envelope_width) <= tol:
+            walls.append(Direction.EAST)
+        return walls
+
+    sections = plan.footprint_sections()
+    return [
+        w
+        for w in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST)
+        if wall_faces_outside(sections, room, w)
+    ]
+
+
+def plumbing_wall_sides(plan: Barndominium, room: Room) -> set[Direction]:
+    """The sides of ``room`` that carry a declared **plumbing wall** (a ``wall
+    a - b plumbing`` naming this room whose pair really shares a wall).
+
+    A declared plumbing wall is built as a 2x6 (:data:`PLUMBING_WALL_THICKNESS`),
+    so the flanking rooms lose half of that — not half an ordinary partition —
+    from their clear dimensions. The whole side is treated as the thicker wall
+    even when the shared run covers only part of it (conservative and simple).
+    """
+    sides: set[Direction] = set()
+    for ws in getattr(plan, "wall_specs", None) or []:
+        if "plumbing" not in ws.attributes or room.id not in (ws.room_a, ws.room_b):
+            continue
+        other_id = ws.room_b if room.id == ws.room_a else ws.room_a
+        if other_id == room.id:
+            continue
+        other = plan.room(other_id)
+        if other is None:
+            continue
+        edge = shared_edge(room, other)
+        if edge is None:
+            continue
+        if edge.orientation == "v":
+            sides.add(
+                Direction.WEST if abs(edge.pos - room.x) <= EPSILON else Direction.EAST
+            )
+        else:
+            sides.add(
+                Direction.SOUTH if abs(edge.pos - room.y) <= EPSILON else Direction.NORTH
+            )
+    return sides
+
+
+def _wall_halves(plan: Barndominium, room: Room) -> dict[Direction, float]:
+    """Half the bounding wall's thickness per side of ``room``: an exterior
+    shell edge, a declared plumbing (2x6) wall, or an ordinary partition."""
+    ext = set(exterior_walls(plan, room))
+    plumbing = (
+        plumbing_wall_sides(plan, room)
+        if getattr(plan, "wall_specs", None)
+        else set()
+    )
+
+    def half(side: Direction) -> float:
+        if side in ext:
+            thk = EXTERIOR_WALL_THICKNESS
+        elif side in plumbing:
+            thk = PLUMBING_WALL_THICKNESS
+        else:
+            thk = INTERIOR_WALL_THICKNESS
+        return thk / 2.0
+
+    return {side: half(side) for side in Direction}
+
+
+def clear_dimensions(plan: Barndominium, room: Room) -> tuple[float, float]:
+    """The room's built **clear** (finish-face) ``(width, length)`` in feet.
+
+    barndsl rooms tile on wall *centrelines*, so the interior you can actually
+    use is the nominal rectangle minus half of each bounding wall's thickness —
+    an exterior (shell) edge costs more than an interior partition, and a
+    declared plumbing wall (``wall a - b plumbing``) is a 2x6. This is the
+    dimension IRC habitability minimums are measured to (finished surfaces) and
+    the one Revit computes for its room schedule, so reporting/checking it keeps
+    barndsl and the built model telling the same story.
+    """
+    halves = _wall_halves(plan, room)
+    clear_w = room.width - halves[Direction.WEST] - halves[Direction.EAST]
+    clear_l = room.length - halves[Direction.SOUTH] - halves[Direction.NORTH]
+    return max(0.0, clear_w), max(0.0, clear_l)
+
+
+def clear_box(plan: Barndominium, room: Room) -> tuple[float, float, float, float]:
+    """The room's clear interior as a world-coordinate rectangle
+    ``(x0, y0, width, length)`` — the finish-face box inside the wall centrelines.
+    Its south-west corner is inset from the room rectangle by half the west/south
+    wall. Used to place fixtures inside the usable floor."""
+    halves = _wall_halves(plan, room)
+    clear_w, clear_l = clear_dimensions(plan, room)
+    return (
+        room.x + halves[Direction.WEST],
+        room.y + halves[Direction.SOUTH],
+        clear_w,
+        clear_l,
+    )

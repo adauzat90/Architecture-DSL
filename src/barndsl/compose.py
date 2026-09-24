@@ -45,7 +45,7 @@ from .elements import (
     UseSpec,
 )
 from .geometry import shared_edge
-from .validation import Issue, Severity
+from .issues import Issue, Severity
 
 #: Nesting depth (Phase 20): the host is depth 0, a part it ``use``s is depth 1,
 #: a part *that* part uses is depth 2. A ``use`` that would reach depth 3 is the

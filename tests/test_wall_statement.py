@@ -25,7 +25,7 @@ from barndsl.constants import (
     INTERIOR_WALL_THICKNESS,
     PLUMBING_WALL_THICKNESS,
 )
-from barndsl.validation import clear_dimensions
+from barndsl.geometry import clear_dimensions
 
 
 def _codes(result, severity: str) -> set[str]:

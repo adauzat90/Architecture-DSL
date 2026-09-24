@@ -775,7 +775,8 @@ pip install -e '.[raster]'  # + PNG/PDF render output (cairosvg)
 ```
 src/barndsl/
   elements.py    # plan IR + the fluent Python builder
-  geometry.py    # shared-edge / wall / opening helpers
+  geometry.py    # shared-edge / wall / opening helpers, exterior walls, clear dimensions
+  issues.py      # Issue / Severity / ValidationReport, the diagnostic types
   compiler.py    # lexer + parser + compile_source → CompileResult (diagnostics)
   emit.py        # plan → DSL source
   validation.py  # building-code checks → diagnostics with fix hints

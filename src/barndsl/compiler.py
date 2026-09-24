@@ -51,7 +51,8 @@ from .elements import (
     RoomType,
     inches,
 )
-from .validation import Issue, Severity, ValidationReport, validate
+from .issues import Issue, Severity, ValidationReport
+from .validation import validate
 
 if TYPE_CHECKING:  # the annotation-only import; runtime resolution is lazy
     from .profiles import Profile

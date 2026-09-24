@@ -19,8 +19,8 @@ import math
 from dataclasses import dataclass, replace
 
 from .elements import Barndominium, Direction, Room, RoomType
-from .geometry import door_span, opening_endpoints
-from .validation import clear_box, exterior_walls
+from .geometry import clear_box, door_span, exterior_walls, opening_endpoints
+from .issues import Issue, Severity
 
 
 @dataclass(frozen=True)
@@ -806,8 +806,6 @@ def validate_fixtures(plan: Barndominium, add) -> None:
     exterior wall to vent through (``DRYER_VENT``), and a fixture on a stair
     footprint (``FIXTURE_STAIR``).
     """
-    from .validation import Issue, Severity  # local: validation imports this module
-
     known = {r.id for r in plan.rooms}
     for pf in getattr(plan, "fixtures", []):
         if pf.room not in known:
@@ -883,11 +881,11 @@ def validate_fixtures(plan: Barndominium, add) -> None:
                     )
                     break
 
-        _check_placement(plan, room, fixtures, rects, add, Issue, Severity)
-        _check_plan_rules(plan, room, fixtures, add, Issue, Severity)
+        _check_placement(plan, room, fixtures, rects, add)
+        _check_plan_rules(plan, room, fixtures, add)
 
 
-def _check_placement(plan, room, fixtures, rects, add, Issue, Severity) -> None:
+def _check_placement(plan, room, fixtures, rects, add) -> None:
     """The authored-only placement checks (clearance, front, room type, backing,
     egress). Seeds are auto-fitted, so they're skipped here."""
     ext = set(exterior_walls(plan, room))
@@ -1076,7 +1074,7 @@ def _check_placement(plan, room, fixtures, rects, add, Issue, Severity) -> None:
                     break
 
 
-def _check_plan_rules(plan, room, fixtures, add, Issue, Severity) -> None:
+def _check_plan_rules(plan, room, fixtures, add) -> None:
     """The plan checks that judge seeds and authored pieces alike (range window /
     landing, kitchen triangle, dryer vent, stair)."""
     ext = set(exterior_walls(plan, room))

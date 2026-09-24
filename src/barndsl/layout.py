@@ -47,7 +47,7 @@ from .elements import (
 )
 from .compiler import comment_start
 from .constants import NATURAL_LIGHT_RATIO as _NAT_LIGHT_RATIO
-from .geometry import shared_edge
+from .geometry import exterior_walls, shared_edge
 
 # Glazed area a 1-ft-wide window contributes (head 6.67 - sill 3.0 ft tall),
 # used to size daylight windows; mirrors Window's defaults in elements.py.
@@ -370,10 +370,7 @@ def _kitchen_severances(plan: Barndominium):
     graph leaves those two in different components. ``comps`` is the component
     list the two indices point into.
     """
-    from .validation import (  # local: validation imports geometry only
-        components_excluding,
-        door_graph,
-    )
+    from .validation import components_excluding, door_graph
 
     by_id = {r.id: r for r in plan.rooms}
     graph = door_graph(plan)
@@ -440,8 +437,6 @@ def place_openings(
     notes: list[str],
 ) -> None:
     """Auto-add a front entry and egress/daylight windows on exterior walls."""
-    from .validation import exterior_walls  # local: validation imports geometry only
-
     # 1. Front entry on a public/mudroom room with an exterior wall, plus the
     #    landing IRC R311.3 requires on the outside of it (DOOR_NO_LANDING).
     entry_room = _pick_entry_room(plan, brief)
@@ -504,8 +499,6 @@ def place_openings(
 
 
 def _pick_entry_room(plan: Barndominium, brief: LayoutBrief) -> str | None:
-    from .validation import exterior_walls
-
     def has_ext(rid: str) -> bool:
         r = plan.room(rid)
         return r is not None and bool(exterior_walls(plan, r))
@@ -532,8 +525,6 @@ def _pick_entry_room(plan: Barndominium, brief: LayoutBrief) -> str | None:
 
 def _existing_glaze(plan: Barndominium, room: Room) -> float:
     """Glazed area on this room's exterior walls (what already counts for light)."""
-    from .validation import exterior_walls
-
     ext = set(exterior_walls(plan, room))
     return sum(
         w.glazed_area for w in plan.windows_for(room.id) if w.wall in ext

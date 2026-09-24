@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 
 from .constants import BUILD_MODULE, GOOD_ASPECT
 from .elements import HABITABLE_TYPES, Barndominium, RoomType, feet, inches
-from .geometry import shared_edge
+from .geometry import exterior_walls, shared_edge
 from .layout import (
     PUBLIC_CORE_TYPES,
     LayoutBrief,
@@ -1387,8 +1387,6 @@ def _pick_connected_entry(plan: Barndominium) -> str | None:
     entry never strands the rest of the plan on the wrong side of a missing door.
     """
     from collections import deque
-
-    from .validation import exterior_walls
 
     graph: dict[str, set[str]] = {r.id: set() for r in plan.rooms}
     for d in plan.interior_doors:

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 from .compiler import comment_start
 from .diagnostics import REGISTRY
-from .validation import Issue, Severity
+from .issues import Issue, Severity
 
 #: Structural design-flaw codes that an `accept` pragma may NOT waive, even
 #: though they fire as warnings/infos rather than errors. These describe a broken

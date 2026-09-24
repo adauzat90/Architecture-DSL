@@ -20,9 +20,15 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .elements import Barndominium, Direction, ExteriorDoor, InteriorDoor, Window
-from .geometry import door_offset, door_span, opening_endpoints, shared_edge
+from .geometry import (
+    clear_dimensions,
+    door_offset,
+    door_span,
+    exterior_walls,
+    opening_endpoints,
+    shared_edge,
+)
 from .render import fmt_ft_in
-from .validation import clear_dimensions, exterior_walls
 
 #: How far (world ft) a mark bubble sits inside the room from the opening
 #: centerline, so it lands on the room side clear of the exterior dim chains.

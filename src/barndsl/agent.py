@@ -43,7 +43,7 @@ from .compiler import DSL_REFERENCE, CompileResult, compile_source
 from .compiler import STATEMENT_KEYWORDS as _STMT_KEYWORDS
 from .introspect import plan_summary, render_ascii_plan, summary_text
 from .score import ScoreReport, design_score
-from .validation import Issue, Severity
+from .issues import Issue, Severity
 
 logger = logging.getLogger(__name__)
 

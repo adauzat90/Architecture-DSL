@@ -28,6 +28,7 @@ from .elements import Barndominium, Direction, Room
 from .geometry import (
     SharedEdge,
     door_span,
+    exterior_walls,
     opening_endpoints,
     point_in_footprint,
     shared_edge,
@@ -118,12 +119,6 @@ def solid_runs(
     return runs
 
 
-def _exterior_wall_dirs(plan: Barndominium, room: Room) -> list[Direction]:
-    from .validation import exterior_walls
-
-    return exterior_walls(plan, room)
-
-
 def _axis_interval(
     room: Room, wall: Direction, offset: float, width: float
 ) -> tuple[float, float]:
@@ -179,7 +174,7 @@ def wall_bands(plan: Barndominium, level: int) -> list[WallBand]:
 
     half = EXTERIOR_WALL_THICKNESS / 2.0
     for room in rooms:
-        for wall in _exterior_wall_dirs(plan, room):
+        for wall in exterior_walls(plan, room):
             x1, y1, x2, y2 = wall_segment(room, wall)
             opens = _exterior_openings(plan, room, wall)
             side = _SIDE[wall]
@@ -378,7 +373,7 @@ def opening_gaps(plan: Barndominium, level: int) -> list[OpeningGap]:
     room_by_id = {r.id: r for r in rooms}
 
     for room in rooms:
-        for wall in _exterior_wall_dirs(plan, room):
+        for wall in exterior_walls(plan, room):
             horizontal = wall in (Direction.SOUTH, Direction.NORTH)
             orient = "h" if horizontal else "v"
             pos = wall_segment(room, wall)[1 if horizontal else 0]

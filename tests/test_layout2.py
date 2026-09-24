@@ -15,7 +15,7 @@ from barndsl.layout2 import (
     parse_brief2,
     solve_layout2,
 )
-from barndsl.validation import exterior_walls
+from barndsl.geometry import exterior_walls
 
 
 def _brief(**kw) -> LayoutBrief2:

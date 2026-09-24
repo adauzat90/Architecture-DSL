@@ -1119,7 +1119,7 @@ def test_the_lead_hall_spine_example_compiles_with_no_errors_or_warnings():
     errors AND zero warnings (infos tolerated). No exact score is asserted here —
     the score is being recalibrated concurrently — only the diagnostic counts."""
     from barndsl.agent import _EXAMPLE_HALL_SPINE
-    from barndsl.validation import Severity
+    from barndsl.issues import Severity
 
     result = compile_source(_EXAMPLE_HALL_SPINE)
     assert result.plan is not None

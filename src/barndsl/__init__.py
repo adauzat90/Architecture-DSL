@@ -105,7 +105,9 @@ from .profiles import (
     load_profile,
     profiles_text,
 )
-from .validation import Issue, Severity, ValidationReport, clear_dimensions, validate
+from .geometry import clear_dimensions
+from .issues import Issue, Severity, ValidationReport
+from .validation import validate
 
 __all__ = [
     "barndominium",

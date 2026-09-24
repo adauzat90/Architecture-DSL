@@ -13,7 +13,7 @@ from barndsl import RoomType as T
 from barndsl.constants import EXTERIOR_WALL_THICKNESS as EXT
 from barndsl.constants import INTERIOR_WALL_THICKNESS as INT
 from barndsl.schedule import room_rows
-from barndsl.validation import clear_dimensions
+from barndsl.geometry import clear_dimensions
 
 
 def _codes(plan):

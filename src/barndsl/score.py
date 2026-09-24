@@ -59,9 +59,9 @@ from dataclasses import dataclass, field
 
 from .constants import GOOD_ASPECT, NATURAL_LIGHT_RATIO
 from .elements import GARAGE_TYPES, HABITABLE_TYPES, PUBLIC_TYPES, Barndominium, RoomType
+from .issues import Severity
 from .validation import (
     MIN_VOID_NOTE,
-    Severity,
     largest_void,
     components_excluding,
     door_graph,

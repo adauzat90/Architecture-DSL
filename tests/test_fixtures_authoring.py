@@ -164,7 +164,7 @@ def test_offset_round_trips_through_emit_dsl():
 def test_wall_slotted_bed_centres_on_a_clear_wall():
     # A bed reads best centred (nightstand room both sides), not parked in the
     # first corner the walk reaches.
-    from barndsl.validation import clear_box
+    from barndsl.geometry import clear_box
 
     r = compile_source(_plan("fixture bed_queen in bed wall N"))
     bed_room = r.plan.room("bed")

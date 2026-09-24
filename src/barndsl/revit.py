@@ -59,6 +59,7 @@ from .elements import (
 from .fixtures import resolve_room_fixtures
 from .geometry import (
     TOL,
+    clear_dimensions,
     door_span,
     footprint_area,
     footprint_boundary,
@@ -66,7 +67,6 @@ from .geometry import (
     point_in_footprint,
     shared_edge,
 )
-from .validation import clear_dimensions
 
 # --- defaults the rectangle IR doesn't carry ---------------------------------
 #: Head height of a standard door leaf (interior or exterior): 6'-8".

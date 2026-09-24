@@ -14,18 +14,16 @@ from __future__ import annotations
 
 import math
 from collections import Counter, deque
-from dataclasses import dataclass
-from enum import Enum
 from typing import Protocol
 
 from .constants import (
     BUILD_MODULE,
     COMFORT_HALLWAY_WIDTH,
     EPSILON,
-    EXTERIOR_WALL_THICKNESS,
+    EXTERIOR_WALL_THICKNESS,  # noqa: F401 — re-exported for backward compatibility
     GUARD_DROP_TRIGGER,
     GUARD_HEIGHT,
-    INTERIOR_WALL_THICKNESS,
+    INTERIOR_WALL_THICKNESS,  # noqa: F401 — re-exported for backward compatibility
     MAX_RISER_HEIGHT,
     MIN_BEDROOM_AREA,
     MIN_BEDROOM_DIMENSION,
@@ -34,7 +32,7 @@ from .constants import (
     MIN_SHADE_OVERHANG,
     MIN_TREAD_DEPTH,
     NATURAL_LIGHT_RATIO,
-    PLUMBING_WALL_THICKNESS,
+    PLUMBING_WALL_THICKNESS,  # noqa: F401 — re-exported for backward compatibility
     SOLAR_SOUTH_MIN_GLAZING,
     SOLAR_SOUTH_MIN_WALL,
     SOLAR_SOUTH_SHADE_GLAZING,
@@ -56,16 +54,28 @@ from .elements import (
     RoomType,
 )
 from .drawing import door_leaf, inward_side, swing_side
+from .fixtures import (
+    door_swing_rects,
+    fixtures_fit,
+    fixtures_for,
+    plan_room_fixtures,
+    resolve_room_fixtures,
+    validate_fixtures,
+)
 from .geometry import (
+    clear_box,
+    clear_dimensions,
     door_offset,
     door_span,
+    exterior_walls,
     opening_endpoints,
+    plumbing_wall_sides,  # noqa: F401 — re-exported for backward compatibility
     point_in_footprint,
     point_rect_distance,
     rect_in_footprint,
     shared_edge,
-    wall_faces_outside,
 )
+from .issues import Issue, Severity, ValidationReport
 from .solar import compass_label, true_azimuth, wall_sector
 from .energy import WWR_CEILING, describe_targets
 from .spatial import room_index
@@ -288,195 +298,7 @@ LANDING_MIN_DEPTH = 3.0
 # Profile can amend the enforced values.
 
 
-class Severity(str, Enum):
-    ERROR = "error"
-    WARNING = "warning"
-    INFO = "info"
-
-
-@dataclass
-class Issue:
-    """A single diagnostic. Used for both syntax (compiler) and semantic checks."""
-
-    severity: Severity
-    code: str
-    message: str
-    room: str | None = None
-    line: int | None = None
-    col: int | None = None
-    end_col: int | None = None  # 1-based, exclusive — for column-accurate carets
-    hint: str | None = None
-    #: Set by an ``# barndsl: accept <CODE>`` pragma (see :mod:`barndsl.pragma`).
-    #: An accepted diagnostic has been DOWNGRADED to an INFO — its ``severity`` is
-    #: already ``INFO`` — but the flag records that it was a deliberate,
-    #: documented deviation so the score stops deducting for it and the audit
-    #: trail survives. ``accept_reason`` carries the quoted justification (if any).
-    accepted: bool = False
-    accept_reason: str | None = None
-    #: Cross-file composition (the ``use`` statement). A *part-internal* diagnostic
-    #: — one that fires inside a used part file regardless of where it's placed —
-    #: carries ``file`` (the resolved part path) and ``part`` (the relative path as
-    #: written in the ``use`` line). Its ``line`` anchors to the ``use`` statement in
-    #: the host buffer (the nearest thing there), while the message names the part's
-    #: own ``file:line``. ``None`` on an ordinary host diagnostic. See
-    #: :mod:`barndsl.compose`.
-    file: str | None = None
-    part: str | None = None
-
-    def __str__(self) -> str:
-        loc = f"line {self.line}: " if self.line else ""
-        where = f" ({self.room})" if self.room is not None else ""
-        head = f"{loc}{self.severity.value}[{self.code}]{where}: {self.message}"
-        if self.hint:
-            head += f"\n    hint: {self.hint}"
-        return head
-
-
-@dataclass
-class ValidationReport:
-    issues: list[Issue]
-
-    @property
-    def errors(self) -> list[Issue]:
-        return [i for i in self.issues if i.severity is Severity.ERROR]
-
-    @property
-    def warnings(self) -> list[Issue]:
-        return [i for i in self.issues if i.severity is Severity.WARNING]
-
-    @property
-    def infos(self) -> list[Issue]:
-        return [i for i in self.issues if i.severity is Severity.INFO]
-
-    @property
-    def is_valid(self) -> bool:
-        return not self.errors
-
-    def summary(self) -> str:
-        e, w, n = len(self.errors), len(self.warnings), len(self.infos)
-        status = "VALID" if self.is_valid else "INVALID"
-        return f"{status} — {e} error(s), {w} warning(s), {n} info(s)"
-
-    def __str__(self) -> str:
-        return "\n".join([self.summary(), *(str(i) for i in self.issues)])
-
-
 # --- helpers ----------------------------------------------------------------
-
-
-def exterior_walls(plan: Barndominium, room: Room, tol: float = EPSILON) -> list[Direction]:
-    """Walls of ``room`` that lie on the building envelope (can take windows).
-
-    For a plain rectangular footprint this is the four envelope edges; for an
-    L/T/U footprint (``wing`` blocks) a wall counts only when it faces *outside*
-    the footprint union — a wall on the seam between two abutting blocks is
-    interior even if it sits at the primary envelope's edge.
-    """
-    if not plan.wings:
-        walls: list[Direction] = []
-        if abs(room.y) <= tol:
-            walls.append(Direction.SOUTH)
-        if abs(room.y2 - plan.envelope_length) <= tol:
-            walls.append(Direction.NORTH)
-        if abs(room.x) <= tol:
-            walls.append(Direction.WEST)
-        if abs(room.x2 - plan.envelope_width) <= tol:
-            walls.append(Direction.EAST)
-        return walls
-
-    sections = plan.footprint_sections()
-    return [
-        w
-        for w in (Direction.SOUTH, Direction.NORTH, Direction.WEST, Direction.EAST)
-        if wall_faces_outside(sections, room, w)
-    ]
-
-
-def plumbing_wall_sides(plan: Barndominium, room: Room) -> set[Direction]:
-    """The sides of ``room`` that carry a declared **plumbing wall** (a ``wall
-    a - b plumbing`` naming this room whose pair really shares a wall).
-
-    A declared plumbing wall is built as a 2x6 (:data:`PLUMBING_WALL_THICKNESS`),
-    so the flanking rooms lose half of that — not half an ordinary partition —
-    from their clear dimensions. The whole side is treated as the thicker wall
-    even when the shared run covers only part of it (conservative and simple).
-    """
-    sides: set[Direction] = set()
-    for ws in getattr(plan, "wall_specs", None) or []:
-        if "plumbing" not in ws.attributes or room.id not in (ws.room_a, ws.room_b):
-            continue
-        other_id = ws.room_b if room.id == ws.room_a else ws.room_a
-        if other_id == room.id:
-            continue
-        other = plan.room(other_id)
-        if other is None:
-            continue
-        edge = shared_edge(room, other)
-        if edge is None:
-            continue
-        if edge.orientation == "v":
-            sides.add(
-                Direction.WEST if abs(edge.pos - room.x) <= EPSILON else Direction.EAST
-            )
-        else:
-            sides.add(
-                Direction.SOUTH if abs(edge.pos - room.y) <= EPSILON else Direction.NORTH
-            )
-    return sides
-
-
-def _wall_halves(plan: Barndominium, room: Room) -> dict[Direction, float]:
-    """Half the bounding wall's thickness per side of ``room``: an exterior
-    shell edge, a declared plumbing (2x6) wall, or an ordinary partition."""
-    ext = set(exterior_walls(plan, room))
-    plumbing = (
-        plumbing_wall_sides(plan, room)
-        if getattr(plan, "wall_specs", None)
-        else set()
-    )
-
-    def half(side: Direction) -> float:
-        if side in ext:
-            thk = EXTERIOR_WALL_THICKNESS
-        elif side in plumbing:
-            thk = PLUMBING_WALL_THICKNESS
-        else:
-            thk = INTERIOR_WALL_THICKNESS
-        return thk / 2.0
-
-    return {side: half(side) for side in Direction}
-
-
-def clear_dimensions(plan: Barndominium, room: Room) -> tuple[float, float]:
-    """The room's built **clear** (finish-face) ``(width, length)`` in feet.
-
-    barndsl rooms tile on wall *centrelines*, so the interior you can actually
-    use is the nominal rectangle minus half of each bounding wall's thickness —
-    an exterior (shell) edge costs more than an interior partition, and a
-    declared plumbing wall (``wall a - b plumbing``) is a 2x6. This is the
-    dimension IRC habitability minimums are measured to (finished surfaces) and
-    the one Revit computes for its room schedule, so reporting/checking it keeps
-    barndsl and the built model telling the same story.
-    """
-    halves = _wall_halves(plan, room)
-    clear_w = room.width - halves[Direction.WEST] - halves[Direction.EAST]
-    clear_l = room.length - halves[Direction.SOUTH] - halves[Direction.NORTH]
-    return max(0.0, clear_w), max(0.0, clear_l)
-
-
-def clear_box(plan: Barndominium, room: Room) -> tuple[float, float, float, float]:
-    """The room's clear interior as a world-coordinate rectangle
-    ``(x0, y0, width, length)`` — the finish-face box inside the wall centrelines.
-    Its south-west corner is inset from the room rectangle by half the west/south
-    wall. Used to place fixtures inside the usable floor."""
-    halves = _wall_halves(plan, room)
-    clear_w, clear_l = clear_dimensions(plan, room)
-    return (
-        room.x + halves[Direction.WEST],
-        room.y + halves[Direction.SOUTH],
-        clear_w,
-        clear_l,
-    )
 
 
 def geometric_neighbors(plan: Barndominium, room_id: str) -> list[str]:
@@ -1189,9 +1011,6 @@ def _run_full_plan_validators(plan: Barndominium, add, profile: Profile) -> None
     _validate_structure(plan, add)
     _validate_finishes(plan, add)
     _validate_notes(plan, add)
-    # Local import: fixtures.py imports clear_box from this module.
-    from .fixtures import validate_fixtures
-
     validate_fixtures(plan, add)
 
 
@@ -2087,8 +1906,6 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
     washer/dryer is a ``LAUNDRY_FIT`` warning; a cramped kitchen is a
     ``KITCHEN_FIT`` info.
     """
-    from .fixtures import fixtures_fit  # lazy: fixtures imports back from here
-
     for room in plan.rooms:
         if room.type not in (
             RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN,
@@ -3112,8 +2929,6 @@ def _tempered_wet_reason(
 ) -> str | None:
     if room.type not in WET_TYPES or sill >= _TEMPERED_WET_SILL:
         return None
-    from .fixtures import resolve_room_fixtures
-
     wx1, wy1, wx2, wy2 = window_segment
     for fixture in resolve_room_fixtures(plan, room):
         if fixture.kind in ("tub", "shower") and _rect_seg_distance(
@@ -4672,8 +4487,6 @@ def _validate_exterior_inward_swing(door, room: Room, add) -> None:
 def _validate_door_fixture_conflicts(plan: Barndominium, add) -> None:
     # A door swing that crowds a fixture out of a room the room could otherwise
     # hold: the door-aware placer drops a fixture the door-blind one keeps.
-    from .fixtures import fixtures_for, plan_room_fixtures  # lazy: circular import
-
     for room in plan.rooms:
         if not fixtures_for(room.type):
             continue
@@ -4948,8 +4761,6 @@ def _dq_office_clearance(plan: Barndominium, graph, by_id, add) -> None:
     #     the clear (finish-face) interior, subtracts the door-swing keepouts the
     #     auto-placer already computes, and asks whether the desk box still fits
     #     against any of the four walls. INFO — livability guidance, not a gate.
-    from .fixtures import door_swing_rects
-
     need_along = DESK_WIDTH  # the desk's width runs along the wall
     need_deep = DESK_DEPTH + DESK_CHAIR_PULL  # desk depth + chair-pull off the wall
     for room in plan.rooms:
@@ -6710,8 +6521,6 @@ def _validate_counter_receptacles(plan: Barndominium, outlets_by: dict[str, list
     # RECEPTACLE_COUNTER — IRC E3901.4 kitchen small-appliance receptacles. Along
     # each kitchen counter run (>= 12 in wide), no point on the counter wall line
     # may be more than 24 in from a receptacle. Gated the same way as OUTLET_SPACING.
-    from .fixtures import resolve_room_fixtures
-
     for room in plan.rooms:
         if room.type is not RoomType.KITCHEN:
             continue
