@@ -28,7 +28,7 @@ is a phase.
 | [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Done |
 | [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Done |
 | [TD-5](#td-5-validationpy-size-and-duplicated-thresholds) | `validation.py` size and duplicated thresholds | L | Medium | Open |
-| [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | Open |
+| [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | In progress (6a done) |
 | [TD-7](#td-7-the-score-ignores-the-code-profile) | The score ignores the code profile | S | Medium | Open |
 | [TD-8](#td-8-statement-vocabulary-still-partly-hand-kept) | Statement vocabulary still partly hand-kept | M | Medium | Open |
 | [TD-9](#td-9-three-comment-scanners-one-wrong) | Three comment scanners, one wrong | S | Medium | Done |
@@ -342,6 +342,87 @@ from `validation` for compatibility. Then break the fixtures/validation cycle.
 - Let `CodeInfo` carry category, allowed severities, and the part-local and
   accept-denied flags.
 - Fold the regex guards into the audit.
+
+**Plan.** Three work packages:
+- **TD-6a:** check wiring and profile threading. Done; see below.
+- **TD-6b:** the rule metadata on `CodeInfo`. **Decided by the project owner
+  (2026-09-24):** `CodeInfo` gets the `hint` field ADR 0002 promises; the ADR
+  stays as it is.
+- **TD-6c:** fold the regex guards into the audit, and sort the diagnostics.
+  **Decided by the project owner (2026-09-24):** the final diagnostics list is
+  sorted, even though that changes the output order. It is sorted once, in
+  `compile_source` after pragmas apply, when every diagnostic has its final
+  line. The order is:
+  1. line, with diagnostics that have no line last;
+  2. column;
+  3. severity (errors, then warnings, then infos);
+  4. code.
+
+  The sort is stable, so ties keep the order they were emitted in. Until
+  then nothing checks the registry order, which is the report order: the
+  TD-6a review moved three checks and every test still passed. After the
+  sort, the registry order only breaks ties.
+
+**Resolution (TD-6a).**
+- **One context.** `validation.CheckContext` carries the plan and the profile,
+  plus the door graph and rooms-by-id. The derived state is computed on first
+  use and shared, as the design-quality driver used to do. The context is
+  frozen, so no check can swap the profile under the checks that run after it.
+- **One signature.** All 78 checks take `(ctx, add)`: 41 shell, site and
+  whole-plan checks, and 37 design-quality checks. Each reads what it needs
+  from `ctx`; helpers still take plain arguments.
+  - `fixtures.validate_fixtures` sits below `validation` (TD-4), so it keeps
+    `(plan, add)`, and a one-line adapter registers it.
+- **One list.** `_SHELL_CHECKS` (shell and site; they run even on an empty
+  plan) and `_PLAN_CHECKS` (everything that needs rooms) list every check in
+  run order.
+  - `validate()` runs the first, stops at `EMPTY` on a plan with no rooms,
+    then runs the second.
+  - The design-quality checks sit inline where their driver ran.
+  - `_run_full_plan_validators`, `_DESIGN_QUALITY_CHECKS` and
+    `_validate_design_quality` are gone, and so are the special case for
+    `_dq_hall_tight` and the `len == 37` test.
+- **Profile threading.** No check or helper has a `profile` default any more.
+  Only `validate()` turns `None` into `DEFAULT`, and `CheckContext` requires a
+  profile. `_validate_site_features` no longer takes the profile it ignored;
+  `Profile` has no site fields.
+- **Nothing else changed.** Old and new code give identical diagnostics, in
+  the same order and with every field, and the same score. That covers 456
+  plans (the review corpus plus every example file) under all three built-in
+  profiles: 7,122 diagnostics under `default`, 7,274 under `strict` and 7,118
+  under `rural`.
+- **Tests.** `tests/test_check_registry.py` (formerly
+  `test_design_quality_structure.py`) checks that:
+  - every function whose first parameter is `ctx` or a `CheckContext` is
+    listed exactly once, so a check can't be written and never run;
+  - every listed check takes `(ctx, add)`;
+  - nothing defaults the profile, and only `validate()` and `_amended` name
+    `DEFAULT`;
+  - the context is frozen;
+  - `validate()` runs the lists in order, hands every check the caller's
+    profile (or `DEFAULT`), and stops an empty plan after the shell checks.
+
+  It keeps the tests that run one check on its own. Each of these checks
+  failed on a planted regression.
+- **Independent review.** It found no bugs. It compared every rewritten check
+  body by AST, rebuilt the old run order, and compared 541 plans (every
+  `.barn` file plus the sources embedded in tests) under all three profiles.
+  Its follow-ups are in:
+  - the frozen context;
+  - the wider registry and `DEFAULT` tests;
+  - a comment in `_dq_private_passthrough` put back above the statement it
+    describes;
+  - the note on registry order above;
+  - wording.
+- **Left.** Seven checks still build their own rooms-by-id:
+  `_validate_accessibility`, `_validate_window_fall`, `_validate_life_safety`,
+  `_validate_electrical`, `_validate_water_heater`, `_validate_landings` and
+  `_validate_suites_zones`. `_validate_life_safety` also builds its own door
+  graph. They could read `ctx` instead; that is a behaviour-neutral clean-up
+  for later.
+- **Docs.** `CONTRIBUTING_FEATURES.md`, the `rule-scaffold` checklist and
+  `MODEL_INVARIANTS.md` describe the new wiring. `DIAGNOSTIC_MATRIX.md` was
+  regenerated; only its test and doc references had gone stale.
 
 ## TD-7. The score ignores the code profile
 

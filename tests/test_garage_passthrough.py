@@ -238,18 +238,18 @@ def test_good_shop_plan_scores_clean():
 
 
 def _ctx(plan):
-    from barndsl.validation import door_graph
+    from barndsl.profiles import DEFAULT
+    from barndsl.validation import CheckContext
 
-    return door_graph(plan), {r.id: r for r in plan.rooms}
+    return CheckContext(plan, DEFAULT)
 
 
 def test_passthrough_check_isolated_fires_on_cut_vertex_shop():
     from barndsl.validation import _dq_garage_passthrough
 
     plan = compile_source(FAILING).plan
-    graph, by_id = _ctx(plan)
     found = []
-    _dq_garage_passthrough(plan, graph, by_id, found.append)
+    _dq_garage_passthrough(_ctx(plan), found.append)
     assert {i.code for i in found} == {"GARAGE_PASSTHROUGH"}
 
 
@@ -257,9 +257,8 @@ def test_passthrough_check_isolated_silent_on_buffered_shop():
     from barndsl.validation import _dq_garage_passthrough
 
     plan = compile_source(GOOD).plan
-    graph, by_id = _ctx(plan)
     found = []
-    _dq_garage_passthrough(plan, graph, by_id, found.append)
+    _dq_garage_passthrough(_ctx(plan), found.append)
     assert found == []
 
 
@@ -281,9 +280,8 @@ window living south width 6 offset 6
 window bed south width 4 offset 2
 """
     plan = compile_source(src).plan
-    graph, by_id = _ctx(plan)
     found = []
-    _dq_garage_passthrough(plan, graph, by_id, found.append)
+    _dq_garage_passthrough(_ctx(plan), found.append)
     assert found == []
 
 
@@ -309,9 +307,8 @@ window living south width 8 offset 8
 window bed north width 5 offset 8
 """
     plan = compile_source(src).plan
-    graph, by_id = _ctx(plan)
     found = []
-    _dq_garage_passthrough(plan, graph, by_id, found.append)
+    _dq_garage_passthrough(_ctx(plan), found.append)
     assert found == []
 
 

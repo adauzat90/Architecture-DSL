@@ -8,12 +8,20 @@ the design.
 
 The checks are approximate and **not** a substitute for a licensed designer or a
 review by the authority having jurisdiction.
+
+Every check is a function ``check(ctx, add)``: it reads the plan, the code
+profile and shared derived state from a :class:`CheckContext`, and reports
+through ``add``. To add one, write it and list it in ``_SHELL_CHECKS`` or
+``_PLAN_CHECKS`` at the end of this module, where it should run.
 """
 
 from __future__ import annotations
 
 import math
 from collections import Counter, deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import cached_property
 from typing import Protocol
 
 from .constants import (
@@ -881,32 +889,59 @@ def _find_parent(parent: list[int], item: int) -> int:
         item = parent[item]
     return item
 
+@dataclass(frozen=True, eq=False)
+class CheckContext:
+    """What every check reads: the plan, the code profile its thresholds come
+    from, and state derived from the plan that several checks share.
+
+    :func:`validate` builds one per run and hands it to every check, so it is
+    frozen: no check can swap the profile under the checks after it. The
+    derived state is computed on first use and then shared, so a check must not
+    change the plan's rooms or doors.
+    """
+
+    plan: Barndominium
+    profile: Profile
+
+    @cached_property
+    def graph(self) -> dict[str, set[str]]:
+        """Who can walk to whom through interior doors (:func:`door_graph`)."""
+        return door_graph(self.plan)
+
+    @cached_property
+    def by_id(self) -> dict[str, Room]:
+        """Rooms by id; on a duplicate id (``DUP_ID``) the last room wins."""
+        return {r.id: r for r in self.plan.rooms}
+
+
+#: A check: reads a :class:`CheckContext`, reports each finding through ``add``.
+Check = Callable[[CheckContext, Callable[[Issue], None]], None]
+
+
 def validate(plan: Barndominium, profile: Profile | None = None) -> ValidationReport:
     """Run all checks and return a :class:`ValidationReport`.
 
     ``profile`` supplies the jurisdiction-variable code thresholds (see
     :mod:`barndsl.profiles`); ``None`` uses :data:`~barndsl.profiles.DEFAULT`,
     the IRC baseline, which is byte-identical to the pre-profile behaviour.
+    The checks run in the order ``_SHELL_CHECKS`` then ``_PLAN_CHECKS`` list
+    them; a plan with no rooms stops after the shell checks, at ``EMPTY``.
     """
-    profile = profile or DEFAULT
+    ctx = CheckContext(plan, profile or DEFAULT)
     issues: list[Issue] = []
     add = issues.append
 
-    _validate_plan_shell(plan, add, profile)
-    _validate_site(plan, add)
-    _validate_site_features(plan, add, profile)
-    _validate_porch_guards(plan, add)
-
+    for check in _SHELL_CHECKS:
+        check(ctx, add)
     if _validate_nonempty_plan(plan, add):
         return ValidationReport(issues)
-
-    _validate_duplicate_room_ids(plan, add)
-    _run_full_plan_validators(plan, add, profile)
-    _validate_plan_has_bath(plan, add)
+    for check in _PLAN_CHECKS:
+        check(ctx, add)
     return ValidationReport(issues)
 
 
-def _validate_plan_shell(plan: Barndominium, add, profile: Profile) -> None:
+def _validate_plan_shell(ctx: CheckContext, add) -> None:
+    plan, profile = ctx.plan, ctx.profile
     # Reject + clamp non-finite/absurd dimensions FIRST, so no later check or the
     # metrics takeoff ever sees an `inf`-poisoned value (see _check_dimensions).
     _check_dimensions(plan, add)
@@ -962,7 +997,8 @@ def _validate_nonempty_plan(plan: Barndominium, add) -> bool:
     return True
 
 
-def _validate_duplicate_room_ids(plan: Barndominium, add) -> None:
+def _validate_duplicate_room_ids(ctx: CheckContext, add) -> None:
+    plan = ctx.plan
     # Counter is O(n); the old ``ids.count(i)`` per id was O(n²) on big plans.
     id_counts = Counter(r.id for r in plan.rooms)
     for dup_id in sorted({i for i, c in id_counts.items() if c > 1}):
@@ -975,46 +1011,8 @@ def _validate_duplicate_room_ids(plan: Barndominium, add) -> None:
         ))
 
 
-def _run_full_plan_validators(plan: Barndominium, add, profile: Profile) -> None:
-    _validate_geometry(plan, add)
-    _validate_room_programs(plan, add, profile)
-    _validate_fixtures(plan, add)
-    _validate_furniture(plan, add)
-    _validate_storage(plan, add)
-    _validate_doors(plan, add)
-    _validate_openings(plan, add)
-    _validate_safety_glazing(plan, add)
-    _validate_window_fall(plan, add)
-    _validate_stairs(plan, add, profile)
-    _validate_landings(plan, add)
-    _validate_door_threshold(plan, add)
-    _validate_water_heater(plan, add)
-    _validate_guards(plan, add)
-    _validate_device_refs(plan, add)
-    _validate_life_safety(plan, add)
-    _validate_load_path(plan, add)
-    _validate_plumbing_stack(plan, add)
-    _validate_electrical_plan(plan, add)
-    _validate_electrical(plan, add)
-    _validate_solar(plan, add)
-    _validate_approach(plan, add)
-    _validate_energy(plan, add)
-    _validate_access(plan, add)
-    _validate_egress_and_light(plan, add, profile)
-    _validate_design_quality(plan, add, profile)
-    _validate_accessibility(plan, add)
-    _validate_program(plan, add)
-    _validate_program_area_overrun(plan, add)
-    _validate_requirements(plan, add)
-    _validate_walls(plan, add)
-    _validate_suites_zones(plan, add)
-    _validate_structure(plan, add)
-    _validate_finishes(plan, add)
-    _validate_notes(plan, add)
-    validate_fixtures(plan, add)
-
-
-def _validate_plan_has_bath(plan: Barndominium, add) -> None:
+def _validate_plan_has_bath(ctx: CheckContext, add) -> None:
+    plan = ctx.plan
     if plan.metrics()["bathroom_count"]:
         return
     add(Issue(
@@ -1024,12 +1022,13 @@ def _validate_plan_has_bath(plan: Barndominium, add) -> None:
         hint="Add a bathroom, e.g. `room bath: bathroom at ... size 8 x 8`.",
     ))
 
-def _validate_notes(plan: Barndominium, add) -> None:
+def _validate_notes(ctx: CheckContext, add) -> None:
     """Gently flag a positioned ``note`` anchored outside the footprint (INFO).
 
     Architects legitimately annotate the site, a setback, or a future addition
     outside the walls, so this never blocks — it just points out a callout that
     may have meant to land on the plan (see NOTE_OUTSIDE)."""
+    plan = ctx.plan
     marks = getattr(plan, "note_marks", None)
     if not marks:
         return
@@ -1053,13 +1052,14 @@ def _validate_notes(plan: Barndominium, add) -> None:
         )
 
 
-def _validate_finishes(plan: Barndominium, add) -> None:
+def _validate_finishes(ctx: CheckContext, add) -> None:
     """Teach on an unrecognised per-room ``floor`` finish (never blocking).
 
     A floor hint is free text fuzzy-matched to the material palette; a name that
     matches nothing still builds (it silently inherits the room's default finish),
     so a friendly WARNING points the author at the vocabulary rather than letting
     the typo pass unseen."""
+    plan = ctx.plan
     from .materials import known_floor_names, match_floor
 
     for room in plan.rooms:
@@ -1091,8 +1091,9 @@ def _site_footprint_bounds(plan: Barndominium) -> tuple[float, float, float, flo
     return minx, miny, maxx, maxy
 
 
-def _validate_site(plan: Barndominium, add) -> None:
+def _validate_site(ctx: CheckContext, add) -> None:
     """Check a declared ``site`` / ``setback`` against the building footprint."""
+    plan = ctx.plan
     ss = getattr(plan, "site_spec", None)
     if ss is None:
         return
@@ -1300,8 +1301,9 @@ def _exterior_door_points(plan: Barndominium, bx: float, by: float):
     return out
 
 
-def _validate_site_features(plan: Barndominium, add, profile) -> None:
+def _validate_site_features(ctx: CheckContext, add) -> None:
     """The site-plan v2 checks: well/septic separation, drive access, and setbacks."""
+    plan = ctx.plan
     ss = getattr(plan, "site_spec", None)
     if ss is None or not ss.has_dims or not ss.has_features:
         return
@@ -1435,7 +1437,7 @@ def _septic_setback_hit(septic, bands: list[tuple[str, float, float, float, floa
                 return label
     return None
 
-def _validate_porch_guards(plan: Barndominium, add) -> None:
+def _validate_porch_guards(ctx: CheckContext, add) -> None:
     """IRC R312.1 — when the finish floor sits more than 30 in above finished
     grade, every porch is a walking surface that needs a guard. Fires once per
     porch; silent when no ``grade`` is declared or grade <= 30 in (so an at-grade
@@ -1448,6 +1450,7 @@ def _validate_porch_guards(plan: Barndominium, add) -> None:
     so a raised room-typed porch is just as much an above-grade walking surface as
     a platform porch — both are checked. (A room-porch's ``line``/``col`` also give
     the diagnostic a caret the platform porch can't.)"""
+    plan = ctx.plan
     grade = getattr(plan, "grade", None)
     if grade is None or grade <= GUARD_DROP_TRIGGER + EPSILON:
         return
@@ -1575,7 +1578,8 @@ def _unseen_neighbors(i: int, j: int, nx: int, ny: int, seen: list[list[bool]]) 
             out.append((ni, nj))
     return out
 
-def _validate_geometry(plan: Barndominium, add) -> None:
+def _validate_geometry(ctx: CheckContext, add) -> None:
+    plan = ctx.plan
     _validate_room_geometries(plan, add)
     _validate_room_overlaps(plan, add)
     _validate_footprint_coverage(plan, add)
@@ -1786,8 +1790,9 @@ def _void_severity(void_area: float, frac: float) -> Severity:
         return Severity.ERROR
     return Severity.INFO
 
-def _validate_accessibility(plan: Barndominium, add) -> None:
+def _validate_accessibility(ctx: CheckContext, add) -> None:
     """Opt-in accessibility / aging-in-place nudges (ANSI A117.1-flavoured)."""
+    plan = ctx.plan
     if not plan.accessible:
         return
     by_id = {room.id: room for room in plan.rooms}
@@ -1896,7 +1901,7 @@ def _validate_single_floor_living(plan: Barndominium, add) -> None:
         hint="Place a primary bedroom and a full bath on the ground level.",
     ))
 
-def _validate_fixtures(plan: Barndominium, add) -> None:
+def _validate_fixtures(ctx: CheckContext, add) -> None:
     """Check that wet rooms and kitchens can actually hold their fixtures with
     code clearances (IRC R307 for the bath; a working aisle for the kitchen).
 
@@ -1906,6 +1911,7 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
     washer/dryer is a ``LAUNDRY_FIT`` warning; a cramped kitchen is a
     ``KITCHEN_FIT`` info.
     """
+    plan = ctx.plan
     for room in plan.rooms:
         if room.type not in (
             RoomType.BATHROOM, RoomType.HALF_BATH, RoomType.KITCHEN,
@@ -1956,13 +1962,14 @@ def _validate_fixtures(plan: Barndominium, add) -> None:
             )
 
 
-def _validate_furniture(plan: Barndominium, add) -> None:
+def _validate_furniture(ctx: CheckContext, add) -> None:
     """Furniture-fit nudges for habitable rooms — the livability companion to the
     wet-room fixture checks. A room can clear ``BEDROOM_AREA`` yet be the wrong
     *shape* to arrange: a long thin bedroom that won't hold a bed with a
     walk-around, a dining room too tight to pull a chair. Uses the clear
     (finish-face) interior, like the fixture checks. INFO — guidance, not a gate.
     """
+    plan = ctx.plan
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
             cw, cl = clear_dimensions(plan, room)
@@ -1997,12 +2004,13 @@ def _validate_furniture(plan: Barndominium, add) -> None:
                 )
 
 
-def _validate_storage(plan: Barndominium, add) -> None:
+def _validate_storage(ctx: CheckContext, add) -> None:
     """Flag a storage-poor plan — dedicated storage (closets, pantry, storage rooms)
     below a small fraction of the conditioned area. Deterministic and unconditional, but the floor
     is conservative (below the worked gallery), so it only catches a home with almost
     no closets. INFO. For a specific target, declare `program ... storage <sqft>`.
     """
+    plan = ctx.plan
     interior = plan.interior_area
     if interior <= EPSILON:
         return
@@ -2021,7 +2029,8 @@ def _validate_storage(plan: Barndominium, add) -> None:
         )
 
 
-def _validate_room_programs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
+def _validate_room_programs(ctx: CheckContext, add) -> None:
+    plan, profile = ctx.plan, ctx.profile
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
             _validate_bedroom_program(room, add, profile)
@@ -2140,7 +2149,7 @@ def _area_enlarge_hint(room: Room, area: float) -> str:
         return f"Enlarge it, e.g. `size {_f(room.width)} x {need_len}`."
     return f"Enlarge it to at least {area:g} sq ft."
 
-def _clear_targets(room: Room, profile: Profile = DEFAULT):
+def _clear_targets(room: Room, profile: Profile):
     """The *hard-code* minimums the IRC measures between finished surfaces, keyed
     by room type → ``(kind, minimum)`` where ``kind`` is ``"area"`` or ``"short"``.
 
@@ -2162,7 +2171,7 @@ def _clear_targets(room: Room, profile: Profile = DEFAULT):
 
 
 def _check_clear_dimension(
-    plan: Barndominium, room: Room, add, profile: Profile = DEFAULT
+    plan: Barndominium, room: Room, add, profile: Profile
 ) -> None:
     """Flag a room that meets a clear-measured minimum on its nominal rectangle
     but falls below it once the bounding walls' thickness is subtracted.
@@ -2219,7 +2228,8 @@ def _door_loc(door) -> dict:
     return {"line": door.line, "col": door.col, "end_col": door.end_col}
 
 
-def _validate_doors(plan: Barndominium, add) -> None:
+def _validate_doors(ctx: CheckContext, add) -> None:
+    plan = ctx.plan
     room_ids = {r.id for r in plan.rooms}
     for door in plan.interior_doors:
         _validate_interior_door(plan, door, room_ids, add)
@@ -2655,8 +2665,9 @@ def _check_overhead_door(xdoor, room, add) -> None:
         )
 
 
-def _validate_openings(plan: Barndominium, add) -> None:
+def _validate_openings(ctx: CheckContext, add) -> None:
     """Windows and exterior doors must sit on an exterior wall and fit on it."""
+    plan = ctx.plan
     room_ids = {r.id for r in plan.rooms}
     for window in plan.windows:
         _validate_window_opening(plan, window, room_ids, add)
@@ -2957,13 +2968,14 @@ def _tempered_panel_reason(window, sill: float) -> str | None:
         return "a glazed panel over 9 sq ft with its bottom edge below 18 in and top above 36 in above the floor — R308.4.3"
     return None
 
-def _validate_safety_glazing(plan: Barndominium, add) -> None:
+def _validate_safety_glazing(ctx: CheckContext, add) -> None:
     """Flag each window in an IRC R308.4 hazard location as needing tempered glass.
 
     One WINDOW_TEMPERED warning per offending window, naming the trigger. A window
     that already declares ``tempered`` (the R308.4 escape hatch) is skipped — it is
     specified as safety glass, so there is nothing to warn about (the schedule
     still records it as "tempered (declared)")."""
+    plan = ctx.plan
     for w in plan.windows:
         if getattr(w, "tempered", False):
             continue
@@ -2993,7 +3005,7 @@ def _validate_safety_glazing(plan: Barndominium, add) -> None:
 _WINDOW_FALL_SILL = 24.0 / 12.0  # 24 in
 
 
-def _validate_window_fall(plan: Barndominium, add) -> None:
+def _validate_window_fall(ctx: CheckContext, add) -> None:
     """Flag an operable low-silled window on an upper level for fall protection.
 
     IRC R312.2 requires an opening-control device (or a fall-prevention guard) at
@@ -3005,6 +3017,7 @@ def _validate_window_fall(plan: Barndominium, add) -> None:
     raising the sill, because a bedroom's escape window *wants* a low sill (IRC
     R310) — the two rules are reconciled by an ASTM F2090 device, not by geometry.
     """
+    plan = ctx.plan
     by_id = {r.id: r for r in plan.rooms}
     for w in plan.windows:
         if not getattr(w, "openable", True):
@@ -3049,7 +3062,8 @@ def _stair_rooms(plan: Barndominium, stair, level: int) -> list[Room]:
 _STAIR_MAX_FLIGHT_RISE = 151.0 / 12.0
 
 
-def _validate_stairs(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
+def _validate_stairs(ctx: CheckContext, add) -> None:
+    plan, profile = ctx.plan, ctx.profile
     handrail_noted = False  # STAIR_HANDRAIL is one per plan (first qualifying flight)
     for stair in plan.stairs:
         if _validate_stair_finite(stair, add):
@@ -3340,7 +3354,7 @@ def loft_guard_edges(plan: Barndominium) -> list[tuple[int, float, float, float,
     return segs
 
 
-def _validate_guards(plan: Barndominium, add) -> None:
+def _validate_guards(ctx: CheckContext, add) -> None:
     """Flag an open loft/balcony edge that overlooks a double-height space and
     needs a guard (IRC R312).
 
@@ -3351,6 +3365,7 @@ def _validate_guards(plan: Barndominium, add) -> None:
     below has a solid floor to its edge — no void — so it isn't flagged; that's
     why a loft sized to its great room below doesn't nag.)
     """
+    plan = ctx.plan
     for upper, lower in loft_guard_pairs(plan):
         drop = plan.level_elevation(upper.level) - plan.level_elevation(upper.level - 1)
         add(
@@ -3368,9 +3383,10 @@ def _validate_guards(plan: Barndominium, add) -> None:
         )
 
 
-def _validate_device_refs(plan: Barndominium, add) -> None:
+def _validate_device_refs(ctx: CheckContext, add) -> None:
     """An ``outlet``/``switch``/``light``/``alarm`` must name a real room — like a
     fixture's FIXTURE_ROOM, a mistyped id would otherwise draw and check nothing."""
+    plan = ctx.plan
     known = {room.id for room in plan.rooms}
     devices: list[tuple[str, _InRoom]] = [
         *(("outlet", d) for d in plan.outlets),
@@ -3392,8 +3408,9 @@ def _validate_device_refs(plan: Barndominium, add) -> None:
         ))
 
 
-def _validate_life_safety(plan: Barndominium, add) -> None:
+def _validate_life_safety(ctx: CheckContext, add) -> None:
     """Smoke/CO-alarm coverage (IRC R314/R315)."""
+    plan = ctx.plan
     by_id = {room.id: room for room in plan.rooms}
     bedrooms = [room for room in plan.rooms if room.type is RoomType.BEDROOM]
     alarms = plan.alarms
@@ -3503,8 +3520,9 @@ def _validate_co_alarms(plan: Barndominium, alarms, bedrooms: list[Room], by_id:
         "fuel-fired appliances aren't modelled, so this is triggered by the attached garage/shop alone.",
     ))
 
-def _validate_access(plan: Barndominium, add) -> None:
+def _validate_access(ctx: CheckContext, add) -> None:
     """Every interior room must be reachable from an exterior door."""
+    plan = ctx.plan
     interior_rooms = {room.id for room in plan.rooms if room.type is not RoomType.PORCH}
     if not interior_rooms:
         return
@@ -3614,8 +3632,9 @@ def _no_access_hint(plan: Barndominium, room_id: str, reached: set[str]) -> str:
         f"`entry {room_id} <wall>`."
     )
 
-def _dq_kitchen_flow(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_kitchen_flow(ctx: CheckContext, add) -> None:
     # 1. Open-concept flow: a kitchen should connect to dining or living.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     for room in plan.rooms:
         if room.type is RoomType.KITCHEN:
             neigh_types = {by_id[n].type for n in graph.get(room.id, ()) if n in by_id}
@@ -3632,7 +3651,7 @@ def _dq_kitchen_flow(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_kitchen_passthrough(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_kitchen_passthrough(ctx: CheckContext, add) -> None:
     """Warn when the kitchen is the only route between public rooms.
 
     Open-plan kitchens should be adjacent to dining/living, but traffic should be
@@ -3640,6 +3659,7 @@ def _dq_kitchen_passthrough(plan: Barndominium, graph, by_id, add) -> None:
     neighbour from a living/great/rec neighbour, the kitchen is acting as a
     corridor rather than a work room.
     """
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     living_like = {RoomType.LIVING, RoomType.GREAT_ROOM, RoomType.REC_ROOM}
     dining_like = {RoomType.DINING}
     for room in plan.rooms:
@@ -3685,8 +3705,9 @@ def _dq_kitchen_passthrough(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_bed_privacy(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_bed_privacy(ctx: CheckContext, add) -> None:
     # 2. Bedroom privacy: a bedroom shouldn't open straight onto a public room.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
             # A public room in the bedroom's OWN declared suite (a sitting area,
@@ -3716,8 +3737,9 @@ def _dq_bed_privacy(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_bath_distance(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_bath_distance(ctx: CheckContext, add) -> None:
     # 3. Bath proximity: each bedroom should be near a bathroom.
+    plan, graph = ctx.plan, ctx.graph
     baths = {r.id for r in plan.rooms if r.type in BATH_TYPES}
     if baths:
         for room in plan.rooms:
@@ -3737,12 +3759,13 @@ def _dq_bath_distance(plan: Barndominium, graph, by_id, add) -> None:
                     )
 
 
-def _dq_private_passthrough(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_private_passthrough(ctx: CheckContext, add) -> None:
     # 4. Pass-through privacy: you shouldn't have to walk through a bathroom (or,
     #    apart from its own ensuite/closet, a bedroom) to get between rooms. This
     #    is a circulation-*shape* defect — reachability alone (NO_ACCESS) misses
     #    it — so it warrants a WARNING, not just an INFO. Remove the gateway rooms
     #    and see what falls off the main body of the house.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     #    (key set, label, types whose isolated clusters are legitimate suites)
     gateways = [
         (BATH_TYPES, "bathroom", frozenset()),
@@ -3784,9 +3807,10 @@ def _dq_private_passthrough(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_entry_private(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_entry_private(ctx: CheckContext, add) -> None:
     # 5. An exterior entry shouldn't open straight into a bathroom (a real
     #    defect → WARNING) or a bedroom (sometimes a patio door → INFO).
+    plan, by_id = ctx.plan, ctx.by_id
     for d in plan.exterior_doors:
         rt = by_id[d.room].type if d.room in by_id else None
         if rt in BATH_TYPES:
@@ -3818,13 +3842,14 @@ def _dq_entry_private(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_wet_group(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_wet_group(ctx: CheckContext, add) -> None:
     # 6. Plumbing economy: wet rooms (bath/kitchen/laundry/utility) are cheaper to
     #    run when they share a wall. If there are 3+ but none abut another wet
     #    room, the supply/waste runs are needlessly spread out. A declared
     #    plumbing wall (`wall a - b plumbing`) that a wet room really backs onto
     #    also satisfies this — the wet wall exists, it's just shared with a dry
     #    room (the supply/waste stack lives in that declared 2x6).
+    plan, by_id = ctx.plan, ctx.by_id
     wet = [r for r in plan.rooms if r.type in WET_TYPES]
     if len(wet) >= 3:
         grouped = any(
@@ -3863,10 +3888,11 @@ def _dq_wet_group(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_no_closet(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_no_closet(ctx: CheckContext, add) -> None:
     # 7. Storage: a bedroom needs a closet it can actually use — one reached by a
     #    door/opening *from that bedroom*, not merely a closet that happens to abut
     #    it (which might be a neighbour's, with no way in). Not code, so INFO.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     for room in plan.rooms:
         if room.type is RoomType.BEDROOM:
             own_closet = any(
@@ -3900,10 +3926,11 @@ def _dq_no_closet(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_master_ensuite(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_master_ensuite(ctx: CheckContext, add) -> None:
     # 8. Primary suite: on a floor with two or more full bathrooms, *some* bedroom
     #    should have a private (ensuite) bath rather than every bath only being a
     #    shared hall bath — that's the point of a second bath. INFO (a preference).
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     beds_by_level: dict[int, list[Room]] = {}
     full_baths_by_level: dict[int, int] = {}
     for r in plan.rooms:
@@ -3955,11 +3982,12 @@ def _dq_master_ensuite(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_bed_sound(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_bed_sound(ctx: CheckContext, add) -> None:
     # 8b. Acoustic buffer: two bedrooms that share a wall pass sound straight
     #     between them. The idiom is to stack each bedroom's closet on that wall
     #     (back-to-back), so the closets buffer the sleeping rooms — once buffered
     #     the bedrooms no longer share a wall and this clears.
+    plan, by_id = ctx.plan, ctx.by_id
     beds = [r for r in plan.rooms if r.type is RoomType.BEDROOM]
     for i, ba in enumerate(beds):
         for bb in beds[i + 1 :]:
@@ -3986,11 +4014,12 @@ def _dq_bed_sound(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_closet_shape(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_closet_shape(ctx: CheckContext, add) -> None:
     # 8c. Walk-in vs long, skinny closet: a closet with the floor area for a
     #     walk-in but shaped as a narrow strip wastes that floor. Small reach-ins
     #     (under the walk-in area) and wide/shallow closets (under the aspect
     #     bar) are fine and exempt.
+    plan = ctx.plan
     for room in plan.rooms:
         if room.type is RoomType.CLOSET:
             short = room.min_dimension
@@ -4026,9 +4055,10 @@ _REACH_IN_ACCESS: dict[RoomType, tuple[str, str, str]] = {
 }
 
 
-def _dq_reach_in_access(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_reach_in_access(ctx: CheckContext, add) -> None:
     # 8c2. Reach-in access, for closets AND pantries: a shallow store room can't
     # be walked into, so its single door must open nearly the whole width.
+    plan, by_id = ctx.plan, ctx.by_id
     doors_into = _reach_in_doors_by_room(plan, by_id)
     for room_id, doors in doors_into.items():
         if len(doors) == 1:  # a walk-through reaches stored goods from both openings
@@ -4114,11 +4144,12 @@ def _reach_in_access_fix(noun: str, stored: str, door, edge, lo: float, hi: floa
         f"({_f(CLOSET_WALKIN_DEPTH)} ft deep or more) behind an ordinary door."
     )
 
-def _dq_closet_depth(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_closet_depth(ctx: CheckContext, add) -> None:
     # 8c3. Hanging depth: hanging clothes are 2 ft deep (24 in hangers), so a
     #      bedroom's clothes closet needs that much clear in its short dimension.
     #      Only a closet serving a bedroom (door-connected) is judged — a shallow
     #      hall linen/broom closet is legitimate shelf-only storage.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     for room in plan.rooms:
         if room.type is not RoomType.CLOSET:
             continue
@@ -4146,10 +4177,11 @@ def _dq_closet_depth(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_closet_window(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_closet_window(ctx: CheckContext, add) -> None:
     # 8c4. A window in a closet: sunlight fades clothes, the glass eats the wall
     #      the rod wants, and it spends exterior wall a habitable room could
     #      daylight with. Closets belong buried on interior walls. INFO — taste.
+    plan, by_id = ctx.plan, ctx.by_id
     for w in plan.windows:
         room = by_id.get(w.room)
         if room is not None and room.type is RoomType.CLOSET:
@@ -4169,10 +4201,11 @@ def _dq_closet_window(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_hall_tight(plan: Barndominium, graph, by_id, add, profile: Profile = DEFAULT) -> None:
+def _dq_hall_tight(ctx: CheckContext, add) -> None:
     # 8d. Comfort width: a hall at the code minimum passes but feels tight for two
     #     people or moving furniture; the profile's comfort width is the target.
     #     A profile whose comfort width equals its hard minimum disables the nudge.
+    plan, profile = ctx.plan, ctx.profile
     hard = profile.min_hallway_width
     comfort = profile.comfort_hallway_width
     for room in plan.rooms:
@@ -4198,11 +4231,12 @@ def _dq_hall_tight(plan: Barndominium, graph, by_id, add, profile: Profile = DEF
             )
 
 
-def _dq_no_back_door(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_no_back_door(ctx: CheckContext, add) -> None:
     # 8e. Front *and* back door: a home wants a second exterior door (a back/side
     #     door off the kitchen, mudroom or laundry) — for daily flow and a second
     #     way out. Garage/porch doors don't count as the house's back door, and
     #     neither does an overhead garage door (vehicle access, wherever it is).
+    plan, by_id = ctx.plan, ctx.by_id
     people_doors = [
         d
         for d in plan.exterior_doors
@@ -4228,10 +4262,11 @@ def _dq_no_back_door(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_bath_oversize(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_bath_oversize(ctx: CheckContext, add) -> None:
     # 8f. Ensuite proportion: a private bath shouldn't be larger than the bedroom
     #     it serves — that's a sign the suite is mis-proportioned. Only judged for
     #     a true ensuite (a bath reached only through this bedroom, closets aside).
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     for bed in (r for r in plan.rooms if r.type is RoomType.BEDROOM):
         # sorted() so multiple ensuites off one bedroom emit in a stable order
         # (set iteration otherwise varies the issue order with PYTHONHASHSEED).
@@ -4257,9 +4292,10 @@ def _dq_bath_oversize(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_stair_blocks_door(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_stair_blocks_door(ctx: CheckContext, add) -> None:
     # 8g. A door needs clear floor in front of it; a stair landing intruding on a
     #     doorway blocks it (you step off the stair straight into a swinging door).
+    plan, by_id = ctx.plan, ctx.by_id
     for s in plan.stairs:
         levels = (s.from_level, s.to_level)
         blocked: set[str] = set()
@@ -4307,10 +4343,11 @@ def _dq_stair_blocks_door(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_stair_wall(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_stair_wall(ctx: CheckContext, add) -> None:
     # 8h. Stairs belong along a wall, not marooned in the middle of a room (where
     #     they'd need railings all round and chop up the floor). We can't model
     #     mid-flight landings/turns, but we can flag a free-floating flight.
+    plan = ctx.plan
     for s in plan.stairs:
         if not _stair_against_wall(plan, s):
             add(
@@ -4326,11 +4363,12 @@ def _dq_stair_wall(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_door_centered(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_door_centered(ctx: CheckContext, add) -> None:
     # 8i. Door position: a swing door centred on a wall with usable wall on *both*
     #     flanks wastes the room — backing it to a corner leaves an unbroken run to
     #     line with furniture. Only swing leaves the author left to default (no
     #     explicit offset); cased/sliding and deliberately-placed doors are exempt.
+    plan, by_id = ctx.plan, ctx.by_id
     for d in plan.interior_doors:
         if d.kind != "swing" or d.offset is not None:
             continue
@@ -4359,10 +4397,11 @@ def _dq_door_centered(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_door_swing_clash(ctx: CheckContext, add) -> None:
     # 8k. Door swings shouldn't overlap: two leaves sweeping into the same space
     #     foul each other. Build each swing's swept quarter-disc (the leaf the
     #     plan draws) and test for overlap — only between doors on one level.
+    plan, by_id = ctx.plan, ctx.by_id
     swings = []
     for d in plan.interior_doors:
         a, b = by_id.get(d.room_a), by_id.get(d.room_b)
@@ -4400,9 +4439,10 @@ def _dq_door_swing_clash(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_door_swing_direction(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_door_swing_direction(ctx: CheckContext, add) -> None:
     # 8l. Leaf direction / crowding: privacy swings, inward exterior clearance,
     # and door arcs that consume fixture wall space.
+    plan, by_id = ctx.plan, ctx.by_id
     _validate_interior_privacy_swings(plan, by_id, add)
     _validate_exterior_inward_swings(plan, by_id, add)
     _validate_door_fixture_conflicts(plan, add)
@@ -4508,9 +4548,10 @@ def _add_door_hits_fixture_issue(room: Room, dropped, add) -> None:
         "`hinge near|far`), make it a pocket/sliding door, or enlarge the room.",
     ))
 
-def _dq_envelope_module(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_envelope_module(ctx: CheckContext, add) -> None:
     # 8m. Material efficiency: exterior dimensions that land on a build module cut
     #     less sheet/board waste. Flag envelope and wing measurements off the module.
+    plan = ctx.plan
     off = []
     for label, value in (
         ("envelope width", plan.envelope_width),
@@ -4535,10 +4576,11 @@ def _dq_envelope_module(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_window_partition(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_window_partition(ctx: CheckContext, add) -> None:
     # 8j. Windows shouldn't butt an interior partition where it meets the exterior
     #     wall — there's no room for framing/trim and it reads as off-balance. (A
     #     window flush to a true *building* corner is fine.)
+    plan, by_id = ctx.plan, ctx.by_id
     for w in plan.windows:
         r = by_id.get(w.room)
         if r is None or w.wall not in exterior_walls(plan, r):
@@ -4564,11 +4606,12 @@ def _dq_window_partition(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_room_proportion(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_room_proportion(ctx: CheckContext, add) -> None:
     # 8. Proportion: a habitable room shaped like a bowling alley is hard to
     #    furnish. A more severe, general pass catches non-habitable rooms too
     #    (laundry/utility/baths/etc.) when they are so skinny they read as leftover
     #    corridor space. Linear types with their own rules are exempt.
+    plan = ctx.plan
     for room in plan.rooms:
         short = room.min_dimension
         long = max(room.width, room.length)
@@ -4670,7 +4713,7 @@ def _general_skinny_room_type(room_type: RoomType) -> bool:
     }
 
 
-def _dq_shop_depth(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_shop_depth(ctx: CheckContext, add) -> None:
     # 8d. Shop depth: the shop analog of MUDROOM_SHAPE. A shop bay's job is to
     #     hold a vehicle or a workbench wall PLUS a working aisle, and that needs
     #     real width. Under MIN_SHOP_DEPTH (12 ft) the bay physically can't do it —
@@ -4678,6 +4721,7 @@ def _dq_shop_depth(plan: Barndominium, graph, by_id, add) -> None:
     #     Between 12 and SHOP_COMFORT_DEPTH (20 ft) it works but is tight for a
     #     full-size truck plus a work zone — an INFO comfort nudge. A GARAGE is
     #     exempt (garages are sized to cars, not equipment) — only a SHOP is judged.
+    plan = ctx.plan
     for room in plan.rooms:
         if room.type is not RoomType.SHOP:
             continue
@@ -4720,7 +4764,7 @@ def _dq_shop_depth(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_loft_ceiling(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_loft_ceiling(ctx: CheckContext, add) -> None:
     # 8e. Loft headroom: a loft is habitable (HABITABLE_TYPES) and often sleeps
     #     people, so it needs the IRC R305.1 7 ft habitable minimum. The room's
     #     EFFECTIVE ceiling is its per-room `ceiling_height` override, else the plan
@@ -4729,6 +4773,7 @@ def _dq_loft_ceiling(plan: Barndominium, graph, by_id, add) -> None:
     #     floor (R305.1.1) can't be measured here; the explanation says so. A
     #     `vaulted` loft is open to the ridge (its usable height rises well past
     #     7 ft), so it's exempt — the flat effective ceiling doesn't describe it.
+    plan = ctx.plan
     for room in plan.rooms:
         if room.type is not RoomType.LOFT or getattr(room, "vaulted", False):
             continue
@@ -4753,7 +4798,7 @@ def _dq_loft_ceiling(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_office_clearance(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_office_clearance(ctx: CheckContext, add) -> None:
     # 8f. Office furnish-fit: an office has to hold a desk (DESK_WIDTH x DESK_DEPTH)
     #     with a DESK_CHAIR_PULL behind it to push the chair back — a
     #     DESK_WIDTH x (DESK_DEPTH + DESK_CHAIR_PULL) clear box against a wall,
@@ -4761,6 +4806,7 @@ def _dq_office_clearance(plan: Barndominium, graph, by_id, add) -> None:
     #     the clear (finish-face) interior, subtracts the door-swing keepouts the
     #     auto-placer already computes, and asks whether the desk box still fits
     #     against any of the four walls. INFO — livability guidance, not a gate.
+    plan = ctx.plan
     need_along = DESK_WIDTH  # the desk's width runs along the wall
     need_deep = DESK_DEPTH + DESK_CHAIR_PULL  # desk depth + chair-pull off the wall
     for room in plan.rooms:
@@ -4839,13 +4885,14 @@ def _desk_fits_west_east(
     return False
 
 
-def _dq_new_room_semantics(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_new_room_semantics(ctx: CheckContext, add) -> None:
     """Design-quality checks for the semantic room types beyond the original core.
 
     These are intentionally heuristic: they make the labels mean something without
     turning taste into hard syntax. Existing generic checks still handle egress,
     daylight, reachability and room proportions.
     """
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     for room in plan.rooms:
         if room.type is RoomType.SAFE_ROOM:
             _dq_safe_room(plan, graph, by_id, room, add)
@@ -5140,9 +5187,10 @@ def _has_escape_like_opening(plan: Barndominium, room: Room) -> bool:
     )
 
 
-def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_garage_bedroom(ctx: CheckContext, add) -> None:
     # 9. Garage/shop → sleeping room. IRC R302.5.1: the opening shall not open
     #    into a room used for sleeping. This is code-grounded, so it's a WARNING.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
         label = g.type.value
@@ -5164,7 +5212,7 @@ def _dq_garage_bedroom(plan: Barndominium, graph, by_id, add) -> None:
                 )
 
 
-def _dq_garage_passthrough(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_garage_passthrough(ctx: CheckContext, add) -> None:
     # 9b. Garage/shop as a *circulation spine*. GARAGE_BEDROOM catches a garage
     #     that opens straight into a bedroom (one hop); this catches the subtler,
     #     more dangerous case where the garage/shop is the ONLY interior route
@@ -5175,6 +5223,7 @@ def _dq_garage_passthrough(plan: Barndominium, graph, by_id, add) -> None:
     #     from the component holding the public rooms, the garage was a cut vertex
     #     on that route. A circulation-*shape* defect reachability (NO_ACCESS)
     #     can't see, so it warrants a WARNING.
+    plan, graph = ctx.plan, ctx.graph
     garages = {r.id for r in plan.rooms if r.type in GARAGE_TYPES}
     if not garages:
         return
@@ -5210,10 +5259,11 @@ def _dq_garage_passthrough(plan: Barndominium, graph, by_id, add) -> None:
     )
 
 
-def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_garage_no_entry(ctx: CheckContext, add) -> None:
     # 10. Garage with no interior people-door into the house. A vehicle `entry`
     #     satisfies reachability (NO_ACCESS), so this gap slips through: you'd have
     #     to go outside to get in. Only nudge when it actually abuts the house.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     house_types = {t for t in RoomType if t not in GARAGE_TYPES and t is not RoomType.PORCH}
     garages = [r for r in plan.rooms if r.type in GARAGE_TYPES]
     for g in garages:
@@ -5241,11 +5291,12 @@ def _dq_garage_no_entry(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_garage_vehicle_door(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_garage_vehicle_door(ctx: CheckContext, add) -> None:
     # A garage/shop bay should have an exterior overhead/sectional door. Without
     # one, the room may compile and even connect to the dwelling, but it cannot
     # function as a vehicle/equipment bay — exactly the trapped-shop failure mode
     # the visual review catches.
+    plan = ctx.plan
     for g in plan.rooms:
         if g.type not in GARAGE_TYPES:
             continue
@@ -5273,7 +5324,7 @@ def _dq_garage_vehicle_door(plan: Barndominium, graph, by_id, add) -> None:
         ))
 
 
-def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_garage_separation(ctx: CheckContext, add) -> None:
     # 10b. IRC R302.6: the wall between a private garage and the dwelling — and any
     #      ceiling under habitable space above the garage — must be a fire
     #      separation (≥ ½ in gypsum; ⅝ in Type X where habitable space is above).
@@ -5283,6 +5334,7 @@ def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
     #      detailed as a separation, so that neighbour stops firing — the reminder
     #      becomes verifiable. A ceiling can't be declared, so habitable space
     #      above the garage keeps reminding regardless.
+    plan, by_id = ctx.plan, ctx.by_id
     rated_pairs = {
         frozenset((ws.room_a, ws.room_b))
         for ws in getattr(plan, "wall_specs", None) or []
@@ -5338,7 +5390,7 @@ def _dq_garage_separation(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_garage_door(ctx: CheckContext, add) -> None:
     # 10c. IRC R302.5.1: a door between a private garage and the dwelling must be
     #      self-closing and 20-minute fire-rated (or a solid-core/solid-wood door
     #      at least 1-3/8 in thick). A door into a sleeping room is barred outright
@@ -5346,6 +5398,7 @@ def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
     #      doors. It anchors on the actual `door` statement — the opening that has
     #      to carry the rated leaf — rather than on the garage room, so the caret
     #      lands on the line the author edits.
+    plan, by_id = ctx.plan, ctx.by_id
     seen: set[tuple[str, str]] = set()
     for d in plan.interior_doors:
         a, b = by_id.get(d.room_a), by_id.get(d.room_b)
@@ -5374,7 +5427,7 @@ def _dq_garage_door(plan: Barndominium, graph, by_id, add) -> None:
         )
 
 
-def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_closet_door_swing(ctx: CheckContext, add) -> None:
     # 10d. A swing door into a shallow closet: the leaf (as wide as the door) can't
     #      fully open because the closet isn't as deep as the door is wide, so the
     #      swing fills the closet. A bypass/sliding or bifold door clears the space.
@@ -5382,6 +5435,7 @@ def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
     #      nudge — not a re-seed. Only a leaf that swings *into* the closet — by
     #      its `into`, or by the default swing rule — is judged; one opening into
     #      the other room doesn't fill the closet.
+    plan, by_id = ctx.plan, ctx.by_id
     from .geometry import shared_edge
 
     for d in plan.interior_doors:
@@ -5421,9 +5475,10 @@ def _dq_closet_door_swing(plan: Barndominium, graph, by_id, add) -> None:
             )
 
 
-def _dq_hall_deadend(plan: Barndominium, graph, by_id, add) -> None:
+def _dq_hall_deadend(ctx: CheckContext, add) -> None:
     # 11. A hallway exists to *distribute* circulation. One that opens onto a
     # single room (or none) is just overhead. Exempt an entry foyer/vestibule.
+    plan, graph, by_id = ctx.plan, ctx.graph, ctx.by_id
     hall_entries = {door.room for door in plan.exterior_doors}
     for room in plan.rooms:
         if room.type is RoomType.HALLWAY:
@@ -5519,74 +5574,9 @@ def _add_hall_stub_issue(room: Room, stub: float, add) -> None:
     ))
 
 
-
-#: The design-quality checks, run in order. Each is a standalone
-#: ``(plan, graph, by_id, add)`` function so it can be unit-tested in
-#: isolation; the driver below builds the shared derived state once.
-_DESIGN_QUALITY_CHECKS = (
-    _dq_kitchen_flow,
-    _dq_kitchen_passthrough,
-    _dq_bed_privacy,
-    _dq_bath_distance,
-    _dq_private_passthrough,
-    _dq_entry_private,
-    _dq_wet_group,
-    _dq_no_closet,
-    _dq_master_ensuite,
-    _dq_bed_sound,
-    _dq_closet_shape,
-    _dq_reach_in_access,
-    _dq_closet_depth,
-    _dq_closet_window,
-    _dq_hall_tight,
-    _dq_no_back_door,
-    _dq_bath_oversize,
-    _dq_stair_blocks_door,
-    _dq_stair_wall,
-    _dq_door_centered,
-    _dq_door_swing_clash,
-    _dq_door_swing_direction,
-    _dq_envelope_module,
-    _dq_window_partition,
-    _dq_room_proportion,
-    _dq_shop_depth,
-    _dq_loft_ceiling,
-    _dq_office_clearance,
-    _dq_new_room_semantics,
-    _dq_garage_bedroom,
-    _dq_garage_passthrough,
-    _dq_garage_no_entry,
-    _dq_garage_vehicle_door,
-    _dq_garage_separation,
-    _dq_garage_door,
-    _dq_closet_door_swing,
-    _dq_hall_deadend,
-)
-
-
-def _validate_design_quality(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
-    """Soft, advisory checks (mostly INFO) that nudge toward a livable layout.
-
-    These never block compilation -- they flow through the *same* diagnostic
-    channel as code errors so the author (or the agent) gets quality guidance,
-    not just code-compliance. They mirror what a reviewing architect notices:
-    open-concept flow, bedroom privacy, and bath proximity. Each individual
-    check lives in its own ``_dq_*`` function (see ``_DESIGN_QUALITY_CHECKS``).
-    """
-    graph = door_graph(plan)
-    by_id = {r.id: r for r in plan.rooms}
-    for check in _DESIGN_QUALITY_CHECKS:
-        # Only the hall-comfort nudge reads jurisdiction thresholds; every other
-        # check keeps the plain ``(plan, graph, by_id, add)`` shape (and stays
-        # directly unit-testable with those four args).
-        if check is _dq_hall_tight:
-            _dq_hall_tight(plan, graph, by_id, add, profile)
-        else:
-            check(plan, graph, by_id, add)
-
-
-def _validate_program(plan: Barndominium, add) -> None:
+def _validate_program(ctx: CheckContext, add) -> None:
     """Check the rooms placed against a declared ``program`` (if any)."""
+    plan = ctx.plan
     spec = plan.program_spec
     if spec is None:
         return
@@ -5645,13 +5635,14 @@ def _append_program_area_mismatch(spec, metrics: dict, mismatches: list[str]) ->
         mismatches.append(f"{_f(spec.min_area)} sq ft declared but {interior:.0f} placed")
 
 
-def _validate_program_area_overrun(plan: Barndominium, add) -> None:
+def _validate_program_area_overrun(ctx: CheckContext, add) -> None:
     """Nudge when a declared program area reads like a target but geometry is much larger.
 
     ``program ... area`` remains a minimum contract for backwards compatibility;
     this INFO catches the common author/model mistake of declaring the requested
     area in the program line, then drawing a substantially larger house.
     """
+    plan = ctx.plan
     spec = plan.program_spec
     if spec is None or spec.min_area is None:
         return
@@ -5692,8 +5683,9 @@ def _suggest_anchor(a: Room, b: Room) -> str:
     return "north-of" if by >= ay else "south-of"
 
 
-def _validate_requirements(plan: Barndominium, add) -> None:
+def _validate_requirements(ctx: CheckContext, add) -> None:
     """Check declared ``require`` statements against the compiled plan."""
+    plan = ctx.plan
     room_ids = {room.id for room in plan.rooms}
     for req in plan.requirements:
         loc = _spec_loc(req)
@@ -5824,8 +5816,9 @@ def _validate_area_requirement(req, room: Room, loc: dict, add) -> None:
         **loc,
     ))
 
-def _validate_walls(plan: Barndominium, add) -> None:
+def _validate_walls(ctx: CheckContext, add) -> None:
     """Check declared ``wall`` statements against the compiled plan."""
+    plan = ctx.plan
     room_ids = {room.id for room in plan.rooms}
     for wall_spec in getattr(plan, "wall_specs", None) or []:
         _validate_wall_spec(plan, wall_spec, room_ids, add)
@@ -5931,8 +5924,9 @@ def _add_wall_bearing_axis_issue(wall_spec, add) -> None:
         **_spec_loc(wall_spec),
     ))
 
-def _validate_suites_zones(plan: Barndominium, add) -> None:
+def _validate_suites_zones(ctx: CheckContext, add) -> None:
     """Check declared ``suite`` / ``zone`` statements against the plan."""
+    plan = ctx.plan
     suites = getattr(plan, "suites", None) or []
     zones = getattr(plan, "zones", None) or []
     if not suites and not zones:
@@ -6120,8 +6114,9 @@ POST_CLEAR_MARGIN = 1.5
 COMFORT_BAY = 12.0
 
 
-def _validate_structure(plan: Barndominium, add) -> None:
+def _validate_structure(ctx: CheckContext, add) -> None:
     """Nudge on an auto-placed structural frame (``frame`` directive)."""
+    plan = ctx.plan
     spec = plan.frame_spec
     if spec is None:
         return
@@ -6273,7 +6268,7 @@ def _beam_supports_partition(beam, lo: float, hi: float, pos: float, vertical: b
         return _spans_overlap(lo, hi, min(beam.x1, beam.x2), max(beam.x1, beam.x2))
     return False
 
-def _validate_load_path(plan: Barndominium, add) -> None:
+def _validate_load_path(ctx: CheckContext, add) -> None:
     """Flag an upper-floor partition with no wall or beam beneath it (IRC R502).
 
     An interior wall on an upper level that lands over the open middle of a room
@@ -6282,6 +6277,7 @@ def _validate_load_path(plan: Barndominium, add) -> None:
     wall, beam, or post below. INFO, so it nudges rather than blocks; only runs on
     multi-storey plans.
     """
+    plan = ctx.plan
     if len(plan.levels()) < 2:
         return
     seen: set[frozenset] = set()
@@ -6314,7 +6310,7 @@ def _validate_load_path(plan: Barndominium, add) -> None:
                 )
 
 
-def _validate_plumbing_stack(plan: Barndominium, add) -> None:
+def _validate_plumbing_stack(ctx: CheckContext, add) -> None:
     """Flag an upper-floor wet room with no wet room stacked beneath it.
 
     A bath/kitchen/laundry drains through a vertical waste stack, and the plumbing
@@ -6326,6 +6322,7 @@ def _validate_plumbing_stack(plan: Barndominium, add) -> None:
     same-floor analogue); only a multi-storey plan with an upper wet room can trip
     it, so single-storey and dry upper floors are untouched.
     """
+    plan = ctx.plan
     if len(plan.levels()) < 2:
         return
     by_level: dict[int, list[Room]] = {}
@@ -6352,7 +6349,7 @@ def _validate_plumbing_stack(plan: Barndominium, add) -> None:
         )
 
 
-def _validate_electrical_plan(plan: Barndominium, add) -> None:
+def _validate_electrical_plan(ctx: CheckContext, add) -> None:
     """Opt-in electrical / life-safety reminders the geometry can't verify.
 
     The DSL models rooms and openings, not receptacles, luminaires, switches or
@@ -6363,6 +6360,7 @@ def _validate_electrical_plan(plan: Barndominium, add) -> None:
     onto the construction documents. The stair-lighting and door-landing clauses
     only appear when the plan actually has a stair / an exterior people-door.
     """
+    plan = ctx.plan
     if not getattr(plan, "electrical", False):
         return
     # Once the plan actually draws its electrical layer, the sharper per-room
@@ -6445,8 +6443,9 @@ def _receptacle_reach(room: Room, outlets: list) -> float:
     return max(gaps) / 2.0
 
 
-def _validate_electrical(plan: Barndominium, add) -> None:
+def _validate_electrical(ctx: CheckContext, add) -> None:
     """Per-room electrical checks for plans that opt into the electrical layer."""
+    plan = ctx.plan
     if not (plan.outlets or plan.switches or plan.lights):
         return
     by_id = {r.id: r for r in plan.rooms}
@@ -6627,8 +6626,9 @@ def _shaded_by_covered_porch(plan: Barndominium, room: Room, win) -> bool:
     return False
 
 
-def _validate_solar(plan: Barndominium, add) -> None:
+def _validate_solar(ctx: CheckContext, add) -> None:
     """Solar-glazing nudges — only when the plan declares an ``orientation``."""
+    plan = ctx.plan
     theta = plan.orientation
     if theta is None:
         return
@@ -6747,13 +6747,14 @@ def _window_shaded_by_porch(plan: Barndominium, window) -> bool:
     room = plan.room(window.room)
     return room is not None and _shaded_by_covered_porch(plan, room, window)
 
-def _validate_approach(plan: Barndominium, add) -> None:
+def _validate_approach(ctx: CheckContext, add) -> None:
     """Approach nudges — only when the plan declares a ``street`` side.
 
     A home should meet its street: the front door faces the approach, and the
     garage doors don't turn their back on it (forcing a drive around the house).
     Both INFO; dormant unless ``street`` is set, so an unsited plan is untouched.
     """
+    plan = ctx.plan
     street = plan.street
     if street is None:
         return
@@ -6786,7 +6787,7 @@ def _validate_approach(plan: Barndominium, add) -> None:
             )
 
 
-def _validate_energy(plan: Barndominium, add) -> None:
+def _validate_energy(ctx: CheckContext, add) -> None:
     """Thermal-envelope guidance — only when the plan declares a ``climate`` zone.
 
     The compiler can't run an energy model, so this is guidance, not a pass/fail:
@@ -6795,6 +6796,7 @@ def _validate_energy(plan: Barndominium, add) -> None:
     *ceiling* to go with the existing daylight *floor* (NAT_LIGHT). Dormant unless
     ``climate`` is set, so ordinary plans are untouched.
     """
+    plan = ctx.plan
     zone = plan.climate
     if zone is None:
         return
@@ -6874,7 +6876,7 @@ def _primary_entry(plan: Barndominium):
     return min(pool, key=rank)
 
 
-def _validate_landings(plan: Barndominium, add) -> None:
+def _validate_landings(ctx: CheckContext, add) -> None:
     """Flag an exterior people-door with no landing (IRC R311.3).
 
     A porch whose footprint covers the door's exterior face (its full width, at
@@ -6883,6 +6885,7 @@ def _validate_landings(plan: Barndominium, add) -> None:
     anywhere, every uncovered entry warns; on a plan with NO porches at all it's a
     single INFO nudge on the primary entry (the plan just hasn't drawn porches
     yet — don't spam every door)."""
+    plan = ctx.plan
     entries = [d for d in plan.exterior_doors if not d.overhead]
     if not entries:
         return
@@ -6925,7 +6928,7 @@ def _validate_landings(plan: Barndominium, add) -> None:
             **_door_loc(d)))
 
 
-def _validate_door_threshold(plan: Barndominium, add) -> None:
+def _validate_door_threshold(ctx: CheckContext, add) -> None:
     """Remind, once, about the threshold-to-landing drop at the required egress door.
 
     IRC R311.3.1: at the required egress door the exterior landing may be no more
@@ -6937,6 +6940,7 @@ def _validate_door_threshold(plan: Barndominium, add) -> None:
     plan draws its landings, DOOR_NO_LANDING's per-door pass and the CD set carry
     the detail, so a second always-on reminder would just be noise.
     """
+    plan = ctx.plan
     if plan.porches:
         return
     primary = _primary_entry(plan)
@@ -6954,13 +6958,14 @@ def _validate_door_threshold(plan: Barndominium, add) -> None:
         **_door_loc(primary)))
 
 
-def _validate_water_heater(plan: Barndominium, add) -> None:
+def _validate_water_heater(ctx: CheckContext, add) -> None:
     """Flag a water_heater fixture whose placement needs extra protection.
 
     Two cases (either, or both): in a garage/shop its ignition source must be
     elevated 18 in / be a listed FVIR unit (IRC M1307.3); on an upper floor over
     habitable space it needs a drain pan piped to a drain (IRC P2801.6). One INFO
     per heater, naming which case(s) apply."""
+    plan = ctx.plan
     by_id = {r.id: r for r in plan.rooms}
     for f in plan.fixtures:
         if f.kind != "water_heater":
@@ -7011,7 +7016,8 @@ def _door_clear_width(door) -> float:
     return door.width
 
 
-def _validate_egress_and_light(plan: Barndominium, add, profile: Profile = DEFAULT) -> None:
+def _validate_egress_and_light(ctx: CheckContext, add) -> None:
+    plan, profile = ctx.plan, ctx.profile
     if plan.exterior_doors and not _has_code_egress_door(plan):
         _add_egress_door_issue(add)
 
@@ -7250,3 +7256,110 @@ def _vent_hint(room: Room, walls: list[Direction], fixed_here: bool) -> str:
         f"Add openable window area on an exterior wall, e.g. `window {room.id} "
         f"{walls[0].value} width 4 offset 2`, or confirm mechanical ventilation."
     )
+
+
+def _validate_placed_fixtures(ctx: CheckContext, add) -> None:
+    """The per-fixture rules (``FIXTURE_*``, ``RANGE_*``, ``DRYER_VENT``, …) of
+    :mod:`barndsl.fixtures`, which sits below this module and so can't take a
+    :class:`CheckContext`."""
+    validate_fixtures(ctx.plan, add)
+
+
+# --- the check registry -------------------------------------------------------
+#
+# The one list of checks, in run order: validate() runs _SHELL_CHECKS, stops at
+# EMPTY when the plan has no rooms, then runs _PLAN_CHECKS. The order is part of
+# the output (diagnostics are reported in it), so add a check where it belongs,
+# and every check takes (ctx, add).
+
+#: Checks that judge the shell and the site; they run even on an empty plan.
+_SHELL_CHECKS: tuple[Check, ...] = (
+    _validate_plan_shell,
+    _validate_site,
+    _validate_site_features,
+    _validate_porch_guards,
+)
+
+#: Checks that need rooms.
+_PLAN_CHECKS: tuple[Check, ...] = (
+    _validate_duplicate_room_ids,
+    _validate_geometry,
+    _validate_room_programs,
+    _validate_fixtures,
+    _validate_furniture,
+    _validate_storage,
+    _validate_doors,
+    _validate_openings,
+    _validate_safety_glazing,
+    _validate_window_fall,
+    _validate_stairs,
+    _validate_landings,
+    _validate_door_threshold,
+    _validate_water_heater,
+    _validate_guards,
+    _validate_device_refs,
+    _validate_life_safety,
+    _validate_load_path,
+    _validate_plumbing_stack,
+    _validate_electrical_plan,
+    _validate_electrical,
+    _validate_solar,
+    _validate_approach,
+    _validate_energy,
+    _validate_access,
+    _validate_egress_and_light,
+    # Design quality: soft, advisory checks (mostly INFO) that nudge toward a
+    # livable layout. They never block compilation; they flow through the same
+    # channel as code errors so the author (or the agent) gets quality guidance,
+    # not just code compliance. They mirror what a reviewing architect notices:
+    # open-concept flow, bedroom privacy, bath proximity.
+    _dq_kitchen_flow,
+    _dq_kitchen_passthrough,
+    _dq_bed_privacy,
+    _dq_bath_distance,
+    _dq_private_passthrough,
+    _dq_entry_private,
+    _dq_wet_group,
+    _dq_no_closet,
+    _dq_master_ensuite,
+    _dq_bed_sound,
+    _dq_closet_shape,
+    _dq_reach_in_access,
+    _dq_closet_depth,
+    _dq_closet_window,
+    _dq_hall_tight,
+    _dq_no_back_door,
+    _dq_bath_oversize,
+    _dq_stair_blocks_door,
+    _dq_stair_wall,
+    _dq_door_centered,
+    _dq_door_swing_clash,
+    _dq_door_swing_direction,
+    _dq_envelope_module,
+    _dq_window_partition,
+    _dq_room_proportion,
+    _dq_shop_depth,
+    _dq_loft_ceiling,
+    _dq_office_clearance,
+    _dq_new_room_semantics,
+    _dq_garage_bedroom,
+    _dq_garage_passthrough,
+    _dq_garage_no_entry,
+    _dq_garage_vehicle_door,
+    _dq_garage_separation,
+    _dq_garage_door,
+    _dq_closet_door_swing,
+    _dq_hall_deadend,
+    # Program, walls, structure and the rest.
+    _validate_accessibility,
+    _validate_program,
+    _validate_program_area_overrun,
+    _validate_requirements,
+    _validate_walls,
+    _validate_suites_zones,
+    _validate_structure,
+    _validate_finishes,
+    _validate_notes,
+    _validate_placed_fixtures,
+    _validate_plan_has_bath,
+)

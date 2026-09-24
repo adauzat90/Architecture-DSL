@@ -43,6 +43,7 @@ These invariants are the assumptions that let the compiler, validator, LSP, dire
 - Registry entries expose severity, category, owner, title, and explanation.
 - The registry severity matches every literal emit site unless the code is declared context-dependent (`_VARYING`); every code has an explicit or prefix category rule (no silent default). `barndsl dev audit` enforces both.
 - Validators should emit diagnostics in stable order.
+- Every validator check is a `check(ctx, add)` listed once in `validation._SHELL_CHECKS` or `_PLAN_CHECKS`, which set its run order. It reads the plan and the profile from its frozen `CheckContext`, which also shares state derived from the plan (the door graph, rooms by id). Only `validate()` falls back to the IRC baseline (`DEFAULT`); no check or helper defaults the profile or names `DEFAULT`. `tests/test_check_registry.py` enforces the registration, the signature and the profile rule.
 - Accepted diagnostics remain visible as audited deviations; they are not deleted from compile output.
 - Error diagnostics represent unbuildable or unrecoverable model problems and should not be accepted by pragma.
 
