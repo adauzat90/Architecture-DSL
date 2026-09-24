@@ -28,7 +28,7 @@ is a phase.
 | [TD-3](#td-3-private-cross-module-imports) | Private cross-module imports | M | Medium | Done |
 | [TD-4](#td-4-issue-and-severity-live-in-the-validator) | `Issue`/`Severity` live in the validator | S | Medium | Done |
 | [TD-5](#td-5-validationpy-size-and-duplicated-thresholds) | `validation.py` size and duplicated thresholds | L | Medium | Open |
-| [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | In progress (6a, 6b done) |
+| [TD-6](#td-6-rule-wiring-and-profile-threading) | Rule wiring and profile threading | M | Medium | Done |
 | [TD-7](#td-7-the-score-ignores-the-code-profile) | The score ignores the code profile | S | Medium | Open |
 | [TD-8](#td-8-statement-vocabulary-still-partly-hand-kept) | Statement vocabulary still partly hand-kept | M | Medium | Open |
 | [TD-9](#td-9-three-comment-scanners-one-wrong) | Three comment scanners, one wrong | S | Medium | Done |
@@ -361,7 +361,7 @@ from `validation` for compatibility. Then break the fixtures/validation cycle.
   The sort is stable, so ties keep the order they were emitted in. Until
   then nothing checks the registry order, which is the report order: the
   TD-6a review moved three checks and every test still passed. After the
-  sort, the registry order only breaks ties.
+  sort, the registry order only breaks ties. Done; see below.
 
 **Resolution (TD-6a).**
 - **One context.** `validation.CheckContext` carries the plan and the profile,
@@ -486,6 +486,74 @@ from `validation` for compatibility. Then break the fixtures/validation cycle.
     changes emitted output, so it is not in this package.
   - `DSL_REFERENCE` documents `street <wall>` as taking n|s|e|w, but the
     parser only accepts full wall names there.
+
+**Resolution (TD-6c).**
+- **The regex guards are gone.** `test_review_improvements.py` and
+  `test_fixture_rules.py` each had a guard that scanned a few source files
+  with a regex, without an explicit encoding, for codes missing from the
+  registry. The audit now reads everything those regexes caught, in every
+  `src/barndsl` module:
+  - `_ParseError("CODE", …)`, reported as an ERROR (all 72 parser sites);
+  - `Severity.X, "CODE"` side by side in a tuple, the table `revitlog`'s emit
+    loop reads.
+
+  It now sees 233 of the 236 registered codes, where it saw 218. The other
+  three were invisible to the regexes too: `BRIEF_ACCEPTANCE` is emitted only
+  by `tools/`, and `CLOSET_ACCESS` and `PANTRY_ACCESS` come from a lookup
+  table (`_REACH_IN_ACCESS`).
+- **One report order.** `issues.report_order` is the sort key. `compile_source`
+  sorts the list once, in a shared last step (`_settle`) after the pragmas, on
+  every return path, part compiles included. `report()`, `to_dict()` and the
+  permit packet sort with the same key, so feedback the agent appends
+  afterwards still lands in place. They used to sort by line then column,
+  with line-less diagnostics first. `validate()` still returns check order,
+  because most issues only get a line afterwards.
+- **What changed.** The order, plus one reworded hint.
+  - Over 456 plans under three profiles (1,368 compiles, 21,514
+    diagnostics), every compile has exactly the same diagnostics as before,
+    and the same score.
+  - 1,336 of the compiles list them in a new order.
+  - In the text report, the JSON and the permit packet, plan-level
+    diagnostics with no line (`NO_BATH`, `NO_BACK_DOOR`, …) now come last
+    instead of first.
+  - So do the agent's own line-less notes in its revision prompt, which is
+    built from `to_dict()`: the critic's `DESIGN` suggestions and `BLOCKING`
+    lines, `TRUNCATED` and `NO_PROGRAM`. They used to lead the diagnostics
+    block and now follow the line-anchored ones. The design loop was tuned
+    against the old prompt, so if their place matters, `render_feedback`
+    should list them first on purpose.
+  - A part's own findings all take the host's `use` line and column, so in
+    the host they sort by severity then code, not by the part's line. Each
+    message still starts `in part <file>:<line>`.
+    `USE_PART_INVALID`'s hint said "the errors reported above", which no
+    longer holds; it now says "reported on this `use` line".
+  - No existing test depended on the old order.
+  - `tools/design_review.py` keeps its own sort, because its saved verdicts
+    index into that order.
+- **Tests.**
+  - `tests/test_report_order.py` covers the key's rules and stable ties.
+    Every example plan and part compiles to a sorted list. The report and
+    the JSON keep the order after an append, and pragmas apply before the
+    sort.
+  - `test_repo_audit_checks_can_fail` plants a parse-error code and an emit
+    table code that aren't registered, and a parse error naming a
+    warning-only code.
+  - Each check failed on a planted regression.
+- **Independent review.** It found no bugs.
+  - It confirmed that every return path is sorted and that nothing relied on
+    the old order.
+  - It re-ran the old regexes and found everything they caught in the
+    audit's set.
+  - Its own old-vs-new run covered every repository `.barn` file plus edge
+    cases (garbage input, a recovered compile, pragmas, an empty part): 183
+    compiles under three profiles, identical apart from order.
+  - Its follow-ups are in:
+    - the permit packet's order;
+    - the `USE_PART_INVALID` hint;
+    - three places that still called run order the report order;
+    - the README example;
+    - the notes above;
+    - tie-break, column-only and parse-error severity tests.
 
 ## TD-7. The score ignores the code profile
 
@@ -773,3 +841,7 @@ builder half needs a machine with full Revit.
   re-export.
 - **TD-6a** (PR #31): every validator check takes one context and is listed
   once, in run order; no profile defaults.
+- **TD-6b** (PR #32): everything about a diagnostic code lives on its registry
+  entry, including a general fix hint for all 236 codes.
+- **TD-6c**: the regex registry guards folded into the audit; a compile
+  reports its diagnostics in one order (line, column, severity, code).

@@ -1,5 +1,6 @@
 """The diagnostic types every stage reports with: :class:`Severity`,
-:class:`Issue` and :class:`ValidationReport`.
+:class:`Issue` and :class:`ValidationReport`, and :func:`report_order`, the
+order a compile reports them in.
 
 The compiler, the validator, composition, pragmas, the LSP and the Revit log
 all produce or read these. They live here, with no barndsl imports, so a module
@@ -55,6 +56,21 @@ class Issue:
         if self.hint:
             head += f"\n    hint: {self.hint}"
         return head
+
+
+_SEVERITY_RANK = {Severity.ERROR: 0, Severity.WARNING: 1, Severity.INFO: 2}
+
+
+def report_order(issue: Issue) -> tuple[bool, int, bool, int, int, str]:
+    """Sort key for the order a compile reports diagnostics in: by line (a
+    diagnostic with no line after those with one), then column (likewise), then
+    severity (errors first), then code. Python's sort is stable, so ties keep
+    the order they were emitted in."""
+    return (
+        issue.line is None, issue.line or 0,
+        issue.col is None, issue.col or 0,
+        _SEVERITY_RANK[issue.severity], issue.code,
+    )
 
 
 @dataclass

@@ -57,6 +57,9 @@ def test_repo_audit_checks_can_fail(monkeypatch):
             "Issue(Severity.ERROR if x else Severity.INFO, 'SHOP_DEPTH', 'm')\n"  # 16: both branches
             "def _sev(x):\n    return Severity.ERROR if x else Severity.INFO\n"  # 17-18: a helper
             "Issue(_sev(1), 'DUP_ID', 'm')\n"                        # 19: read through it
+            "raise _ParseError('PLANTED_PARSE', 'm', 1)\n"           # 20: a parse error
+            "TABLE = (('failed', Severity.WARNING, 'PLANTED_ROW'),)\n"  # 21: an emit table
+            "raise _ParseError('NO_BATH', 'm', 1)\n"                 # 22: parse errors are errors
         ),
     })
     out = devtools.repo_audit()
@@ -68,9 +71,12 @@ def test_repo_audit_checks_can_fail(monkeypatch):
     assert out["diagnostics"]["severity_drift"] == [
         "DUP_ID (registry error, emitted error/info)",
         "FOYER_FLOW (registry warning, emitted info/warning)",
+        "NO_BATH (registry warning, emitted error/warning)",
         "SHOP_DEPTH (registry info/warning, emitted error/info/warning)",
     ]
     assert out["diagnostics"]["unexplained_registry"] == ["NO_BATH"]  # hint too short
+    # A code named by a parse error or an emit table needs an entry too.
+    assert out["diagnostics"]["missing_registry"] == ["PLANTED_PARSE", "PLANTED_ROW"]
     assert out["diagnostics"]["unclassified_category"] == ["MECH_ACCESS"]
     # Private names are flagged however they're reached — never a public name,
     # a dunder, or a module's own privates.

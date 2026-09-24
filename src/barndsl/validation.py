@@ -7268,9 +7268,10 @@ def _validate_placed_fixtures(ctx: CheckContext, add) -> None:
 # --- the check registry -------------------------------------------------------
 #
 # The one list of checks, in run order: validate() runs _SHELL_CHECKS, stops at
-# EMPTY when the plan has no rooms, then runs _PLAN_CHECKS. The order is part of
-# the output (diagnostics are reported in it), so add a check where it belongs,
-# and every check takes (ctx, add).
+# EMPTY when the plan has no rooms, then runs _PLAN_CHECKS. validate() returns
+# issues in this order; a compile then sorts them into report order
+# (issues.report_order), where the run order only breaks ties. Add a check where
+# it belongs; every check takes (ctx, add).
 
 #: Checks that judge the shell and the site; they run even on an empty plan.
 _SHELL_CHECKS: tuple[Check, ...] = (

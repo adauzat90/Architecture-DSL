@@ -153,15 +153,15 @@ column-accurate carets, and actionable fix hints** — like compiler output:
 ```text
 $ barndsl compile broken.barn
 COMPILE FAILED — 3 error(s), 1 warning(s), 0 info(s)
-broken.barn:6:14: error[BAD_TYPE]: Unknown room type 'lounge'.
-    room office: lounge at 24,0 size 20 x 14
-                 ^~~~~~
-    hint: Use one of: living, kitchen, dining, bedroom, bathroom, ...
 broken.barn:5:6: error[NO_ACCESS] (kitchen): Room 'kitchen' cannot be reached from any entrance.
     room kitchen: kitchen at 24,0 size 16 x 12
          ^~~~~~~
     hint: Add `door kitchen - living` (they share a wall).
-broken.barn:6:6: info[BED_PRIVACY] (bed): Bedroom 'bed' opens directly onto the living area.
+broken.barn:6:14: error[BAD_TYPE]: Unknown room type 'lounge'.
+    room office: lounge at 24,0 size 20 x 14
+                 ^~~~~~
+    hint: Use one of: living, kitchen, dining, bedroom, bathroom, ...
+broken.barn:7:6: info[BED_PRIVACY] (bed): Bedroom 'bed' opens directly onto the living area.
     room bed: bedroom at 24,12 size 16 x 12
          ^~~
     hint: Buffer bedrooms with a hallway for privacy.

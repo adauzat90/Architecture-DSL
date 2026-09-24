@@ -894,7 +894,8 @@ def compose_uses(
                 f"part \"{use.relpath}\" doesn't compile cleanly on its own; "
                 f"instance '{use.alias}' can't be stamped.",
                 line=use.line, col=use.col, end_col=use.end_col,
-                hint="Fix the part-internal error(s) reported above, then re-use it.",
+                hint="Fix the part-internal error(s) reported on this `use` line (each "
+                "starts `in part <file>:<line>`), then re-use it.",
             ))
             continue
 

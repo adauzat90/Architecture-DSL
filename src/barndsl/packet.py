@@ -25,6 +25,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from .cost import estimate_cost
+from .issues import report_order
 from .render import RenderConfig, render_site_svg, render_svg, sheet_scale
 from .schedule import schedule_tables
 from .score import design_score
@@ -458,7 +459,7 @@ def _cost_section(est: dict[str, Any]) -> str:
 
 
 def _diagnostics(result: Any) -> str:
-    diags = sorted(result.diagnostics, key=lambda i: (i.line or 0, i.col or 0))
+    diags = sorted(result.diagnostics, key=report_order)
     # Accepted deviations (downgraded by a `# barndsl: accept CODE` pragma) get
     # their own audit subsection — the documented, deliberate deviations an AHJ
     # reviewer reads — separate from the diagnostics still needing attention.

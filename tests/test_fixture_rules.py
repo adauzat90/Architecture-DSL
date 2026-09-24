@@ -6,9 +6,6 @@ that the auto-seeds never trip the authored-only rules. The placement geometry
 lives in :mod:`barndsl.fixtures`; this file pins the *diagnostics*.
 """
 
-import re
-from pathlib import Path
-
 from barndsl.compiler import compile_source
 from barndsl.diagnostics import REGISTRY, explain
 
@@ -377,10 +374,3 @@ def test_new_codes_are_registered_and_explained():
         assert code in REGISTRY, code
         text = explain(code)
         assert text.startswith(code) and len(text) > len(code) + 20
-
-
-def test_registry_covers_every_code_emitted_in_fixtures():
-    text = (Path(__file__).resolve().parent.parent / "src" / "barndsl" / "fixtures.py").read_text()
-    emitted = set(re.findall(r'Severity\.\w+,\s*"([A-Z_]{3,})"', text))
-    missing = sorted(emitted - set(REGISTRY))
-    assert not missing, missing
